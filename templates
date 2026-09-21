@@ -1,0 +1,42 @@
+;;; Tempel templates. First form per section names the mode; `p' is a
+;;; field, `r>' the region (indented), `n' a newline, `q' the exit point.
+
+fundamental-mode
+
+(today (format-time-string "%Y-%m-%d"))
+(now (format-time-string "%Y-%m-%d %H:%M"))
+
+prog-mode
+
+(todo (concat comment-start "TODO: " q))
+(fixme (concat comment-start "FIXME: " q))
+(note (concat comment-start "NOTE: " q))
+
+emacs-lisp-mode
+
+(lambda "(lambda (" p ") " r> ")")
+(defun "(defun " p " (" p ")" n> r> ")")
+(let "(let ((" p "))" n> r> ")")
+(when "(when " p n> r> ")")
+(unless "(unless " p n> r> ")")
+(dolist "(dolist (" p " " p ")" n> r> ")")
+(iface "(defcustom " p " " p n> "\"" p "\"" n> ":type '" p " :group '" p ")")
+
+elixir-ts-mode
+
+(def "def " p " do" n> r> n "end")
+(defp "defp " p " do" n> r> n "end")
+(defmodule "defmodule " p " do" n> r> n "end")
+(test "test \"" p "\" do" n> r> n "end")
+(case "case " p " do" n> p " -> " r> n "end")
+
+python-ts-mode
+
+(def "def " p "(" p "):" n> r>)
+(class "class " p ":" n> r>)
+(main "if __name__ == \"__main__\":" n> r>)
+
+rust-ts-mode
+
+(fn "fn " p "(" p ") {" n> r> n "}")
+(test "#[test]" n "fn " p "() {" n> r> n "}")

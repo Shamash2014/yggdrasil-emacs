@@ -1,0 +1,147 @@
+===============================================================================
+=    Welcome to the  Y G G D R A S I L  tutor  —  practice right in here      =
+===============================================================================
+
+ This is a scratch copy: type in it, break it, nothing is saved.  Re-open any
+ time with  M-x ygg-tutor  (or  SPC H ).  The live, complete key map is always
+ one keypress away:  SPC ?  .
+
+ Yggdrasil is HELIX-first: you SELECT, then act.  A motion moves the selection;
+ a verb acts on the current selection.  Three modes show in the modeline:
+   ⟨N⟩ normal   ⟨I⟩ insert   ⟨V⟩ visual
+ Leave insert with  jk  (fast) or  ESC .  Do that now if you ever get stuck.
+
+
+-------------------------------------------------------------------------------
+ Lesson 1 — MOVE.   In normal mode the cursor sits ON a character (a 1-cell
+ selection).  Move with  h j k l ,  words with  w b e ,  line ends  0 $ ^ ,
+ file ends  gg  and  G .  A count repeats:  3w  jumps three words.
+
+   ** Move to this word: ---------------------------> [ here ] <--- with w/l. **
+
+ f<char> jumps to the next <char> on the line; t<char> stops just before it.
+   ** Press  fx  to land on the x: ....... x ....... then  0  to return. **
+
+
+-------------------------------------------------------------------------------
+ Lesson 2 — SELECT then ACT (the core idea).   A verb acts on the SELECTION,
+ not on "the next motion".   d delete,  c change,  y yank.   x selects the
+ whole line;  w selects a word forward.
+
+   ** Put the cursor on "junk", press  w  to select it, then  d  to delete: **
+       keep this junk word gone
+
+   ** Put the cursor anywhere on the next line, press  x  then  d  (=dd): **
+       delete this entire line with x d
+
+
+-------------------------------------------------------------------------------
+ Lesson 3 — CHANGE & INSERT.   c deletes the selection and drops you in insert.
+ i insert before cursor,  a after,  o open line below,  O above.  r replaces
+ one char.   u undo,  U redo.
+
+   ** On the next line select "OLD" with  w , press  c , type NEW, then  jk : **
+       replace OLD here
+
+   ** Press  o  below to open a line, type something, then  jk  and  u : **
+       (open below me)
+
+
+-------------------------------------------------------------------------------
+ Lesson 4 — YANK & PASTE.   y yanks the selection.   p pastes after,  P before.
+ A whole-line yank/delete pastes as a NEW line (linewise), not mid-line.
+
+   ** Select this line with  x ,  y  to yank, then  p  to duplicate it below: **
+       clone this line downward
+
+
+-------------------------------------------------------------------------------
+ Lesson 5 — MANY CURSORS (Helix multi-selection).   Select a region, then
+   s   select every regex match inside it     ;  collapse back to cursors
+   C   add a cursor on the next line           ,  keep only the main cursor
+ With many cursors, one verb edits every place at once.
+
+   ** Select these 3 lines: put cursor on the first, press  2 X  (extend 3
+      lines).  Then  s , type  foo , Enter — every "foo" is now a cursor.
+      Press  c , type BAR,  jk  — all change together. **
+       foo one
+       foo two
+       foo three
+
+
+-------------------------------------------------------------------------------
+ Lesson 6 — SEARCH.   / starts a regex search (Enter to accept),  n / N  repeat
+ forward / back,  *  searches the word under the cursor.  Matches become the
+ selection, so a verb can act on them.
+
+   ** Press  /target  Enter, then  n  a few times to hop the matches: **
+       target ... target ... target ... target
+
+
+-------------------------------------------------------------------------------
+ Lesson 7 — OBJECTS & SURROUND (the  m  menu).   m i <obj> selects INSIDE,
+ m a <obj> selects AROUND.  Shortcuts:  m w = inner word.
+ Surround:  m s <char> add,  m r <a> <b> replace,  m d <char> delete.
+
+   ** Cursor inside the parens, press  m i (  to select just what's inside: **
+       call(select me)
+
+   ** Cursor in the quotes, press  m s "  ... then  m d "  to remove them: **
+       wrap this
+
+
+-------------------------------------------------------------------------------
+ Lesson 8 — VISUAL MODE.   v enters visual: motions now EXTEND the selection
+ (instead of replacing it).  V selects whole lines.  ESC or v leaves.  Verbs
+ work the same.   g c  toggles comments on the selected lines.
+
+   ** Press  v  then  j j  to grab three lines, then  g c  to comment them: **
+       line to comment
+       line to comment
+       line to comment
+
+
+-------------------------------------------------------------------------------
+ Lesson 9 — THE LEADER  ( SPC ).   Tap  SPC  and pause — a menu shows every
+ branch.  The essentials:
+     SPC f f  find file (fuzzy)      SPC b b  switch buffer
+     SPC s g  grep the project       SPC s    search menu (line, symbols…)
+     SPC g    git (magit + neogit)   SPC q    quickfix / diagnostics
+     SPC c    code / LSP             SPC o    open (terminal, panel)
+     SPC ?    the FULL key map       SPC h    Emacs help
+
+   ** Tap  SPC  now and just read the menu.  Then  SPC ?  and search "yank". **
+
+
+-------------------------------------------------------------------------------
+ Lesson 10 — WINDOWS, TERMINALS, WORKSPACES.
+     C-h C-j C-k C-l   move between windows (works everywhere, even terminals)
+     SPC w             window menu (splits, resize, close)
+     SPC o t           bottom terminal — in it, only  jk  escapes to normal
+     g t  /  g T       next / previous tab
+     SPC z             tree workspaces (saved with the session, buffers revive)
+
+   ** Try  SPC o t  to pop a terminal, run a command, then  jk  and  SPC o t
+      again to hide it. **
+
+
+-------------------------------------------------------------------------------
+ Lesson 11 — IDE POWER (present when the tools are installed).
+     SPC c r   rename symbol      SPC c f   format buffer     SPC c a  action
+     g d       go to definition   g r       references → quickfix
+     SPC q t   TODOs → quickfix   SPC u u   undo tree
+     SPC d j   debug from .vscode/launch.json   SPC d c  continue/launch
+     SPC a a   spawn an AI agent   SPC a v   send selection to it
+     \         localleader: per-language (run tests, REPL, build)
+     M-j / M-k drag a tree-sitter node;  SPC c s  structural edits
+
+   ** Open a code file and try  g d  on a symbol, then  C-o  to jump back. **
+
+
+===============================================================================
+ You know enough to work.  Everything else is discoverable:  pause after any
+ prefix ( SPC ,  g ,  m ,  z ,  ] ,  [ ) to see its menu, or hit  SPC ?  for
+ the searchable master list.   Re-run this tutor any time:  SPC H .
+
+ Happy hacking under the world-tree.  🌳
+===============================================================================
