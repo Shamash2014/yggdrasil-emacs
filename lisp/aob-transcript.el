@@ -48,6 +48,38 @@
               ((file-readable-p file)))
     file))
 
+(defun aob-transcript--title (file)
+  "What the conversation in FILE opened with, as a name.
+A day is not a name when they all happened today; the first thing you
+said is what tells one from another."
+  (with-temp-buffer
+    (ignore-errors (insert-file-contents file nil 0 131072))
+    (goto-char (point-min))
+    (catch 'found
+      (while (not (eobp))
+        (let* ((line (buffer-substring-no-properties
+                      (line-beginning-position) (line-end-position)))
+               (rec (and (not (string-empty-p line))
+                         (ignore-errors
+                           (json-parse-string line :object-type 'alist
+                                              :null-object nil
+                                              :false-object nil)))))
+          (when (and rec (equal (alist-get 'type rec) "user"))
+            (when-let* ((msg (alist-get 'message rec))
+                        (text (aob-transcript--text (alist-get 'content msg)))
+                        (text (string-trim text))
+                        ((not (string-empty-p text)))
+                        ;; the harness writes its own preamble in as a
+                        ;; user turn; the first thing a person said is
+                        ;; what this is after
+                        ((not (string-prefix-p "<" text)))
+                        ((not (string-prefix-p "Caveat:" text))))
+              (throw 'found
+                     (truncate-string-to-width
+                      (car (split-string text "\n" t)) 44 nil nil t)))))
+        (forward-line 1))
+      nil)))
+
 ;;;###autoload
 (defun aob-transcript-found (project &optional agent)
   "Conversations AGENT left on disk for PROJECT, newest first.
@@ -72,10 +104,12 @@ you have only just taken in is none of them."
                                                   (expand-file-name project))
                                         :dir (file-name-as-directory
                                               (expand-file-name project))
+                                        :ts (float-time
+                                             (file-attribute-modification-time
+                                              (file-attributes file)))
                                         :found t))
-                           (name (aob-transcript--name entry file))
-                           ;; a day is not a name when there were six of
-                           ;; them that day
+                           (name (or (aob-transcript--title file)
+                                     (aob-transcript--name entry file)))
                            (name (if (member name seen)
                                      (format "%s %s" name
                                              (substring (plist-get entry :acp-id) 0 4))

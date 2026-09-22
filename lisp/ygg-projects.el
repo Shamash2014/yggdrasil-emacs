@@ -30,6 +30,7 @@
 (declare-function aob-session-p "aob" (x))
 (declare-function ygg-aob-session-subagents "layer-aob" (s))
 (declare-function aob-acp-resumable-entries "aob-acp" ())
+(declare-function aob-transcript-file "aob-transcript" (entry))
 (declare-function aob-acp-resume-entry "aob-acp" (e &optional pref))
 (declare-function aob-acp-archive-entry "aob-acp" (e))
 (declare-function aob--call "aob" (s verb &rest args))
@@ -169,7 +170,18 @@ or not this Emacs was there for it."
          (found (and (fboundp 'aob-transcript-found)
                      (seq-remove (lambda (e) (member (plist-get e :acp-id) ids))
                                  (ignore-errors (aob-transcript-found root))))))
-    (append known found)))
+    ;; newest first, whichever list it came from: a conversation is
+    ;; found again by when it happened
+    (sort (append known found)
+          (lambda (a b) (> (or (ygg-projects--entry-ts a) 0)
+                           (or (ygg-projects--entry-ts b) 0))))))
+
+(defun ygg-projects--entry-ts (entry)
+  "When ENTRY was last written to, as far as the disk knows."
+  (or (plist-get entry :ts)
+      (when-let* ((file (and (fboundp 'aob-transcript-file)
+                             (ignore-errors (aob-transcript-file entry)))))
+        (float-time (file-attribute-modification-time (file-attributes file))))))
 
 (defun ygg-projects--agents (root)
   "What ROOT has going, and everything it could go back to.
@@ -370,20 +382,14 @@ scan already learned not to do."
                                         (and (fboundp 'aob-subagent-p)
                                              (aob-subagent-p x)))
                                       all))
-                 (push (cons (format "%s · %s" (aob-session-name s)
-                                     (aob-session-state s))
-                             s)
-                       out)
+                 (push (cons (aob-session-name s) s) out)
                  ;; what it sent, under it, marked rather than indented: a
                  ;; row this narrow has no columns to spare.  A spawned one
                  ;; is a session of its own; a reported one is a plist the
                  ;; agent mentioned and nothing can be done with
                  (dolist (kid (and (fboundp 'aob-subagent-children)
                                    (aob-subagent-children s)))
-                   (push (cons (format "↳ %s · %s" (aob-session-name kid)
-                                       (aob-session-state kid))
-                               kid)
-                         out))
+                   (push (cons (format "↳ %s" (aob-session-name kid)) kid) out))
                  (dolist (sub (and (fboundp 'ygg-aob-session-subagents)
                                    (ygg-aob-session-subagents s)))
                    (push (cons (format "↳ %s" (or (plist-get sub :title)
@@ -393,9 +399,7 @@ scan already learned not to do."
                          out)))
                ;; ended, but the conversation is still there to pick up
                (dolist (e (ygg-projects--past root))
-                 (push (cons (format "%s · ended" (or (plist-get e :name)
-                                                      (plist-get e :agent)
-                                                      "session"))
+                 (push (cons (or (plist-get e :name) (plist-get e :agent) "session")
                              e)
                        out))
                (setq out (nreverse out))))
@@ -415,14 +419,47 @@ scan already learned not to do."
     ('worktrees (ygg-projects--worktree-entries root))
     (_ nil)))
 
+(defun ygg-projects--ago (ts)
+  "TS as how long ago it was, in one or two characters and a unit."
+  (when ts
+    (let ((secs (max 0 (- (float-time) ts))))
+      (cond ((< secs 90) "now")
+            ((< secs 3600) (format "%dm" (round secs 60)))
+            ((< secs 86400) (format "%dh" (round secs 3600)))
+            ((< secs (* 7 86400)) (format "%dd" (round secs 86400)))
+            (t (format-time-string "%b %-d" ts))))))
+
+(defun ygg-projects--entry-badge (payload)
+  "What PAYLOAD has to say for itself at the right edge.
+A running conversation says what it is doing; one that ended says how
+long ago, since a list of six conversations from today is told apart
+by when, not by that they were all today."
+  (cond ((and (fboundp 'aob-session-p) (aob-session-p payload))
+         (format "%s" (aob-session-state payload)))
+        ((and (consp payload) (plist-member payload :acp-id))
+         (or (ygg-projects--ago (plist-get payload :ts))
+             (when-let* ((file (and (fboundp 'aob-transcript-file)
+                                    (ignore-errors (aob-transcript-file payload)))))
+               (ygg-projects--ago
+                (float-time (file-attribute-modification-time
+                             (file-attributes file)))))
+             "ended"))
+        (t "")))
+
 (defun ygg-projects--entry-text (label root kind payload)
-  (propertize (concat "        "
-                      (propertize "·" 'font-lock-face
-                                  (ygg-projects--session-dot payload))
-                      "  "
-                      (propertize label 'font-lock-face 'ygg-projects-entry)
-                      (ygg-projects--right ""))
-              'ygg-project root 'ygg-row kind 'ygg-entry payload))
+  (let* ((badge (ygg-projects--entry-badge payload))
+         (room (- (ygg-projects--width) 8 (string-width badge)))
+         (label (if (<= (string-width label) room)
+                    label
+                  (truncate-string-to-width label (max 4 room) nil nil t))))
+    (propertize (concat "        "
+                        (propertize "·" 'font-lock-face
+                                    (ygg-projects--session-dot payload))
+                        "  "
+                        (propertize label 'font-lock-face 'ygg-projects-entry)
+                        (ygg-projects--right
+                         (propertize badge 'font-lock-face 'ygg-projects-count)))
+                'ygg-project root 'ygg-row kind 'ygg-entry payload)))
 
 (defun ygg-projects--entry-nodes (root kind)
   (mapcar (lambda (cell)
