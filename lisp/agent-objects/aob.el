@@ -46,9 +46,23 @@
 (defun aob-session-get (id)
   (gethash id aob--sessions))
 
+(defun aob--free-id (id)
+  "ID, or ID with a suffix no session is using.
+Two conversations can be called the same thing — a title, an agent and
+a number after a restart — and the registry is keyed by id: a second
+session taking the first one's key is a session that disappears."
+  (if (not (gethash id aob--sessions))
+      id
+    (let ((n 2))
+      (while (gethash (format "%s#%d" id n) aob--sessions)
+        (setq n (1+ n)))
+      (format "%s#%d" id n))))
+
 (defun aob-create-session (&rest args)
   (let ((s (apply #'aob-session--create
                   (append args (list :started (current-time) :nevents 0)))))
+    ;; before the hook, which is where a session's id is written down
+    (setf (aob-session-id s) (aob--free-id (aob-session-id s)))
     (puthash (aob-session-id s) s aob--sessions)
     (setq aob--order (cons (aob-session-id s)
                            (delete (aob-session-id s) aob--order)))

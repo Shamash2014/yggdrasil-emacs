@@ -452,13 +452,24 @@ for the id."
        (aob-mcp-relay
         conn id
         `(let* ((who ,who)
-                (s (or (and (fboundp 'aob-session-get) (aob-session-get who))
-                       ;; a name is what a person reads off a list, and
-                       ;; what an agent will send back
-                       (and (fboundp 'aob-sessions)
-                            (seq-find (lambda (x) (equal (aob-session-name x) who))
-                                      (aob-sessions))))))
+                (by-id (and (fboundp 'aob-session-get) (aob-session-get who)))
+                ;; a name is what a person reads off a list, and what an
+                ;; agent will send back — but two conversations can carry
+                ;; one name, and guessing which is how a message goes to
+                ;; the wrong agent
+                (by-name (unless by-id
+                           (and (fboundp 'aob-sessions)
+                                (seq-filter (lambda (x)
+                                              (equal (aob-session-name x) who))
+                                            (aob-sessions)))))
+                (s (or by-id (and (= (length by-name) 1) (car by-name)))))
            (cond
+            ((and (null s) (cdr by-name))
+             (cons (format "%d conversations are called %s — say which, by id:"
+                           (length by-name) who)
+                   (mapcar (lambda (x) (format "  %s  %s" (aob-session-id x)
+                                               (or (aob-session-dir x) "")))
+                           by-name)))
             ((null s) (list (format "no session called %s" who)))
             ((not (fboundp 'aob-prompt)) (list "no way to talk to it here"))
             ((and (eq (aob-session-state s) 'working)
