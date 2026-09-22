@@ -190,12 +190,19 @@ vscode preset: width 0.4 (min 80), height 0.4 (min 8)."
           :min-height height
           :min-width width)))
 
-(defun ygg--vertico-posframe-enable ()
-  "Float the picker, once there is a frame that can show one."
-  (when (and (display-graphic-p)
-             (fboundp 'vertico-posframe-mode)
-             (not (bound-and-true-p vertico-posframe-mode)))
-    (vertico-posframe-mode 1)))
+(defun ygg--vertico-posframe-enable (&optional frame)
+  "Float the picker, once there is a FRAME that can show one."
+  (with-selected-frame (or (and (frame-live-p frame) frame) (selected-frame))
+    (when (and (display-graphic-p)
+               (require 'vertico-posframe nil t)
+               (not (bound-and-true-p vertico-posframe-mode)))
+      (vertico-posframe-mode 1))))
+
+;; registered before the package is anywhere near loaded: a daemon makes
+;; its first frame whenever the first client connects, which is as often
+;; before the deferred setup below as after it
+(add-hook 'server-after-make-frame-hook #'ygg--vertico-posframe-enable)
+(add-hook 'after-make-frame-functions #'ygg--vertico-posframe-enable)
 
 (when (fboundp 'elpaca)
   (elpaca vertico-posframe
@@ -208,11 +215,7 @@ vscode preset: width 0.4 (min 80), height 0.4 (min 8)."
                vertico-posframe-border-width 0
                vertico-posframe-size-function #'ygg--vertico-posframe-size
                vertico-posframe-parameters '((left-fringe . 0) (right-fringe . 0)))
-         (ygg--vertico-posframe-enable)
-         ;; a daemon has no graphical frame when this timer runs, so the
-         ;; mode would never come on: the first frame turns it on instead
-         (add-hook 'server-after-make-frame-hook
-                   #'ygg--vertico-posframe-enable))))))
+         (ygg--vertico-posframe-enable))))))
 
 (defun ygg-vertico-posframe-toggle ()
   "Toggle floating (posframe) rendering of the vertico minibuffer."
