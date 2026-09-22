@@ -21,6 +21,7 @@
 (require 'vui nil t)
 
 (declare-function ygg-project-roots "ygg-project-scan" (&optional refresh))
+(declare-function ygg-project-candidates "ygg-project-scan" (&optional refresh))
 (declare-function ygg-project-import-mark "ygg-project-scan" (root))
 (defvar ygg-project-import-hook)
 (declare-function aob-sessions "aob")
@@ -212,7 +213,12 @@ nothing."
   (let* ((scanned (seq-uniq (mapcar #'file-name-as-directory
                                     (delq nil (ignore-errors (ygg-project-roots))))
                             #'equal))
-         (pinned (delq nil (list ygg-projects--here ygg-projects--open)))
+         ;; only ones you imported: standing in a folder is not importing
+         ;; it, and a row that appears because you opened a file there is
+         ;; the row you removed yesterday coming back
+         (pinned (seq-filter (lambda (r) (member r scanned))
+                             (delq nil (list ygg-projects--here
+                                             ygg-projects--open))))
          (all (append scanned (seq-remove (lambda (r) (member r scanned)) pinned)))
          (picked (seq-take all (max 1 ygg-projects-limit))))
     (dolist (r pinned)
@@ -613,18 +619,17 @@ the sidebar moving on its own."
 (declare-function ygg-project-remove "ygg-project-scan" (dir))
 
 (defun ygg-projects-add (dir)
-  "Remember DIR and show it in the sidebar.
-The ones you forgot are offered by name: forgetting a project is a
-decision you can take back without having to remember where it lives.
-Anything else, and the folder picker takes over."
+  "Import DIR and show it in the sidebar.
+Repositories the scan found but nobody has imported are offered by
+name; anything else, and the folder picker takes over."
   (interactive
-   (let* ((forgotten (mapcar #'abbreviate-file-name
-                             (and (boundp 'ygg-project-ignored)
-                                  ygg-project-ignored)))
+   (let* ((found (mapcar #'abbreviate-file-name
+                         (and (fboundp 'ygg-project-candidates)
+                              (ignore-errors (ygg-project-candidates)))))
           (pick (string-trim
                  (completing-read
-                  (if forgotten "Project (forgotten, or a folder): " "Project: ")
-                  forgotten nil nil))))
+                  (if found "Import (found on disk, or a folder): " "Import: ")
+                  found nil nil))))
      (list (if (and (not (string-empty-p pick))
                     (file-directory-p (expand-file-name pick)))
                (expand-file-name pick)

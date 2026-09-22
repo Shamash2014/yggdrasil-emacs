@@ -25,12 +25,6 @@
 Counts the `.git' itself, so 4 reaches a repo three folders down."
   :type 'natnum :group 'ygg-project)
 
-(defcustom ygg-project-ignored nil
-  "Roots never offered, however often the scan finds them again.
-Forgetting a remembered project is enough to drop it; one the scan
-turns up on its own would come straight back, so it is named here."
-  :type '(repeat directory) :group 'yggdrasil)
-
 (defcustom ygg-project-dirs nil
   "Extra folders belonging to a project, as (ROOT . DIRECTORIES).
 A project is not always one checkout: an agent asked to work on one
@@ -143,25 +137,43 @@ the sidebar appears."
                    (when callback
                      (funcall callback ygg-project-scan--found))))))))))))
 
-(defun ygg-project-roots (&optional refresh)
-  "Every repository worth offering: the ones found, and the ones remembered.
-Remembered roots come first — you opened them, so you meant them — and a
-project outside every search path is still reachable through them."
+(defun ygg-project-roots (&optional _refresh)
+  "The projects you took in, newest way round the way `project' keeps them.
+What a walk of the disk turned up is not a project until you import
+it: a list nobody chose is a list nobody can keep, and removing a row
+from it only lasts until the next scan finds the folder again."
+  (delete-dups
+   (mapcar (lambda (d) (file-name-as-directory (expand-file-name d)))
+           (and (fboundp 'project-known-project-roots)
+                (project-known-project-roots)))))
+
+(defvar ygg-project--importing nil
+  "Non-nil while an import is putting a project on the list.")
+
+(defun ygg-project--only-on-import (fn &rest args)
+  "Let only an import add to the project list.
+Visiting a file, switching to a folder or restoring a session all ask
+`project\=' about where they are, and it writes down every answer — so
+the list fills itself with everything you have ever opened, and a row
+you removed comes back the next time anything looks at that folder."
+  (when ygg-project--importing (apply fn args)))
+
+(with-eval-after-load 'project
+  (advice-add 'project-remember-project :around #'ygg-project--only-on-import))
+
+(defun ygg-project-candidates (&optional refresh)
+  "Repositories found on disk that have not been imported.
+The walk is a source of suggestions for the import, and nothing else."
   (when (or refresh (null ygg-project-scan--found))
     (setq ygg-project-scan--found
           (or (and (not refresh) (ygg-project-scan--load))
               (ygg-project-scan--save (ygg-project-scan--walk)))))
-  (let ((known (and (fboundp 'project-known-project-roots)
-                    (project-known-project-roots))))
-    ;; the list file keeps `~/...' and find prints absolute paths, so the
-    ;; two spellings of one project only collapse once both are expanded
-    (let ((ignored (mapcar (lambda (d) (file-name-as-directory (expand-file-name d)))
-                           ygg-project-ignored)))
-      (seq-remove
-       (lambda (d) (member d ignored))
-       (delete-dups
-        (mapcar (lambda (d) (file-name-as-directory (expand-file-name d)))
-                (append known ygg-project-scan--found)))))))
+  (let ((taken (ygg-project-roots)))
+    (seq-remove
+     (lambda (d) (member d taken))
+     (delete-dups
+      (mapcar (lambda (d) (file-name-as-directory (expand-file-name d)))
+              ygg-project-scan--found)))))
 
 ;;; Taking a project in — skills, config, layout, commands
 
@@ -262,35 +274,30 @@ when the last of it settles.  Nothing here blocks."
          (pr (project-current nil dir)))
     (unless (file-directory-p dir)
       (user-error "ygg: %s is not a directory" (abbreviate-file-name dir)))
-    (setq ygg-project-ignored
-          (seq-remove (lambda (d)
-                        (equal dir (file-name-as-directory (expand-file-name d))))
-                      ygg-project-ignored))
     (unless pr
       (user-error "ygg: %s is not a repository" (abbreviate-file-name dir)))
-    (project-remember-project pr)
-    (customize-save-variable 'ygg-project-ignored ygg-project-ignored)
-    ;; no walk: a remembered root is already one of the roots, and the
-    ;; scan that finds the rest is not what you are waiting for
+    (let ((ygg-project--importing t)) (project-remember-project pr))
+    ;; no walk: an imported root is already one of the roots, and the
+    ;; scan that suggests the others is not what you are waiting for
     (ygg-project-import dir)
     (message "ygg: remembered %s" (abbreviate-file-name dir))
     dir))
 
 ;;;###autoload
 (defun ygg-project-remove (dir)
-  "Stop offering DIR, whether it was remembered or found."
+  "Drop DIR from the projects you took in.
+Nothing is remembered about it: the folder is still on disk and the
+scan will offer it again next time you import one."
   (interactive
-   (list (completing-read "Forget project: "
+   (list (completing-read "Remove project: "
                           (mapcar #'abbreviate-file-name (ygg-project-roots))
                           nil t)))
   (let ((dir (file-name-as-directory (expand-file-name dir))))
     (when (fboundp 'project-forget-project)
       (ignore-errors (project-forget-project dir)))
-    (add-to-list 'ygg-project-ignored dir)
-    (customize-save-variable 'ygg-project-ignored ygg-project-ignored)
     (remhash dir ygg-project-import--state)
     (run-hooks 'ygg-project-import-hook)
-    (message "ygg: forgot %s" (abbreviate-file-name dir))
+    (message "ygg: removed %s" (abbreviate-file-name dir))
     dir))
 
 ;;;###autoload
