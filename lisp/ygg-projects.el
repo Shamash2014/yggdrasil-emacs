@@ -174,12 +174,19 @@ or not this Emacs was there for it."
                                                            (plist-get e :dir) "/")))))
                       (ignore-errors (aob-acp-resumable-entries)))))
          (ids (mapcar (lambda (e) (plist-get e :acp-id)) known))
+         (awake (delq nil (mapcar (lambda (s) (aob-session-ref s :acp-id))
+                                  (and (fboundp 'aob-sessions) (aob-sessions)))))
          (found (and (fboundp 'aob-transcript-found)
                      (seq-remove (lambda (e)
                                    (or (member (plist-get e :acp-id) ids)
                                        ;; put away as a persisted entry, but
                                        ;; its file is still where it was
-                                       (member (plist-get e :acp-id) hidden)))
+                                       (member (plist-get e :acp-id) hidden)
+                                       ;; woken: the file it was found in is
+                                       ;; the file the live session is
+                                       ;; writing, and one conversation is
+                                       ;; one row
+                                       (member (plist-get e :acp-id) awake)))
                                  (ignore-errors (aob-transcript-found root)))))
          (put-away (when ygg-projects-show-archived
                      (append
