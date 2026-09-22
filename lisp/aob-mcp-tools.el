@@ -409,6 +409,80 @@ Cheap: reads the session registry, opens nothing."
                (list "none sent yet"))))))))
 
 (aob-mcp-deftool
+ :name "session_list"
+ :description "Every conversation open in this editor, yours and everyone
+else's: id, state, name and folder. The ids are what session_say takes."
+ :args nil
+ :handler
+ (lambda (_args conn id)
+   (aob-mcp-relay
+    conn id
+    `(if (not (fboundp 'aob-sessions))
+         (list "no sessions here")
+       (or (mapcar (lambda (s)
+                     (format "%s  %s  %s  %s"
+                             (aob-session-id s)
+                             (aob-session-state s)
+                             (aob-session-name s)
+                             (or (aob-session-dir s) (aob-session-project s) "")))
+                   (aob-sessions))
+           (list "none open"))))))
+
+(aob-mcp-deftool
+ :name "session_say"
+ :description "Say something to another conversation in this editor —
+a peer, not only a subagent you sent. It lands in that conversation's
+turn where its agent takes steering, and is queued for its next turn
+where it does not. Returns which of the two happened. Use session_list
+for the id."
+ :args '((:name "id" :type string
+          :description "the session id or name, as session_list prints it")
+         (:name "text" :type string
+          :description "what to say to it"))
+ :handler
+ (lambda (args conn id)
+   (let ((text (plist-get args :text))
+         (who (plist-get args :id)))
+     (cond
+      ((or (null who) (string-empty-p (string-trim who)))
+       "which session? pass id")
+      ((or (null text) (string-empty-p (string-trim text)))
+       "nothing to say: pass text")
+      (t
+       (aob-mcp-relay
+        conn id
+        `(let* ((who ,who)
+                (s (or (and (fboundp 'aob-session-get) (aob-session-get who))
+                       ;; a name is what a person reads off a list, and
+                       ;; what an agent will send back
+                       (and (fboundp 'aob-sessions)
+                            (seq-find (lambda (x) (equal (aob-session-name x) who))
+                                      (aob-sessions))))))
+           (cond
+            ((null s) (list (format "no session called %s" who)))
+            ((not (fboundp 'aob-prompt)) (list "no way to talk to it here"))
+            ((and (eq (aob-session-state s) 'working)
+                  (fboundp 'aob-acp--steers-p)
+                  (ignore-errors (aob-acp--steers-p s))
+                  (fboundp 'aob-interject))
+             (condition-case err (progn (aob-interject s ,text)
+                                        (list (format "said to %s, into the turn it is running"
+                                                      (aob-session-name s))))
+               (error (list (format "%s would not take it: %s"
+                                    (aob-session-name s)
+                                    (error-message-string err))))))
+            (t
+             ;; a conversation with no process behind it cannot be told
+             ;; anything, and saying so beats saying nothing
+             (condition-case err (progn (aob-prompt s ,text nil)
+                                        (list (format "said to %s (%s)"
+                                                      (aob-session-name s)
+                                                      (aob-session-state s))))
+               (error (list (format "%s would not take it: %s"
+                                    (aob-session-name s)
+                                    (error-message-string err)))))))))))))) 
+
+(aob-mcp-deftool
  :name "subagent_status"
  :description "How one subagent is getting on: state, directory, its own
 subagents, and the last thing it said."
