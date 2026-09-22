@@ -23,6 +23,58 @@ plugin brings, which is not the same set the CLI will hand to a session."
 
 ;;;###autoload
 
+(defun ygg-agent--mcp-spec (name spec)
+  "One server SPEC from a CLI config, in the shape a session is handed."
+  (when (hash-table-p spec)
+    (let ((url (gethash "url" spec))
+          (type (or (gethash "type" spec) "stdio"))
+          (command (gethash "command" spec)))
+      (cond
+       (url (list :name name :type (if (equal type "sse") "sse" "http") :url url))
+       (command
+        (list :name name :command command
+              :args (vconcat (gethash "args" spec))
+              :env (let (env)
+                     (when-let* ((table (gethash "env" spec)))
+                       (maphash (lambda (key value)
+                                  (push (list :name key :value (format "%s" value))
+                                        env))
+                                table))
+                     ;; a list of (:name :value), which is the shape the
+                     ;; wire builder recognises; a vector is not
+                     (nreverse env))))))))
+
+;;;###autoload
+(defun ygg-agent-user-mcp-servers (agent &optional project)
+  "The MCP servers AGENT\='s own configuration declares, in wire shape.
+A session opened from here goes through session/new, which carries the
+servers it is given and nothing else — so the ones the CLI would have
+loaded from its config have to be handed over too, or an agent started
+from Emacs reaches fewer tools than the same agent started by hand."
+  (when (equal agent "claude")
+    (let* ((file (expand-file-name "~/.claude.json"))
+           (json (and (file-readable-p file) (ygg-agent--read-json file)))
+           (tables
+            (and json
+                 (delq nil
+                       (list (gethash "mcpServers" json)
+                             (when-let* ((project)
+                                         (projects (gethash "projects" json))
+                                         (entry (or (gethash (directory-file-name
+                                                              (expand-file-name project))
+                                                             projects)
+                                                    (gethash (file-name-as-directory
+                                                              (expand-file-name project))
+                                                             projects))))
+                               (gethash "mcpServers" entry))))))
+           out)
+      (dolist (table tables)
+        (when (hash-table-p table)
+          (maphash (lambda (name spec)
+                     (push (ygg-agent--mcp-spec name spec) out))
+                   table)))
+      (delq nil (nreverse out)))))
+
 (defconst ygg-agent--config-homes
   '(("claude" :var "CLAUDE_CONFIG_DIR" :marker ".claude-config-dir" :home "~/.claude"
      :share ("skills" "agents" "commands" "plugins" "hooks"

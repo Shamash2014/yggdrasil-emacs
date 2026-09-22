@@ -631,6 +631,20 @@ buffer-local that says where the words were going."
 
 (advice-add 'aob-acp-spawn :around #'ygg-aob--with-project-skills)
 
+;; and every server its own configuration declares.  A session gets what
+;; session/new carries and nothing else, so an agent started from here
+;; would otherwise reach fewer tools than the same agent started by hand
+(declare-function ygg-agent-user-mcp-servers "ygg-agent-conf" (agent &optional project))
+
+(defun ygg-aob--with-user-mcp (fn agent name project &rest rest)
+  "Hand the session AGENT's own configured servers, beside ours."
+  (let ((aob-acp-mcp-servers
+         (append (bound-and-true-p aob-acp-mcp-servers)
+                 (ignore-errors (ygg-agent-user-mcp-servers agent project)))))
+    (apply fn agent name project rest)))
+
+(advice-add 'aob-acp--open :around #'ygg-aob--with-user-mcp)
+
 (defun ygg-aob--worktree-skills (fn project dir done &rest rest)
   "Link PROJECT's skills into worktree DIR the moment it exists.
 The spawn cannot do this itself: the worktree is made on its way out."
