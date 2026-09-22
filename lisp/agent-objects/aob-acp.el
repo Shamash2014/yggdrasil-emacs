@@ -1445,6 +1445,13 @@ something larger than a buffer — a workspace, a tab — sets this so a
 session opened from a scratch buffer still belongs to that place."
   :type '(choice function (const nil)) :group 'aob)
 
+(defvar aob-acp-system-append nil
+  "What every session is told on top of its agent's own system prompt.
+A string, a function of the session returning one, or nil.  It rides in
+the request that opens the session, so it reaches a session whatever
+config home it runs under; an adapter that does not read
+_meta.systemPrompt never sees it.")
+
 (defvar aob-acp-start-dir nil
   "Where a spawn belongs, said outright by a caller that already knows.
 A task's root is not a guess to be improved on, so this beats both
@@ -2047,6 +2054,9 @@ the adapters store their sessions under."
     ;; the adapter asks what to open with, a caller's `let' is long
     ;; unwound and the session would go out with none of them
     (let ((servers aob-acp-mcp-servers)
+          (told (if (functionp aob-acp-system-append)
+                    (funcall aob-acp-system-append s)
+                  aob-acp-system-append))
           (fn open))
       (setq open (lambda (init)
                    (let* ((aob-acp-mcp-servers servers)
@@ -2056,7 +2066,12 @@ the adapters store their sessions under."
                      ;; about what it was handed
                      (when-let* ((params (cadr spec)))
                        (aob-session-put s :mcp-sent
-                                        (append (plist-get params :mcpServers) nil)))
+                                        (append (plist-get params :mcpServers) nil))
+                       (when (and (stringp told) (not (string-empty-p told)))
+                         (setcar (cdr spec)
+                                 (plist-put params :_meta
+                                            (plist-put (copy-sequence (plist-get params :_meta))
+                                                       :systemPrompt (list :append told))))))
                      spec))))
     (if prepare
         (funcall prepare s

@@ -286,6 +286,10 @@ when the last of it settles.  Nothing here blocks."
      root
      (list (cons "skills"
                  (lambda ()
+                   ;; the config's skills, wherever every agent reads them,
+                   ;; then the project's own, where its sessions start
+                   (when (fboundp 'ygg-agent-skills-ensure)
+                     (ygg-agent-skills-ensure))
                    (when (fboundp 'ygg-agent-link-project-skills)
                      (ygg-agent-link-project-skills root))))
            (cons "config"

@@ -87,6 +87,35 @@
    (format "remove -g -s %s -a '*' -y" (shell-quote-argument name))
    (concat "remove-" name)))
 
+(defconst ygg-agent--shared-skills "~/.agents/skills"
+  "Where the installer keeps each skill once, for every agent that reads skills.")
+
+(defun ygg-agent--skills-stale ()
+  "The config's skills an agent would not see as written: never installed,
+or edited since.  The installer copies, so a change here reaches no one
+until it runs again."
+  (seq-filter
+   (lambda (name)
+     (let ((src (expand-file-name "SKILL.md" (expand-file-name name ygg-agent-skills-root)))
+           (dst (expand-file-name (concat name "/SKILL.md") ygg-agent--shared-skills)))
+       (and (file-readable-p src)
+            (or (not (file-exists-p dst))
+                (file-newer-than-file-p src dst)))))
+   (ygg-agent--skill-names)))
+
+(defun ygg-agent-skills-ensure ()
+  "Install the config's skills for every agent when any is missing or stale."
+  (interactive)
+  (if-let* ((stale (ygg-agent--skills-stale)))
+      (progn (ygg-agent--notify (format "skills: %d to install (%s)" (length stale)
+                                        (string-join (seq-take stale 3) ", ")))
+             (ygg-agent-skill-install))
+    (when (called-interactively-p 'any)
+      (ygg-agent--notify "skills: every agent has them"))))
+
+(unless noninteractive
+  (run-with-idle-timer 30 nil #'ygg-agent-skills-ensure))
+
 ;;; A project's own skills.  The config home cannot carry them: its
 ;;; skills entry is the shared link to the user's, and the CLI reads a
 ;;; project's from .claude/skills under the directory the session starts

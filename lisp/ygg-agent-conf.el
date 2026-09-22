@@ -150,31 +150,49 @@ is started by hand."
 (defcustom ygg-agent-instructions
   "## This editor (aob)
 
-You are running inside Emacs, and the `aob` MCP server is that editor.
+You are running inside Emacs. Its aob MCP server is how you work with
+the editor, and you must use it wherever it covers the job.
 
-- Delegate with `subagent_spawn`, and follow the work with
-  `subagent_list`, `subagent_status` and `subagent_kill`.  A subagent
-  spawned that way is a session of its own in the editor — visible,
-  steerable, and not spending your context.
-- Ask the editor what it already knows before shelling out for the same
-  answer: `xref_references` and `xref_apropos` for who calls what,
-  `imenu_symbols` for a file's shape, `treesit_info` for the parse, and
-  `diagnostics` for what a checker says about a file that is open.
-- Talk to the other conversations open here, not only to the ones you
-  sent: `session_list` gives every one of them with its id, state,
-  name and folder, and `session_say` puts words into one — into the
-  turn it is running where its agent takes steering, queued for its
-  next turn where it does not.  Address a session by its id; two
-  conversations can carry one name and a name that fits both is
-  refused rather than guessed.
-- `tool_names` lists everything this server offers."
+- Delegation: spawn subagents with subagent_spawn, never with the
+  built-in Task or Agent tool. Follow them with subagent_list and
+  subagent_status, stop them with subagent_kill. A subagent spawned this
+  way is a session of its own in the editor: visible, steerable, and not
+  spending your context.
+- Code questions: ask the editor before reaching for grep or a shell.
+  xref_references and xref_apropos for who calls what, imenu_symbols for
+  a file's shape, treesit_info for the parse, diagnostics for what a
+  checker says about an open file.
+- Other conversations: session_list gives every conversation open here
+  with its id, state, name and folder; session_say puts words into one,
+  into the turn it is running where its agent takes steering, queued for
+  its next turn where it does not. Address a session by its id: a name
+  that fits two conversations is refused rather than guessed.
+- tool_names lists everything the server offers."
   "What every session started from here is told about this editor.
-Written into the config home the session runs under, which is where
-the CLI looks for what the user told it once and for all."
+It goes out in the request that opens the session, appended to the
+agent's own system prompt, so a session hears it whichever config home
+it runs under."
   :type 'string :group 'yggdrasil)
 
 (defconst ygg-agent--instructions-open "<!-- aob: managed, edited by Emacs -->")
 (defconst ygg-agent--instructions-close "<!-- /aob -->")
+
+(defun ygg-agent-remove-instructions (home)
+  "Take the fenced block an older setup wrote out of HOME\='s memory file.
+The system prompt carries it now, and a second copy in the memory file
+is the same words read twice in every turn."
+  (let ((file (and home (expand-file-name "CLAUDE.md" home))))
+    (when (and file (file-readable-p file))
+      (let* ((old (with-temp-buffer (insert-file-contents file) (buffer-string)))
+             (new (and (string-match (concat "\n*" (regexp-quote ygg-agent--instructions-open)
+                                             "\\(?:.\\|\n\\)*?"
+                                             (regexp-quote ygg-agent--instructions-close)
+                                             "\n?")
+                                     old)
+                       (replace-match "\n" t t old))))
+        (when (and new (not (equal old new)))
+          (with-temp-file file (insert (string-trim-left new)))
+          file)))))
 
 (defun ygg-agent-write-instructions (home)
   "Put `ygg-agent-instructions\=' in HOME\='s memory file, and only that.
