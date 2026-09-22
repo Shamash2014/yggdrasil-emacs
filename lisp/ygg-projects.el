@@ -804,11 +804,22 @@ and no state gets to put its cursor back."
     (set-mark (point))
     (deactivate-mark)))
 
+(defun ygg-projects--window (&optional frame)
+  "The sidebar\='s own window on FRAME: the side window down the left.
+A copy of the buffer in an ordinary window — a restored configuration,
+a stray `switch-to-buffer\=' — is not the sidebar, whatever it shows."
+  (when-let* ((buf (get-buffer ygg-projects-buffer-name)))
+    (seq-find (lambda (w) (eq (window-parameter w 'window-side) 'left))
+              (get-buffer-window-list buf nil (or frame (selected-frame))))))
+
 (defun ygg-projects--display (buf)
   "Put BUF in the sidebar's own window and return it.
 The width is preserved once set: `balance-windows\=' counts a side
 window as one more pane to share the frame out between, and hands a
 panel a third of the screen."
+  (dolist (w (get-buffer-window-list buf nil t))
+    (unless (window-parameter w 'window-side)
+      (ignore-errors (ygg-projects--dismiss w))))
   (let ((win (display-buffer buf `((display-buffer-in-side-window)
                                    (side . left) (slot . 0)
                                    (window-width . ,ygg-projects-width)
@@ -873,7 +884,7 @@ window configuration, a session load, a compose box making room.")
               (frame-parent)
               (minibufferp))
     (when-let* ((buf (get-buffer ygg-projects-buffer-name))
-                ((not (get-buffer-window buf (selected-frame)))))
+                ((not (ygg-projects--window))))
       (let ((ygg-projects--restoring t))
         (when-let* ((win (ignore-errors (ygg-projects--display buf))))
           (set-window-dedicated-p win t)
