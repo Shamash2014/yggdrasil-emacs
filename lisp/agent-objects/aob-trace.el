@@ -111,12 +111,19 @@ and a config that arranges sessions can address them its own way.")
     (aob-trace--fit-margins)))
 
 (defun aob-trace--fit-margins ()
-  "Hold the prose to `aob-trace-measure' by padding the right margin."
+  "Give the trace the window, keeping the gutter the mark hangs in.
+`aob-trace-measure\=' caps the line only when it is set: a measure is
+worth having in a window wide enough to need one, and a window nobody
+widened is not that window."
   (dolist (win (get-buffer-window-list (current-buffer) nil t))
     (let* ((total (window-total-width win))
-           (slack (max 0 (- total aob-trace-measure 4))))
+           (slack (if (> aob-trace-measure 0)
+                      (max 0 (- total aob-trace-measure 4))
+                    0)))
       (set-window-margins win 4 slack)
-      (set-window-fringes win 0 0))))
+      (set-window-fringes win 0 0)
+      (with-current-buffer (window-buffer win)
+        (setq-local fill-column (max 20 (- total 4 slack)))))))
 
 (defcustom aob-trace-icons t
   "Draw event kinds as nerd-font glyphs (needs a Nerd Font) instead of ASCII."
@@ -135,8 +142,11 @@ clock; `log' is the timestamped row-per-event shape."
   "Extra height under a paragraph break, in units of the line height."
   :type 'number :group 'aob)
 
-(defcustom aob-trace-measure 78
-  "Columns of prose before the right margin takes over, under `delta'."
+(defcustom aob-trace-measure 0
+  "Columns of prose before the right margin takes over, under `delta'.
+Zero gives the trace the whole window, less the gutter its marks hang
+in: a paragraph reads better at seventy-eight columns, and a shell
+command, a diff and a path do not."
   :type 'natnum :group 'aob)
 
 (defface aob-trace-prose
