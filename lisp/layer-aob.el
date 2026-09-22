@@ -527,12 +527,14 @@ spawned by aob are then the same install, logged in once."
 
 (advice-add 'aob-acp-spawn :around #'ygg-aob--with-project-skills)
 
-(defun ygg-aob--worktree-skills (fn project dir done)
-  "Link PROJECT's skills into worktree DIR the moment it exists."
-  (funcall fn project dir
-           (lambda (err)
-             (unless err (ignore-errors (ygg-agent-link-project-skills dir)))
-             (funcall done err))))
+(defun ygg-aob--worktree-skills (fn project dir done &rest rest)
+  "Link PROJECT's skills into worktree DIR the moment it exists.
+The spawn cannot do this itself: the worktree is made on its way out."
+  (apply fn project dir
+         (lambda (err)
+           (unless err (ignore-errors (ygg-agent-link-project-skills dir)))
+           (funcall done err))
+         rest))
 
 (advice-add 'aob-acp--worktree-make :around #'ygg-aob--worktree-skills)
 

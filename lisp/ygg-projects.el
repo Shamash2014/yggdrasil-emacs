@@ -195,10 +195,20 @@ in the background and redraws this when it settles."
                           root (expand-file-name
                                 (buffer-local-value 'default-directory b)))))
                   (buffer-list))))
-    (when (fboundp 'ygg-project-commands-refresh)
-      (ygg-project-commands-refresh
-       root (lambda (_root) (ygg-projects-refresh))))
     (cons running (max total running))))
+
+(defun ygg-projects--scan-commands ()
+  "Ask for a command scan of the projects on show.
+Never from the render: the callback redraws, the redraw counts the
+commands, and counting them would ask for another scan."
+  (when (fboundp 'ygg-project-commands-refresh)
+    (let ((done nil))
+      (dolist (root (ygg-projects--roots))
+        (ygg-project-commands-refresh
+         root (lambda (_root)
+                (unless done
+                  (setq done t)
+                  (run-at-time 0 nil #'ygg-projects-refresh))))))))
 
 (defun ygg-projects--terminals (root)
   (let ((n (seq-count
@@ -586,6 +596,12 @@ that; a project row is only the list this sidebar keeps."
       (user-error "projects: that one is still running — end it first"))
      (t (user-error "projects: no conversation on this line")))))
 
+(defun ygg-projects-rescan ()
+  "Redraw, and look again for what the projects can run."
+  (interactive)
+  (ygg-projects-refresh)
+  (ygg-projects--scan-commands))
+
 (defun ygg-projects-next () (interactive) (ygg-projects--goto 1))
 (defun ygg-projects-prev () (interactive) (ygg-projects--goto -1))
 (defun ygg-projects-next-project () (interactive) (ygg-projects--goto 1 t))
@@ -692,7 +708,7 @@ The line keeps its place on screen; what opens, opens below it."
     (define-key map "K" #'ygg-projects-prev-project)
     (define-key map "n" #'ygg-projects-next)
     (define-key map "p" #'ygg-projects-prev)
-    (define-key map "g" #'ygg-projects-refresh)
+    (define-key map "g" #'ygg-projects-rescan)
     (define-key map "+" #'project-switch-project)
     (define-key map "A" #'ygg-projects-add)
     (define-key map "D" #'ygg-projects-delete)
@@ -820,6 +836,7 @@ the whole frame instead of a side window."
           (with-current-buffer buf (setq ygg-projects--instance inst))))
       (ygg-projects--setup buf)
       (ygg-projects-refresh)
+      (ygg-projects--scan-commands)
       (let ((win (ygg-projects--display buf)))
         ;; dedicated: whatever the sidebar opens goes to the main area,
         ;; never into the sidebar's own window
