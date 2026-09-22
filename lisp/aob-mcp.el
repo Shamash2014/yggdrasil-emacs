@@ -284,6 +284,31 @@ other one thinks."
 
 ;;; Transport
 
+(defvar aob-mcp-key nil
+  "The secret a caller presents as ?key=, or nil to answer anyone.")
+
+(defvar aob-mcp-key-file nil
+  "File holding the secret, read once at startup.
+Not the command line: argv is world-readable on this machine, and a
+token that scopes which session is calling is not a password.")
+
+(defun aob-mcp--read-key ()
+  (when (and (null aob-mcp-key) aob-mcp-key-file
+             (file-readable-p aob-mcp-key-file))
+    (setq aob-mcp-key
+          (string-trim (with-temp-buffer
+                         (insert-file-contents aob-mcp-key-file)
+                         (buffer-string))))))
+
+(defun aob-mcp--unauthorized (conn)
+  "Refuse CONN: it did not present the secret."
+  (when (process-live-p conn)
+    (ignore-errors
+      (process-send-string conn (concat "HTTP/1.1 401 Unauthorized\r\n"
+                                        "Content-Length: 0\r\n"
+                                        "Connection: close\r\n\r\n"))
+      (process-send-eof conn))))
+
 (defun aob-mcp--query (target key)
   (when (string-match (concat "[?&]" (regexp-quote key) "=\\([^&]*\\)") target)
     (url-unhex-string (match-string 1 target))))
@@ -310,7 +335,13 @@ other one thinks."
                                              :array-type 'list
                                              :false-object nil :null-object nil)
                         (error nil))))
-            (cond ((and verb (not (equal verb "POST")))
+            (cond ((and aob-mcp-key
+                        (not (equal (and target (aob-mcp--query target "key"))
+                                    aob-mcp-key)))
+                   ;; every local process can reach this port; only the
+                   ;; ones this Emacs handed the secret to may use it
+                   (aob-mcp--unauthorized conn))
+                  ((and verb (not (equal verb "POST")))
                    (aob-mcp--not-allowed conn))
                   (req (aob-mcp--dispatch conn req))
                   (t (aob-mcp--error conn nil -32700 "that was not JSON")))))))))
@@ -342,6 +373,7 @@ other one thinks."
 
 (defun aob-mcp-run ()
   "Serve forever.  The entry point of the headless Emacs."
+  (aob-mcp--read-key)
   (aob-mcp-start)
   ;; the top of the loop, not inside a filter: waiting for output here is
   ;; what serving is, while the same call inside a handler would re-enter

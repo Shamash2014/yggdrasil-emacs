@@ -13,6 +13,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'aob-mcp)
+(require 'url-util)
 
 (defcustom aob-mcp-host-name "aob"
   "What the server is called in a session's server list."
@@ -33,6 +34,21 @@ the prefix above Emacs.app, not beside the executable."
       (executable-find "emacsclient")
       "emacsclient"))
 
+(defvar aob-mcp-host--key nil
+  "The secret this Emacs and its sidecar share for this run.")
+
+(defun aob-mcp-host--key-file ()
+  (expand-file-name "aob-mcp-key" (locate-user-emacs-file "var/")))
+
+(defun aob-mcp-host--write-key ()
+  "Make a secret for this run and leave it where only its owner reads it."
+  (setq aob-mcp-host--key (aob-mcp-host--token))
+  (let ((file (aob-mcp-host--key-file)))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file (insert aob-mcp-host--key))
+    (set-file-modes file #o600)
+    file))
+
 (defun aob-mcp-host--command ()
   "How to start the headless Emacs.
 It is told the port, the socket to call back on and where emacsclient
@@ -40,12 +56,16 @@ is: a -Q child inherits none of that, and would otherwise reach for
 whatever Emacs happens to be first on PATH."
   (list (expand-file-name invocation-name invocation-directory)
         "-Q" "--batch"
+        ;; -Q reads no init, so the child does not inherit the one setting
+        ;; that stops a stale .elc from beating the source beside it
+        "--eval" "(setq load-prefer-newer t)"
         "-L" (aob-mcp-host--lisp-dir)
         "-l" "aob-mcp"
         "--eval" (format "%S" `(progn
                                  (setq aob-mcp-port ,aob-mcp-port
                                        aob-mcp-server-name ,(or (bound-and-true-p server-name)
                                                                 aob-mcp-server-name)
+                                       aob-mcp-key-file ,(aob-mcp-host--key-file)
                                        aob-mcp-emacsclient ,(aob-mcp-host--emacsclient))
                                  ;; the tool set is optional: a server with no
                                  ;; tools still answers, and says so
@@ -65,6 +85,7 @@ whatever Emacs happens to be first on PATH."
   "Start the headless Emacs that serves MCP, unless it is already up."
   (interactive)
   (unless (aob-mcp-host-live-p)
+    (aob-mcp-host--write-key)
     (let ((buf (get-buffer-create " *aob-mcp-host*")))
       (setq aob-mcp-host--process
             (make-process
@@ -81,7 +102,10 @@ whatever Emacs happens to be first on PATH."
   (interactive)
   (when (process-live-p aob-mcp-host--process)
     (delete-process aob-mcp-host--process))
-  (setq aob-mcp-host--process nil))
+  (setq aob-mcp-host--process nil)
+  (setq aob-mcp-host--key nil)
+  (when (file-exists-p (aob-mcp-host--key-file))
+    (ignore-errors (delete-file (aob-mcp-host--key-file)))))
 
 (defun aob-mcp-host-restart ()
   "Stop and start, to pick up edited tools."
@@ -123,10 +147,15 @@ too late for `aob-session-created-hook\=' to have seen it."
   (add-hook 'aob-session-created-hook #'aob-mcp-host--claim))
 
 (defun aob-mcp-host-spec (token)
-  "The server entry a session spawned under TOKEN is handed."
+  "The server entry a session spawned under TOKEN is handed.
+The token says which session is calling; the key says it may call at
+all, and only sessions this Emacs opened are given it."
   (list :name aob-mcp-host-name
         :type "http"
-        :url (format "%s?session=%s" (aob-mcp-url) token)))
+        :url (if aob-mcp-host--key
+                 (format "%s?key=%s&session=%s" (aob-mcp-url)
+                         (url-hexify-string aob-mcp-host--key) token)
+               (format "%s?session=%s" (aob-mcp-url) token))))
 
 (defun aob-mcp-host--around-spawn (fn &rest args)
   "Give every session this Emacs opens the sidecar, under its own token."

@@ -29,6 +29,8 @@
 (declare-function aob-acp-resumable-entries "aob-acp" ())
 (declare-function aob-acp-resume-entry "aob-acp" (e &optional pref))
 (declare-function aob-acp-archive-entry "aob-acp" (e))
+(declare-function aob--call "aob" (s verb &rest args))
+(declare-function aob-remove-session "aob" (s))
 (declare-function aob-acp-forget-entry "aob-acp" (e))
 (declare-function aob-acp-delete-session "aob-acp" (s))
 (declare-function aob-transcript-view "aob-transcript" (entry))
@@ -668,6 +670,34 @@ that; a project row is only the list this sidebar keeps."
       (user-error "projects: that one is still running — end it first"))
      (t (user-error "projects: no conversation on this line")))))
 
+(defun ygg-projects-archive-ask ()
+  "Put the conversation on this line away, after asking.
+One still running is ended first and archived on the next press: an
+agent holding a conversation open is the reason it cannot be filed."
+  (interactive)
+  (let ((entry (ygg-projects--entry-at-point)))
+    (cond
+     ((and (consp entry) (plist-member entry :acp-id))
+      (when (y-or-n-p (format "Archive %s? "
+                              (or (plist-get entry :name) "this conversation")))
+        (aob-acp-archive-entry entry)
+        (ygg-projects-refresh)))
+     ;; a conversation opened for reading is a session object with no
+     ;; agent behind it: there is nothing to end, only something to file
+     ((and (aob-session-p entry)
+           (or (aob-session-ref entry :asleep)
+               (memq (aob-session-state entry) '(done dead failed))))
+      (when (y-or-n-p (format "Archive %s? " (aob-session-name entry)))
+        (when-let* ((past (aob-session-ref entry :asleep)))
+          (aob-acp-archive-entry past))
+        (aob-remove-session entry)
+        (ygg-projects-refresh)))
+     ((aob-session-p entry)
+      (when (y-or-n-p (format "End %s? " (aob-session-name entry)))
+        (ignore-errors (aob--call entry :kill))
+        (ygg-projects-refresh)))
+     (t (user-error "projects: no conversation on this line")))))
+
 (defun ygg-projects-rescan ()
   "Redraw, and look again for what the projects can run."
   (interactive)
@@ -786,6 +816,7 @@ The line keeps its place on screen; what opens, opens below it."
     (define-key map "A" #'ygg-projects-add)
     (define-key map "D" #'ygg-projects-delete)
     (define-key map "-" #'ygg-projects-archive)
+    (define-key map "x" #'ygg-projects-archive-ask)
     (define-key map "R" #'ygg-projects-resume)
     (define-key map "q" #'ygg-projects-close)
     map)
