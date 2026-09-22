@@ -138,7 +138,10 @@ refresh runs in, and a refresh runs in the sidebar's own.")
   "The mounted vui root of this sidebar.")
 
 (defvar ygg-projects--open-row nil
-  "Cons of (ROOT . KIND) whose entries are listed, or nil.")
+  "Conses of (ROOT . KIND) whose entries are listed.
+A set, not one at a time: opening the commands of a project is not a
+reason to put its sessions away, and a row that closed itself because
+you looked at another is a row you have to open twice.")
 
 ;;; What each project is running
 
@@ -506,12 +509,10 @@ cannot spill past the text area and mark every line truncated."
 
 (defun ygg-projects--rows (root)
   "ROOT's rows, the opened one followed by what it holds."
-  (let ((open-root (car-safe ygg-projects--open-row))
-        (open-kind (cdr-safe ygg-projects--open-row))
-        (out nil))
+  (let ((out nil))
     (pcase-dolist (`(,kind ,icon ,label ,count) (ygg-projects--row-specs root))
       (push (vui-text (ygg-projects--row-text icon label count root kind)) out)
-      (when (and (equal root open-root) (eq kind open-kind))
+      (when (member (cons root kind) ygg-projects--open-row)
         (dolist (node (ygg-projects--entry-nodes root kind)) (push node out))))
     (nreverse out)))
 
@@ -645,8 +646,13 @@ Anything else, and the folder picker takes over."
       (ygg-project-remove root)
       (when (equal (file-name-as-directory (expand-file-name root))
                    ygg-projects--open)
-        (setq ygg-projects--open nil ygg-projects--open-row nil))
+        (setq ygg-projects--open nil
+              ygg-projects--open-row (ygg-projects--forget-rows root)))
       (ygg-projects-refresh))))
+
+(defun ygg-projects--forget-rows (root)
+  "The open rows, less those of ROOT."
+  (seq-remove (lambda (cell) (equal (car cell) root)) ygg-projects--open-row))
 
 (defun ygg-projects--entry-at-point ()
   (get-text-property (line-beginning-position) 'ygg-entry))
@@ -749,11 +755,12 @@ The line keeps its place on screen; what opens, opens below it."
     (cond
      ((null root) nil)
      ((eq kind 'project)
-      (setq ygg-projects--open (unless (equal root ygg-projects--open) root)
-            ygg-projects--open-row nil))
-     (t (setq ygg-projects--open-row
-              (unless (equal ygg-projects--open-row (cons root kind))
-                (cons root kind)))))
+      (setq ygg-projects--open (unless (equal root ygg-projects--open) root)))
+     (t (let ((cell (cons root kind)))
+          (setq ygg-projects--open-row
+                (if (member cell ygg-projects--open-row)
+                    (remove cell ygg-projects--open-row)
+                  (cons cell ygg-projects--open-row))))))
     (ygg-projects-refresh)
     ;; and when the list is long enough to scroll, hold the row against
     ;; the same screen line rather than letting the view slide
