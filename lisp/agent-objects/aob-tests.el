@@ -216,9 +216,18 @@
       (aob--modeline-refresh)
       (should (string-match-p "»1" aob-modeline-string))
       (with-current-buffer (aob-trace-buffer s)
-        (aob-trace--render t)
-        ;; words carry a speaker line rather than a glyph behind a clock
-        (should (string-match-p "you" (buffer-string)))
+        ;; words carry a speaker line rather than a glyph behind a clock —
+        ;; under the plain style, where the name is the only thing saying
+        ;; who spoke; delta draws a mark in the margin instead
+        (cl-flet ((redraw ()
+                    ;; a block is cached on its event: a style read at
+                    ;; render time is only read again once that is gone
+                    (dolist (e (aob-session-events s)) (plist-put e :line nil))
+                    (aob-trace--render t)))
+          (let ((aob-trace-style 'plain))
+            (redraw)
+            (should (string-match-p "you" (buffer-string))))
+          (redraw))
         (should (string-match-p "later ⋯ queued" (buffer-string))))
       ;; flush promotes the same event in place — no duplicate, no marker
       (aob-set-state s 'idle)
@@ -1812,7 +1821,9 @@ even from an agent that would have reconnected silently."
     (dotimes (i 20) (aob-event s 'message :text (format "line %d" i)))
     (aob-trace--render-1 s)
     (let* ((built 0)
-           (end (point-max))
+           ;; where the blocks end, which is before the line you type the
+           ;; next prompt in: that line is rewritten by design
+           (end (aob-trace--tail-end))
            (mark (copy-marker end))
            (blocks aob-trace--blocks))
       (advice-add 'aob-trace--line :before (lambda (&rest _) (cl-incf built)))
@@ -1822,7 +1833,7 @@ even from an agent that would have reconnected silently."
             (aob-trace--render-1 s)
             (should (= built 1))
             (should (= (marker-position mark) end))
-            (should (> (point-max) end))
+            (should (> (aob-trace--tail-end) end))
             (should (equal blocks (butlast aob-trace--blocks)))
             (should (cl-every #'eq blocks (butlast aob-trace--blocks))))
         (advice-mapc (lambda (f _p) (advice-remove 'aob-trace--line f))
@@ -1873,13 +1884,15 @@ even from an agent that would have reconnected silently."
 (ert-deftest aob-trace-markdown-faces-prose-rows ()
   "A message row reads as markdown; a tool row stays as it is."
   (aob-tests--with-markdown
-    (should (eq 'bold (aob-tests--md-face
-                       (aob-trace--line '(:type message :ts 0 :text "# head"))
-                       "# head")))
-    (should-not (eq 'bold (aob-tests--md-face
-                          (aob-trace--line '(:type tool :ts 0 :kind "read"
-                                             :title "# head"))
-                          "# head")))))
+    (should (memq 'bold (ensure-list
+                         (aob-tests--md-face
+                          (aob-trace--line '(:type message :ts 0 :text "# head"))
+                          "# head"))))
+    (should-not (memq 'bold (ensure-list
+                             (aob-tests--md-face
+                              (aob-trace--line '(:type tool :ts 0 :kind "read"
+                                                 :title "# head"))
+                              "# head"))))))
 
 (ert-deftest aob-trace-markdown-faces-prose-detail ()
   "Expanded message detail reads as markdown; a diff detail stays as it is."
@@ -1965,7 +1978,7 @@ one that names MCP nowhere is sent what it was always sent."
 the same stderr line is what that looks like.  A caller that binds the
 isolation token gets a process keyed to it, and the env function is
 told, so it can hand that process a config home of its own."
-  (should (equal '("claude" . "/r") (aob-acp--conn-key "claude" "/r")))
+  (should (equal '("claude" "/r") (aob-acp--conn-key "claude" "/r")))
   (let ((aob-acp-isolate "decode-path"))
     (should (equal '("claude" "/r" "decode-path")
                    (aob-acp--conn-key "claude" "/r")))

@@ -1037,6 +1037,17 @@ than only in the compose buffer."
 (defun aob-trace--inline-p ()
   (and (aob-trace--delta-p) aob-trace-inline-input))
 
+(defun aob-trace--tail-end ()
+  "Where the rendered blocks end: before the input line, when there is one.
+The input marker stands after the glyph that line carries, so writing
+up to it rewrites that glyph on every append — and takes every marker
+standing at the end of the trace with it."
+  (if (and aob-trace--input (marker-position aob-trace--input))
+      (save-excursion
+        (goto-char (marker-position aob-trace--input))
+        (line-beginning-position))
+    (point-max)))
+
 (defun aob-trace--content-end ()
   "Where the rendered trace ends: the input marker, else the buffer end."
   (if (and aob-trace--input (marker-position aob-trace--input))
@@ -1239,7 +1250,10 @@ submits a thread of comments together."
           (delete-region (point-min) cut))))
     ;; incremental: the buffer is edited only from the first changed
     ;; block on, so redisplay re-wraps the tail, never all visible lines
-    (while (and new old (eq (car new) (car old)))
+    ;; `equal', not `eq': a block rebuilt to the same text is the same
+    ;; text, and rewriting it churns the tail and moves every marker
+    ;; standing at the end of it
+    (while (and new old (equal (car new) (car old)))
       (cl-incf pos (1+ (length (car new))))
       (pop new) (pop old))
     (when (or new old)
@@ -1254,10 +1268,10 @@ submits a thread of comments together."
                                           (car new) nil (length (car old)))))
           (setq suffix (length (car old)))
           (cl-incf pos suffix))
-        (delete-region (min pos (aob-trace--content-end))
-                       (aob-trace--content-end))
+        (delete-region (min pos (aob-trace--tail-end))
+                       (aob-trace--tail-end))
         (save-excursion
-          (goto-char (aob-trace--content-end))
+          (goto-char (aob-trace--tail-end))
           (when suffix
             (insert (substring (car new) suffix) (aob-trace--sep))
             (pop new) (pop old))
