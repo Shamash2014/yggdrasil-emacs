@@ -2582,7 +2582,9 @@ Prompts sent while it opens queue and fire on readiness."
                 ;; a second time only where the first found nothing
                 (aob-acp--seed-history s e)
                 (aob-acp--session-opened s res acp-id "session resumed")))))
-      (aob-acp--seed-history s e)
+      ;; `aob-acp--open' is what makes the session; a caller that stands
+      ;; in for it hands back whatever it likes
+      (when (aob-session-p s) (aob-acp--seed-history s e))
       s)))
 
 (defun aob-acp--restore-target ()
