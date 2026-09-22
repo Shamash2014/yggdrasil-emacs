@@ -482,7 +482,9 @@ One mark per turn, beside the row that opens it: an agent that answers
 in eight parts is one agent speaking once, and eight marks down the
 gutter say eight."
   (cond ((not (aob-trace--delta-p)) "")
-        ((eq (plist-get ev :type) 'prompt)
+        ;; a prompt a tool or a workflow put there is nobody standing at
+        ;; the keyboard, and a face beside it says someone was
+        ((and (eq (plist-get ev :type) 'prompt) (plist-get ev :typed))
          (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-account_circle"
                             'aob-trace-speaker)
              ""))
@@ -503,9 +505,7 @@ gutter say eight."
                    (aob-trace--prose
                     (aob-trace--md (aob-trace--body ev)
                                    (aob-trace--live-p ev)))))
-                (when-let* ((n (plist-get ev :images)) ((> n 0)))
-                  (concat " " (mapconcat #'identity
-                                         (make-list n "[[Image]]") " ")))
+                (aob-trace--images-of ev)
                 (let ((st (aob-trace--status ev)))
                   (if (string-empty-p st) "" (concat " " st))))
       (aob-trace--plain-line ev time))))
@@ -575,12 +575,62 @@ remap such as `ygg-focus-dim' cannot outrank it."
             (setq i (1+ i)))))
       copy)))
 
+(defcustom aob-trace-image-height 160
+  "How tall a picture sent to an agent is drawn in the trace, in pixels."
+  :type 'natnum :group 'aob)
+
+(defvar aob-trace--images (make-hash-table :test 'equal)
+  "(FILE HEIGHT . MTIME) to the image drawn for it.")
+
+(defun aob-trace--thumb (file)
+  "FILE as a picture, or its name when there is nothing to draw it with."
+  (or (when (and aob-trace-icons (display-graphic-p)
+                 (stringp file) (file-readable-p file))
+        (let* ((mtime (file-attribute-modification-time (file-attributes file)))
+               (key (list file aob-trace-image-height mtime))
+               (img (gethash key aob-trace--images 'miss)))
+          (when (eq img 'miss)
+            (setq img (ignore-errors
+                        (create-image file nil nil
+                                      :max-height aob-trace-image-height
+                                      :max-width 600
+                                      :ascent 'center)))
+            (puthash key img aob-trace--images))
+          (when img (propertize "[[Image]]" 'display img))))
+      (and (stringp file) (format "[[%s]]" (file-name-nondirectory file)))))
+
+(defun aob-trace--images-of (ev)
+  "The pictures EV carries, shown where they can be and named where not."
+  (when-let* ((n (plist-get ev :images)) ((> n 0)))
+    (let ((files (plist-get ev :image-files)))
+      (concat " " (string-join
+                   (if files
+                       (delq nil (mapcar #'aob-trace--thumb files))
+                     (make-list n "[[Image]]"))
+                   " ")))))
+
+(defun aob-trace--hang (ev str)
+  "STR with the agent\='s mark beside its first line when EV opens a turn.
+A turn that starts with a command run is a turn nobody appeared to
+take, so the mark goes where the turn does and not only where it
+speaks."
+  (if (not (and (aob-trace--delta-p) (plist-get ev :turn-head)
+                (stringp str) (not (string-empty-p str))))
+      str
+    (let ((i 0))
+      (while (and (< i (length str)) (eq (aref str i) ?\n))
+        (setq i (1+ i)))
+      (concat (substring str 0 i)
+              (aob-trace--gutter (aob-trace--avatar-glyph) (substring str i))))))
+
 (defun aob-trace--plain-line (ev time)
   "EV as one row behind its clock: the shape a log reads in."
   (progn
     (pcase (plist-get ev :type)
       ('tool
-       (if (aob-trace--delta-p)
+       (aob-trace--hang
+        ev
+        (if (aob-trace--delta-p)
            (if (equal (plist-get ev :kind) "execute")
                (aob-trace--card
                 ev (aob-trace--one-line
@@ -612,7 +662,7 @@ remap such as `ygg-focus-dim' cannot outrank it."
                                  (unless (string-empty-p st) st))
                                (plist-get ev :stat)))
                " ")
-              (aob-trace--rollup ev)))))
+              (aob-trace--rollup ev))))))
       (_ (let ((st (aob-trace--status ev)))
            (funcall
             (cond
@@ -648,11 +698,7 @@ remap such as `ygg-focus-dim' cannot outrank it."
                          (aob-trace--prose
                           (aob-trace--md (aob-trace--body ev)
                                          (aob-trace--live-p ev))))
-                       (when-let* ((n (plist-get ev :images))
-                                   ((> n 0)))
-                         (concat " " (mapconcat #'identity
-                                                (make-list n "[[Image]]")
-                                                " ")))))
+                       (aob-trace--images-of ev)))
                      ('thought
                       (if (aob-trace--delta-p)
                           (propertize (concat "Thinking: " (aob-event-head ev) " ›")
@@ -1177,8 +1223,9 @@ standing at the end of the trace with it."
         (save-excursion
           (goto-char (point-max))
           (unless (bolp) (insert "\n"))
-          (insert (propertize " " 'display
-                              `((margin left-margin) ,(aob-trace--user-glyph))))
+          ;; no mark beside it: the line you type in is not something
+          ;; said, and a face in the gutter says somebody spoke
+          (insert " ")
           (setq aob-trace--input (point-marker))
           (set-marker-insertion-type aob-trace--input nil)))
       (setq buffer-read-only nil)
@@ -1212,11 +1259,12 @@ A turn already running is not a reason to wait — an agent whose
 subagents are working is an agent you can still talk to, and where
 the adapter takes steering the words go in without costing it the
 work in flight."
-  (if (and (eq (aob-session-state s) 'working)
-           (fboundp 'aob-acp--steers-p)
-           (ignore-errors (aob-acp--steers-p s)))
-      (aob-interject s text)
-    (aob-prompt s text nil)))
+  (let ((aob-prompt-typed t))
+    (if (and (eq (aob-session-state s) 'working)
+             (fboundp 'aob-acp--steers-p)
+             (ignore-errors (aob-acp--steers-p s)))
+        (aob-interject s text)
+      (aob-prompt s text nil))))
 
 (defun aob-trace-send ()
   "Send what is typed at the end of the trace to this session."
@@ -1402,6 +1450,21 @@ and what the header counts against — not the window the agent claims."
     (while (and new old (equal (car new) (car old)))
       (cl-incf pos (1+ (length (car new))))
       (pop new) (pop old))
+    ;; every write below lands at an offset counted off the blocks, so it
+    ;; holds only while the buffer still reads as they say.  A write at a
+    ;; drifted offset lands inside a word or over the row above it, and
+    ;; nothing later repairs what it wrote — so a buffer whose length no
+    ;; longer answers to the blocks, or whose first changed block is not
+    ;; where it is said to be, is drawn again from the top
+    (when (and old
+               (or (> (+ pos (length (car old))) (aob-trace--tail-end))
+                   (/= (aob-trace--tail-end)
+                       (+ (point-min)
+                          (apply #'+ (mapcar (lambda (b) (1+ (length b))) old))))
+                   (let ((end (min (point-max) (+ pos (length (car old))))))
+                     (not (equal (buffer-substring-no-properties pos end)
+                                 (car old))))))
+      (setq new blocks old nil pos 1))
     (when (or new old)
       ;; a streaming block only grows: when the old text is a strict
       ;; prefix of the new, keep it in place and insert just the tail —
@@ -1474,10 +1537,13 @@ and what the header counts against — not the window the agent claims."
             (when-let* ((dir (or (aob-session-dir s) (aob-session-project s))))
               (propertize (format "  %s" (abbreviate-file-name dir))
                           'face 'shadow)))
-      (when-let* ((dir (or (aob-session-dir s) (aob-session-project s)))
+      (when-let* ((dir (or (aob-session-project s) (aob-session-dir s)))
                   ((file-directory-p dir)))
-        (setq-local ygg-diagram-image-root
-                    (file-name-as-directory (expand-file-name dir))))
+        ;; a trace stands where its agent does: magit, a terminal, a
+        ;; find-file started from here open on the agent\='s project and
+        ;; not on whatever folder the buffer happened to be made in
+        (setq default-directory (file-name-as-directory (expand-file-name dir)))
+        (setq-local ygg-diagram-image-root default-directory))
       (aob-register-view buf #'aob-trace--render)
       (let ((inhibit-read-only t)) (aob-trace--render t))
       (goto-char (point-max)))

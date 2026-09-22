@@ -420,6 +420,11 @@ fleet has no session of its own and follows the global tick."
 
 ;;; Verbs
 
+(defvar aob-prompt-typed nil
+  "Non-nil while sending a prompt the owner typed themselves.
+A trace shows whose turn it is by a mark in the gutter, and a prompt a
+tool or a workflow put there is nobody standing at the keyboard.")
+
 (defun aob-prompt (s text &optional attachments)
   "Send TEXT (plus image ATTACHMENTS) as a new prompt turn to S."
   (interactive (let ((s (aob-target)))
@@ -1077,17 +1082,20 @@ attachments whose [[ImageN]] survived the user's editing ride along."
     ;; send before killing the buffer — a refused send must not eat the text
     ;; steering carries text only; a draft with images queues rather than
     ;; sending as a correction that silently lost its attachments
-    (cond ((and session aob-compose--steer (null atts))
-           (aob-interject session text))
-          (session (aob-prompt session text atts))
-          ((stringp tgt) (user-error "aob: target session is gone"))
-          ;; a function target wants the words themselves rather than a
-          ;; session to send them to — a caller composing a brief, say
-          ((functionp tgt) (funcall tgt text atts))
-          (aob-compose-spawn-function
-           (funcall aob-compose-spawn-function text (and (consp tgt) (cdr tgt))
-                    atts))
-          (t (user-error "aob: no session and no spawn function")))
+    ;; whatever the draft goes to — a session, a spawn, a caller — it is
+    ;; words the owner typed, and a spawn queues its first turn right here
+    (let ((aob-prompt-typed t))
+      (cond ((and session aob-compose--steer (null atts))
+             (aob-interject session text))
+            (session (aob-prompt session text atts))
+            ((stringp tgt) (user-error "aob: target session is gone"))
+            ;; a function target wants the words themselves rather than a
+            ;; session to send them to — a caller composing a brief, say
+            ((functionp tgt) (funcall tgt text atts))
+            (aob-compose-spawn-function
+             (funcall aob-compose-spawn-function text (and (consp tgt) (cdr tgt))
+                      atts))
+            (t (user-error "aob: no session and no spawn function"))))
     ;; read after the send: a refused send leaves you in the draft, and a
     ;; spawn function is free to say where this one should land
     (let ((after aob-compose-after-send))
@@ -1153,6 +1161,26 @@ A miss is cached as itself: outside a repo the answer is no files, and
         (puthash dir (ignore-errors (process-lines "git" "-C" dir "ls-files"))
                  aob--files-cache)
       known)))
+
+(defvar aob--folders-cache (make-hash-table :test #'equal)
+  "DIR to (FILES . FOLDERS): the folders, and the file list they came from.")
+
+(defun aob--project-folders (dir)
+  "DIR's folders that hold a tracked file, each ending in its slash.
+Every folder on the way up from a file, so a parent is offered beside
+the leaf it holds."
+  (let ((files (aob--project-files dir))
+        (known (gethash dir aob--folders-cache)))
+    (if (and known (eq (car known) files))
+        (cdr known)
+      (let ((seen (make-hash-table :test #'equal)))
+        (dolist (rel files)
+          (let ((d (file-name-directory rel)))
+            (while (and d (not (gethash d seen)))
+              (puthash d t seen)
+              (setq d (file-name-directory (directory-file-name d))))))
+        (cdr (puthash dir (cons files (sort (hash-table-keys seen) #'string<))
+                      aob--folders-cache))))))
 
 (defun aob-files-cache-clear ()
   "Drop the @file completion cache (it goes stale as files are added)."
@@ -1227,8 +1255,13 @@ moment the sign is typed rather than one character after it."
                             (max anchor (- (point) 200)) t))
       (let ((dir (aob--capf-dir)))
         (list (1+ (match-beginning 0)) (point)
-              (aob--capf-file-table dir)
+              (completion-table-merge (aob--project-folders dir)
+                                      (aob--capf-file-table dir))
               :company-prefix-length t
+              ;; a folder and a file are written the same way, so the
+              ;; popup says which one a word is
+              :annotation-function
+              (lambda (cand) (if (string-suffix-p "/" cand) "  folder" "  file"))
               :exclusive 'no)))
      ;; a #definition token — the code itself, not a path to go read
      ((save-excursion

@@ -957,6 +957,7 @@ redrawing the parent's line."
                                                   :title (when atts
                                                            (format "+%d image(s)"
                                                                    (length atts)))
+                                                  :typed aob-prompt-typed
                                                   :status "queued")))))
   (run-hook-with-args 'aob-queue-change-hook s))
 
@@ -1141,7 +1142,8 @@ the turn it actually opens."
   (unless queued
     ;; the tokens you wrote come back as tokens: what you sent is what the
     ;; trace shows, counted in the same [[Image]] the compose buffer used
-    (aob-event s 'prompt :text text :images (length atts)))
+    (aob-event s 'prompt :text text :images (length atts) :image-files atts
+               :typed aob-prompt-typed))
   (aob-set-state s 'working)
   (aob-acp--request
    s "session/prompt"
@@ -1292,7 +1294,8 @@ advertised steering keeps the old bargain: queue the text and cancel."
              (aob-acp--cancel s))
         ((equal (plist-get res :outcome) "promptRequired")
          (aob-acp--prompt-1 s text))
-        (t (aob-event s 'prompt :text text :title "steered")
+        (t (aob-event s 'prompt :text text :title "steered"
+                      :typed aob-prompt-typed)
            (aob-set-state s 'working))))))))
 
 ;;; Goal — an objective the agent holds across turns and keeps working
@@ -2138,32 +2141,60 @@ started for something already named says so in every list it shows up in."
                                 table nil t)))
     (cadr (assoc pick aob-acp--pick-map))))
 
+(defcustom aob-acp-modes
+  '(("claude"
+     (:id "default" :name "default" :description "asks before edits and commands")
+     (:id "acceptEdits" :name "accept edits" :description "edits without asking")
+     (:id "plan" :name "plan" :description "reads and plans, changes nothing")
+     (:id "auto" :name "auto" :description "a classifier decides what to ask")
+     (:id "dontAsk" :name "don't ask" :description "DENIES whatever it would ask")
+     (:id "bypassPermissions" :name "bypass" :description "asks about nothing")))
+  "Modes to offer per agent before a session is up to advertise its own.
+A session asleep, or not yet through its handshake, has said nothing
+about what it takes; the choice is kept and put to it when it wakes."
+  :type '(alist :key-type string :value-type (repeat plist))
+  :group 'aob)
+
+(defun aob-acp--mode-choices (s)
+  "The modes S can be put in: what it advertised, else what its agent takes."
+  (or (plist-get (aob-session-ref s :modes) :availableModes)
+      (let ((agent (or (aob-session-ref s :agent) "")))
+        (cdr (seq-find (lambda (cell) (string-match-p (regexp-quote (car cell)) agent))
+                       aob-acp-modes)))))
+
+(defun aob-acp--awake-p (s)
+  "Whether S has a connection that can be asked anything."
+  (and (aob-session-conn s) (aob-session-ref s :modes) t))
+
+(defun aob-acp--put-mode (s id)
+  "Put S in mode ID now, or when it wakes if it cannot be asked yet."
+  (if (aob-acp--awake-p s)
+      (aob-acp--want-mode s id)
+    ;; an asleep session is woken from its entry, not from itself: the
+    ;; mode has to be in what the resume reads
+    (when-let* ((entry (aob-session-ref s :asleep)))
+      (aob-session-put s :asleep (plist-put entry :mode id)))
+    (aob-session-put s :want-mode id)
+    (aob-session-put s :mode-id id)
+    (aob--dirty s)
+    (message "aob: %s wakes in %s" (aob-session-name s) id)))
+
 (defun aob-acp-set-mode (s)
   "Switch S's session mode (plan / auto / accept-edits…)."
   (interactive (list (aob-target)))
-  (let ((modes (plist-get (aob-session-ref s :modes) :availableModes)))
+  (let ((modes (aob-acp--mode-choices s)))
     (unless modes (user-error "aob: %s advertises no modes" (aob-session-name s)))
-    (let ((id (aob-acp--pick-plist "Mode" modes :name :id
-                                   (aob-session-ref s :mode-id))))
-      (aob-acp--request s "session/set_mode"
-                        (list :sessionId (aob-acp--acp-id s) :modeId id)
-                        (lambda (_res err)
-                          (if err
-                              (message "aob: set_mode failed: %s"
-                                       (plist-get err :message))
-                            (aob-session-put s :mode-id id)
-                            (aob--dirty s)))))))
-
+    (aob-acp--put-mode s (aob-acp--pick-plist "Mode" modes :name :id
+                                              (aob-session-ref s :mode-id)))))
 
 (defun aob-acp-cycle-mode (s)
   "Step S to the next mode the agent advertises."
   (interactive (list (aob-target)))
-  (let* ((modes (plist-get (aob-session-ref s :modes) :availableModes))
-         (ids (mapcar (lambda (m) (plist-get m :id)) modes))
+  (let* ((ids (mapcar (lambda (m) (plist-get m :id)) (aob-acp--mode-choices s)))
          (now (aob-session-ref s :mode-id))
          (next (or (cadr (member now ids)) (car ids))))
     (unless ids (user-error "aob: %s advertises no modes" (aob-session-name s)))
-    (aob-acp--want-mode s next)
+    (aob-acp--put-mode s next)
     (message "aob: mode %s" next)))
 
 
