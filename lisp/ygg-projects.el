@@ -781,6 +781,11 @@ agent holding a conversation open is the reason it cannot be filed."
 
 (add-hook 'ygg-project-import-hook #'ygg-projects--on-import)
 
+;; a conversation's opening line arrives after the list it belongs to
+(defvar aob-transcript-titles-hook)
+(with-eval-after-load 'aob-transcript
+  (add-hook 'aob-transcript-titles-hook #'ygg-projects--on-import))
+
 (defun ygg-projects-rescan ()
   "Redraw, and look again for what the projects can run."
   (interactive)

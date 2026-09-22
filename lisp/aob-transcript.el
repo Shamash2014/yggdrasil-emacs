@@ -67,22 +67,73 @@ keychains, and every row of the sidebar asks for it.")
 (defun aob-transcript--mtime (file)
   (float-time (file-attribute-modification-time (file-attributes file))))
 
+(defvar aob-transcript-titles-hook nil
+  "Run with no arguments when titles read in the background land.")
+
+(defvar aob-transcript--queue nil
+  "Files whose opening line is still to be read.")
+
+(defvar aob-transcript--timer nil)
+
+(defcustom aob-transcript-titles-per-tick 6
+  "Conversations whose opening line is read in one go of the idle timer."
+  :type 'natnum :group 'aob-transcript)
+
+(defun aob-transcript--title-cached (file)
+  "FILE\='s opening line if it has already been read, else nil."
+  (let ((cell (gethash file aob-transcript--titles)))
+    (when (and cell (equal (car cell) (aob-transcript--mtime file)))
+      (cdr cell))))
+
 (defun aob-transcript--title (file)
-  "What the conversation in FILE opened with, as a name.
+  "What the conversation in FILE opened with, reading it if need be.
 Cached against the file\='s own clock: this runs for every row of the
 sidebar, and a row is drawn whenever anything moves."
-  (let ((stamp (aob-transcript--mtime file))
-        (cell (gethash file aob-transcript--titles)))
-    (if (and cell (equal (car cell) stamp))
-        (cdr cell)
+  (or (aob-transcript--title-cached file)
       (let ((title (aob-transcript--title-1 file)))
-        (puthash file (cons stamp title) aob-transcript--titles)
-        title))))
+        (puthash file (cons (aob-transcript--mtime file) title)
+                 aob-transcript--titles)
+        title)))
+
+(defun aob-transcript--want-title (file)
+  "Ask for FILE\='s opening line to be read when there is a moment."
+  (unless (member file aob-transcript--queue)
+    (setq aob-transcript--queue (append aob-transcript--queue (list file))))
+  (unless aob-transcript--timer
+    (setq aob-transcript--timer
+          (run-with-idle-timer 0.2 t #'aob-transcript--read-some))))
+
+(defun aob-transcript--read-some ()
+  "Read the next few queued openings, then let whoever draws know."
+  (let ((n aob-transcript-titles-per-tick)
+        (any nil))
+    (while (and (> n 0) aob-transcript--queue)
+      (let ((file (pop aob-transcript--queue)))
+        (when (file-readable-p file)
+          (aob-transcript--title file)
+          (setq any t)))
+      (setq n (1- n)))
+    (when any
+      ;; the listing was built from what was cached at the time
+      (clrhash aob-transcript--found)
+      (run-hooks 'aob-transcript-titles-hook))
+    (unless aob-transcript--queue
+      (when aob-transcript--timer
+        (cancel-timer aob-transcript--timer)
+        (setq aob-transcript--timer nil)))))
 
 (defun aob-transcript--title-1 (file)
-  "Read FILE\='s opening line off the disk."
+  "Read FILE\='s opening line off the disk, a little of it at a time."
+  (or (aob-transcript--title-in file 16384)
+      (and (> (or (file-attribute-size (file-attributes file)) 0) 16384)
+           (aob-transcript--title-in file 262144))))
+
+(defun aob-transcript--title-in (file bytes)
+  "FILE\='s opening line, looking only at its first BYTES."
   (with-temp-buffer
-    (ignore-errors (insert-file-contents file nil 0 131072))
+    ;; the opening line is at the top: a small read first, and the
+    ;; larger one only where a preamble pushed it down
+    (ignore-errors (insert-file-contents file nil 0 bytes))
     (goto-char (point-min))
     (catch 'found
       (while (not (eobp))
@@ -150,8 +201,13 @@ you have only just taken in is none of them."
                                              (file-attribute-modification-time
                                               (file-attributes file)))
                                         :found t))
-                           (name (or (aob-transcript--title file)
-                                     (aob-transcript--name entry file)))
+                           ;; the list first: an opening line is a read,
+                           ;; and a hundred reads is not a listing.  What
+                           ;; has been read is used, the rest is asked
+                           ;; for and arrives on a later draw
+                           (name (or (aob-transcript--title-cached file)
+                                     (progn (aob-transcript--want-title file)
+                                            (aob-transcript--name entry file))))
                            (name (if (member name seen)
                                      (format "%s %s" name
                                              (substring (plist-get entry :acp-id) 0 4))
@@ -168,7 +224,8 @@ home moving is a change of mind, and nothing on disk says when."
   (interactive)
   (clrhash aob-transcript--homes)
   (clrhash aob-transcript--found)
-  (clrhash aob-transcript--titles))
+  (clrhash aob-transcript--titles)
+  (setq aob-transcript--queue nil))
 
 (defun aob-transcript--text (content)
   "The words in CONTENT, whatever shape the record used for it."
