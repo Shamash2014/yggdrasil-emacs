@@ -176,7 +176,7 @@ sidebar, and a row is drawn whenever anything moves."
       nil)))
 
 ;;;###autoload
-(defun aob-transcript-found (project &optional agent)
+(defun aob-transcript-found (project &optional agent where)
   "Conversations AGENT left on disk for PROJECT, newest first.
 The CLI writes one file per conversation under its config home.  What
 this Emacs knows about is what it started itself, which for a project
@@ -186,11 +186,12 @@ you have only just taken in is none of them."
                 #'file-directory-p
                 (mapcar (lambda (home)
                           (expand-file-name
-                           (format "projects/%s" (aob-transcript--slug project))
+                           (format "projects/%s%s" (aob-transcript--slug project)
+                                   (if where (concat "/" where) ""))
                            home))
                         (aob-transcript--homes agent project))))
          (dir (car dirs))
-         (key (cons agent dirs)))
+         (key (list agent dirs where)))
     (when dirs
       ;; the folder's own clock says when a conversation was added to it
       ;; or written to; until it moves, the listing stands
@@ -198,12 +199,13 @@ you have only just taken in is none of them."
             (cell (gethash key aob-transcript--found)))
         (if (and cell (equal (car cell) stamp))
             (cdr cell)
-          (let ((entries (aob-transcript--found-1 project agent dirs)))
+          (let ((entries (aob-transcript--found-1 project agent dirs where)))
             (puthash key (cons stamp entries) aob-transcript--found)
             entries))))))
 
-(defun aob-transcript--found-1 (project agent dirs)
-  "Read DIRS, which hold AGENT\='s conversations about PROJECT."
+(defun aob-transcript--found-1 (project agent dirs &optional where)
+  "Read DIRS, which hold AGENT\='s conversations about PROJECT.
+WHERE, when given, is the folder they were put away in."
   (let ((files (sort (seq-mapcat (lambda (dir) (directory-files dir t "\\.jsonl\\'"))
                                  dirs)
                          (lambda (a b)
@@ -224,7 +226,8 @@ you have only just taken in is none of them."
                                         ;; which home it came out of is
                                         ;; not derivable from the entry
                                         :file file
-                                        :found t))
+                                        :found t
+                                        :archived (and where t)))
                            ;; the list first: an opening line is a read,
                            ;; and a hundred reads is not a listing.  What
                            ;; has been read is used, the rest is asked

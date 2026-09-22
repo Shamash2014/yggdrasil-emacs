@@ -139,6 +139,10 @@ refresh runs in, and a refresh runs in the sidebar's own.")
 (defvar-local ygg-projects--instance nil
   "The mounted vui root of this sidebar.")
 
+(defcustom ygg-projects-show-archived nil
+  "Whether conversations put away are listed with the rest."
+  :type 'boolean :group 'ygg-projects)
+
 (defvar ygg-projects--open-row nil
   "Conses of (ROOT . KIND) whose entries are listed.
 A set, not one at a time: opening the commands of a project is not a
@@ -159,7 +163,10 @@ you looked at another is a row you have to open twice.")
 The ones this Emacs started, and the ones the CLI left on disk before
 it ever did — a project you have just taken in has a history whether
 or not this Emacs was there for it."
-  (let* ((known (and (fboundp 'aob-acp-resumable-entries)
+  (let* ((hidden (and (fboundp 'aob-acp-archived-entries)
+                      (mapcar (lambda (e) (plist-get e :acp-id))
+                              (ignore-errors (aob-acp-archived-entries)))))
+         (known (and (fboundp 'aob-acp-resumable-entries)
                      (seq-filter
                       (lambda (e)
                         (equal root (file-name-as-directory
@@ -168,8 +175,25 @@ or not this Emacs was there for it."
                       (ignore-errors (aob-acp-resumable-entries)))))
          (ids (mapcar (lambda (e) (plist-get e :acp-id)) known))
          (found (and (fboundp 'aob-transcript-found)
-                     (seq-remove (lambda (e) (member (plist-get e :acp-id) ids))
-                                 (ignore-errors (aob-transcript-found root))))))
+                     (seq-remove (lambda (e)
+                                   (or (member (plist-get e :acp-id) ids)
+                                       ;; put away as a persisted entry, but
+                                       ;; its file is still where it was
+                                       (member (plist-get e :acp-id) hidden)))
+                                 (ignore-errors (aob-transcript-found root)))))
+         (put-away (when ygg-projects-show-archived
+                     (append
+                      (seq-filter
+                       (lambda (e)
+                         (equal root (file-name-as-directory
+                                      (expand-file-name (or (plist-get e :project)
+                                                            (plist-get e :dir) "/")))))
+                       (and (fboundp 'aob-acp-archived-entries)
+                            (ignore-errors (aob-acp-archived-entries))))
+                      (and (fboundp 'aob-transcript-found)
+                           (ignore-errors
+                             (aob-transcript-found root nil "archive")))))))
+    (setq found (append found put-away))
     ;; newest first, whichever list it came from: a conversation is
     ;; found again by when it happened
     (sort (append known found)
@@ -541,6 +565,8 @@ long ago, since a list of six conversations from today is told apart
 by when, not by that they were all today."
   (cond ((and (fboundp 'aob-session-p) (aob-session-p payload))
          (format "%s" (aob-session-state payload)))
+        ((and (consp payload) (proper-list-p payload) (plist-get payload :archived))
+         "archived")
         ((and (consp payload) (eq (car payload) 'docker))
          (ygg-projects--docker-status (plist-get (cdr payload) :status)))
         ((and (consp payload) (proper-list-p payload)
@@ -1065,6 +1091,15 @@ discards everything the filter left."
     (when (fboundp 'aob-transcript-move) (aob-transcript-move entry "discarded"))
     (ygg-projects-refresh)))
 
+(defun ygg-projects-toggle-archived ()
+  "Show the conversations put away, or stop showing them."
+  (interactive)
+  (setq ygg-projects-show-archived (not ygg-projects-show-archived))
+  (when (fboundp 'aob-transcript-forget) (aob-transcript-forget))
+  (ygg-projects-refresh)
+  (message "projects: archived conversations %s"
+           (if ygg-projects-show-archived "shown" "hidden")))
+
 (defun ygg-projects-rescan ()
   "Redraw, and look again for what the projects can run."
   (interactive)
@@ -1200,6 +1235,7 @@ The line keeps its place on screen; what opens, opens below it."
     (define-key map "+" #'project-switch-project)
     (define-key map "A" #'ygg-projects-add)
     (define-key map "I" #'ygg-projects-import)
+    (define-key map "z" #'ygg-projects-toggle-archived)
     (define-key map "D" #'ygg-projects-delete)
     (define-key map "-" #'ygg-projects-archive)
     (define-key map "x" #'ygg-projects-archive-ask)
