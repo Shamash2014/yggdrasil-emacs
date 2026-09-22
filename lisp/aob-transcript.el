@@ -25,8 +25,18 @@
   "Conversations that already happened."
   :group 'aob :prefix "aob-transcript-")
 
+(defvar aob-transcript--homes (make-hash-table :test 'equal)
+  "(AGENT . DIR) to config home: working it out reads settings and
+keychains, and every row of the sidebar asks for it.")
+
 (defun aob-transcript--home (agent dir)
   "The config home AGENT used in DIR, or its default one."
+  (let ((key (cons agent dir)))
+    (or (gethash key aob-transcript--homes)
+        (puthash key (aob-transcript--home-1 agent dir) aob-transcript--homes))))
+
+(defun aob-transcript--home-1 (agent dir)
+  "Work out AGENT's config home in DIR from its configuration."
   (or (when (fboundp 'ygg-agent--config-env)
         (when-let* ((entry (ygg-agent--config-env agent agent dir))
                     ((string-match "=\\(.*\\)\\'" entry)))
@@ -48,10 +58,29 @@
               ((file-readable-p file)))
     file))
 
+(defvar aob-transcript--titles (make-hash-table :test 'equal)
+  "File to (MTIME . TITLE): reading the head of one is not free.")
+
+(defvar aob-transcript--found (make-hash-table :test 'equal)
+  "Project to (MTIME . ENTRIES): the listing is redone when the folder moves.")
+
+(defun aob-transcript--mtime (file)
+  (float-time (file-attribute-modification-time (file-attributes file))))
+
 (defun aob-transcript--title (file)
   "What the conversation in FILE opened with, as a name.
-A day is not a name when they all happened today; the first thing you
-said is what tells one from another."
+Cached against the file\='s own clock: this runs for every row of the
+sidebar, and a row is drawn whenever anything moves."
+  (let ((stamp (aob-transcript--mtime file))
+        (cell (gethash file aob-transcript--titles)))
+    (if (and cell (equal (car cell) stamp))
+        (cdr cell)
+      (let ((title (aob-transcript--title-1 file)))
+        (puthash file (cons stamp title) aob-transcript--titles)
+        title))))
+
+(defun aob-transcript--title-1 (file)
+  "Read FILE\='s opening line off the disk."
   (with-temp-buffer
     (ignore-errors (insert-file-contents file nil 0 131072))
     (goto-char (point-min))
@@ -89,9 +118,22 @@ you have only just taken in is none of them."
   (let* ((agent (or agent (bound-and-true-p aob-acp-default-agent) "claude"))
          (dir (expand-file-name
                (format "projects/%s" (aob-transcript--slug project))
-               (aob-transcript--home agent project))))
+               (aob-transcript--home agent project)))
+         (key (cons agent dir)))
     (when (file-directory-p dir)
-      (let ((files (sort (directory-files dir t "\\.jsonl\\'")
+      ;; the folder's own clock says when a conversation was added to it
+      ;; or written to; until it moves, the listing stands
+      (let ((stamp (aob-transcript--mtime dir))
+            (cell (gethash key aob-transcript--found)))
+        (if (and cell (equal (car cell) stamp))
+            (cdr cell)
+          (let ((entries (aob-transcript--found-1 project agent dir)))
+            (puthash key (cons stamp entries) aob-transcript--found)
+            entries))))))
+
+(defun aob-transcript--found-1 (project agent dir)
+  "Read DIR, which holds AGENT\='s conversations about PROJECT."
+  (let ((files (sort (directory-files dir t "\\.jsonl\\'")
                          (lambda (a b)
                            (time-less-p
                             (file-attribute-modification-time (file-attributes b))
@@ -116,7 +158,17 @@ you have only just taken in is none of them."
                                    name)))
                       (push name seen)
                       (plist-put entry :name name)))
-                  files))))))
+                  files))))
+
+;;;###autoload
+(defun aob-transcript-forget ()
+  "Drop what was read from disk, so the next look reads it again.
+The folder\='s clock catches a conversation being written; a config
+home moving is a change of mind, and nothing on disk says when."
+  (interactive)
+  (clrhash aob-transcript--homes)
+  (clrhash aob-transcript--found)
+  (clrhash aob-transcript--titles))
 
 (defun aob-transcript--text (content)
   "The words in CONTENT, whatever shape the record used for it."

@@ -784,6 +784,7 @@ agent holding a conversation open is the reason it cannot be filed."
 (defun ygg-projects-rescan ()
   "Redraw, and look again for what the projects can run."
   (interactive)
+  (when (fboundp 'aob-transcript-forget) (aob-transcript-forget))
   (ygg-projects-refresh)
   (ygg-projects--scan-commands)
   (ygg-projects--scan-worktrees))
