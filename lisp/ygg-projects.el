@@ -787,7 +787,7 @@ The line keeps its place on screen; what opens, opens below it."
     (define-key map "D" #'ygg-projects-delete)
     (define-key map "-" #'ygg-projects-archive)
     (define-key map "R" #'ygg-projects-resume)
-    (define-key map "q" #'quit-window)
+    (define-key map "q" #'ygg-projects-close)
     map)
   "The sidebar's own verbs, ahead of yggdrasil's normal state.")
 
@@ -857,6 +857,37 @@ the whole frame instead of a side window."
 (defvar ygg-projects--sizing nil
   "Non-nil while the sidebar is putting its own width back.")
 
+(defvar ygg-projects--wanted nil
+  "Non-nil while the sidebar is meant to be on screen.
+Set when you open it, cleared only when you close it yourself.  Nothing
+else decides that a panel you asked for is gone: a space restoring a
+window configuration, a session load, a compose box making room.")
+
+(defvar ygg-projects--restoring nil
+  "Non-nil while the sidebar is putting itself back, to not recurse.")
+
+(defun ygg-projects--restore (&rest _)
+  "Put the sidebar back on a frame that lost it without being asked."
+  (unless (or ygg-projects--restoring
+              (not ygg-projects--wanted)
+              (frame-parent)
+              (minibufferp))
+    (when-let* ((buf (get-buffer ygg-projects-buffer-name))
+                ((not (get-buffer-window buf (selected-frame)))))
+      (let ((ygg-projects--restoring t))
+        (when-let* ((win (ignore-errors (ygg-projects--display buf))))
+          (set-window-dedicated-p win t)
+          (with-current-buffer buf (ygg-projects--trim-window)))))))
+
+(add-hook 'window-configuration-change-hook #'ygg-projects--restore)
+
+(defun ygg-projects-close ()
+  "Close the sidebar, and mean it: it stays closed until you open it."
+  (interactive)
+  (setq ygg-projects--wanted nil)
+  (when-let* ((win (get-buffer-window ygg-projects-buffer-name 'visible)))
+    (ygg-projects--dismiss win)))
+
 (defun ygg-projects--trim-window ()
   "Nothing to the left of a card, a dark run to its right, and the width it was given.
 `balance-windows\=' counts the sidebar as one more pane to share the
@@ -910,7 +941,7 @@ windows around, the width it was opened at is the width it keeps."
   (if-let* ((win (get-buffer-window ygg-projects-buffer-name 'visible)))
       ;; already up, on this frame or another: the key closes it rather
       ;; than opening a second one
-      (ygg-projects--dismiss win)
+      (ygg-projects-close)
     (when-let* ((pr (project-current nil)))
       (setq ygg-projects--here
             (file-name-as-directory (expand-file-name (project-root pr)))))
@@ -931,6 +962,7 @@ windows around, the width it was opened at is the width it keeps."
       (ygg-projects-refresh)
       (ygg-projects--scan-commands)
       (ygg-projects--scan-worktrees)
+      (setq ygg-projects--wanted t)
       (let ((win (ygg-projects--display buf)))
         ;; dedicated: whatever the sidebar opens goes to the main area,
         ;; never into the sidebar's own window
