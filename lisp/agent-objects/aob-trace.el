@@ -1186,6 +1186,26 @@ submits a thread of comments together."
                  (format "> %s\n%s" (plist-get c :quote) (plist-get c :text)))
                cs "\n\n")))
 
+(defcustom aob-trace-rot-window 200000
+  "Tokens past which answers get worse for the size of the context.
+A model that takes a million does not answer at nine hundred thousand
+the way it answers at fifty.  This is the window worth staying inside,
+and what the header counts against — not the window the agent claims."
+  :type 'natnum :group 'aob)
+
+(defun aob-trace--rot (s)
+  "How much of the sharp window S has spent, as a badge."
+  (when-let* (((> aob-trace-rot-window 0))
+              (used (or (aob-session-ref s :ctx-used)
+                        (plist-get (aob-session-ref s :usage) :totalTokens))))
+    (let ((pct (round (* 100.0 (/ (float used) aob-trace-rot-window)))))
+      ;; the header is a mode-line format string: a lone per-cent is a
+      ;; construct there, and the one the reader wants is two
+      (propertize (format " %d%%%%" pct)
+                  'face (cond ((>= pct 100) 'error)
+                              ((>= pct 75) 'warning)
+                              (t 'shadow))))))
+
 (defun aob-trace--render-1 (s)
   ;; whichever event is still being written: decorating it is work that
   ;; will be thrown away by the next chunk
@@ -1206,7 +1226,7 @@ submits a thread of comments together."
                     (format " · %s" m)
                   "")
                 (if-let* ((ctx (aob-session-ctx s)))
-                    (format " · %s ctx" ctx)
+                    (concat (format " · %s ctx" ctx) (or (aob-trace--rot s) ""))
                   "")
                 (if-let* ((goal (aob-session-ref s :goal)))
                     (propertize

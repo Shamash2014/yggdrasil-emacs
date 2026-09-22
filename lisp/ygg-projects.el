@@ -547,7 +547,7 @@ cannot spill past the text area and mark every line truncated."
         (cmds (ygg-projects--commands root))
         (terms (ygg-projects--terminals root))
         (wts (ygg-projects--worktrees root)))
-    (list (list 'agents (ygg-projects--icon "nf-md-account_outline" "A")
+    (list (list 'agents "▲"
                 "Sessions" (ygg-projects--counts (car agents) (cdr agents)))
           (list 'commands (ygg-projects--icon "nf-md-console" ">")
                 "Commands" (ygg-projects--counts (car cmds) (cdr cmds)))
