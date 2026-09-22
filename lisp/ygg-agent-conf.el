@@ -338,11 +338,13 @@ The default home uses the bare name; every other is suffixed with the
 first eight hex of the sha256 of its path.")
 
 (defun ygg-agent--credential-name (dir)
-  "Keychain service name holding DIR's credentials."
-  (format "%s-%s" ygg-agent--credential-service
-          (substring (secure-hash 'sha256 (directory-file-name
-                                           (expand-file-name dir)))
-                     0 8)))
+  "Keychain service name holding DIR's credentials.
+The home the CLI uses when nothing names one keeps the bare service."
+  (let ((path (directory-file-name (expand-file-name dir))))
+    (if (equal path (directory-file-name (expand-file-name "~/.claude")))
+        ygg-agent--credential-service
+      (format "%s-%s" ygg-agent--credential-service
+              (substring (secure-hash 'sha256 path) 0 8)))))
 
 (defun ygg-agent--keychain-read (service)
   "SERVICE's secret parsed as JSON, or nil."
@@ -422,6 +424,37 @@ tools.  Only `mcpOAuth' travels: the account token stays each home's own."
         (setq start (match-end 0))))
     (seq-uniq names)))
 
+(defvar ygg-agent--login-cache (make-hash-table :test #'equal)
+  "Config home to whether its keychain item still holds an account token.")
+
+(defun ygg-agent--logged-in-p (kind dir &optional cached)
+  "Non-nil when a KIND agent started in DIR can reach an account.
+Claude Code keys its credentials on the config home\='s path, so a home
+that has never been logged in — or whose refresh has since been revoked
+— is left holding MCP logins and no account token, and every prompt
+sent there comes back as \"Authentication required\" before a line is
+read.  CACHED answers from what is already known and never goes near
+the keychain, for a picker that has not been answered yet."
+  (cond
+   ((not (and (eq system-type 'darwin) (equal kind "claude"))) t)
+   (cached (let ((known (gethash dir ygg-agent--login-cache 'unknown)))
+             (if (eq known 'unknown) t known)))
+   (t (puthash dir
+               (and (when-let* ((json (ygg-agent--keychain-read
+                                       (ygg-agent--credential-name dir))))
+                      (gethash "claudeAiOauth" json))
+                    t)
+               ygg-agent--login-cache))))
+
+(defun ygg-agent--authenticated-home (kind spec homes &optional cached)
+  "The first of HOMES with a login left, else the home the CLI itself uses.
+A private home is worth having only once someone has logged into it;
+until then the shared home is the one place a login is certain to be,
+and a session that runs is worth more than a home nothing writes to."
+  (or (seq-find (lambda (dir) (ygg-agent--logged-in-p kind dir cached)) homes)
+      (let ((home (expand-file-name (plist-get spec :home))))
+        (if (ygg-agent--logged-in-p kind home cached) home (car homes)))))
+
 (defun ygg-agent--bootstrap-share (spec dir)
   (make-directory dir t)
   (let ((home (expand-file-name (plist-get spec :home))))
@@ -477,8 +510,9 @@ absent.  The old directory is kept beside the link, never deleted."
 Homes made before a share or a seed was added never get it otherwise —
 they are only built once, when the project first launches an agent."
   (interactive)
+  (clrhash ygg-agent--login-cache)
   (let ((root (and ygg-agent-conf-root (expand-file-name ygg-agent-conf-root)))
-        (touched 0) (seeded nil) (reclaimed nil))
+        (touched 0) (seeded nil) (reclaimed nil) (anonymous nil))
     (unless (and root (file-directory-p root))
       (user-error "No agent config root to refresh"))
     ;; no dot rule here: a home is named after its repository, and .emacs.d
@@ -493,20 +527,40 @@ they are only built once, when the project first launches an agent."
                 (when-let* ((back (ygg-agent--reclaim-share spec home)))
                   (push (format "%s [%s]" label (string-join back " ")) reclaimed))
                 (when (ygg-agent--seed-settings spec home)
-                  (push label seeded)))
+                  (push label seeded))
+                (unless (ygg-agent--logged-in-p kind home)
+                  (push label anonymous)))
               (ygg-agent--bootstrap-share spec home))))))
     (let ((dead (seq-mapcat (lambda (cell) (ygg-agent--dangling-shares (cdr cell)))
                             ygg-agent--config-homes)))
-      (message "agent config homes: %d checked, %d seeded%s, %d reclaimed%s%s"
+      (message "agent config homes: %d checked, %d seeded%s, %d reclaimed%s%s%s"
                touched (length seeded)
                (if seeded (format " (%s)" (string-join (nreverse seeded) ", ")) "")
                (length reclaimed)
                (if reclaimed
                    (format " (%s)" (string-join (nreverse reclaimed) ", ")) "")
+               (if anonymous
+                   (format "  ·  %d never logged in, on the shared home: %s"
+                           (length anonymous)
+                           (string-join (nreverse anonymous) " "))
+                 "")
                (if dead
                    (format "  ·  %d dead shared link(s): %s"
                            (length dead) (string-join dead " "))
                  "")))))
+
+(defun ygg-agent--own-home (kind repo &optional isolate)
+  "The home under `ygg-agent-conf-root\=' REPO would keep for KIND.
+ISOLATE names a worker whose home sits beside the repository\='s own."
+  (expand-file-name
+   (format "%s%s/%s"
+           (file-name-nondirectory (directory-file-name repo))
+           (if isolate
+               (concat "@" (replace-regexp-in-string
+                            "[^A-Za-z0-9_-]" "-" (format "%s" isolate)))
+             "")
+           kind)
+   ygg-agent-conf-root))
 
 (defun ygg-agent--config-dir (kind spec project &optional peek isolate)
   "Config home for KIND in PROJECT, made ready unless PEEK.
@@ -532,17 +586,15 @@ day a login can be seeded too."
              (or (ygg-agent--read-marker (expand-file-name marker project))
                  (ygg-agent--read-marker (expand-file-name marker repo))))
         (when ygg-agent-conf-root
-          (let ((dir (expand-file-name
-                      (format "%s%s/%s"
-                              (file-name-nondirectory (directory-file-name repo))
-                              (if isolate
-                                  (concat "@" (replace-regexp-in-string
-                                               "[^A-Za-z0-9_-]" "-"
-                                               (format "%s" isolate)))
-                                "")
-                              kind)
-                      ygg-agent-conf-root)))
-            (unless peek (ygg-agent--bootstrap-share spec dir))
+          (let* ((own (ygg-agent--own-home kind repo isolate))
+                 (shared (and isolate (ygg-agent--own-home kind repo)))
+                 (dir (ygg-agent--authenticated-home
+                       kind spec (delq nil (list own shared)) peek)))
+            (unless (or peek
+                        (equal (directory-file-name dir)
+                               (directory-file-name
+                                (expand-file-name (plist-get spec :home)))))
+              (ygg-agent--bootstrap-share spec dir))
             dir)))))
 
 (defun ygg-agent--config-label (preset cmd project)
@@ -559,18 +611,70 @@ not go near the keychain."
                   (kind (ygg-agent--kind preset cmd))
                   (spec (cdr (assoc kind ygg-agent--config-homes)))
                   (dir (ygg-agent--config-dir kind spec project 'peek))
-                  ((string-prefix-p root (expand-file-name dir))))
+                  ((or (string-prefix-p root (expand-file-name dir))
+                       (equal (directory-file-name (expand-file-name dir))
+                              (directory-file-name
+                               (expand-file-name (plist-get spec :home)))))))
         (abbreviate-file-name (directory-file-name dir)))
     (error nil)))
 
 (defun ygg-agent--config-env (preset cmd project &optional isolate)
   "Return \"VAR=DIR\" for PRESET/CMD in PROJECT, or nil; never signals.
-ISOLATE, when given, names a worker whose home is its own."
+ISOLATE, when given, names a worker whose home is its own.
+
+The shared home answers nil, and not its own path: the CLI keys its
+credentials on the variable, so naming the default home is not the same
+as leaving the variable alone — it is a home of that name nobody has
+ever logged into."
   (condition-case nil
       (when-let* ((kind (ygg-agent--kind preset cmd))
                   (spec (cdr (assoc kind ygg-agent--config-homes)))
-                  (dir (ygg-agent--config-dir kind spec project nil isolate)))
+                  (dir (ygg-agent--config-dir kind spec project nil isolate))
+                  ((not (equal (directory-file-name dir)
+                               (directory-file-name
+                                (expand-file-name (plist-get spec :home)))))))
         (format "%s=%s" (plist-get spec :var) (directory-file-name dir)))
     (error nil)))
+
+(declare-function project-root "project" (project))
+(declare-function make-term "term" (name program &optional startfile &rest switches))
+(declare-function term-mode "term" ())
+(declare-function term-char-mode "term" ())
+
+;;;###autoload
+(defun ygg-agent-login-config-home (project)
+  "Log PROJECT\='s own config home in, instead of borrowing the shared one.
+The CLI keys its credentials on the home it is pointed at, so a home no
+one has logged into answers every prompt with \"Authentication
+required\".  Such a home is passed over when a session starts — this is
+where it earns its place back."
+  (interactive
+   (list (read-directory-name
+          "Log in the config home of: "
+          (or (when (fboundp 'project-current)
+                (when-let* ((pr (project-current nil)))
+                  (project-root pr)))
+              default-directory))))
+  (unless ygg-agent-conf-root (user-error "No agent config root"))
+  (require 'term)
+  (let* ((kind "claude")
+         (spec (cdr (assoc kind ygg-agent--config-homes)))
+         (home (ygg-agent--own-home kind (ygg-agent--repo-home
+                                          (expand-file-name project))))
+         (exe (or (executable-find "claude") "claude")))
+    (ygg-agent--bootstrap-share spec home)
+    (remhash home ygg-agent--login-cache)
+    (let ((process-environment
+           (cons (format "%s=%s" (plist-get spec :var) (directory-file-name home))
+                 process-environment))
+          (default-directory (file-name-as-directory (expand-file-name project))))
+      (pop-to-buffer
+       (save-window-excursion
+         (with-current-buffer
+             (make-term (format "login %s" (abbreviate-file-name home))
+                        exe nil "auth" "login")
+           (term-mode)
+           (term-char-mode)
+           (current-buffer)))))))
 
 (provide 'ygg-agent-conf)

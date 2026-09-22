@@ -19,6 +19,8 @@
 (require 'aob-trace)
 
 (declare-function ygg-agent--config-env "ygg-agent-conf" (preset cmd project &optional isolate))
+(declare-function ygg-agent--own-home "ygg-agent-conf" (kind repo &optional isolate))
+(declare-function ygg-agent--repo-home "ygg-agent-conf" (project))
 (declare-function aob-acp-resume-entry "aob-acp" (e &optional pref))
 
 (defgroup aob-transcript nil
@@ -51,12 +53,30 @@ justfin-git and not under justfin.git."
   (replace-regexp-in-string "[^A-Za-z0-9]" "-"
                             (directory-file-name (expand-file-name dir))))
 
+(defun aob-transcript--own-home (agent dir)
+  "The home this config keeps for DIR, whether or not sessions use it.
+A home whose login has lapsed is passed over when a session starts, and
+still holds everything it was written before that."
+  (let ((key (list 'own agent dir)))
+    (let ((known (gethash key aob-transcript--homes)))
+      (unless known
+        (setq known (or (and (fboundp 'ygg-agent--own-home)
+                             (bound-and-true-p ygg-agent-conf-root)
+                             (ignore-errors
+                               (ygg-agent--own-home
+                                agent (ygg-agent--repo-home dir))))
+                        'none))
+        (puthash key known aob-transcript--homes))
+      (unless (eq known 'none) known))))
+
 (defun aob-transcript--homes (agent dir)
   "Every config home AGENT may have written DIR\='s conversations under.
-The one a session from here runs with, and the one the CLI uses when
-you start it yourself — a project has a history from both."
+The one a session from here runs with, the one this config keeps for
+the project, and the one the CLI uses when you start it yourself — a
+project has a history from all three."
   (delete-dups
    (delq nil (list (aob-transcript--home agent dir)
+                   (aob-transcript--own-home agent dir)
                    (expand-file-name
                     (if (equal agent "codex") "~/.codex" "~/.claude"))))))
 
@@ -190,7 +210,6 @@ you have only just taken in is none of them."
                                    (if where (concat "/" where) ""))
                            home))
                         (aob-transcript--homes agent project))))
-         (dir (car dirs))
          (key (list agent dirs where)))
     (when dirs
       ;; the folder's own clock says when a conversation was added to it
