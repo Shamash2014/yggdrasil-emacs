@@ -461,14 +461,17 @@ margin string is never looked at."
   (aob-trace--agent-mark))
 
 (defun aob-trace--avatar (ev)
-  "A glyph standing in for whoever EV is from, or an empty string."
-  (if (not (aob-trace--delta-p))
-      ""
-    (if (eq (plist-get ev :type) 'prompt)
-        (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-account_circle"
-                           'aob-trace-speaker)
-            "")
-      (aob-trace--agent-mark))))
+  "A glyph standing in for whoever EV is from, or an empty string.
+One mark per turn, beside the row that opens it: an agent that answers
+in eight parts is one agent speaking once, and eight marks down the
+gutter say eight."
+  (cond ((not (aob-trace--delta-p)) "")
+        ((eq (plist-get ev :type) 'prompt)
+         (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-account_circle"
+                            'aob-trace-speaker)
+             ""))
+        ((plist-get ev :turn-head) (aob-trace--agent-mark))
+        (t "")))
 
 (defun aob-trace--line (ev &optional name)
   (let ((time (format-time-string "%H:%M:%S" (plist-get ev :ts))))
@@ -589,7 +592,8 @@ remap such as `ygg-focus-dim' cannot outrank it."
             (cond
              ;; a thought is the agent speaking: Delta hangs its mark in
              ;; the gutter and leaves the line itself clean
-             ((and (aob-trace--delta-p) (eq (plist-get ev :type) 'thought))
+             ((and (aob-trace--delta-p) (eq (plist-get ev :type) 'thought)
+                   (plist-get ev :turn-head))
               (lambda (str) (aob-trace--gutter (aob-trace--avatar-glyph) str)))
              ;; and the row that opens a turn carries the mark too, kind
              ;; glyph and all: a turn that starts with a command run is a
@@ -658,7 +662,13 @@ remap such as `ygg-focus-dim' cannot outrank it."
 
 (defun aob-trace--line-cached (s ev)
   "EV's fully rendered, propertized line — recomputed only after the
-event mutated (chunk pushes, tool updates clear the cache)."
+event mutated (chunk pushes, tool updates clear the cache), or after
+the width it was clipped against changed, which is the same thing to a
+row that no longer fits."
+  (let ((width (aob-trace--text-width)))
+    (unless (equal (plist-get ev :line-width) width)
+      (plist-put ev :line-width width)
+      (plist-put ev :line nil)))
   (or (plist-get ev :line)
       (let ((l (propertize (aob-trace--line
                             ev (and (fboundp 'aob-session-ref)
@@ -800,28 +810,28 @@ them, grouped and in order, or in their own trace."
         (opening t))
     (while evs
       (let* ((run (seq-take-while #'aob-trace--explores-p evs))
-             (n (length run))
-             (ev (car evs))
-             ;; a state row is the session speaking, not the agent: the
-             ;; mark belongs on the first thing the agent itself does
-             ;; the agent's own doing: a permission is the adapter
-             ;; asking and a state row is the session speaking
-             ;; a boolean, not the tail `memq' hands back: the stored
-             ;; value is compared with it, and a list never equals t
-             (head (and opening
-                        (memq (plist-get ev :type) '(tool message thought))
-                        t)))
-        (unless (eq (and (plist-get ev :turn-head) t) head)
-          (plist-put ev :turn-head head)
-          (plist-put ev :line nil))
-        (setq opening (or (eq (plist-get ev :type) 'prompt)
-                          (and opening (not (memq (plist-get ev :type)
-                                                  '(tool message thought))))))
-        (if (>= n aob-trace-explore-min)
-            (progn (push (aob-trace--explore-block s run) acc)
-                   (setq evs (nthcdr n evs)))
-          (push (aob-trace--block s ev) acc)
-          (setq evs (cdr evs)))))
+             (folded (>= (length run) aob-trace-explore-min))
+             (group (if folded run (list (car evs))))
+             (first t))
+        ;; every event in the group is told whether it opens a turn, not
+        ;; just the one that gets drawn: a flag left over from a render
+        ;; where it was the head is a mark beside every row it touches
+        (dolist (ev group)
+          (let ((head (and first opening
+                           (memq (plist-get ev :type) '(tool message thought))
+                           t)))
+            (unless (eq (and (plist-get ev :turn-head) t) head)
+              (plist-put ev :turn-head head)
+              (plist-put ev :line nil))
+            (setq first nil)
+            (setq opening (or (eq (plist-get ev :type) 'prompt)
+                              (and opening
+                                   (not (memq (plist-get ev :type)
+                                              '(tool message thought))))))))
+        (if folded
+            (push (aob-trace--explore-block s run) acc)
+          (push (aob-trace--block s (car evs)) acc))
+        (setq evs (nthcdr (length group) evs))))
     (let ((blocks (nreverse acc)))
       (when (and blocks (aob-trace--delta-p)
                  (string-prefix-p "\n" (car blocks)))
