@@ -592,8 +592,20 @@ Copying the command is the general map's w: the target is the command.")
   (ygg-embark--map nil "c" #'ygg-embark-session-compose)
   "To compose aimed at the session, over the agent verbs it inherits.")
 
+(defvar-keymap ygg-embark-conversation-map
+  :doc "What can be done to a conversation, one or fifty at a time."
+  "a" #'ygg-conversation-archive
+  "d" #'ygg-conversation-discard
+  "o" #'ygg-conversation-open
+  "RET" #'ygg-conversation-open)
+
+(declare-function ygg-conversation-archive "ygg-projects" (candidate))
+(declare-function ygg-conversation-discard "ygg-projects" (candidate))
+(declare-function ygg-conversation-open "ygg-projects" (candidate))
+
 (defconst ygg-embark-keymaps
-  '((ygg-task . ygg-embark-task-map)
+  '((ygg-conversation . ygg-embark-conversation-map)
+    (ygg-task . ygg-embark-task-map)
     (ygg-space . ygg-embark-space-map)
     (ygg-qf-row . ygg-embark-qf-map)
     (ygg-context-entry . ygg-embark-context-map)

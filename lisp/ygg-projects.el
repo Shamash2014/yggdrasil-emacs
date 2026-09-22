@@ -980,6 +980,75 @@ answers have changed underneath, or one of them was wrong."
         (ygg-project-import root)
       (user-error "projects: nothing to import with"))))
 
+(defvar ygg-conversations--index (make-hash-table :test #'equal)
+  "Candidate string to the conversation it stands for.")
+
+(declare-function aob-transcript-move "aob-transcript" (entry where))
+(declare-function aob-acp-archive-entry "aob-acp" (e))
+
+(defun ygg-conversations--label (entry root)
+  (format "%s  %s  %s"
+          (or (plist-get entry :name) (plist-get entry :agent) "session")
+          (or (ygg-projects--ago (ygg-projects--entry-ts entry)) "")
+          (abbreviate-file-name (directory-file-name root))))
+
+(defun ygg-conversations--entry (candidate)
+  (or (gethash candidate ygg-conversations--index)
+      (user-error "projects: no conversation called that")))
+
+(defun ygg-conversations--roots ()
+  (or (and ygg-projects--open (list ygg-projects--open))
+      (ygg-projects--roots)))
+
+;;;###autoload
+(defun ygg-conversations (&optional all)
+  "Pick among the conversations of the open project, or ALL projects.
+The point of a list is what can be done to several of it at once:
+this is a completion category, so `embark-act-all\=' archives or
+discards everything the filter left."
+  (interactive "P")
+  (clrhash ygg-conversations--index)
+  (let (rows)
+    (dolist (root (if all (ygg-projects--roots) (ygg-conversations--roots)))
+      (dolist (entry (ygg-projects--past root))
+        (let ((label (ygg-conversations--label entry root)))
+          (puthash label entry ygg-conversations--index)
+          (push label rows))))
+    (unless rows (user-error "projects: no conversations"))
+    (let ((pick (completing-read
+                 "Conversation: "
+                 (lambda (string predicate action)
+                   (if (eq action 'metadata)
+                       '(metadata (category . ygg-conversation))
+                     (complete-with-action action (nreverse rows) string predicate)))
+                 nil t)))
+      (ygg-conversation-open pick))))
+
+(defun ygg-conversation-open (candidate)
+  "Read CANDIDATE."
+  (interactive "sConversation: ")
+  (let ((entry (ygg-conversations--entry candidate)))
+    (cond ((and (fboundp 'aob-session-p) (aob-session-p entry)) (aob-trace entry))
+          ((fboundp 'aob-transcript-view) (aob-transcript-view entry))
+          (t (user-error "projects: nothing to read it with")))))
+
+(defun ygg-conversation-archive (candidate)
+  "Put CANDIDATE away: kept, and out of the list."
+  (interactive "sConversation: ")
+  (let ((entry (ygg-conversations--entry candidate)))
+    (when (and (fboundp 'aob-acp-archive-entry)
+               (not (plist-get entry :found)))
+      (ignore-errors (aob-acp-archive-entry entry)))
+    (when (fboundp 'aob-transcript-move) (aob-transcript-move entry "archive"))
+    (ygg-projects-refresh)))
+
+(defun ygg-conversation-discard (candidate)
+  "Move CANDIDATE out of the way, into a folder nothing reads."
+  (interactive "sConversation: ")
+  (let ((entry (ygg-conversations--entry candidate)))
+    (when (fboundp 'aob-transcript-move) (aob-transcript-move entry "discarded"))
+    (ygg-projects-refresh)))
+
 (defun ygg-projects-rescan ()
   "Redraw, and look again for what the projects can run."
   (interactive)

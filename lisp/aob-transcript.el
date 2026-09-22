@@ -240,6 +240,18 @@ you have only just taken in is none of them."
                       (plist-put entry :name name)))
                   files))))
 
+(defun aob-transcript-move (entry where)
+  "Move ENTRY\='s conversation into the WHERE folder beside it.
+Nothing is destroyed: archiving and discarding are both a move, and a
+folder the listing does not read is what \"gone\" means here."
+  (when-let* ((file (aob-transcript-file entry)))
+    (let* ((dir (expand-file-name where (file-name-directory file)))
+           (to (expand-file-name (file-name-nondirectory file) dir)))
+      (make-directory dir t)
+      (rename-file file to t)
+      (aob-transcript-forget)
+      to)))
+
 ;;;###autoload
 (defun aob-transcript-forget ()
   "Drop what was read from disk, so the next look reads it again.
