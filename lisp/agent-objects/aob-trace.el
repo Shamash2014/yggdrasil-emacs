@@ -359,6 +359,14 @@ NAME is the agent this session runs; the owner\='s own turns say you."
   "Face behind a command card."
   :group 'aob)
 
+(defface aob-trace-tool
+  '((((background dark)) :foreground "#8EA4C9")
+    (t :foreground "#4A5B76"))
+  "Face for what the agent ran, told apart from what it said.
+A trace is two kinds of line — words, and machine work — and the eye
+should not have to read one to find out which it is."
+  :group 'aob)
+
 (defface aob-trace-card-meta '((t :inherit shadow))
   "Face for the chevron and elapsed time on a command card."
   :group 'aob)
@@ -403,6 +411,7 @@ wide."
                             ;; the edge; two is the menu-shortcut rule
                             `(space :align-to (- right ,(1+ (string-width meta)))))
                 (propertize meta 'font-lock-face 'aob-trace-card-meta))))
+    (add-face-text-property 0 (length head) 'aob-trace-tool t head)
     (add-face-text-property 0 (length head) 'aob-trace-card t head)
     head))
 
@@ -560,9 +569,9 @@ remap such as `ygg-focus-dim' cannot outrank it."
                 ev (aob-trace--one-line
                     (or (plist-get ev :title) (plist-get ev :kind) "")))
            (concat
-            (aob-trace--prose
-             (concat (if (plist-get ev :parent) "└ " "")
-                     (aob-trace--verb ev) " "))
+            (propertize (concat (if (plist-get ev :parent) "└ " "")
+                                (aob-trace--verb ev) " ")
+                        'font-lock-face 'aob-trace-tool)
             (propertize (or (plist-get ev :title) (plist-get ev :kind) "")
                         'font-lock-face 'aob-trace-target)
             (let ((st (plist-get ev :status)))
@@ -1177,6 +1186,21 @@ standing at the end of the trace with it."
   (goto-char (point-max))
   (when (fboundp 'ygg-insert-state) (ygg-insert-state)))
 
+(declare-function aob-acp--steers-p "aob-acp" (s))
+(declare-function aob-interject "aob" (s text))
+
+(defun aob-trace--say (s text)
+  "Say TEXT to S: into the turn it is running, where it takes that.
+A turn already running is not a reason to wait — an agent whose
+subagents are working is an agent you can still talk to, and where
+the adapter takes steering the words go in without costing it the
+work in flight."
+  (if (and (eq (aob-session-state s) 'working)
+           (fboundp 'aob-acp--steers-p)
+           (ignore-errors (aob-acp--steers-p s)))
+      (aob-interject s text)
+    (aob-prompt s text nil)))
+
 (defun aob-trace-send ()
   "Send what is typed at the end of the trace to this session."
   (interactive)
@@ -1191,14 +1215,13 @@ standing at the end of the trace with it."
         (delete-region start (point-max)))
       (when (fboundp 'ygg-normal-state) (ygg-normal-state))
       (aob-session-put s :comments nil)
-      (aob-prompt s (string-trim
-                     (string-join
-                      (delq nil (list (and (fboundp 'aob-context-text)
-                                           (aob-context-text))
-                                      comments
-                                      (unless (string-empty-p text) text)))
-                      "\n\n"))
-                  nil))))
+      (aob-trace--say s (string-trim
+                         (string-join
+                          (delq nil (list (and (fboundp 'aob-context-text)
+                                               (aob-context-text))
+                                          comments
+                                          (unless (string-empty-p text) text)))
+                          "\n\n"))))))
 
 (defface aob-trace-anchor
   '((((background dark)) :background "#3a3222" :underline "#8a7a4a")
