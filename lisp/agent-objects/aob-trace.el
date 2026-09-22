@@ -519,8 +519,18 @@ mark outside it; a margin display does the same without indenting text."
           (and (stringp glyph) (string-empty-p glyph))
           (string-empty-p str))
       str
-    (concat (propertize " " 'display `((margin left-margin) ,glyph))
-            str)))
+    (if (aob-trace--gutter-p)
+        (concat (propertize " " 'display `((margin left-margin) ,glyph))
+                str)
+      ;; no margin to hang it in — a narrow window has none — so it
+      ;; goes on the line rather than nowhere
+      (concat (if (stringp glyph) glyph (propertize " " 'display glyph))
+              " " str))))
+
+(defun aob-trace--gutter-p ()
+  "Whether a window showing this buffer has a margin to hang a mark in."
+  (let ((win (get-buffer-window (current-buffer) t)))
+    (if win (> (or (car (window-margins win)) 0) 0) t)))
 
 (defun aob-trace--prose (str)
   "STR in the prose face, applied as a property so a window-level

@@ -581,6 +581,13 @@ scan already learned not to do."
         (concat (match-string 1 status) (match-string 2 status))
       (downcase (or (car (split-string status " " t)) "")))))
 
+(defcustom ygg-projects-entry-spacing 0.4
+  "Extra line height under an entry, as a share of the line.
+A sublist is a list of things, not a paragraph: what tells one row
+from the next is the space around it."
+  :type 'number :group 'ygg-projects)
+
+
 (defun ygg-projects--entry-badge (payload)
   "What PAYLOAD has to say for itself at the right edge.
 A running conversation says what it is doing; one that ended says how
@@ -859,12 +866,6 @@ row, else nowhere."
                 (setq exact here))))
           (forward-line 1)))
       (when-let* ((target (or exact loose))) (goto-char target)))))
-
-(defcustom ygg-projects-entry-spacing 0.4
-  "Extra line height under an entry, as a share of the line.
-A sublist is a list of things, not a paragraph: what tells one row
-from the next is the space around it."
-  :type 'number :group 'ygg-projects)
 
 (defun ygg-projects-refresh ()
   "Redraw the sidebar from what the projects are running now.
@@ -1171,6 +1172,23 @@ The line keeps its place on screen; what opens, opens below it."
         (forward-line (- above))
         (set-window-start win (line-beginning-position) t)))))
 
+;; defined above its uses: a macro the compiler has not seen yet is
+;; compiled as a function call, and answers one with "invalid function"
+(defmacro ygg-projects--keeping (&rest body)
+  "Run BODY, and put the sidebar back if BODY took it away.
+Opening a space restores a window configuration recorded without this
+side window, so acting on a row would otherwise close the sidebar the
+row was picked from."
+  (declare (indent 0) (debug t))
+  `(let ((had (and (get-buffer-window ygg-projects-buffer-name 'visible) t)))
+     (prog1 (progn ,@body)
+       (when-let* ((had)
+                   (buf (get-buffer ygg-projects-buffer-name))
+                   ((not (get-buffer-window buf 'visible)))
+                   (win (ygg-projects--display buf)))
+         (set-window-dedicated-p win t)
+         (with-current-buffer buf (ygg-projects--trim-window))))))
+
 (defun ygg-projects-open ()
   "Open the project on this line as its own space."
   (interactive)
@@ -1310,21 +1328,6 @@ panel a third of the screen."
                                     . ((no-delete-other-windows . t)))))))
     (when (window-live-p win) (window-preserve-size win t t))
     win))
-
-(defmacro ygg-projects--keeping (&rest body)
-  "Run BODY, and put the sidebar back if BODY took it away.
-Opening a space restores a window configuration recorded without this
-side window, so acting on a row would otherwise close the sidebar the
-row was picked from."
-  (declare (indent 0) (debug t))
-  `(let ((had (and (get-buffer-window ygg-projects-buffer-name 'visible) t)))
-     (prog1 (progn ,@body)
-       (when-let* ((had)
-                   (buf (get-buffer ygg-projects-buffer-name))
-                   ((not (get-buffer-window buf 'visible)))
-                   (win (ygg-projects--display buf)))
-         (set-window-dedicated-p win t)
-         (with-current-buffer buf (ygg-projects--trim-window))))))
 
 (defun ygg-projects-keep-open (fn &rest args)
   "Call FN with ARGS and put the sidebar back if it went away.
