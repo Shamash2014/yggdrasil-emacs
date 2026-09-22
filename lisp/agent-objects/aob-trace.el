@@ -140,7 +140,7 @@ clock; `log' is the timestamped row-per-event shape."
   :type 'natnum :group 'aob)
 
 (defface aob-trace-prose
-  '((t :inherit default :height 1.05))
+  '((t :inherit default))
   "Face for message and prompt bodies under the delta style.
 One family for the whole interface: a proportional face reads better
 in a paragraph and worse in everything a paragraph here is made of —

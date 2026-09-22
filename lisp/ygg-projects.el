@@ -71,7 +71,7 @@
   :type 'natnum :group 'ygg-projects)
 
 (defface ygg-projects-base
-  '((t :height 1.05))
+  '((t :height 1.0))
   "Face sizing the whole sidebar and lifting it off the ground."
   :group 'ygg-projects)
 
@@ -554,20 +554,59 @@ by when, not by that they were all today."
              "ended"))
         (t "")))
 
+(defcustom ygg-projects-entry-indent 4
+  "Columns an entry is set in from the left.
+A panel is narrow: every column spent on indentation is a column the
+name does not get."
+  :type 'natnum :group 'ygg-projects)
+
 (defun ygg-projects--entry-text (label root kind payload)
+  "LABEL as a row, and a second line where it does not fit.
+The badge is the width the name cannot have, so the name is measured
+against what is left and carries on underneath rather than being cut
+where nothing can be read."
   (let* ((badge (ygg-projects--entry-badge payload))
-         (room (- (ygg-projects--width) 8 (string-width badge)))
-         (label (if (<= (string-width label) room)
-                    label
-                  (truncate-string-to-width label (max 4 room) nil nil t))))
-    (propertize (concat "        "
-                        (propertize "·" 'font-lock-face
-                                    (ygg-projects--session-dot payload))
-                        "  "
-                        (propertize label 'font-lock-face 'ygg-projects-entry)
-                        (ygg-projects--right
-                         (propertize badge 'font-lock-face 'ygg-projects-count)))
-                'ygg-project root 'ygg-row kind 'ygg-entry payload)))
+         ;; a rail down the indent, the way a tree says depth without
+         ;; spending a column on saying nothing
+         (head (concat (make-string (max 0 (- ygg-projects-entry-indent 2)) ?\s)
+                       (propertize "│" 'font-lock-face 'ygg-projects-idle)
+                       " "
+                       (propertize "·" 'font-lock-face
+                                   (ygg-projects--session-dot payload))
+                       " "))
+         (indent (+ ygg-projects-entry-indent 2))
+         (room (max 4 (- (ygg-projects--width) indent (string-width badge) 1)))
+         (fits (<= (string-width label) room))
+         (cut (unless fits
+                (let* ((head (truncate-string-to-width label room))
+                       (space (string-match "[ /:_-][^ /:_-]*\\'" head)))
+                  ;; break where the words break, unless that throws most
+                  ;; of the line away
+                  (if (and space (> space (* 0.5 (length head))))
+                      (1+ space)
+                    (length head)))))
+         (first (if fits label (string-trim-right (substring label 0 cut))))
+         (rest (unless fits (string-trim-left (substring label cut))))
+         (wrap (- (ygg-projects--width) indent)))
+    (concat
+     (propertize (concat head
+                         (propertize first 'font-lock-face 'ygg-projects-entry)
+                         (ygg-projects--right
+                          (propertize badge 'font-lock-face 'ygg-projects-count)))
+                 'ygg-project root 'ygg-row kind 'ygg-entry payload)
+     (when (and rest (not (string-empty-p rest)))
+       (concat
+        "\n"
+        (propertize
+         (concat (make-string (max 0 (- ygg-projects-entry-indent 2)) ?\s)
+                 (propertize "│" 'font-lock-face 'ygg-projects-idle)
+                 (make-string (max 0 (- indent (- ygg-projects-entry-indent 1))) ?\s)
+                 ;; clipped, not elided: an ellipsis is a column spent
+                 ;; saying there was another column
+                 (propertize (truncate-string-to-width rest wrap)
+                             'font-lock-face 'ygg-projects-entry)
+                 (ygg-projects--right ""))
+         'ygg-project root 'ygg-row kind 'ygg-entry payload 'ygg-cont t))))))
 
 (defun ygg-projects--entry-nodes (root kind)
   (mapcar (lambda (cell)
@@ -756,6 +795,8 @@ the sidebar moving on its own."
                 (zerop (forward-line dir))
                 (not (eobp)))
       (when (and (get-text-property (line-beginning-position) 'ygg-project)
+                 ;; the second line of a name is the same row, not the next
+                 (not (get-text-property (line-beginning-position) 'ygg-cont))
                  (or (not project-only)
                      (eq (get-text-property (line-beginning-position) 'ygg-row)
                          'project)))
