@@ -1756,32 +1756,117 @@ was sent with."
                                                          :null-object nil)))
                  (tools (plist-get (plist-get json :result) :tools)))
             (cond ((null json) "not JSON")
-                  (tools (format "%d tools: %s" (length tools)
+                  (tools (format "%d tools: %s%s" (length tools)
                                  (string-join
                                   (seq-take (mapcar (lambda (tool)
                                                       (plist-get tool :name))
                                                     tools)
-                                            8)
-                                  " ")))
+                                            4)
+                                  " ")
+                                 (if (> (length tools) 4) " …" "")))
                   (t "answered, no tools"))))))))
 
 ;;;###autoload
+(defvar-local aob-acp-mcp--session nil
+  "The session the listing in this buffer is about.")
+
+(defvar aob-acp-mcp-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "g" #'aob-acp-mcp-refresh)
+    (define-key map "R" #'aob-acp-mcp-restart)
+    map)
+  "Keys of the server listing.")
+
+(define-derived-mode aob-acp-mcp-mode special-mode "aob-mcp"
+  "What a session can reach, and what it was given.")
+
+(defun aob-acp-mcp-refresh ()
+  "Ask every server again."
+  (interactive)
+  (when aob-acp-mcp--session (aob-acp-mcp aob-acp-mcp--session)))
+
+(defun aob-acp-mcp-restart ()
+  "Reload this conversation into a process that gets every server.
+The servers a session has are the ones it was opened with; there is no
+adding one to a session already running.  Its ACP id outlives the
+process, so this is the same conversation, with them."
+  (interactive)
+  (let ((s aob-acp-mcp--session))
+    (unless s (user-error "aob: no session here"))
+    (when (y-or-n-p (format "Reload %s into a process with every server? "
+                            (aob-session-name s)))
+      (aob-acp-restart s))))
+
+(defun aob-acp--mcp-target (entry)
+  "What ENTRY points at, without the secret that gets you in.
+A listing is the thing people screenshot."
+  (or (when-let* ((url (plist-get entry :url)))
+        (car (split-string url "?")))
+      (string-join (cons (or (plist-get entry :command) "")
+                         (append (plist-get entry :args) nil))
+                   " ")))
+
+(defun aob-acp--mcp-status (entry)
+  "Whether ENTRY can be reached from here, as far as here can tell."
+  (cond ((plist-get entry :url) (aob-acp--mcp-probe (plist-get entry :url)))
+        ((plist-get entry :command)
+         (if (executable-find (plist-get entry :command))
+             "ready" "not on PATH"))
+        (t "")))
+
+(defun aob-acp--mcp-known (s)
+  "Every server this session could have, by name, as (ENTRY . WHERE)."
+  (let* ((project (aob-session-project s))
+         (out nil))
+    (dolist (entry (aob-session-ref s :mcp-sent))
+      (push (cons entry "session") out))
+    (dolist (entry (and (fboundp 'ygg-agent-user-mcp-servers)
+                        (ignore-errors
+                          (ygg-agent-user-mcp-servers
+                           (aob-session-ref s :agent) project))))
+      (unless (seq-find (lambda (cell) (equal (plist-get (car cell) :name)
+                                              (plist-get entry :name)))
+                        out)
+        (push (cons entry "config") out)))
+    (dolist (entry (ignore-errors (aob-acp-project-mcp-servers project)))
+      (unless (seq-find (lambda (cell) (equal (plist-get (car cell) :name)
+                                              (plist-get entry :name)))
+                        out)
+        (push (cons entry "project") out)))
+    (when (and (fboundp 'aob-mcp-host-live-p) (aob-mcp-host-live-p)
+               (not (seq-find (lambda (cell)
+                                (equal (plist-get (car cell) :name)
+                                       (bound-and-true-p aob-mcp-host-name)))
+                              out)))
+      ;; with the key, or the probe asks the way a stranger would and is
+      ;; told 401 by the thing it is trying to describe
+      (push (cons (if (fboundp 'aob-mcp-host-spec)
+                      (aob-mcp-host-spec "listing")
+                    (list :name (or (bound-and-true-p aob-mcp-host-name) "aob")
+                          :type "http" :url (aob-mcp-url)))
+                  "emacs")
+            out))
+    (nreverse out)))
+
+;;;###autoload
 (defun aob-acp-mcp (s)
-  "What MCP servers S was handed, and whether they answer.
-An agent that says it cannot reach a server is a question about what
-it was given at session/new, which is the one thing a trace does not
-show.  A server named here but silent is reachable by nobody; a
-session with none was opened before anything was handed to it."
+  "Every MCP server S can reach, and whether S was given it.
+The servers a session has are the ones it was opened with, so a
+session older than a server is a session without it — which this says
+rather than leaving you to wonder, and R puts right."
   (interactive (list (aob-target)))
   (let* ((caps (plist-get (aob-session-ref s :agent-caps) :mcpCapabilities))
-         (sent (aob-session-ref s :mcp-sent))
+         (sent (mapcar (lambda (e) (plist-get e :name))
+                       (aob-session-ref s :mcp-sent)))
+         (rows (aob-acp--mcp-known s))
          (buf (get-buffer-create (format "*aob-mcp: %s*" (aob-session-name s)))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
-        (special-mode)
+        (unless (derived-mode-p 'aob-acp-mcp-mode) (aob-acp-mcp-mode))
+        (setq aob-acp-mcp--session s)
         (erase-buffer)
-        (insert (propertize (format "%s\n" (aob-session-name s)) 'face 'bold))
-        (insert (format "the agent takes %s\n\n"
+        (insert (propertize (format "%s" (aob-session-name s)) 'face 'bold)
+                (format "  ·  takes %s\n\n"
                         (if caps
                             (string-join
                              (delq nil (list (and (plist-get caps :http) "http")
@@ -1789,42 +1874,27 @@ session with none was opened before anything was handed to it."
                                              "stdio"))
                              " · ")
                           "no kind it ever named")))
-        (if (null sent)
-            (insert "nothing was handed to this session\n\n")
-          (dolist (entry sent)
-            (let ((url (plist-get entry :url)))
-              (insert (format "%s  %s\n  %s\n"
-                              (propertize (format "%s" (plist-get entry :name))
-                                          'face 'bold)
+        (if (null rows)
+            (insert "no servers anywhere: none configured, none declared, none served\n")
+          (pcase-dolist (`(,entry . ,where) rows)
+            (let* ((name (plist-get entry :name))
+                   (has (member name sent)))
+              (insert (format "%s %-14s %-6s %s\n"
+                              (propertize (if has "✓" "·")
+                                          'face (if has 'success 'shadow))
+                              name
                               (or (plist-get entry :type) "stdio")
-                              (or url
-                                  (string-join (cons (or (plist-get entry :command) "")
-                                                     (append (plist-get entry :args) nil))
-                                               " "))))
-              (when url
-                (insert (format "  %s\n" (aob-acp--mcp-probe url))))
-              (insert "\n"))))
-        ;; and what else there is to be had, whether or not this session
-        ;; was given it: a session opened before a server existed says
-        ;; nothing about the server, only about itself
-        (let ((named (mapcar (lambda (e) (plist-get e :name)) sent)))
-          (when (and (fboundp 'aob-mcp-host-live-p) (fboundp 'aob-mcp-url))
-            (insert (propertize "this Emacs serves\n" 'face 'bold))
-            (insert (format "  %s  %s%s\n"
-                            (if (bound-and-true-p aob-mcp-host-name)
-                                aob-mcp-host-name "aob")
-                            (if (aob-mcp-host-live-p) (aob-mcp-url) "not running")
-                            (if (member (bound-and-true-p aob-mcp-host-name) named)
-                                "" "  — not handed to this session"))))
-          (when-let* ((declared (and (fboundp 'aob-acp-project-mcp-servers)
-                                     (ignore-errors
-                                       (aob-acp-project-mcp-servers
-                                        (aob-session-project s))))))
-            (insert (propertize "\nthis project declares\n" 'face 'bold))
-            (dolist (entry declared)
-              (insert (format "  %s  %s\n" (plist-get entry :name)
-                              (or (plist-get entry :url)
-                                  (plist-get entry :command) ""))))))
+                              (propertize (aob-acp--mcp-target entry) 'face 'shadow)))
+              (insert (format "  %-14s %s\n" ""
+                              (propertize (format "%s · from %s%s"
+                                                  (aob-acp--mcp-status entry)
+                                                  where
+                                                  (if has "" " · not in this session"))
+                                          'face (if has 'shadow 'warning)))))))
+        (unless (and sent (= (length sent) (length rows)))
+          (insert (propertize
+                   "\nR reloads this conversation into a process that gets them all\n"
+                   'face 'warning)))
         (goto-char (point-min))))
     (display-buffer buf)))
 
