@@ -587,12 +587,38 @@ spawned by aob are then the same install, logged in once."
 (add-hook 'ghostel-pre-spawn-hook #'ygg-agent--terminal-env)
 
 (defcustom ygg-aob-trace-action
-  '((display-buffer-reuse-window display-buffer-in-direction)
-    (direction . right)
-    (window-width . 0.5)
+  '((display-buffer-reuse-window ygg-aob--trace-window display-buffer-pop-up-window)
     (inhibit-same-window . t))
   "How a session's trace is put on screen."
   :type 'sexp :group 'aob)
+
+(defun ygg-aob--trace-window (buffer alist)
+  "Put BUFFER where a conversation can be read: the widest window there
+is, split when it can afford two and taken over when it cannot.
+Splitting whatever window happens to be selected is how a trace ends
+up nineteen columns wide in a frame with room for four of them."
+  (let* ((cands (seq-remove
+                 (lambda (w)
+                   (or (window-parameter w 'window-side)
+                       ;; the caller said not this one, and handing it
+                       ;; back anyway is how this returns nothing and
+                       ;; the fallback splits something in half
+                       (and (cdr (assq 'inhibit-same-window alist))
+                            (eq w (selected-window)))))
+                 (window-list nil 'no-minibuf)))
+         (widest (car (sort cands (lambda (a b) (> (window-total-width a)
+                                                   (window-total-width b)))))))
+    (when (window-live-p widest)
+      (if (>= (window-total-width widest) (* 2 ygg-aob-trace-min-width))
+          ;; room for both: the conversation takes its columns off the
+          ;; right of the widest window and leaves the rest of it
+          (when-let* ((new (ignore-errors
+                             (split-window widest (- ygg-aob-trace-min-width)
+                                           'right))))
+            (window--display-buffer buffer new 'window alist))
+        ;; no room for both: the conversation takes that window whole,
+        ;; which is better than two windows too narrow to read
+        (window--display-buffer buffer widest 'reuse alist)))))
 
 (setq aob-acp-show-trace nil)
 
@@ -630,6 +656,24 @@ frame again until the sidebar is squeezed out of it."
     (with-selected-window win
       (display-buffer-below-selected buffer alist))))
 
+(defcustom ygg-aob-trace-min-width 80
+  "Columns a conversation gets, where the frame has them to give.
+A trace holds commands, diffs and paths as well as prose; thirty
+columns of it breaks words in half and reads as a fault."
+  :type 'natnum :group 'aob)
+
+(defun ygg-aob--widen-trace (win)
+  "Give WIN `ygg-aob-trace-min-width\=' columns, taking them from its
+neighbours — never from a side window, which is pinned."
+  (when (and (window-live-p win)
+             (> ygg-aob-trace-min-width (window-total-width win))
+             (not (window-parameter win 'window-side)))
+    ;; columns, not pixels: the fifth argument is PIXELWISE, and a
+    ;; delta of forty-two pixels is five columns of nothing
+    (ignore-errors
+      (window-resize win (- ygg-aob-trace-min-width (window-total-width win))
+                     t))))
+
 (defun ygg-aob--show-trace (s)
   "Show S's trace in the window conversations are read in.
 A subagent opens beside the conversation that sent it instead: what it
@@ -646,6 +690,10 @@ window would hide the one you were reading."
                              (set-window-buffer w buf))
                            w)
                          (ignore-errors (display-buffer buf ygg-aob-trace-action)))))
+      ;; every window showing it, not only the one just chosen: a trace
+      ;; can be on screen twice, and the cramped one is the one you are
+      ;; looking at
+      (dolist (w (get-buffer-window-list buf nil nil)) (ygg-aob--widen-trace w))
       (when (and ygg-aob--compose-sending (window-live-p win))
         (select-window win))
       win)))
