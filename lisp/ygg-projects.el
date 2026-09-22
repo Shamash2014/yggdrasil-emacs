@@ -176,12 +176,40 @@ you looked at another is a row you have to open twice.")
 
 ;;; What each project is running
 
+(declare-function aob-trace--work-root "aob-trace" (s))
+(declare-function aob-session-put "aob" (s key val))
+
+(defun ygg-projects--root-of (dir roots)
+  "The one of ROOTS DIR is, or is inside of, the deepest when several are."
+  (when dir
+    (let ((dir (file-name-as-directory
+                (if (file-remote-p dir) (expand-file-name dir) (file-truename dir)))))
+      (car (sort (seq-filter (lambda (r) (string-prefix-p r dir)) roots)
+                 (lambda (a b) (> (length a) (length b))))))))
+
+(defun ygg-projects--session-root (s roots)
+  "The one of ROOTS session S belongs under, or nil.
+Its own project first; an agent started in a folder that is no project
+goes under the one it has been working in, as its tools last said."
+  (or (ygg-projects--root-of (aob-session-project s) roots)
+      (when (fboundp 'aob-trace--work-root)
+        (let ((newest (plist-get (seq-find (lambda (e) (eq (plist-get e :type) 'tool))
+                                           (aob-session-events s))
+                                 :seq))
+              (known (aob-session-ref s :sidebar-root)))
+          (if (and known (equal (car known) newest))
+              (cdr known)
+            (let ((root (ygg-projects--root-of (aob-trace--work-root s) roots)))
+              (aob-session-put s :sidebar-root (cons newest root))
+              root))))))
+
 (defun ygg-projects--sessions (root)
   (when (fboundp 'aob-sessions)
-    (seq-filter (lambda (s)
-                  (when-let* ((p (aob-session-project s)))
-                    (equal (file-name-as-directory (expand-file-name p)) root)))
-                (aob-sessions))))
+    (let ((roots (mapcar (lambda (r) (file-name-as-directory
+                                      (expand-file-name (if (consp r) (car r) r))))
+                         (ygg-projects--roots))))
+      (seq-filter (lambda (s) (equal (ygg-projects--session-root s roots) root))
+                  (aob-sessions)))))
 
 (defun ygg-projects--past (root)
   "Conversations in ROOT that ended but can be picked up again.
@@ -428,7 +456,9 @@ on every row of a list of thirty is a second of nothing."
         (condition-case nil
             (make-process
              :name "ygg-docker" :buffer buf :noquery t
-             :command '("docker" "ps" "--format"
+             ;; -a: a stack that is down is still the project's, and
+             ;; the row is where it is brought back up
+             :command '("docker" "ps" "-a" "--format"
                         "{{.Names}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Status}}\t{{.Label \"com.docker.compose.project.working_dir\"}}")
              :sentinel
              (lambda (proc _event)
@@ -464,10 +494,23 @@ on every row of a list of thirty is a second of nothing."
                  (when (buffer-live-p buf) (kill-buffer buf))))))))
 
 (defun ygg-projects--processes (root)
-  "What ROOT has running that you can go and look at."
-  (let ((n (+ (length (cdr (ygg-projects--root-buffers root)))
-              (length (ygg-projects--containers root)))))
-    (cons n n)))
+  "What ROOT has running, of all it has that you can go and look at."
+  (let* ((containers (ygg-projects--containers root))
+         (buffers (length (cdr (ygg-projects--root-buffers root))))
+         (up (seq-count (lambda (c) (string-prefix-p "Up" (or (plist-get c :status) "")))
+                        containers)))
+    (cons (+ buffers up) (+ buffers (length containers)))))
+
+(defvar ygg-projects--docker-timer nil)
+
+(defun ygg-projects--docker-tick ()
+  "Ask docker again while the sidebar is on screen: stacks come and go."
+  (when (ygg-projects--window)
+    (ygg-projects--scan-docker)))
+
+(unless (timerp ygg-projects--docker-timer)
+  (setq ygg-projects--docker-timer
+        (run-with-timer 20 20 #'ygg-projects--docker-tick)))
 
 (defun ygg-projects--folders (root)
   "Every folder ROOT covers, the checkout itself first.
@@ -578,12 +621,15 @@ scan already learned not to do."
                                                   "session")
                                               e))))
                           (ygg-projects--past root))))
-       ;; newest first, running or ended alike: what happened today is
-       ;; what the row is opened for, and a session's own rows go with it
-       (apply #'append
-              (mapcar #'cdr
-                      (sort (append groups past)
-                            (lambda (a b) (> (car a) (car b))))))))
+       ;; running first and then ended, each newest first, with air
+       ;; between: what is alive is told from what is kept without
+       ;; reading a single badge, and a session's own rows go with it
+       (let ((newest (lambda (cells)
+                       (apply #'append
+                              (mapcar #'cdr (sort cells (lambda (a b) (> (car a) (car b)))))))))
+         (append (funcall newest groups)
+                 (and groups past (list (cons "" 'ygg-projects-gap)))
+                 (funcall newest past)))))
     ('commands (mapcar (lambda (c)
                          (cons (format "%s  %s" (plist-get c :name)
                                        (propertize (format "%s" (plist-get c :source))
@@ -744,10 +790,12 @@ it."
 
 (defun ygg-projects--entry-nodes (root kind)
   (mapcar (lambda (cell)
+            (if (eq (cdr cell) 'ygg-projects-gap)
+                (vui-text " ")
             (let ((text (ygg-projects--entry-text (car cell) root kind (cdr cell))))
               (when (ygg-projects--on-screen-p (cdr cell))
                 (ygg-projects--mark-row text 'ygg-projects-on-screen))
-              (vui-text text)))
+              (vui-text text))))
           (or (ygg-projects--entries root kind)
               (list (cons "— none —" nil)))))
 
@@ -955,6 +1003,7 @@ the sidebar moving on its own."
                             (list :roots (ygg-projects--roots)
                                   :open ygg-projects--open))
           (ygg-projects--goto-row row)
+          (ygg-projects--follow-point)
           (when (and (window-live-p win) start (<= start (point-max)))
             (set-window-start win start t)))))))
 
@@ -1435,6 +1484,15 @@ row was picked from."
   (list (cons 'ygg-projects--modal ygg-projects-map)))
 (add-to-list 'emulation-mode-map-alists 'ygg-projects--emulation-alist)
 
+(defun ygg-projects--follow-point ()
+  "Stand the sidebar in the project point is on.
+Whatever is started from here — magit, a terminal, a compose, a find —
+starts in that project, not in the folder the sidebar was made in."
+  (when-let* ((root (get-text-property (line-beginning-position) 'ygg-project))
+              ((stringp root))
+              ((file-directory-p root)))
+    (setq default-directory (file-name-as-directory root))))
+
 (defun ygg-projects--drop-selection ()
   "Moving is not selecting: normal state leaves no region behind,
 and no state gets to put its cursor back."
@@ -1523,6 +1581,28 @@ window configuration, a session load, a compose box making room.")
 
 (add-hook 'window-configuration-change-hook #'ygg-projects--follow-trace)
 
+(defvar ygg-projects--redraw-timer nil)
+
+(defun ygg-projects--redraw-soon (&rest _)
+  "Redraw shortly: a burst of session changes is one redraw, not fifty.
+A plain timer and not an idle one — an idle timer made while Emacs is
+already idle waits for the next keystroke, and agents finish their
+turns while nobody is typing."
+  (unless (timerp ygg-projects--redraw-timer)
+    (setq ygg-projects--redraw-timer
+          (run-with-timer 0.3 nil
+                          (lambda ()
+                            (setq ygg-projects--redraw-timer nil)
+                            (ygg-projects-refresh))))))
+
+(defvar aob-session-created-hook)
+(defvar aob-session-removed-hook)
+(defvar aob-state-change-hook)
+(with-eval-after-load 'aob
+  (add-hook 'aob-session-created-hook #'ygg-projects--redraw-soon)
+  (add-hook 'aob-session-removed-hook #'ygg-projects--redraw-soon)
+  (add-hook 'aob-state-change-hook #'ygg-projects--redraw-soon))
+
 (defun ygg-projects-close ()
   "Close the sidebar, and mean it: it stays closed until you open it."
   (interactive)
@@ -1576,6 +1656,7 @@ windows around, the width it was opened at is the width it keeps."
     (setq-local hl-line-face 'ygg-projects-current)
     (hl-line-mode 1)
     (add-hook 'post-command-hook #'ygg-projects--drop-selection 90 t)
+    (add-hook 'post-command-hook #'ygg-projects--follow-point nil t)
     (add-hook 'window-configuration-change-hook #'ygg-projects--trim-window nil t)))
 
 ;;;###autoload
@@ -1608,6 +1689,7 @@ windows around, the width it was opened at is the width it keeps."
       (ygg-projects-refresh)
       (ygg-projects--scan-commands)
       (ygg-projects--scan-worktrees)
+      (ygg-projects--scan-docker)
       (setq ygg-projects--wanted t)
       (let ((win (ygg-projects--display buf)))
         ;; dedicated: whatever the sidebar opens goes to the main area,
@@ -1619,6 +1701,84 @@ windows around, the width it was opened at is the width it keeps."
             (unless (eq other win) (ygg-projects--dismiss other)))
           (select-window win)))
       (ygg-projects--trim-window))))
+
+;;; Sessions — the sidebar is laid over a layout, never saved inside one
+
+(defvar easysession-before-save-hook)
+(defvar easysession-after-save-hook)
+(defvar easysession-after-load-hook)
+(declare-function easysession-add-save-handler "easysession" (handler-fn))
+(declare-function easysession-add-load-handler "easysession" (handler-fn))
+
+(defun ygg-projects--session-save (buffers)
+  "The sidebar's state as easysession keeps it; BUFFERS go on untouched.
+The next handler is handed what this one leaves, so all of them are left."
+  `((key . "ygg-projects")
+    (value . ((wanted . ,(and ygg-projects--wanted t))
+              (open . ,ygg-projects--open)
+              (open-row . ,ygg-projects--open-row)
+              (archived . ,ygg-projects-show-archived)))
+    (remaining-buffers . ,buffers)))
+
+(defun ygg-projects--session-load (session-data)
+  "Take the sidebar's state back from SESSION-DATA.
+A session saved before the sidebar was kept has nothing to say, and the
+sidebar stays as it is."
+  (when-let* ((state (assoc-default "ygg-projects" session-data)))
+    (setq ygg-projects--wanted (alist-get 'wanted state)
+          ygg-projects--open (alist-get 'open state)
+          ygg-projects--open-row (alist-get 'open-row state)
+          ygg-projects-show-archived (alist-get 'archived state))))
+
+(defun ygg-projects--stray-window-p (win)
+  "Non-nil when WIN shows the sidebar but is not the sidebar\='s own window.
+A layout saved with the sidebar in it brings the buffer back in an
+ordinary window, or a placeholder of it when the buffer is gone."
+  (let ((name (buffer-name (window-buffer win))))
+    (and (string-match-p (concat "\\`[ *]*\\(Old buffer \\)?"
+                                 (regexp-quote ygg-projects-buffer-name))
+                         name)
+         (not (eq (window-parameter win 'window-side) 'left)))))
+
+(defvar ygg-projects--saved-frames nil
+  "Frames the sidebar was taken out of for a save, to be put back in.")
+
+(defun ygg-projects--before-session-save ()
+  "Take the sidebar out of every frame, so no saved layout holds it.
+Runs after the layer that keeps each frame\='s configuration to put back
+once the save is written, so the live frame never loses it."
+  (setq ygg-projects--saved-frames nil)
+  (let ((ygg-projects--restoring t))
+    (dolist (frame (frame-list))
+      (when-let* ((win (ygg-projects--window frame))
+                  ((not (eq win (frame-root-window frame)))))
+        (push frame ygg-projects--saved-frames)
+        (ignore-errors (delete-window win))))))
+
+(defun ygg-projects--after-session-save ()
+  "Put the sidebar back in the frames it was taken from, if nothing else did."
+  (dolist (frame ygg-projects--saved-frames)
+    (when (frame-live-p frame)
+      (with-selected-frame frame (ygg-projects--restore))))
+  (setq ygg-projects--saved-frames nil))
+
+(defun ygg-projects--after-session-load ()
+  "Clear what a stale layout restored of the sidebar, then show it as saved."
+  (dolist (frame (frame-list))
+    (dolist (win (window-list frame 'no-minibuf))
+      (when (and (window-live-p win)
+                 (not (eq win (frame-root-window frame)))
+                 (ygg-projects--stray-window-p win))
+        (ignore-errors (delete-window win)))))
+  (ygg-projects--restore)
+  (ygg-projects-refresh))
+
+(with-eval-after-load 'easysession
+  (easysession-add-save-handler #'ygg-projects--session-save)
+  (easysession-add-load-handler #'ygg-projects--session-load)
+  (add-hook 'easysession-before-save-hook #'ygg-projects--before-session-save 90)
+  (add-hook 'easysession-after-save-hook #'ygg-projects--after-session-save 90)
+  (add-hook 'easysession-after-load-hook #'ygg-projects--after-session-load 90))
 
 (provide 'ygg-projects)
 ;;; ygg-projects.el ends here
