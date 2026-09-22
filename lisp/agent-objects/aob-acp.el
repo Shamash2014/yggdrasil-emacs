@@ -2571,13 +2571,19 @@ Prompts sent while it opens queue and fire on readiness."
                   (when-let* ((space (plist-get e :space)))
                     (list :space space))))
          (verb (list nil)))
-    (aob-acp--open
-     (plist-get e :agent) name (plist-get e :project) dir
-     (lambda (init) (aob-acp--restore-open init acp-id cwd name verb pref))
-     (lambda (s res)
-       (aob-session-put s :restored-by (car verb))
-       (aob-acp--seed-history s e)
-       (aob-acp--session-opened s res acp-id "session resumed")))))
+    ;; the conversation goes in before the adapter answers: opening a
+    ;; session takes seconds, and a trace that is empty for those seconds
+    ;; is a conversation that looks lost
+    (let ((s (aob-acp--open
+              (plist-get e :agent) name (plist-get e :project) dir
+              (lambda (init) (aob-acp--restore-open init acp-id cwd name verb pref))
+              (lambda (s res)
+                (aob-session-put s :restored-by (car verb))
+                ;; a second time only where the first found nothing
+                (aob-acp--seed-history s e)
+                (aob-acp--session-opened s res acp-id "session resumed")))))
+      (aob-acp--seed-history s e)
+      s)))
 
 (defun aob-acp--restore-target ()
   "The stored conversation to bring back: the one at point, else one picked."
