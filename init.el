@@ -608,6 +608,23 @@ address space, which is not what a freed cache gives back."
 (defvar nerd-icons-font-family)
 (setq nerd-icons-font-family "JetBrainsMono Nerd Font Mono")
 
+(defun ygg-font-unify (&rest _)
+  "Draw the whole interface in the one family.
+A proportional face in a frame built on a grid is the one line that
+does not line up, and the generic Monospace is not this monospace:
+both are pointed at whatever `default' is wearing.  Re-run when a
+theme loads, since a theme is free to put them back."
+  (let ((mono (face-attribute 'default :family nil t)))
+    (dolist (face '(variable-pitch variable-pitch-text
+                    fixed-pitch fixed-pitch-serif
+                    custom-button custom-button-mouse custom-button-pressed
+                    icon-button modus-themes-button))
+      (when (facep face)
+        (set-face-attribute face nil :family mono)))))
+
+(ygg-font-unify)
+(add-hook 'enable-theme-functions #'ygg-font-unify)
+
 ;;; Idle warmup: preload lazy modules + recentf so first use is instant
 (run-with-idle-timer
  2 nil
