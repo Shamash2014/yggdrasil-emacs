@@ -30,6 +30,14 @@
     ("dialyxir" "dialyzer"))
   "Tasks worth offering only where the dependency that provides them is.")
 
+(defconst ygg-project-commands--flutter
+  '("pub get" "run" "test" "analyze" "clean")
+  "What any Flutter checkout can be told to do.")
+
+(defconst ygg-project-commands--dart
+  '("pub get" "test" "analyze" "format .")
+  "What a Dart package that is not a Flutter app can be told to do.")
+
 (defconst ygg-project-commands--go
   '(("build" . "build ./...") ("test" . "test ./...") ("vet" . "vet ./...")))
 
@@ -179,6 +187,53 @@ unescaped, which is enough for the handful of keys read here."
                        patterns)))))
       (ygg-project-commands--expand (nreverse patterns) dir))))
 
+(defun ygg-project-commands--yaml-list (text key)
+  "The plain list under KEY in TEXT, to the first line that ends it."
+  (when (string-match (format "^%s:[ \t]*\n" (regexp-quote key)) text)
+    (let ((lines (split-string (substring text (match-end 0)) "\n"))
+          (done nil)
+          out)
+      (dolist (line lines)
+        (unless done
+          (cond
+           ((string-match "\\`[ \t]*-[ \t]*[\"']?\\([^\"'\n]+?\\)[\"']?[ \t]*\\'" line)
+            (push (match-string 1 line) out))
+           ;; blank lines and comments are part of the list; a line back
+           ;; at the left margin is the next key, and the end of it
+           ((string-match-p "\\`[ \t]*\\(#.*\\)?\\'" line) nil)
+           (t (setq done t)))))
+      (nreverse out))))
+
+(defun ygg-project-commands--melos-packages (root)
+  "The packages a melos workspace lists, as directories."
+  (when-let* ((file (ygg-project-commands--first root "melos.yaml" "pubspec.yaml"))
+              (text (ygg-project-commands--text file))
+              (patterns (ygg-project-commands--yaml-list text "packages")))
+    (seq-filter (lambda (dir) (ygg-project-commands--file dir "pubspec.yaml"))
+                (ygg-project-commands--expand patterns root))))
+
+(defun ygg-project-commands--melos-scripts (root)
+  "The scripts a melos workspace defines, by name."
+  (when-let* ((file (ygg-project-commands--first root "melos.yaml" "pubspec.yaml"))
+              (text (ygg-project-commands--text file))
+              ((string-match "^scripts:[ \t]*\n" text)))
+    (let ((lines (split-string (substring text (match-end 0)) "\n"))
+          (done nil)
+          (indent nil)
+          out)
+      (dolist (line lines)
+        (unless done
+          (cond
+           ;; the names are the keys one level in; what a script runs is
+           ;; keyed deeper, and `run' is not the name of every script
+           ((string-match "\\`\\([ \t]+\\)\\([a-zA-Z][a-zA-Z0-9_:-]*\\):" line)
+            (let ((depth (length (match-string 1 line))))
+              (unless indent (setq indent depth))
+              (when (= depth indent) (push (match-string 2 line) out))))
+           ((string-match-p "\\`[ \t]*\\(#.*\\)?\\'" line) nil)
+           ((string-match-p "\\`[^ \t]" line) (setq done t)))))
+      (nreverse out))))
+
 (defun ygg-project-commands--mix-apps (root)
   "The apps of an umbrella, which is how Elixir spells a monorepo."
   (when-let* ((mix (ygg-project-commands--file root "mix.exs"))
@@ -196,7 +251,8 @@ unescaped, which is enough for the handful of keys read here."
                         (ygg-project-commands--pnpm-workspaces root)
                         (ygg-project-commands--cargo-workspaces root)
                         (ygg-project-commands--go-workspaces root)
-                        (ygg-project-commands--mix-apps root)))))
+                        (ygg-project-commands--mix-apps root)
+                        (ygg-project-commands--melos-packages root)))))
 
 
 ;;; What one directory can run
@@ -312,6 +368,20 @@ for it."
       (pcase-dolist (`(,name . ,args) ygg-project-commands--go)
         (push (ygg-project-commands--entry name dir root 'go (format "go %s" args))
               out)))
+    (when-let* ((pubspec (ygg-project-commands--file dir "pubspec.yaml")))
+      (let* ((text (ygg-project-commands--text pubspec))
+             (flutter (string-match-p "^[ \t]*\\(flutter:\\|sdk: flutter\\)" (or text "")))
+             (runner (if flutter 'flutter 'dart)))
+        (dolist (task (if flutter
+                          ygg-project-commands--flutter
+                        ygg-project-commands--dart))
+          (push (ygg-project-commands--entry
+                 task dir root runner (format "%s %s" runner task))
+                out))
+        (dolist (name (ygg-project-commands--melos-scripts dir))
+          (push (ygg-project-commands--entry
+                 name dir root 'melos (format "melos run %s" name))
+                out))))
     (when-let* ((mix (ygg-project-commands--file dir "mix.exs")))
       (let ((text (ygg-project-commands--text mix)))
         ;; an alias may shadow a task of the same name — it is still one
