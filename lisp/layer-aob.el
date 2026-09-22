@@ -287,9 +287,10 @@ actions keep their tool title.  The short path stays the clickable target."
 
 (setq aob-compose-hint "ZZ send · ZA attach · ZQ abort")
 
-;; no float, and nothing new to make room for either: the draft stands in
-;; the window the conversation is in and hands it back when it closes
-(setq aob-compose-float nil)
+;; the draft floats at the foot of the frame, where a prompt line belongs;
+;; the window action below is what a terminal frame falls back to
+(setq aob-compose-float t)
+(setq aob-compose-float-poshandler #'posframe-poshandler-frame-bottom-center)
 
 (defun ygg-aob--compose-display (buffer alist)
   "Show BUFFER as a box over the conversation it is going to.

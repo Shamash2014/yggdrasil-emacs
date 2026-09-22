@@ -622,6 +622,11 @@ placed by aob-compose-display-action, a box at the bottom."
 (declare-function posframe-show "posframe")
 (declare-function posframe-delete "posframe")
 (declare-function posframe-poshandler-frame-top-center "posframe")
+(declare-function posframe-poshandler-frame-bottom-center "posframe")
+
+(defcustom aob-compose-float-poshandler #'posframe-poshandler-frame-top-center
+  "Where the floating box stands: a posframe poshandler."
+  :type 'function :group 'aob)
 
 (defun aob-compose--float-p ()
   "Whether the box can float here."
@@ -662,7 +667,7 @@ focus unless NO-FOCUS.  Returns the window it stands in."
              (frame (with-selected-frame parent
                       (posframe-show
                        buffer
-                       :poshandler #'posframe-poshandler-frame-top-center
+                       :poshandler aob-compose-float-poshandler
                      :width (max 40 (round (* aob-compose-float-width
                                               (frame-width parent))))
                      :height aob-compose-float-height
