@@ -794,6 +794,29 @@ row, else nowhere."
           (forward-line 1)))
       (when-let* ((target (or exact loose))) (goto-char target)))))
 
+(defcustom ygg-projects-entry-spacing 0.4
+  "Extra line height under an entry, as a share of the line.
+A sublist is a list of things, not a paragraph: what tells one row
+from the next is the space around it."
+  :type 'number :group 'ygg-projects)
+
+(defun ygg-projects--space-entries ()
+  "Put air under each entry, but not between the two lines of one.
+The property has to sit on the newline that ends the line — on the
+first character it is read by nothing — and vui writes those newlines
+itself, so this runs over what it drew."
+  (let ((inhibit-read-only t))
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((eol (line-end-position)))
+          (when (and (get-text-property (line-beginning-position) 'ygg-entry)
+                     (< eol (point-max))
+                     (not (get-text-property (1+ eol) 'ygg-cont)))
+            (put-text-property eol (1+ eol)
+                               'line-spacing ygg-projects-entry-spacing)))
+        (forward-line 1)))))
+
 (defun ygg-projects-refresh ()
   "Redraw the sidebar from what the projects are running now.
 Point is kept on the row it was on rather than at the offset that row
@@ -810,6 +833,7 @@ the sidebar moving on its own."
           (vui-update-props ygg-projects--instance
                             (list :roots (ygg-projects--roots)
                                   :open ygg-projects--open))
+          (ygg-projects--space-entries)
           (ygg-projects--goto-row row)
           (when (and (window-live-p win) start (<= start (point-max)))
             (set-window-start win start t)))))))
