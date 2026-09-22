@@ -977,6 +977,7 @@ windows around, the width it was opened at is the width it keeps."
     (let ((ygg-projects--sizing t))
       (dolist (win (get-buffer-window-list (current-buffer) nil t))
         (set-window-fringes win 0 ygg-projects-gutter)
+        (unless (zerop (window-hscroll win)) (set-window-hscroll win 0))
         (when (window-parameter win 'window-side)
           (let ((delta (- ygg-projects-width (window-total-width win))))
             (unless (zerop delta)
@@ -987,6 +988,9 @@ windows around, the width it was opened at is the width it keeps."
   "Make BUF read like a sidebar and answer to the modal layer."
   (with-current-buffer buf
     (setq truncate-lines t)
+    ;; a panel has no columns off to the right: point reaching the end of
+    ;; a truncated row must not slide the whole sidebar sideways
+    (setq-local auto-hscroll-mode nil)
     (setq-local cursor-type nil)
     (setq-local left-margin-width 0)
     (setq-local line-spacing 0)
