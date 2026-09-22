@@ -618,7 +618,14 @@ where nothing can be read."
      (propertize (concat head
                          (propertize first 'font-lock-face 'ygg-projects-entry)
                          (ygg-projects--right
-                          (propertize badge 'font-lock-face 'ygg-projects-count)
+                          ;; the badge is the state, so it is the colour of
+                          ;; the state: green at work, orange waiting on
+                          ;; you, grey once there is nothing to wait for
+                          (propertize badge 'font-lock-face
+                                      (if (and (fboundp 'aob-session-p)
+                                               (aob-session-p payload))
+                                          (ygg-projects--session-dot payload)
+                                        'ygg-projects-count))
                           ;; the row is as tall as it needs, unless its
                           ;; name carries on below, where the air belongs
                           (unless (and rest (not (string-empty-p rest)))
@@ -1181,11 +1188,21 @@ The line keeps its place on screen; what opens, opens below it."
           ('folders (dired entry))
           ('processes
            (if (and (consp entry) (eq (car entry) 'docker))
-               (let ((default-directory root)
-                     (name (plist-get (cdr entry) :name)))
+               (let* ((default-directory root)
+                      (name (plist-get (cdr entry) :name))
+                      (buffer (format "*docker: %s*" name)))
                  (async-shell-command
                   (format "docker logs --tail 200 -f %s" (shell-quote-argument name))
-                  (format "*docker: %s*" name)))
+                  buffer)
+                 ;; a log is a stream: it is read at the end, it never
+                 ;; ends, and fontifying every line of it as it arrives
+                 ;; is work thrown away by the next line
+                 (with-current-buffer buffer
+                   (font-lock-mode -1)
+                   (setq-local comint-buffer-maximum-size 4000)
+                   (setq-local comint-scroll-show-maximum-output t)
+                   (add-hook 'comint-output-filter-functions
+                             #'comint-truncate-buffer nil t)))
              (pop-to-buffer entry)))
           ('worktrees (if (fboundp 'ygg-space-open)
                           (ygg-space-open entry)
