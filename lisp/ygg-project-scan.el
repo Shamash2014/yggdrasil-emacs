@@ -147,6 +147,30 @@ from it only lasts until the next scan finds the folder again."
            (and (fboundp 'project-known-project-roots)
                 (project-known-project-roots)))))
 
+(defvar project--list)
+(declare-function project--write-project-list "project" ())
+
+(defun ygg-project--forget (dir)
+  "Take DIR out of `project\='s own list, however that list spells it.
+It stores what each caller handed it — one abbreviates the home
+folder, another expands it — and forgets by string equality, so a
+project remembered as ~/x is still there after forgetting /home/me/x."
+  (dolist (spelling (delete-dups
+                     (list dir (directory-file-name dir)
+                           (abbreviate-file-name dir)
+                           (abbreviate-file-name (directory-file-name dir)))))
+    (when (fboundp 'project-forget-project)
+      (ignore-errors (project-forget-project spelling))))
+  ;; and whatever spelling neither of those was
+  (when (and (boundp 'project--list) (listp project--list))
+    (let ((rest (seq-remove (lambda (entry)
+                              (equal dir (ygg-project--key (car entry))))
+                            project--list)))
+      (unless (equal rest project--list)
+        (setq project--list rest)
+        (when (fboundp 'project--write-project-list)
+          (ignore-errors (project--write-project-list)))))))
+
 (defvar ygg-project--importing nil
   "Non-nil while an import is putting a project on the list.")
 
@@ -293,8 +317,7 @@ scan will offer it again next time you import one."
                           (mapcar #'abbreviate-file-name (ygg-project-roots))
                           nil t)))
   (let ((dir (file-name-as-directory (expand-file-name dir))))
-    (when (fboundp 'project-forget-project)
-      (ignore-errors (project-forget-project dir)))
+    (ygg-project--forget dir)
     (remhash dir ygg-project-import--state)
     (run-hooks 'ygg-project-import-hook)
     (message "ygg: removed %s" (abbreviate-file-name dir))
