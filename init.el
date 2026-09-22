@@ -124,12 +124,28 @@
 (add-hook 'emacs-startup-hook
           (lambda ()
             ;; after load-theme, or the theme clobbers these
-            (set-face-attribute 'which-key-key-face nil
-                                :inherit 'default :weight 'bold)
-            (set-face-attribute 'which-key-command-description-face nil
-                                :inherit 'font-lock-comment-face)
-            (set-face-attribute 'which-key-group-description-face nil
-                                :inherit 'warning :weight 'normal))
+            ;; Helix: the key is the thing you are looking for, so it
+            ;; carries the colour; what it does is plain text, not a
+            ;; comment; a submenu is marked by being another colour again
+            ;; the colour has to be set, not inherited: a theme that
+            ;; already gave the face a foreground keeps it, and the
+            ;; inherit is never consulted
+            (let ((key (face-attribute 'warning :foreground nil t))
+                  (group (face-attribute 'success :foreground nil t))
+                  (text (face-attribute 'default :foreground nil t)))
+              (set-face-attribute 'which-key-key-face nil
+                                  :foreground key :weight 'bold)
+              (set-face-attribute 'which-key-command-description-face nil
+                                  :foreground text :weight 'normal)
+              (set-face-attribute 'which-key-group-description-face nil
+                                  :foreground group :underline nil
+                                  :weight 'normal))
+            (set-face-attribute 'which-key-separator-face nil
+                                :inherit 'shadow)
+            (when (facep 'which-key-posframe-border)
+              (set-face-attribute 'which-key-posframe-border nil
+                                  :background (face-attribute 'vertical-border
+                                                              :foreground nil t))))
           95)
 (defun ygg--posframe-size (info)
   "Measure the posframe buffer's own content size in pixels.
@@ -168,27 +184,46 @@ render above the top edge on macOS child frames."
   (let ((size (ygg--posframe-size info)))
     (cons 0 (max 0 (- (plist-get info :parent-frame-height) (cdr size))))))
 
+(defun ygg--posframe-bottom-right (info)
+  "Helix\='s keymap box: bottom right, a cell clear of the edges."
+  (let* ((size (ygg--posframe-size info))
+         (pad (or (frame-char-width) 8)))
+    (cons (max 0 (- (plist-get info :parent-frame-width) (car size) pad))
+          (max 0 (- (plist-get info :parent-frame-height) (cdr size)
+                    (* 2 (or (frame-char-height) 16)))))))
+
+(defun ygg--which-key-enable (&optional frame)
+  "Float the keymap box, once there is a FRAME that can show one."
+  (with-selected-frame (or (and (frame-live-p frame) frame) (selected-frame))
+    (when (and (display-graphic-p)
+               (require 'which-key-posframe nil t)
+               (not (bound-and-true-p which-key-posframe-mode)))
+      (which-key-posframe-mode 1))))
+
+;; registered before the package is near loaded: a daemon makes its first
+;; frame when the first client connects, which is as often before the
+;; deferred setup below as after it
+(add-hook 'server-after-make-frame-hook #'ygg--which-key-enable)
+(add-hook 'after-make-frame-functions #'ygg--which-key-enable)
+
 (elpaca which-key-posframe
-  ;; Helix shows its hints as a bar across the bottom, key then label,
-  ;; one per line — not a floating box in the corner
-  (setq which-key-posframe-poshandler #'ygg--posframe-bottom-bar
-        which-key-posframe-border-width 0
+  ;; Helix's keymap box: bottom right, bordered, hugging its contents,
+  ;; key then label — not a bar across the whole frame
+  (setq which-key-posframe-poshandler #'ygg--posframe-bottom-right
+        which-key-posframe-border-width 1
         which-key-posframe-min-width 0
         which-key-posframe-parameters
         '((left-fringe . 0) (right-fringe . 0)
-          (internal-border-width . 8)))
-  (setq which-key-max-display-columns nil
+          (internal-border-width . 10)))
+  (setq which-key-max-display-columns 1
         which-key-separator "  "
         which-key-prefix-prefix ""
-        which-key-show-prefix 'bottom
-        which-key-add-column-padding 2)
-  (if (display-graphic-p)
-      (which-key-posframe-mode 1)
-    (add-hook 'server-after-make-frame-hook
-              (lambda ()
-                (when (and (display-graphic-p)
-                           (not (bound-and-true-p which-key-posframe-mode)))
-                  (which-key-posframe-mode 1))))))
+        ;; the pending keys belong in the status line, which is where
+        ;; Helix puts them; the box is only what can follow them
+        which-key-show-prefix nil
+        which-key-add-column-padding 2
+        which-key-max-description-length 32)
+  (ygg--which-key-enable))
 
 ;;; Visuals: the nvim theme.lua palette (near-monochrome + muted accents)
 ;;; ported onto built-in modus. Dark = dark_palette(), light = light_palette().
