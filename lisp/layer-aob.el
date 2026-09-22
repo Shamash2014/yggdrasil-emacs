@@ -287,6 +287,11 @@ actions keep their tool title.  The short path stays the clickable target."
 
 (setq aob-compose-hint "ZZ send · ZA attach · ZQ abort")
 
+;; the box floats over the frame rather than splitting it: a draft to a
+;; session already on screen should not take the layout apart, and the
+;; sidebar is not something a compose box gets to close
+(setq aob-compose-float t)
+
 ;; a buffer opened to be written starts in insert state (after
 ;; yggdrasil-local-mode has already forced normal on mode change)
 (defun ygg-aob--compose-in-insert (buffer)

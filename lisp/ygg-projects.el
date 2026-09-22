@@ -17,12 +17,14 @@
 (require 'project)
 (require 'ygg-ui)
 (require 'ygg-project-commands nil t)
+(require 'ygg-git nil t)
 (require 'vui nil t)
 
 (declare-function ygg-project-roots "ygg-project-scan" (&optional refresh))
 (declare-function aob-sessions "aob")
 (declare-function aob-session-project "aob" (s))
 (declare-function aob-session-state "aob" (s))
+(declare-function aob-session-p "aob" (x))
 (declare-function ygg-aob-session-subagents "layer-aob" (s))
 (declare-function aob-acp-resumable-entries "aob-acp" ())
 (declare-function aob-acp-resume-entry "aob-acp" (e &optional pref))
@@ -76,8 +78,17 @@
 (defface ygg-projects-count '((t :inherit shadow))
   "Face for a row's count." :group 'ygg-projects)
 
-(defface ygg-projects-live '((t :inherit success))
-  "Face for the dot of a project with something running." :group 'ygg-projects)
+(defface ygg-projects-live
+  '((((background dark)) :foreground "#98BB6C")
+    (t :foreground "#3f6f2a"))
+  "Face for the dot of a session at work, or a project holding one.
+Not `success\=': the theme reads that as blue, and a dot whose whole job
+is to say something is running should be green at a glance."
+  :group 'ygg-projects)
+
+(defface ygg-projects-waiting '((t :inherit warning))
+  "Face for the dot of a session that is up but waiting on you."
+  :group 'ygg-projects)
 
 (defface ygg-projects-idle '((t :inherit shadow))
   "Face for the dot of a quiet project." :group 'ygg-projects)
@@ -155,6 +166,34 @@ counts as one the project has, since it can be resumed."
              (car subs))
           (+ (length all) (cdr subs) past))))
 
+(defconst ygg-projects-busy-states '(working starting)
+  "States in which a session is doing something of its own.")
+
+(defconst ygg-projects-over-states '(dead done failed)
+  "States after which a session does nothing more.")
+
+(defun ygg-projects--session-dot (payload)
+  "The dot PAYLOAD gets: green at work, orange waiting, grey when over.
+Only a session has a state; a subagent the agent merely reported, a
+folder or a command has none and keeps the quiet dot."
+  (let ((state (and (fboundp 'aob-session-p) (aob-session-p payload)
+                    (aob-session-state payload))))
+    (cond ((memq state ygg-projects-busy-states) 'ygg-projects-live)
+          ((null state) 'ygg-projects-idle)
+          ((memq state ygg-projects-over-states) 'ygg-projects-idle)
+          (t 'ygg-projects-waiting))))
+
+(defun ygg-projects--dot (root)
+  "ROOT\='s own dot, the loudest of its sessions\=' dots.
+Green while any of them works, orange while one is up and waiting, grey
+when the project has nothing of its own running."
+  (let ((states (mapcar #'aob-session-state (ygg-projects--sessions root))))
+    (cond ((seq-some (lambda (st) (memq st ygg-projects-busy-states)) states)
+           'ygg-projects-live)
+          ((seq-some (lambda (st) (not (memq st ygg-projects-over-states))) states)
+           'ygg-projects-waiting)
+          (t 'ygg-projects-idle))))
+
 (defun ygg-projects--roots ()
   "Every project root worth listing, in an order that does not move.
 Neither opening a project nor an agent starting in one reorders the
@@ -180,21 +219,40 @@ nothing."
                                 (ygg-projects--sessions root)))))
       (cons n n))))
 
+(defvar ygg-projects--buffers nil
+  "Each root's buffers as (ROOT COMMANDS . TERMINALS), for one redraw.")
+
+(defun ygg-projects--forget-buffers ()
+  (setq ygg-projects--buffers nil))
+
+(defun ygg-projects--root-buffers (root)
+  "ROOT's running commands and its terminals, as one walk of the buffer list.
+Three rows of every card ask the same question; the list is long, and
+`expand-file-name' per buffer per row is what makes a redraw felt."
+  (or (cdr (assoc root ygg-projects--buffers))
+      (let (cmds terms)
+        (dolist (b (buffer-list))
+          (when (string-prefix-p root (expand-file-name
+                                       (buffer-local-value 'default-directory b)))
+            (when (provided-mode-derived-p
+                   (buffer-local-value 'major-mode b) 'ghostel-mode)
+              (push b terms))
+            (when (and (process-live-p (get-buffer-process b))
+                       (provided-mode-derived-p
+                        (buffer-local-value 'major-mode b)
+                        'compilation-mode 'comint-mode))
+              (push b cmds))))
+        (let ((cell (cons (nreverse cmds) (nreverse terms))))
+          (push (cons root cell) ygg-projects--buffers)
+          cell))))
+
 (defun ygg-projects--commands (root)
   "Commands running in ROOT now, out of what its build systems offer.
 The offer is read from a cache that never blocks; a scan is asked for
 in the background and redraws this when it settles."
   (let ((total (length (and (fboundp 'ygg-project-commands)
                             (ygg-project-commands root))))
-        (running (seq-count
-                  (lambda (b)
-                    (and (process-live-p (get-buffer-process b))
-                         (with-current-buffer b
-                           (derived-mode-p 'compilation-mode 'comint-mode))
-                         (string-prefix-p
-                          root (expand-file-name
-                                (buffer-local-value 'default-directory b)))))
-                  (buffer-list))))
+        (running (length (car (ygg-projects--root-buffers root)))))
     (cons running (max total running))))
 
 (defun ygg-projects--scan-commands ()
@@ -211,14 +269,7 @@ commands, and counting them would ask for another scan."
                   (run-at-time 0 nil #'ygg-projects-refresh))))))))
 
 (defun ygg-projects--terminals (root)
-  (let ((n (seq-count
-            (lambda (b)
-              (and (provided-mode-derived-p
-                    (buffer-local-value 'major-mode b) 'ghostel-mode)
-                   (string-prefix-p root (expand-file-name
-                                          (buffer-local-value
-                                           'default-directory b)))))
-            (buffer-list))))
+  (let ((n (length (cdr (ygg-projects--root-buffers root)))))
     (cons n n)))
 
 (defun ygg-projects--folders (root)
@@ -236,17 +287,51 @@ additionally given to see."
                      (and (fboundp 'ygg-project-workspaces)
                           (ignore-errors (ygg-project-workspaces root))))))))
 
+(defvar ygg-projects--worktrees-cache (make-hash-table :test #'equal)
+  "Each root's other worktrees as (NAME . DIR), as the last scan found them.")
+
+(defvar ygg-projects--worktrees-pending (make-hash-table :test #'equal)
+  "Roots with a worktree scan already out.")
+
+(defun ygg-projects--worktrees-parse (out root)
+  "The worktrees OUT names, ROOT's own checkout left out."
+  (let ((own (file-name-as-directory (expand-file-name root)))
+        (start 0)
+        dirs)
+    (while (string-match "^worktree \\(.*\\)$" out start)
+      (setq start (match-end 0))
+      (let ((dir (match-string 1 out)))
+        (unless (equal (file-name-as-directory (expand-file-name dir)) own)
+          (push (cons (file-name-nondirectory dir) dir) dirs))))
+    (nreverse dirs)))
+
+(defun ygg-projects--worktree-entries (root)
+  "ROOT's other worktrees, from the cache only — safe on a drawing path."
+  (gethash root ygg-projects--worktrees-cache))
+
+(defun ygg-projects--scan-worktrees ()
+  "Ask git what worktrees the projects on show have, without waiting.
+Never from the render: a fork per card per redraw is what the command
+scan already learned not to do."
+  (when (fboundp 'ygg-git-async)
+    (dolist (root (ygg-projects--roots))
+      (unless (gethash root ygg-projects--worktrees-pending)
+        (when (ignore-errors
+                (ygg-git-async
+                 root '("worktree" "list" "--porcelain")
+                 (lambda (out exit)
+                   (remhash root ygg-projects--worktrees-pending)
+                   (let ((was (gethash root ygg-projects--worktrees-cache))
+                         (now (and (zerop exit)
+                                   (ygg-projects--worktrees-parse out root))))
+                     (puthash root now ygg-projects--worktrees-cache)
+                     (unless (equal was now) (ygg-projects-refresh))))))
+          (puthash root t ygg-projects--worktrees-pending))))))
+
 (defun ygg-projects--worktrees (root)
-  "Worktrees ROOT has besides the checkout itself."
-  (let ((n (or (ignore-errors
-                 (with-temp-buffer
-                   (let ((default-directory root))
-                     (when (zerop (call-process "git" nil t nil
-                                                "worktree" "list" "--porcelain"))
-                       (goto-char (point-min))
-                       (how-many "^worktree ")))))
-               0)))
-    (cons (max 0 (1- n)) (max 0 (1- n)))))
+  "Worktrees ROOT has besides the checkout itself, as last scanned."
+  (let ((n (length (ygg-projects--worktree-entries root))))
+    (cons n n)))
 
 
 ;;; What a row holds, when you open it
@@ -300,35 +385,18 @@ additionally given to see."
                        (and (fboundp 'ygg-project-commands)
                             (ygg-project-commands root))))
     ('terminals (mapcar (lambda (b) (cons (buffer-name b) b))
-                        (seq-filter
-                         (lambda (b)
-                           (and (provided-mode-derived-p
-                                 (buffer-local-value 'major-mode b) 'ghostel-mode)
-                                (string-prefix-p
-                                 root (expand-file-name
-                                       (buffer-local-value 'default-directory b)))))
-                         (buffer-list))))
+                        (cdr (ygg-projects--root-buffers root))))
     ('folders (mapcar (lambda (d) (cons (abbreviate-file-name
                                         (directory-file-name d))
                                        d))
                       (ygg-projects--folders root)))
-    ('worktrees (ignore-errors
-                  (with-temp-buffer
-                    (let ((default-directory root))
-                      (when (zerop (call-process "git" nil t nil
-                                                 "worktree" "list" "--porcelain"))
-                        (goto-char (point-min))
-                        (let (out)
-                          (while (re-search-forward "^worktree \\(.*\\)$" nil t)
-                            (let ((dir (match-string 1)))
-                              (unless (equal (file-name-as-directory dir) root)
-                                (push (cons (file-name-nondirectory dir) dir) out))))
-                          (nreverse out)))))))
+    ('worktrees (ygg-projects--worktree-entries root))
     (_ nil)))
 
 (defun ygg-projects--entry-text (label root kind payload)
   (propertize (concat "        "
-                      (propertize "·" 'font-lock-face 'ygg-projects-idle)
+                      (propertize "·" 'font-lock-face
+                                  (ygg-projects--session-dot payload))
                       "  "
                       (propertize label 'font-lock-face 'ygg-projects-entry)
                       (ygg-projects--right ""))
@@ -388,10 +456,7 @@ cannot spill past the text area and mark every line truncated."
 (defun ygg-projects--head-text (root)
   "ROOT's own line."
   (let* ((raw (file-name-nondirectory (directory-file-name root)))
-         (agents (ygg-projects--agents root))
-         (dot (propertize "●" 'font-lock-face
-                          (if (> (car agents) 0)
-                              'ygg-projects-live 'ygg-projects-idle)))
+         (dot (propertize "●" 'font-lock-face (ygg-projects--dot root)))
          ;; the basename is the name already: what is worth saying is
          ;; which folder it sits in
          (full (abbreviate-file-name
@@ -501,6 +566,7 @@ the sidebar moving on its own."
         (let* ((row (ygg-projects--row-at-point))
                (win (get-buffer-window buf 'visible))
                (start (and (window-live-p win) (window-start win))))
+          (ygg-projects--forget-buffers)
           (vui-update-props ygg-projects--instance
                             (list :roots (ygg-projects--roots)
                                   :open ygg-projects--open))
@@ -523,6 +589,7 @@ the sidebar moving on its own."
         (setq moved 1)))
     (beginning-of-line)))
 
+(declare-function ygg-git-async "ygg-git" (root args callback))
 (declare-function ygg-project-commands "ygg-project-commands" (root))
 (declare-function ygg-project-commands-refresh "ygg-project-commands" (root &optional cb))
 (declare-function ygg-project-commands-run "ygg-project-commands" (command))
@@ -600,7 +667,8 @@ that; a project row is only the list this sidebar keeps."
   "Redraw, and look again for what the projects can run."
   (interactive)
   (ygg-projects-refresh)
-  (ygg-projects--scan-commands))
+  (ygg-projects--scan-commands)
+  (ygg-projects--scan-worktrees))
 
 (defun ygg-projects-next () (interactive) (ygg-projects--goto 1))
 (defun ygg-projects-prev () (interactive) (ygg-projects--goto -1))
@@ -827,6 +895,7 @@ the whole frame instead of a side window."
       (unless (and buf (buffer-local-value 'ygg-projects--instance buf))
         ;; vui-mount ends in `switch-to-buffer', which would leave the
         ;; sidebar showing in the main window as well as its own
+        (ygg-projects--forget-buffers)
         (let ((inst (save-window-excursion
                       (vui-mount (vui-component 'ygg-projects-view
                                                 :roots (ygg-projects--roots)
@@ -837,6 +906,7 @@ the whole frame instead of a side window."
       (ygg-projects--setup buf)
       (ygg-projects-refresh)
       (ygg-projects--scan-commands)
+      (ygg-projects--scan-worktrees)
       (let ((win (ygg-projects--display buf)))
         ;; dedicated: whatever the sidebar opens goes to the main area,
         ;; never into the sidebar's own window
