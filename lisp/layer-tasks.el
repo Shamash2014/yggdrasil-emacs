@@ -322,6 +322,49 @@ Lands in a live `*task:…*' buffer, tracked by `ygg-jobs'/`ygg-job-kill'."
        ((or (null choice) (string-empty-p choice)) nil)
        (t (user-error "Unknown: %s" choice))))))
 
+;;; Output is a stream, not a document: nothing keeps all of it
+
+(defcustom ygg-output-max-lines 4000
+  "Lines an output buffer keeps before the top goes.
+A log is read at its end.  Fifty of them keeping everything is a
+machine spending its afternoon on text nobody will scroll back to."
+  :type 'natnum :group 'yggdrasil)
+
+(defun ygg-output--bound-comint ()
+  "Keep this comint buffer to `ygg-output-max-lines'."
+  (setq-local comint-buffer-maximum-size ygg-output-max-lines)
+  (add-hook 'comint-output-filter-functions #'comint-truncate-buffer nil t))
+
+(defun ygg-output--bound-compilation ()
+  "Keep this compilation buffer to `ygg-output-max-lines'."
+  (save-excursion
+    (let ((inhibit-read-only t)
+          (keep (- (line-number-at-pos (point-max)) ygg-output-max-lines)))
+      (when (> keep 0)
+        (goto-char (point-min))
+        (forward-line keep)
+        (delete-region (point-min) (point))))))
+
+;;;###autoload
+(defun ygg-output-bound-process (process)
+  "Keep PROCESS\='s buffer to `ygg-output-max-lines\=', whatever wrote it.
+Not every stream is a comint: a plain process buffer has no filter
+hook to hang truncation on, so the truncation goes on the filter."
+  (when (processp process)
+    (let ((filter (or (process-filter process)
+                      #'internal-default-process-filter)))
+      (set-process-filter
+       process
+       (lambda (proc chunk)
+         (funcall filter proc chunk)
+         (when-let* ((buffer (process-buffer proc))
+                     ((buffer-live-p buffer)))
+           (with-current-buffer buffer (ygg-output--bound-compilation))))))
+    process))
+
+(add-hook 'comint-mode-hook #'ygg-output--bound-comint)
+(add-hook 'compilation-filter-hook #'ygg-output--bound-compilation)
+
 (yggdrasil-define-keys 'ygg-leader-open-map
   "c" #'ygg-command-panel :label "command panel"
   "!" #'ygg-run-async :label "run async command"

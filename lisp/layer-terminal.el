@@ -521,6 +521,33 @@ The side it lands on becomes the default for the next terminal."
 (when (fboundp 'elpaca)
   (elpaca docker))
 
+(declare-function docker-compose-run-docker-compose-async-with-buffer "docker-compose" (action &rest args))
+
+(defun ygg-docker-compose-ps ()
+  "What the stack has, running or not — the one thing its transient lacks."
+  (interactive)
+  (docker-compose-run-docker-compose-async-with-buffer "ps" "-a"))
+
+(declare-function ygg-output-bound-process "layer-tasks" (process))
+
+(defun ygg-docker--bound-output (process &rest _)
+  "Keep what docker streams into a buffer from filling it."
+  (when (fboundp 'ygg-output-bound-process) (ygg-output-bound-process process))
+  process)
+
+(with-eval-after-load 'docker-process
+  ;; docker's own output buffers are special-mode, not comint: the hook
+  ;; that bounds a shell does not reach them
+  (advice-add 'docker-run-start-file-process-shell-command
+              :filter-return #'ygg-docker--bound-output))
+
+(with-eval-after-load 'docker-compose
+  ;; after Config, in the group it belongs to; the lower-case keys are
+  ;; the arguments and the upper-case ones the verbs
+  (ignore-errors
+    (transient-append-suffix 'docker-compose "V"
+      '("A" "Ps (all)" ygg-docker-compose-ps))))
+
 (yggdrasil-leader-def "o" ygg-leader-open-map "open")
 
 (provide 'layer-terminal)

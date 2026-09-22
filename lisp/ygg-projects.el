@@ -363,6 +363,22 @@ repository it came out of."
                                    (file-name-directory
                                     (directory-file-name common))))))))))
 
+(declare-function docker-run-docker-async-with-buffer-noninteractive "docker-core" (&rest args))
+(declare-function docker-compose "docker-compose" ())
+
+(defun ygg-projects--docker-logs (root name)
+  "Follow container NAME\='s log, through docker.el where it is there.
+Its plumbing knows which docker to call and how to reach a remote
+host; this only says which container and how much of it."
+  (let ((default-directory root))
+    (require 'docker-core nil t)
+    (if (fboundp 'docker-run-docker-async-with-buffer-noninteractive)
+        (docker-run-docker-async-with-buffer-noninteractive
+         "logs" "-f" "--tail" "200" name)
+      (async-shell-command (format "docker logs --tail 200 -f %s"
+                                   (shell-quote-argument name))
+                           (format "*docker: %s*" name)))))
+
 (defun ygg-projects--containers (root)
   "The containers docker last reported for ROOT."
   (gethash root ygg-projects--docker-cache))
@@ -1188,21 +1204,7 @@ The line keeps its place on screen; what opens, opens below it."
           ('folders (dired entry))
           ('processes
            (if (and (consp entry) (eq (car entry) 'docker))
-               (let* ((default-directory root)
-                      (name (plist-get (cdr entry) :name))
-                      (buffer (format "*docker: %s*" name)))
-                 (async-shell-command
-                  (format "docker logs --tail 200 -f %s" (shell-quote-argument name))
-                  buffer)
-                 ;; a log is a stream: it is read at the end, it never
-                 ;; ends, and fontifying every line of it as it arrives
-                 ;; is work thrown away by the next line
-                 (with-current-buffer buffer
-                   (font-lock-mode -1)
-                   (setq-local comint-buffer-maximum-size 4000)
-                   (setq-local comint-scroll-show-maximum-output t)
-                   (add-hook 'comint-output-filter-functions
-                             #'comint-truncate-buffer nil t)))
+               (ygg-projects--docker-logs root (plist-get (cdr entry) :name))
              (pop-to-buffer entry)))
           ('worktrees (if (fboundp 'ygg-space-open)
                           (ygg-space-open entry)
@@ -1223,9 +1225,13 @@ The line keeps its place on screen; what opens, opens below it."
                    (if (fboundp 'ygg-task-run) (call-interactively #'ygg-task-run)
                      (user-error "projects: no task runner"))))
       ('folders (call-interactively #'ygg-project-add-folder))
-      ('processes (let ((default-directory root))
-                    (if (fboundp 'ghostel) (call-interactively #'ghostel)
-                      (user-error "projects: no terminal"))))
+      ('processes
+       (let ((default-directory root))
+         ;; where there is a stack, the stack is what the row is about
+         (cond ((and (ygg-projects--docker-p root) (fboundp 'docker-compose))
+                (call-interactively #'docker-compose))
+               ((fboundp 'ghostel) (call-interactively #'ghostel))
+               (t (user-error "projects: no terminal")))))
       ('worktrees (let ((default-directory root))
                     (cond ((fboundp 'ygg-wt-list) (call-interactively #'ygg-wt-list))
                           ((fboundp 'magit-worktree)
