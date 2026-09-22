@@ -1790,7 +1790,7 @@ session with none was opened before anything was handed to it."
                              " · ")
                           "no kind it ever named")))
         (if (null sent)
-            (insert "nothing was sent with this session\n")
+            (insert "nothing was handed to this session\n\n")
           (dolist (entry sent)
             (let ((url (plist-get entry :url)))
               (insert (format "%s  %s\n  %s\n"
@@ -1804,6 +1804,27 @@ session with none was opened before anything was handed to it."
               (when url
                 (insert (format "  %s\n" (aob-acp--mcp-probe url))))
               (insert "\n"))))
+        ;; and what else there is to be had, whether or not this session
+        ;; was given it: a session opened before a server existed says
+        ;; nothing about the server, only about itself
+        (let ((named (mapcar (lambda (e) (plist-get e :name)) sent)))
+          (when (and (fboundp 'aob-mcp-host-live-p) (fboundp 'aob-mcp-url))
+            (insert (propertize "this Emacs serves\n" 'face 'bold))
+            (insert (format "  %s  %s%s\n"
+                            (if (bound-and-true-p aob-mcp-host-name)
+                                aob-mcp-host-name "aob")
+                            (if (aob-mcp-host-live-p) (aob-mcp-url) "not running")
+                            (if (member (bound-and-true-p aob-mcp-host-name) named)
+                                "" "  — not handed to this session"))))
+          (when-let* ((declared (and (fboundp 'aob-acp-project-mcp-servers)
+                                     (ignore-errors
+                                       (aob-acp-project-mcp-servers
+                                        (aob-session-project s))))))
+            (insert (propertize "\nthis project declares\n" 'face 'bold))
+            (dolist (entry declared)
+              (insert (format "  %s  %s\n" (plist-get entry :name)
+                              (or (plist-get entry :url)
+                                  (plist-get entry :command) ""))))))
         (goto-char (point-min))))
     (display-buffer buf)))
 

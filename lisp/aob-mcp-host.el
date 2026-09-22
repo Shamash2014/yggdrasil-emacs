@@ -15,6 +15,13 @@
 (require 'aob-mcp)
 (require 'url-util)
 
+;; declared, not merely bound: these live in aob-acp, and a file compiled
+;; without knowing they are special binds them lexically — the `let' below
+;; then holds a value nothing else can see, and every session opens with
+;; no servers and no token
+(defvar aob-acp-mcp-servers)
+(defvar aob-acp-session-refs)
+
 (defcustom aob-mcp-host-name "aob"
   "What the server is called in a session's server list."
   :type 'string :group 'aob-mcp)
