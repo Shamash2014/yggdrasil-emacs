@@ -614,13 +614,14 @@ scan already learned not to do."
                                     (ygg-aob-session-subagents s))))))
               live))
             ;; ended, but the conversation is still there to pick up
-            (past (mapcar (lambda (e)
+            (past (and ygg-projects-show-past
+                  (mapcar (lambda (e)
                             (cons (or (ygg-projects--entry-ts e) 0)
                                   (list (cons (or (plist-get e :name)
                                                   (plist-get e :agent)
                                                   "session")
                                               e))))
-                          (ygg-projects--past root))))
+                          (ygg-projects--past root)))))
        ;; running first and then ended, each newest first, with air
        ;; between: what is alive is told from what is kept without
        ;; reading a single badge, and a session's own rows go with it
@@ -1252,6 +1253,19 @@ discards everything the filter left."
     (when (fboundp 'aob-transcript-move) (aob-transcript-move entry "discarded"))
     (ygg-projects-refresh)))
 
+(defcustom ygg-projects-show-past t
+  "Whether the sessions row lists ended conversations under the live ones.
+Off, it lists only what is running or waiting: the row is then what is
+going on, not the history of the project."
+  :type 'boolean :group 'ygg-projects)
+
+(defun ygg-projects-toggle-past ()
+  "List ended conversations under the live sessions, or stop listing them."
+  (interactive)
+  (setq ygg-projects-show-past (not ygg-projects-show-past))
+  (ygg-projects-refresh)
+  (message "projects: old sessions %s" (if ygg-projects-show-past "shown" "hidden")))
+
 (defun ygg-projects-toggle-archived ()
   "Show the conversations put away, or stop showing them."
   (interactive)
@@ -1470,7 +1484,8 @@ row was picked from."
     (define-key map "+" #'project-switch-project)
     (define-key map "A" #'ygg-projects-add)
     (define-key map "I" #'ygg-projects-import)
-    (define-key map "z" #'ygg-projects-toggle-archived)
+    (define-key map "z" #'ygg-projects-toggle-past)
+    (define-key map "Z" #'ygg-projects-toggle-archived)
     (define-key map "D" #'ygg-projects-delete)
     (define-key map "-" #'ygg-projects-archive)
     (define-key map "x" #'ygg-projects-archive-ask)
@@ -1717,7 +1732,8 @@ The next handler is handed what this one leaves, so all of them are left."
     (value . ((wanted . ,(and ygg-projects--wanted t))
               (open . ,ygg-projects--open)
               (open-row . ,ygg-projects--open-row)
-              (archived . ,ygg-projects-show-archived)))
+              (archived . ,ygg-projects-show-archived)
+              (past . ,ygg-projects-show-past)))
     (remaining-buffers . ,buffers)))
 
 (defun ygg-projects--session-load (session-data)
@@ -1728,7 +1744,8 @@ sidebar stays as it is."
     (setq ygg-projects--wanted (alist-get 'wanted state)
           ygg-projects--open (alist-get 'open state)
           ygg-projects--open-row (alist-get 'open-row state)
-          ygg-projects-show-archived (alist-get 'archived state))))
+          ygg-projects-show-archived (alist-get 'archived state)
+          ygg-projects-show-past (alist-get 'past state t))))
 
 (defun ygg-projects--stray-window-p (win)
   "Non-nil when WIN shows the sidebar but is not the sidebar\='s own window.
