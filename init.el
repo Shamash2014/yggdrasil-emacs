@@ -624,6 +624,30 @@ address space, which is not what a freed cache gives back."
    (minibuffer-depth-indicate-mode 1)
    (save-place-mode 1)))
 
+;;; Compiled where the macros live: a package's macro — vui's components,
+;;; elpaca's own — only expands correctly in a session that has loaded it,
+;;; so the config compiles itself once everything is up rather than from a
+;;; bare batch Emacs.  Layers are left as source: their elpaca calls do not
+;;; survive compilation.
+(defun ygg-recompile-lisp ()
+  "Byte-compile what is stale under lisp/, then native-compile the lot."
+  (interactive)
+  (let* ((dir (locate-user-emacs-file "lisp"))
+         (dirs (list dir (expand-file-name "agent-objects" dir)))
+         (done 0))
+    (dolist (d dirs)
+      (dolist (f (directory-files d t "\\`[^.].*\\.el\\'"))
+        (unless (string-prefix-p "layer-" (file-name-nondirectory f))
+          (when (file-newer-than-file-p f (concat f "c"))
+            (when (ignore-errors (byte-compile-file f)) (setq done (1+ done)))))))
+    (when (and (fboundp 'native-comp-available-p) (native-comp-available-p))
+      (dolist (d dirs) (native-compile-async d nil)))
+    (when (called-interactively-p 'interactive)
+      (message "recompiled %d file%s" done (if (= done 1) "" "s")))
+    done))
+
+(run-with-idle-timer 3 nil #'ygg-recompile-lisp)
+
 ;;; emacsclient reaches this session (agent tooling relies on it)
 (require 'server)
 (unless (server-running-p) (server-start))

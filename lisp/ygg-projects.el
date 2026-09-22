@@ -240,7 +240,7 @@ Three rows of every card ask the same question; the list is long, and
             (when (and (process-live-p (get-buffer-process b))
                        (provided-mode-derived-p
                         (buffer-local-value 'major-mode b)
-                        'compilation-mode 'comint-mode))
+                        '(compilation-mode comint-mode)))
               (push b cmds))))
         (let ((cell (cons (nreverse cmds) (nreverse terms))))
           (push (cons root cell) ygg-projects--buffers)
@@ -800,11 +800,17 @@ and no state gets to put its cursor back."
     (deactivate-mark)))
 
 (defun ygg-projects--display (buf)
-  "Put BUF in the sidebar's own window and return it."
-  (display-buffer buf `((display-buffer-in-side-window)
-                        (side . left) (slot . 0)
-                        (window-width . ,ygg-projects-width)
-                        (window-parameters . ((no-delete-other-windows . t))))))
+  "Put BUF in the sidebar's own window and return it.
+The width is preserved once set: `balance-windows\=' counts a side
+window as one more pane to share the frame out between, and hands a
+panel a third of the screen."
+  (let ((win (display-buffer buf `((display-buffer-in-side-window)
+                                   (side . left) (slot . 0)
+                                   (window-width . ,ygg-projects-width)
+                                   (window-parameters
+                                    . ((no-delete-other-windows . t)))))))
+    (when (window-live-p win) (window-preserve-size win t t))
+    win))
 
 (defmacro ygg-projects--keeping (&rest body)
   "Run BODY, and put the sidebar back if BODY took it away.
@@ -843,10 +849,23 @@ the whole frame instead of a side window."
                  (eq (window-buffer win) (get-buffer ygg-projects-buffer-name)))
         (set-window-buffer win (other-buffer (window-buffer win)))))))
 
+(defvar ygg-projects--sizing nil
+  "Non-nil while the sidebar is putting its own width back.")
+
 (defun ygg-projects--trim-window ()
-  "Nothing to the left of a card, a dark run to its right."
-  (dolist (win (get-buffer-window-list (current-buffer) nil t))
-    (set-window-fringes win 0 ygg-projects-gutter)))
+  "Nothing to the left of a card, a dark run to its right, and the width it was given.
+`balance-windows\=' counts the sidebar as one more pane to share the
+frame out between, and a panel is not a pane: whatever moves the
+windows around, the width it was opened at is the width it keeps."
+  (unless ygg-projects--sizing
+    (let ((ygg-projects--sizing t))
+      (dolist (win (get-buffer-window-list (current-buffer) nil t))
+        (set-window-fringes win 0 ygg-projects-gutter)
+        (when (window-parameter win 'window-side)
+          (let ((delta (- ygg-projects-width (window-total-width win))))
+            (unless (zerop delta)
+              (ignore-errors (window-resize win delta t t))))
+          (window-preserve-size win t t))))))
 
 (defun ygg-projects--setup (buf)
   "Make BUF read like a sidebar and answer to the modal layer."
