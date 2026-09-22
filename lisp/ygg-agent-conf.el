@@ -147,6 +147,53 @@ is started by hand."
      (or (ygg-agent--json-mcp (format "~/.%s/settings.json" agent) project)
          (ygg-agent--json-mcp (format "~/.%s.json" agent) project)))))
 
+(defcustom ygg-agent-instructions
+  "## This editor (aob)
+
+You are running inside Emacs, and the `aob` MCP server is that editor.
+
+- Delegate with `subagent_spawn`, and follow the work with
+  `subagent_list`, `subagent_status` and `subagent_kill`.  A subagent
+  spawned that way is a session of its own in the editor — visible,
+  steerable, and not spending your context.
+- Ask the editor what it already knows before shelling out for the same
+  answer: `xref_references` and `xref_apropos` for who calls what,
+  `imenu_symbols` for a file's shape, `treesit_info` for the parse, and
+  `diagnostics` for what a checker says about a file that is open.
+- `tool_names` lists everything this server offers."
+  "What every session started from here is told about this editor.
+Written into the config home the session runs under, which is where
+the CLI looks for what the user told it once and for all."
+  :type 'string :group 'yggdrasil)
+
+(defconst ygg-agent--instructions-open "<!-- aob: managed, edited by Emacs -->")
+(defconst ygg-agent--instructions-close "<!-- /aob -->")
+
+(defun ygg-agent-write-instructions (home)
+  "Put `ygg-agent-instructions\=' in HOME\='s memory file, and only that.
+The block is fenced, so what you wrote around it stays yours and a
+second run replaces ours rather than adding another."
+  (when (and home (file-directory-p home))
+    (let* ((file (expand-file-name "CLAUDE.md" home))
+           (block (concat ygg-agent--instructions-open "\n"
+                          ygg-agent-instructions "\n"
+                          ygg-agent--instructions-close "\n"))
+           (old (when (file-readable-p file)
+                  (with-temp-buffer (insert-file-contents file) (buffer-string))))
+           (new (cond
+                 ((null old) block)
+                 ((string-match (concat (regexp-quote ygg-agent--instructions-open)
+                                        "\\(?:.\\|\n\\)*?"
+                                        (regexp-quote ygg-agent--instructions-close)
+                                        "\n?")
+                                old)
+                  (replace-match block t t old))
+                 (t (concat old (if (string-suffix-p "\n" old) "" "\n") "\n" block)))))
+      (unless (equal old new)
+        (make-directory (file-name-directory file) t)
+        (with-temp-file file (insert new)))
+      file)))
+
 (defconst ygg-agent--config-homes
   '(("claude" :var "CLAUDE_CONFIG_DIR" :marker ".claude-config-dir" :home "~/.claude"
      :share ("skills" "agents" "commands" "plugins" "hooks"

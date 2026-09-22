@@ -110,6 +110,9 @@ and a config that arranges sessions can address them its own way.")
               (lambda (_frame) (aob-trace--fit-margins)) nil t)
     (aob-trace--fit-margins)))
 
+(defvar-local aob-trace--fit-width nil
+  "The width the blocks in this buffer were drawn for.")
+
 (defun aob-trace--fit-margins ()
   "Give the trace the window, keeping the gutter the mark hangs in.
 `aob-trace-measure\=' caps the line only when it is set: a measure is
@@ -123,7 +126,16 @@ widened is not that window."
       (set-window-margins win 4 slack)
       (set-window-fringes win 0 0)
       (with-current-buffer (window-buffer win)
-        (setq-local fill-column (max 20 (- total 4 slack)))))))
+        (setq-local fill-column (max 20 (- total 4 slack)))
+        ;; a card was clipped to the width it was drawn at; a window that
+        ;; changed width is a window whose cards are the wrong length
+        (let ((now (window-body-width win)))
+          (unless (equal now aob-trace--fit-width)
+            (setq aob-trace--fit-width now)
+            (when-let* ((s (and aob-trace--session-id
+                                (aob-session-get aob-trace--session-id))))
+              (dolist (ev (aob-session-events s)) (plist-put ev :line nil))
+              (setq aob-trace--blocks nil))))))))
 
 (defcustom aob-trace-icons t
   "Draw event kinds as nerd-font glyphs (needs a Nerd Font) instead of ASCII."
@@ -364,13 +376,21 @@ Zero follows `aob-trace-measure\='.  A card is a row in a log: what ran
 and how long it took.  The command itself is under TAB, whole."
   :type 'natnum :group 'aob)
 
+(defun aob-trace--text-width ()
+  "Columns the trace has for a line of text, as it stands now."
+  (let ((win (get-buffer-window (current-buffer) t)))
+    (cond ((> aob-trace-card-width 0) aob-trace-card-width)
+          (win (max 20 (window-body-width win)))
+          ((> aob-trace-measure 0) aob-trace-measure)
+          (t 78))))
+
 (defun aob-trace--one-line (text)
-  "TEXT as the single line a card has room for."
-  (let* ((line (car (split-string (or text "") "\n" t)))
-         (room (max 12 (- (if (> aob-trace-card-width 0)
-                              aob-trace-card-width
-                            aob-trace-measure)
-                          12))))
+  "TEXT as the single line a card has room for.
+Against the window, not against the measure: the measure is off by
+default, and a card measured against zero is a card twelve columns
+wide."
+  (let ((line (car (split-string (or text "") "\n" t)))
+        (room (max 24 (- (aob-trace--text-width) 14))))
     (truncate-string-to-width (string-trim (or line "")) room)))
 
 (defun aob-trace--card (ev body)

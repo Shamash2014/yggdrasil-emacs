@@ -673,6 +673,27 @@ buffer-local that says where the words were going."
 
 (advice-add 'aob-acp-spawn :around #'ygg-aob--with-project-skills)
 
+;; and what it is running inside.  An agent that does not know the editor
+;; has an MCP server shells out for what the editor already knows, and
+;; delegates inside its own context instead of opening a session
+(declare-function ygg-agent-write-instructions "ygg-agent-conf" (home))
+
+(defun ygg-aob--with-instructions (fn agent &rest args)
+  "Tell the session being spawned what this editor offers it."
+  (when (and (fboundp 'ygg-agent--config-env)
+             (fboundp 'ygg-agent-write-instructions))
+    (ignore-errors
+      (let* ((root (or (bound-and-true-p aob-acp-start-dir)
+                       (ignore-errors (project-root (project-current nil)))
+                       default-directory))
+             (entry (ygg-agent--config-env agent agent root))
+             (home (and (stringp entry) (string-match "=\\(.*\\)\\'" entry)
+                        (match-string 1 entry))))
+        (ygg-agent-write-instructions home))))
+  (apply fn agent args))
+
+(advice-add 'aob-acp-spawn :around #'ygg-aob--with-instructions)
+
 ;; and every server its own configuration declares.  A session gets what
 ;; session/new carries and nothing else, so an agent started from here
 ;; would otherwise reach fewer tools than the same agent started by hand
