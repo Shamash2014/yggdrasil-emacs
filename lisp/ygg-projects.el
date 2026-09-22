@@ -612,8 +612,22 @@ the sidebar moving on its own."
 (declare-function ygg-project-remove "ygg-project-scan" (dir))
 
 (defun ygg-projects-add (dir)
-  "Remember DIR and show it in the sidebar."
-  (interactive "DProject: ")
+  "Remember DIR and show it in the sidebar.
+The ones you forgot are offered by name: forgetting a project is a
+decision you can take back without having to remember where it lives.
+Anything else, and the folder picker takes over."
+  (interactive
+   (let* ((forgotten (mapcar #'abbreviate-file-name
+                             (and (boundp 'ygg-project-ignored)
+                                  ygg-project-ignored)))
+          (pick (string-trim
+                 (completing-read
+                  (if forgotten "Project (forgotten, or a folder): " "Project: ")
+                  forgotten nil nil))))
+     (list (if (and (not (string-empty-p pick))
+                    (file-directory-p (expand-file-name pick)))
+               (expand-file-name pick)
+             (read-directory-name "Project: " nil nil t)))))
   (ygg-project-add dir)
   (ygg-projects-refresh))
 
