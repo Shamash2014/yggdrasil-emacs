@@ -694,7 +694,9 @@ cannot spill past the text area and mark every line truncated."
         (cmds (ygg-projects--commands root))
         (terms (ygg-projects--processes root))
         (wts (ygg-projects--worktrees root)))
-    (list (list 'agents "▲"
+    ;; the same family as the rows under it: one text glyph among four
+    ;; icons is the one that looks wrong, whatever its width says
+    (list (list 'agents (ygg-projects--icon "nf-md-triangle_outline" "▲")
                 "Sessions" (ygg-projects--counts (car agents) (cdr agents)))
           (list 'commands (ygg-projects--icon "nf-md-console" ">")
                 "Commands" (ygg-projects--counts (car cmds) (cdr cmds)))
@@ -746,25 +748,51 @@ cannot spill past the text area and mark every line truncated."
                               roots)))))
         t))
 
+(defun ygg-projects--entry-key (entry)
+  "Something ENTRY can be found again by after a redraw."
+  (cond ((null entry) nil)
+        ((and (fboundp 'aob-session-p) (aob-session-p entry))
+         (aob-session-id entry))
+        ((and (consp entry) (proper-list-p entry) (plist-get entry :acp-id))
+         (plist-get entry :acp-id))
+        ((and (consp entry) (eq (car entry) 'docker))
+         (plist-get (cdr entry) :name))
+        ((bufferp entry) (buffer-name entry))
+        ((stringp entry) entry)
+        (t (format "%s" entry))))
+
 (defun ygg-projects--row-at-point ()
-  "What the line point is on stands for, as (ROOT . KIND)."
-  (cons (get-text-property (line-beginning-position) 'ygg-project)
-        (get-text-property (line-beginning-position) 'ygg-row)))
+  "What the line point is on stands for: its project, row and entry.
+The entry as well as the row: forty-nine conversations are forty-nine
+lines of one row, and a redraw that only knows the row puts the
+cursor back on the first of them."
+  (list (get-text-property (line-beginning-position) 'ygg-project)
+        (get-text-property (line-beginning-position) 'ygg-row)
+        (ygg-projects--entry-key
+         (get-text-property (line-beginning-position) 'ygg-entry))))
 
 (defun ygg-projects--goto-row (cell)
-  "Put point back on the row CELL names, if it is still drawn."
+  "Put point back on what CELL names, if it is still drawn.
+The line that holds the same entry, else the first line of the same
+row, else nowhere."
   (when (car cell)
-    (let ((target nil))
+    (let ((exact nil) (loose nil))
       (save-excursion
         (goto-char (point-min))
-        (while (and (not target) (not (eobp)))
-          (if (and (equal (get-text-property (line-beginning-position) 'ygg-project)
-                          (car cell))
-                   (eq (get-text-property (line-beginning-position) 'ygg-row)
-                       (cdr cell)))
-              (setq target (line-beginning-position))
-            (forward-line 1))))
-      (when target (goto-char target)))))
+        (while (not (eobp))
+          (let ((here (line-beginning-position)))
+            (when (and (equal (get-text-property here 'ygg-project) (nth 0 cell))
+                       (eq (get-text-property here 'ygg-row) (nth 1 cell))
+                       (not (get-text-property here 'ygg-cont)))
+              (unless loose (setq loose here))
+              (when (and (nth 2 cell)
+                         (equal (ygg-projects--entry-key
+                                 (get-text-property here 'ygg-entry))
+                                (nth 2 cell))
+                         (not exact))
+                (setq exact here))))
+          (forward-line 1)))
+      (when-let* ((target (or exact loose))) (goto-char target)))))
 
 (defun ygg-projects-refresh ()
   "Redraw the sidebar from what the projects are running now.
@@ -1044,8 +1072,16 @@ The line keeps its place on screen; what opens, opens below it."
                         (dired entry))))
       (pcase row
       ('project (ygg-projects-open))
-      ('agents (if (fboundp 'ygg-aob-pick) (ygg-aob-pick)
-                 (user-error "projects: no agent picker")))
+      ('agents
+       ;; the picker where there is something to pick, the list
+       ;; otherwise: a row that answers a keypress with an error is a
+       ;; row that looks broken
+       (condition-case nil
+           (if (and (fboundp 'ygg-aob-pick)
+                    (fboundp 'aob-live-sessions) (aob-live-sessions))
+               (ygg-aob-pick)
+             (ygg-projects-toggle))
+         (error (ygg-projects-toggle))))
       ('commands (let ((default-directory root))
                    (if (fboundp 'ygg-task-run) (call-interactively #'ygg-task-run)
                      (user-error "projects: no task runner"))))
