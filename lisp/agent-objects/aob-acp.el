@@ -390,7 +390,7 @@ request, after its decision is pushed and its event recorded.")
          (condition-case err (funcall fn s d tc)
            (error (message "aob-acp-request-functions: %S" err))))))
     ;; AskUserQuestion (and MCP elicitations) arrive as a form request;
-    ;; it becomes a Decision like permissions do — ✋, then r answers
+    ;; it becomes a Decision like permissions do — ■, then r answers
     ("elicitation/create"
      (let ((d (list :reply-id id
                     :kind 'elicitation

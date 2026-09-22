@@ -188,7 +188,7 @@ Computed once and cached into the event's `:line', so the render-diff's
 `eq' skip and the Mono font's single-cell advance both stay intact."
   (pcase (plist-get ev :type)
     ('tool (if (plist-get ev :subagent)
-               (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-account_arrow_right_outline" 'shadow) "↳")
+               (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-account_arrow_right_outline" 'shadow) "└")
              (pcase (plist-get ev :kind)
                ("read"    (or (aob-trace--nf #'nerd-icons-faicon "nf-fa-file_o" 'shadow) "→"))
                ("edit"    (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-pencil" 'warning) "±"))
@@ -202,7 +202,7 @@ Computed once and cached into the event's `:line', so the render-diff's
     ('message    (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-message_text_outline" 'shadow) "┃"))
     ('thought    (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-thought_bubble_outline" 'shadow) "∴"))
     ('prompt     (or (aob-trace--nf #'nerd-icons-octicon "nf-oct-chevron_right" 'ygg-state-insert) "❯"))
-    ('permission (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-shield_key_outline" 'warning) "✋"))
+    ('permission (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-shield_key_outline" 'warning) "■"))
     ('plan       (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-format_list_checks" 'shadow) "▤"))
     ('stop       (or (and aob-trace-icons
                           (or (featurep 'nerd-icons) (require 'nerd-icons nil t))
@@ -304,7 +304,7 @@ NAME is the agent this session runs; the owner\='s own turns say you."
           (concat "\n"
                   (propertize who 'font-lock-face 'aob-trace-speaker)
                   (if (plist-get ev :parent)
-                      (propertize " ↳ subagent" 'font-lock-face 'shadow)
+                      (propertize " └ subagent" 'font-lock-face 'shadow)
                     "")
                   (if (aob-trace--delta-p)
                       ""
@@ -508,7 +508,7 @@ remap such as `ygg-focus-dim' cannot outrank it."
                 ev (or (plist-get ev :title) (plist-get ev :kind) ""))
            (concat
             (aob-trace--prose
-             (concat (if (plist-get ev :parent) "↳ " "")
+             (concat (if (plist-get ev :parent) "└ " "")
                      (aob-trace--verb ev) " "))
             (propertize (or (plist-get ev :title) (plist-get ev :kind) "")
                         'font-lock-face 'aob-trace-target)
@@ -527,7 +527,7 @@ remap such as `ygg-focus-dim' cannot outrank it."
                (delq nil (list (let ((st (aob-trace--stamp time)))
                                  (unless (string-empty-p st) st))
                                ;; subagent work nests under its Task
-                               (and (plist-get ev :parent) " ↳")
+                               (and (plist-get ev :parent) " └")
                                (or (plist-get ev :title) (plist-get ev :kind))
                                (let ((st (aob-trace--status ev)))
                                  (unless (string-empty-p st) st))
@@ -545,7 +545,7 @@ remap such as `ygg-focus-dim' cannot outrank it."
                    (let ((stamp (aob-trace--stamp time)))
                      (if (string-empty-p stamp) "" (concat stamp " ")))
                    ;; a subagent's own words, in its own trace
-                   (if (plist-get ev :parent) "↳ " "")
+                   (if (plist-get ev :parent) "└ " "")
                    ;; narrative is the point of the trace: messages and
                    ;; prompts show whole (visual-line wraps them); thoughts
                    ;; stay a head, TAB expands.  The glyph column already
@@ -1384,10 +1384,10 @@ and what the header counts against — not the window the agent claims."
 (defun aob-plan--glyph (status)
   (pcase status
     ("in_progress" (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-progress_clock" 'warning)
-                       (propertize "◐" 'face 'warning)))
+                       (propertize "◉" 'face 'warning)))
     ("completed" (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-checkbox_marked_outline" 'success)
-                     (propertize "☑" 'face 'success)))
-    (_ (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-checkbox_blank_outline" 'shadow) "☐"))))
+                     (propertize "✓" 'face 'success)))
+    (_ (or (aob-trace--nf #'nerd-icons-mdicon "nf-md-checkbox_blank_outline" 'shadow) "▫"))))
 
 (defun aob-plan--render (&optional force)
   (when-let* ((s (aob-session-get aob-plan--session-id)))
@@ -1415,7 +1415,7 @@ and what the header counts against — not the window the agent claims."
             (insert (propertize (format "── done %d\n" (length done))
                                 'face 'shadow))
             (dolist (e done)
-              (insert (propertize (format "☑ %s\n" (plist-get e :content))
+              (insert (propertize (format "✓ %s\n" (plist-get e :content))
                                   'face 'shadow)))))))))
 
 (defun aob-plan-buffer (s)

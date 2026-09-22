@@ -209,7 +209,8 @@ The walk is a source of suggestions for the import, and nothing else."
 (defvar ygg-project-import--state (make-hash-table :test 'equal)
   "Root to the step its import is on, while one is running.")
 
-(defconst ygg-project-import--frames ["◐" "◓" "◑" "◒"])
+(defconst ygg-project-import--frames ["▘" "▝" "▗" "▖"]
+  "A spinner the mono font draws itself: a fallback glyph is a\ndifferent face at a different width, in a panel made of columns.")
 (defvar ygg-project-import--tick 0)
 (defvar ygg-project-import--timer nil)
 

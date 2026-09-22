@@ -1239,15 +1239,15 @@ it cannot hold never blocks the queue, and steering falls back to cancel."
       (should (equal (aob-session-ref s :plan-tick) 1)))
     (with-current-buffer (aob-plan-buffer s)
       (let ((str (buffer-string)))
-        (should (string-match-p "◐ implement parser" str))
-        (should (string-match-p "☐ write tests" str))
+        (should (string-match-p "◉ implement parser" str))
+        (should (string-match-p "▫ write tests" str))
         (should (string-match-p "── done 1" str))
-        (should (< (string-match "◐" str) (string-match "☐" str)))
-        (should (< (string-match "☐" str) (string-match "── done" str))))
+        (should (< (string-match "◉" str) (string-match "▫" str)))
+        (should (< (string-match "▫" str) (string-match "── done" str))))
       ;; a todo edit replaces the entries and re-renders in place
       (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"plan\",\"entries\":[{\"content\":\"scaffold module\",\"status\":\"completed\",\"priority\":\"high\"},{\"content\":\"implement parser\",\"status\":\"completed\",\"priority\":\"high\"},{\"content\":\"write tests\",\"status\":\"in_progress\",\"priority\":\"medium\"}]}}}")
       (aob-plan--render)
-      (should (string-match-p "◐ write tests" (buffer-string)))
+      (should (string-match-p "◉ write tests" (buffer-string)))
       (should (string-match-p "── done 2" (buffer-string)))
       (should (equal (plist-get (aob-session-ref s :plan-ev) :title)
                      "plan 2/3 · write tests")))))
@@ -1288,8 +1288,8 @@ moved on lands again at the tail instead of rewriting a scrolled-past line."
           (setq aob-trace--expanded
                 (list (plist-get (aob-session-ref s :plan-ev) :seq)))
           (aob-trace--render t)
-          (should (string-match-p "☑ a" (buffer-string)))
-          (should (string-match-p "◐ b" (buffer-string))))))))
+          (should (string-match-p "✓ a" (buffer-string)))
+          (should (string-match-p "◉ b" (buffer-string))))))))
 
 (ert-deftest aob-plan-survives-eviction ()
   "An evicted plan event leaves no orphan pointer: the next update makes

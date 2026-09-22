@@ -246,14 +246,14 @@ answer can be drawn from without re-joining it ten times a second.
 (defun aob-event-summary (ev)
   (pcase (plist-get ev :type)
     ('tool (format "%s%s%s"
-                   (if (plist-get ev :subagent) "↳ "
+                   (if (plist-get ev :subagent) "└ "
                      (concat (or (plist-get ev :kind) "tool") " "))
                    (or (plist-get ev :title) "")
                    (if-let* ((st (plist-get ev :stat))) (concat "  " st) "")))
     ('message (aob-event-head ev 48))
     ('thought (concat "… " (aob-event-head ev 44)))
     ('prompt (concat "» " (aob-event-head ev 44)))
-    ('permission (concat "✋ " (or (plist-get ev :title) "permission")))
+    ('permission (concat "■ " (or (plist-get ev :title) "permission")))
     ('plan (or (plist-get ev :title) "plan"))
     ('stop (format "done (%s)%s"
                    (or (plist-get ev :reason) "end")
@@ -1382,17 +1382,17 @@ Proceed based on it."
     (setq aob-modeline-string
           (concat
            (when (> blocked 0)
-             (propertize (format " ✋%d" blocked) 'face 'error))
+             (propertize (format " ■%d" blocked) 'face 'error))
            (when (> working 0)
              (propertize (format " ●%d" working) 'face 'warning))
            (when (> subs 0)
-             (propertize (format " ↳%d" subs) 'face 'warning))
+             (propertize (format " └%d" subs) 'face 'warning))
            (when (> queued 0)
              (propertize (format " »%d" queued) 'face 'shadow))))
     (force-mode-line-update t)))
 
 (define-minor-mode aob-modeline-mode
-  "Show agent attention counts (✋ blocked, ● working) in the modeline."
+  "Show agent attention counts (■ blocked, ● working) in the modeline."
   :global t :group 'aob
   (if aob-modeline-mode
       (progn

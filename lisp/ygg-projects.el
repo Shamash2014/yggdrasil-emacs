@@ -389,10 +389,10 @@ scan already learned not to do."
                  ;; agent mentioned and nothing can be done with
                  (dolist (kid (and (fboundp 'aob-subagent-children)
                                    (aob-subagent-children s)))
-                   (push (cons (format "↳ %s" (aob-session-name kid)) kid) out))
+                   (push (cons (format "└ %s" (aob-session-name kid)) kid) out))
                  (dolist (sub (and (fboundp 'ygg-aob-session-subagents)
                                    (ygg-aob-session-subagents s)))
-                   (push (cons (format "↳ %s" (or (plist-get sub :title)
+                   (push (cons (format "└ %s" (or (plist-get sub :title)
                                                   (plist-get sub :name)
                                                   "subagent"))
                                (cons s sub))

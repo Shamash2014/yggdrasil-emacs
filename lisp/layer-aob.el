@@ -230,7 +230,7 @@ actions keep their tool title.  The short path stays the clickable target."
           (let* ((sub (and (plist-get ev :parent)
                            (gethash (plist-get ev :parent) names)))
                  (label (cond
-                         (sub (concat "↳ " (aob--first-line sub 60)))
+                         (sub (concat "└ " (aob--first-line sub 60)))
                          ((plist-get ev :title)
                           (aob--first-line (plist-get ev :title) 60))
                          (t (or (plist-get ev :kind) "tool")))))
@@ -239,7 +239,7 @@ actions keep their tool title.  The short path stays the clickable target."
       ;; a finished subagent's children were collapsed off the ring; their
       ;; locations ride the surviving Task, still under its name
       (when-let* ((title (and (plist-get ev :children) (plist-get ev :title)))
-                  (label (concat "↳ " (aob--first-line title 60))))
+                  (label (concat "└ " (aob--first-line title 60))))
         (dolist (loc (plist-get ev :child-locs))
           (when-let* ((path (plist-get loc :path)))
             (push (format "%s:%d: %s" path (or (plist-get loc :line) 1) label)
@@ -843,7 +843,7 @@ An already-visible trace is refocused; otherwise it opens in place."
 
 (defun ygg-aob--tree-glyph (s)
   (pcase (aob-session-state s)
-    ('blocked (propertize "✋" 'face 'error))
+    ('blocked (propertize "■" 'face 'error))
     ((or 'working 'starting) (propertize "●" 'face 'warning))
     (_ (propertize "○" 'face 'shadow))))
 
@@ -1149,7 +1149,7 @@ worst attention sits on `a'; a sole agent needs no key."
                                             'face 'error)
                                 (ygg-aob--doing (cdr p) room)
                                 (pcase (aob-session-state (cdr p))
-                                  ('blocked (propertize " ✋" 'face 'error))
+                                  ('blocked (propertize " ■" 'face 'error))
                                   ('working (propertize " ●" 'face 'warning))
                                   (_ ""))))
                       pairs "   "))
@@ -1208,7 +1208,7 @@ questions, so one queue empties under one key."
           (dolist (s (aob-sessions))
             (dolist (d (aob-session-decisions s))
               (insert (propertize
-                       (format "✋ %s — %s%s"
+                       (format "■ %s — %s%s"
                                (aob-session-name s)
                                (plist-get d :title)
                                (if-let* ((det (plist-get d :detail)))
