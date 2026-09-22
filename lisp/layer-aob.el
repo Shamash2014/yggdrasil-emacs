@@ -1325,8 +1325,20 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 
 (defvar ygg-leader-agent-map (make-sparse-keymap) "The a prefix: AI agents.")
 (yggdrasil-leader-def "a" ygg-leader-agent-map "agents")
+(declare-function ygg-project-import "ygg-project-scan" (root &optional callback))
+(declare-function ygg-projects-add "ygg-projects" (dir))
+(declare-function ygg-projects-toggle-archived "ygg-projects" ())
+(declare-function ygg-conversations "ygg-projects" (&optional all))
+
 (yggdrasil-define-keys 'ygg-leader-agent-map
-  "d" #'ygg-projects-sidebar :label "projects")
+  "d" #'ygg-projects-sidebar :label "projects"
+  ;; the verbs the sidebar has, where `:' and the leader can find them:
+  ;; a command reachable only by a key in one buffer is a command you
+  ;; have to already know about
+  "p" #'ygg-project-import :label "import project"
+  "P" #'ygg-projects-add :label "add project"
+  "k" #'ygg-conversations :label "conversations"
+  "z" #'ygg-projects-toggle-archived :label "archived on/off")
 
 (yggdrasil-define-keys 'ygg-leader-agent-map
   ;; works on the visual selection: region is what the answer replaces

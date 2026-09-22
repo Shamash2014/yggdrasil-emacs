@@ -286,6 +286,14 @@ Lands in a live `*task:…*' buffer, tracked by `ygg-jobs'/`ygg-job-kill'."
     (dolist (it (ygg-task--collect))
       (let ((s (format "▶ run  %s" (plist-get it :label))))
         (puthash s (cons 'task it) actions) (push s special)))
+    ;; what this project can be told to run — the justfile, the package
+    ;; scripts, the mix tasks — which the sidebar knows and the panel did
+    ;; not, so the two lists disagreed about what exists
+    (dolist (c (and (fboundp 'ygg-project-commands)
+                    (when-let* ((pr (project-current nil)))
+                      (ignore-errors (ygg-project-commands (project-root pr))))))
+      (let ((s (format "▶ %-6s %s" (plist-get c :source) (plist-get c :name))))
+        (puthash s (cons 'project c) actions) (push s special)))
     (dolist (b (ygg--panel-job-buffers))
       (let ((s (format "⚙ job  %s" (buffer-name b))))
         (puthash s (cons 'job b) actions) (push s special)))
@@ -302,6 +310,10 @@ Lands in a live `*task:…*' buffer, tracked by `ygg-jobs'/`ygg-job-kill'."
        ((eq (car-safe entry) 'task)
         (ygg-task--exec (plist-get (cdr entry) :command) (plist-get (cdr entry) :directory)
                         (plist-get (cdr entry) :label)))
+       ((eq (car-safe entry) 'project)
+        (if (fboundp 'ygg-project-commands-run)
+            (ygg-project-commands-run (cdr entry))
+          (user-error "projects: nothing to run it with")))
        ((eq (car-safe entry) 'job)
         (select-window (display-buffer (cdr entry)
                                        '((display-buffer-reuse-window
