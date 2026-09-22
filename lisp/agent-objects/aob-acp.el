@@ -1528,6 +1528,24 @@ queued, and whoever held it is who sends it afterwards.  Readiness is the
 first place the session's model can be read, so this is where a caller
 that cares which model answers gets to stop the turn.")
 
+(defun aob-acp--want-config (s config)
+  "Set the config options CONFIG names on S, those it advertises.
+CONFIG is a plist of id to value.  An option the agent never offered is
+said once and skipped: a preset written for one agent should not fail a
+session on another."
+  (let ((offered (mapcar (lambda (o) (plist-get o :id))
+                         (aob-session-ref s :config-options))))
+    (dolist (pair (seq-partition config 2))
+      ;; written as a plist, so the ids arrive as keywords; the wire
+      ;; wants the bare name the agent advertised
+      (let* ((key (car pair))
+             (id (if (keywordp key) (substring (symbol-name key) 1)
+                   (format "%s" key)))
+             (value (cadr pair)))
+        (if (and offered (not (member id offered)))
+            (message "aob: %s does not offer %s" (aob-session-name s) id)
+          (aob-acp--set-config s id value))))))
+
 (defun aob-acp--session-opened (s res &optional fallback-id title)
   "Ingest the result of any session-opening method (new/load/fork).
 Every path stores modes/models identically — a resumed or forked
@@ -1554,6 +1572,12 @@ session must not be poorer than a fresh one."
   (when-let* ((want (aob-session-ref s :want-model)))
     (aob-session-put s :want-model nil)
     (aob-acp--want-model s want))
+  ;; and the rest of what the preset asked for — reasoning effort and
+  ;; the like — in the same ordered window, so the first turn runs under
+  ;; all of it and not only the parts that had a path of their own
+  (when-let* ((want (aob-session-ref s :want-config)))
+    (aob-session-put s :want-config nil)
+    (aob-acp--want-config s want))
   (aob-set-state s 'idle)
   (aob-event s 'state :title (or title "session ready"))
   (aob-acp--persist)
@@ -1943,28 +1967,28 @@ a name that is not offered is reported rather than forced."
 
 (defun aob-acp-spawn-with (agent project model &optional intent)
   "Spawn AGENT on PROJECT with MODEL, sending INTENT as its first turn.
-Every choice is made here rather than inherited: the agent, the checkout
-it is sent into, and the model it answers with.
+AGENT is a preset name: what it runs on, how it may act and what it
+answers with come from `aob-acp-presets', so the only thing still asked
+is where.  MODEL overrides the preset\='s own, for a one-off.
 
 With no INTENT the first turn is written in a compose buffer rather than
 the minibuffer, and the session is spawned when that is sent: a first
 prompt is the longest one there is, and it can carry attachments."
   (interactive
-   (let* ((agent (completing-read "ACP agent: " (aob-acp-names)
-                                  nil t nil nil aob-acp-default-agent))
-          (roots (and (fboundp 'ygg-project-roots)
-                      (mapcar #'abbreviate-file-name (ygg-project-roots))))
-          (project (completing-read
-                    "Project: " roots nil nil
-                    (abbreviate-file-name (or (aob-acp--project)
-                                              default-directory))))
-          (offered (cdr (assoc (aob-acp-preset-agent agent) aob-acp-models)))
-          (model (let ((pick (completing-read
-                              (format "Model (%s, empty for its default): "
-                                      (string-join offered "/"))
-                              offered nil nil)))
-                   (unless (string-empty-p (string-trim pick)) pick))))
-     (list agent (expand-file-name project) model nil)))
+   (let* ((preset (completing-read "Preset: " (aob-acp-names)
+                                   nil t nil nil aob-acp-default-agent))
+          ;; the project you are in is the answer nearly every time; a
+          ;; prefix argument is for the times it is not
+          (project (if current-prefix-arg
+                       (completing-read
+                        "Project: "
+                        (and (fboundp 'ygg-project-roots)
+                             (mapcar #'abbreviate-file-name (ygg-project-roots)))
+                        nil nil
+                        (abbreviate-file-name (or (aob-acp--project)
+                                                  default-directory)))
+                     (or (aob-acp--project) default-directory))))
+     (list preset (expand-file-name project) nil nil)))
   (let ((dir (file-name-as-directory project)))
     (if intent
         (aob-acp--spawn-with-1 agent dir model intent nil)
