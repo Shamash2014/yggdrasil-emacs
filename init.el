@@ -629,6 +629,28 @@ address space, which is not what a freed cache gives back."
 ;;; so the config compiles itself once everything is up rather than from a
 ;;; bare batch Emacs.  Layers are left as source: their elpaca calls do not
 ;;; survive compilation.
+(defun ygg--elc-stale-p (file)
+  "Whether FILE\='s .elc is missing, or not strictly newer than the source.
+Equal timestamps count as stale: a file written and compiled inside the
+same second is what `load\=' prefers ever after, and it is the one case
+where a wrong .elc can never be replaced by the source beside it."
+  (let* ((elc (concat file "c"))
+         (theirs (and (file-exists-p elc)
+                      (file-attribute-modification-time (file-attributes elc)))))
+    (or (null theirs)
+        (not (time-less-p (file-attribute-modification-time (file-attributes file))
+                          theirs)))))
+
+(defun ygg--readable-elisp-p (file)
+  "Whether FILE\='s parens close.
+A file being written by an agent while this runs is caught here: a .elc
+compiled from half a definition is loaded in preference to the source
+that will be correct a second later."
+  (with-temp-buffer
+    (insert-file-contents file)
+    (set-syntax-table emacs-lisp-mode-syntax-table)
+    (condition-case nil (progn (check-parens) t) (error nil))))
+
 (defun ygg-recompile-lisp ()
   "Byte-compile what is stale under lisp/, then native-compile the lot."
   (interactive)
@@ -638,7 +660,7 @@ address space, which is not what a freed cache gives back."
     (dolist (d dirs)
       (dolist (f (directory-files d t "\\`[^.].*\\.el\\'"))
         (unless (string-prefix-p "layer-" (file-name-nondirectory f))
-          (when (file-newer-than-file-p f (concat f "c"))
+          (when (and (ygg--elc-stale-p f) (ygg--readable-elisp-p f))
             (when (ignore-errors (byte-compile-file f)) (setq done (1+ done)))))))
     (when (and (fboundp 'native-comp-available-p) (native-comp-available-p))
       (dolist (d dirs) (native-compile-async d nil)))
