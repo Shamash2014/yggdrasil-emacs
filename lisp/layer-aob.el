@@ -612,12 +612,36 @@ frame again until the sidebar is squeezed out of it."
                    (buffer-local-value 'aob-buffer-session-id (window-buffer w))))
             (window-list nil 'no-minibuf)))
 
+(defcustom ygg-aob-subagent-action
+  '((display-buffer-reuse-window
+     ygg-aob--beside-conversation
+     display-buffer-below-selected)
+    (window-height . 0.4))
+  "How a subagent's trace is put on screen: beside the one that sent it."
+  :type 'sexp :group 'aob)
+
+(defun ygg-aob--subagent-p (s)
+  "Whether S is a session another session sent."
+  (and (fboundp 'aob-session-ref) (aob-session-ref s :parent-session) t))
+
+(defun ygg-aob--beside-conversation (buffer alist)
+  "Put BUFFER under the conversation window, leaving it where it is."
+  (when-let* ((win (ygg-aob--conversation-window)))
+    (with-selected-window win
+      (display-buffer-below-selected buffer alist))))
+
 (defun ygg-aob--show-trace (s)
   "Show S's trace in the window conversations are read in.
-Point follows only when this is the conversation you just spoke to."
+A subagent opens beside the conversation that sent it instead: what it
+was sent to do is read against what was being done, and taking the
+window would hide the one you were reading."
   (unless noninteractive
     (when-let* ((buf (ignore-errors (aob-trace-buffer s)))
-                (win (or (when-let* ((w (ygg-aob--conversation-window)))
+                (win (or (and (ygg-aob--subagent-p s)
+                              (ignore-errors
+                                (display-buffer buf ygg-aob-subagent-action)))
+                         (when-let* ((w (and (not (ygg-aob--subagent-p s))
+                                             (ygg-aob--conversation-window))))
                            (unless (eq (window-buffer w) buf)
                              (set-window-buffer w buf))
                            w)
@@ -639,6 +663,14 @@ buffer-local that says where the words were going."
 (advice-add 'aob-compose-send :around #'ygg-aob--compose-opens-trace)
 
 (add-hook 'aob-session-created-hook #'ygg-aob--show-trace 95)
+
+(defun ygg-aob--trace-of-subagent (fn s &rest args)
+  "Open a subagent's trace beside the conversation, not over it."
+  (if (ygg-aob--subagent-p s)
+      (ygg-aob--show-trace s)
+    (apply fn s args)))
+
+(advice-add 'aob-trace :around #'ygg-aob--trace-of-subagent)
 
 ;; a project is not always one checkout.  whatever folders it carries
 ;; are handed to its agents as additional directories, so work that
