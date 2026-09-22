@@ -147,6 +147,22 @@
   (yggdrasil-localleader-def mode "r" #'aob-transcript-wake "wake it (resume acp)")
   (yggdrasil-localleader-def mode "t" #'aob-subagents "subagents"))
 
+(declare-function ygg-ex--cmd-write "yggdrasil-ex" (range bang args))
+(declare-function aob-trace-send "aob-trace")
+
+(defun ygg-aob--write-sends (fn &rest args)
+  "Make :w send, where the buffer is a prompt rather than a file.
+A draft and the line at the foot of a trace are both things you finish
+and let go of; the key that means \"I am done with this text\" is
+already in the hand."
+  (cond ((derived-mode-p 'aob-compose-mode) (aob-compose-send))
+        ((derived-mode-p 'aob-trace-mode) (aob-trace-send))
+        (t (apply fn args))))
+
+(with-eval-after-load 'yggdrasil-ex
+  (advice-add 'ygg-ex--cmd-write :around #'ygg-aob--write-sends)
+  (advice-add 'ygg-ex--cmd-wq :around #'ygg-aob--write-sends))
+
 (defvar ygg-quickscope-inhibit)
 
 ;; the trace is prose, not code: f and t still jump, but their preview

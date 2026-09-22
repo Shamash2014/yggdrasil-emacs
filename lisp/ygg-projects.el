@@ -21,6 +21,8 @@
 (require 'vui nil t)
 
 (declare-function ygg-project-roots "ygg-project-scan" (&optional refresh))
+(declare-function ygg-project-import-mark "ygg-project-scan" (root))
+(defvar ygg-project-import-hook)
 (declare-function aob-sessions "aob")
 (declare-function aob-session-project "aob" (s))
 (declare-function aob-session-state "aob" (s))
@@ -471,7 +473,10 @@ cannot spill past the text area and mark every line truncated."
          (name (if (<= (string-width raw) avail) raw
                  (truncate-string-to-width raw avail nil nil t)))
          (room (- avail (string-width name) 2))
-         (path (cond ((<= (string-width full) room) full)
+         (mark (and (fboundp 'ygg-project-import-mark)
+                    (ygg-project-import-mark root)))
+         (path (cond (mark (propertize mark 'font-lock-face 'ygg-projects-waiting))
+                     ((<= (string-width full) room) full)
                      ((let ((short (concat "…/" (file-name-nondirectory full))))
                         (and (<= (string-width short) room) short)))
                      (t ""))))
@@ -697,6 +702,13 @@ agent holding a conversation open is the reason it cannot be filed."
         (ignore-errors (aob--call entry :kill))
         (ygg-projects-refresh)))
      (t (user-error "projects: no conversation on this line")))))
+
+(defun ygg-projects--on-import ()
+  "Redraw while a project is being taken in, if anyone is watching."
+  (when (get-buffer-window ygg-projects-buffer-name 'visible)
+    (ygg-projects-refresh)))
+
+(add-hook 'ygg-project-import-hook #'ygg-projects--on-import)
 
 (defun ygg-projects-rescan ()
   "Redraw, and look again for what the projects can run."

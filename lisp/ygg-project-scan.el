@@ -163,6 +163,97 @@ project outside every search path is still reachable through them."
         (mapcar (lambda (d) (file-name-as-directory (expand-file-name d)))
                 (append known ygg-project-scan--found)))))))
 
+;;; Taking a project in — skills, config, layout, commands
+
+(defvar ygg-project-import-hook nil
+  "Run with no arguments whenever an import moves, so a view can redraw.")
+
+(defvar ygg-project-import--state (make-hash-table :test 'equal)
+  "Root to the step its import is on, while one is running.")
+
+(defconst ygg-project-import--frames ["◐" "◓" "◑" "◒"])
+(defvar ygg-project-import--tick 0)
+(defvar ygg-project-import--timer nil)
+
+(defun ygg-project-importing (root)
+  "What ROOT's import is doing now, or nil when nothing is."
+  (gethash (ygg-project--key root) ygg-project-import--state))
+
+(defun ygg-project-import-mark (root)
+  "ROOT's spinner and step while it is being taken in, else nil."
+  (when-let* ((step (ygg-project-importing root)))
+    (format "%s %s"
+            (aref ygg-project-import--frames
+                  (mod ygg-project-import--tick
+                       (length ygg-project-import--frames)))
+            step)))
+
+(defun ygg-project-import--turn ()
+  (setq ygg-project-import--tick (1+ ygg-project-import--tick))
+  (if (zerop (hash-table-count ygg-project-import--state))
+      (when ygg-project-import--timer
+        (cancel-timer ygg-project-import--timer)
+        (setq ygg-project-import--timer nil))
+    (run-hooks 'ygg-project-import-hook)))
+
+(defun ygg-project-import--mark (root step)
+  (puthash root step ygg-project-import--state)
+  (unless ygg-project-import--timer
+    (setq ygg-project-import--timer
+          (run-at-time 0 0.15 #'ygg-project-import--turn)))
+  (run-hooks 'ygg-project-import-hook))
+
+(defun ygg-project-import--done (root callback)
+  (remhash root ygg-project-import--state)
+  (run-hooks 'ygg-project-import-hook)
+  (message "ygg: %s is ready" (abbreviate-file-name root))
+  (when callback (funcall callback root)))
+
+(defun ygg-project-import--run (root steps callback)
+  (if (null steps)
+      ;; the command scan is asynchronous already, so it ends the import
+      (progn
+        (ygg-project-import--mark root "commands")
+        (if (fboundp 'ygg-project-commands-refresh)
+            (ygg-project-commands-refresh
+             root (lambda (&rest _) (ygg-project-import--done root callback)))
+          (ygg-project-import--done root callback)))
+    (ygg-project-import--mark root (caar steps))
+    ;; a step at a time off the timer: each one is short, and between
+    ;; them the sidebar draws what is happening rather than freezing
+    (run-at-time 0.05 nil
+                 (lambda ()
+                   (ignore-errors (funcall (cdar steps)))
+                   (ygg-project-import--run root (cdr steps) callback)))))
+
+;;;###autoload
+(defun ygg-project-import (root &optional callback)
+  "Take ROOT in: its skills, the config its agents answer under, what
+it is laid out as and what it can run.  CALLBACK is called with ROOT
+when the last of it settles.  Nothing here blocks."
+  (interactive (list (completing-read "Import project: "
+                                      (mapcar #'abbreviate-file-name
+                                              (ygg-project-roots))
+                                      nil t)))
+  (let ((root (ygg-project--key root)))
+    (ygg-project-import--run
+     root
+     (list (cons "skills"
+                 (lambda ()
+                   (when (fboundp 'ygg-agent-link-project-skills)
+                     (ygg-agent-link-project-skills root))))
+           (cons "config"
+                 (lambda ()
+                   (when (and (fboundp 'ygg-agent--config-env)
+                              (boundp 'aob-acp-default-agent))
+                     (ygg-agent--config-env aob-acp-default-agent
+                                            aob-acp-default-agent root))))
+           (cons "layout"
+                 (lambda ()
+                   (when (fboundp 'ygg-project-workspaces)
+                     (ygg-project-workspaces root)))))
+     callback)))
+
 ;;;###autoload
 (defun ygg-project-add (dir)
   "Remember DIR as a project worth offering."
@@ -179,7 +270,9 @@ project outside every search path is still reachable through them."
       (user-error "ygg: %s is not a repository" (abbreviate-file-name dir)))
     (project-remember-project pr)
     (customize-save-variable 'ygg-project-ignored ygg-project-ignored)
-    (ygg-project-roots t)
+    ;; no walk: a remembered root is already one of the roots, and the
+    ;; scan that finds the rest is not what you are waiting for
+    (ygg-project-import dir)
     (message "ygg: remembered %s" (abbreviate-file-name dir))
     dir))
 
@@ -195,7 +288,8 @@ project outside every search path is still reachable through them."
       (ignore-errors (project-forget-project dir)))
     (add-to-list 'ygg-project-ignored dir)
     (customize-save-variable 'ygg-project-ignored ygg-project-ignored)
-    (ygg-project-roots t)
+    (remhash dir ygg-project-import--state)
+    (run-hooks 'ygg-project-import-hook)
     (message "ygg: forgot %s" (abbreviate-file-name dir))
     dir))
 
