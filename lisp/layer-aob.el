@@ -131,6 +131,7 @@
 (declare-function aob-transcript-wake "aob-transcript" (s))
 (declare-function aob-acp-cycle-mode "aob-acp")
 (declare-function aob-acp-config "aob-acp")
+(declare-function aob-acp-mcp "aob-acp")
 (declare-function aob-deliver-to "aob-deliver")
 ;; how an agent answers is a property of the one in front of you, so it
 ;; is set from its own buffer: the localleader already knows which
@@ -140,6 +141,7 @@
   (yggdrasil-localleader-def mode "M" #'aob-acp-cycle-mode "next mode")
   (yggdrasil-localleader-def mode "l" #'aob-acp-model "model")
   (yggdrasil-localleader-def mode "E" #'aob-acp-config "effort / options")
+  (yggdrasil-localleader-def mode "c" #'aob-acp-mcp "mcp servers")
   (yggdrasil-localleader-def mode "g" #'aob-acp-goal "goal")
   (yggdrasil-localleader-def mode "w" #'aob-deliver-to "answer goes…")
   (yggdrasil-localleader-def mode "r" #'aob-transcript-wake "wake it (resume acp)")

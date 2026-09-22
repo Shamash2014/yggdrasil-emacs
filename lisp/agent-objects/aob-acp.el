@@ -1733,6 +1733,80 @@ was sent with."
        (list :name name :type (symbol-name kind) :url url
              :headers (vconcat (plist-get spec :headers)))))))
 
+(defun aob-acp--mcp-probe (url)
+  "Ask URL for its tools, and say how that went."
+  (let* ((url-request-method "POST")
+         (url-request-extra-headers
+          '(("Content-Type" . "application/json") ("Accept" . "application/json")))
+         (url-request-data
+          (encode-coding-string
+           (json-serialize (list :jsonrpc "2.0" :id 1 :method "tools/list"
+                                 :params (make-hash-table)))
+           'utf-8))
+         (buf (ignore-errors (url-retrieve-synchronously url t t 3))))
+    (if (not buf)
+        "no answer"
+      (with-current-buffer buf
+        (goto-char (point-min))
+        (if (not (re-search-forward "\r?\n\r?\n" nil t))
+            "no body"
+          (let* ((json (ignore-errors (json-parse-buffer :object-type 'plist
+                                                         :array-type 'list
+                                                         :false-object nil
+                                                         :null-object nil)))
+                 (tools (plist-get (plist-get json :result) :tools)))
+            (cond ((null json) "not JSON")
+                  (tools (format "%d tools: %s" (length tools)
+                                 (string-join
+                                  (seq-take (mapcar (lambda (tool)
+                                                      (plist-get tool :name))
+                                                    tools)
+                                            8)
+                                  " ")))
+                  (t "answered, no tools"))))))))
+
+;;;###autoload
+(defun aob-acp-mcp (s)
+  "What MCP servers S was handed, and whether they answer.
+An agent that says it cannot reach a server is a question about what
+it was given at session/new, which is the one thing a trace does not
+show.  A server named here but silent is reachable by nobody; a
+session with none was opened before anything was handed to it."
+  (interactive (list (aob-target)))
+  (let* ((caps (plist-get (aob-session-ref s :agent-caps) :mcpCapabilities))
+         (sent (aob-session-ref s :mcp-sent))
+         (buf (get-buffer-create (format "*aob-mcp: %s*" (aob-session-name s)))))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (special-mode)
+        (erase-buffer)
+        (insert (propertize (format "%s\n" (aob-session-name s)) 'face 'bold))
+        (insert (format "the agent takes %s\n\n"
+                        (if caps
+                            (string-join
+                             (delq nil (list (and (plist-get caps :http) "http")
+                                             (and (plist-get caps :sse) "sse")
+                                             "stdio"))
+                             " · ")
+                          "no kind it ever named")))
+        (if (null sent)
+            (insert "nothing was sent with this session\n")
+          (dolist (entry sent)
+            (let ((url (plist-get entry :url)))
+              (insert (format "%s  %s\n  %s\n"
+                              (propertize (format "%s" (plist-get entry :name))
+                                          'face 'bold)
+                              (or (plist-get entry :type) "stdio")
+                              (or url
+                                  (string-join (cons (or (plist-get entry :command) "")
+                                                     (append (plist-get entry :args) nil))
+                                               " "))))
+              (when url
+                (insert (format "  %s\n" (aob-acp--mcp-probe url))))
+              (insert "\n"))))
+        (goto-char (point-min))))
+    (display-buffer buf)))
+
 (defun aob-acp-project-mcp-servers (project)
   "The servers PROJECT declares in its own MCP file, as entries.
 Read as written: a checkout that says its work needs a server is a
@@ -1875,7 +1949,15 @@ the adapters store their sessions under."
     (let ((servers aob-acp-mcp-servers)
           (fn open))
       (setq open (lambda (init)
-                   (let ((aob-acp-mcp-servers servers)) (funcall fn init)))))
+                   (let* ((aob-acp-mcp-servers servers)
+                          (spec (funcall fn init)))
+                     ;; what went out, kept where it can be read back: an
+                     ;; agent that cannot reach a server is a question
+                     ;; about what it was handed
+                     (when-let* ((params (cadr spec)))
+                       (aob-session-put s :mcp-sent
+                                        (append (plist-get params :mcpServers) nil)))
+                     spec))))
     (if prepare
         (funcall prepare s
                  (lambda (err)
