@@ -1380,7 +1380,57 @@ and what the header counts against — not the window the agent claims."
                               ((>= pct 75) 'warning)
                               (t 'shadow))))))
 
+(defun aob-trace--tool-paths (ev)
+  "The absolute paths tool EV names: its locations, its file, a cd it ran."
+  (let ((raw (plist-get ev :raw)))
+    (append
+     (mapcar (lambda (l) (plist-get l :path)) (plist-get ev :locations))
+     (and (consp raw) (keywordp (car raw))
+          (list (plist-get raw :file_path) (plist-get raw :path)
+                (plist-get raw :notebook_path)))
+     (when-let* (((consp raw))
+                 ((keywordp (car raw)))
+                 (cmd (plist-get raw :command))
+                 ((stringp cmd)))
+       (let ((start 0) out)
+         (while (string-match "\\bcd +\\([~/][^ ;&|)]*\\)" cmd start)
+           (push (match-string 1 cmd) out)
+           (setq start (match-end 0)))
+         out)))))
+
+(defun aob-trace--work-root (s)
+  "The repository S's agent was last seen working in, or nil."
+  (seq-some
+   (lambda (ev)
+     (and (eq (plist-get ev :type) 'tool)
+          (seq-some (lambda (path)
+                      (and (stringp path) (file-name-absolute-p path)
+                           (when-let* ((root (locate-dominating-file
+                                              (expand-file-name path) ".git")))
+                             (file-name-as-directory (expand-file-name root)))))
+                    (aob-trace--tool-paths ev))))
+   (seq-take (aob-session-events s) 40)))
+
+(defvar-local aob-trace--root-seq nil
+  "The newest tool event the trace's folder was last worked out from.")
+
+(defun aob-trace--follow-root (s)
+  "Stand the trace in the repository S works in, when its own folder is none.
+An agent started in the home folder goes and finds the checkout it is
+asked about; magit and a terminal started from its trace belong there,
+not in a folder no command of it runs in."
+  (let ((newest (plist-get (seq-find (lambda (e) (eq (plist-get e :type) 'tool))
+                                     (aob-session-events s))
+                           :seq)))
+    (unless (equal newest aob-trace--root-seq)
+      (setq aob-trace--root-seq newest)
+      (let ((home (or (aob-session-project s) (aob-session-dir s))))
+        (unless (and home (locate-dominating-file home ".git"))
+          (when-let* ((root (aob-trace--work-root s)))
+            (setq default-directory root)))))))
+
 (defun aob-trace--render-1 (s)
+  (aob-trace--follow-root s)
   ;; whichever event is still being written: decorating it is work that
   ;; will be thrown away by the next chunk
   (setq aob-trace--live-seq
@@ -1542,7 +1592,8 @@ and what the header counts against — not the window the agent claims."
         ;; a trace stands where its agent does: magit, a terminal, a
         ;; find-file started from here open on the agent\='s project and
         ;; not on whatever folder the buffer happened to be made in
-        (setq default-directory (file-name-as-directory (expand-file-name dir)))
+        (setq default-directory (file-name-as-directory (expand-file-name dir))
+              aob-trace--root-seq nil)
         (setq-local ygg-diagram-image-root default-directory))
       (aob-register-view buf #'aob-trace--render)
       (let ((inhibit-read-only t)) (aob-trace--render t))

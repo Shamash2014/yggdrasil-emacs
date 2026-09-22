@@ -1451,17 +1451,23 @@ A task's root is not a guess to be improved on, so this beats both
 `aob-acp-start-dir-function' and the buffer, and is taken as given —
 climbing to a `.git' above it would undo the worktree it names.")
 
+(defun aob-acp--real-dir (dir)
+  "DIR where it actually is, so a folder reached through a link is one folder.
+The agent files its conversations, its config home and its project row
+under the path it is given; the same tree under two names is two of each."
+  (file-name-as-directory
+   (if (file-remote-p dir) (expand-file-name dir) (file-truename dir))))
+
 (defun aob-acp--project ()
   (if aob-acp-start-dir
-      (file-name-as-directory (expand-file-name aob-acp-start-dir))
+      (aob-acp--real-dir aob-acp-start-dir)
     (let ((default-directory (or (and aob-acp-start-dir-function
                                       (ignore-errors
                                         (funcall aob-acp-start-dir-function)))
                                  default-directory)))
-      (file-name-as-directory
-       (expand-file-name
-        (or (locate-dominating-file default-directory ".git")
-            default-directory))))))
+      (aob-acp--real-dir
+       (or (locate-dominating-file default-directory ".git")
+           default-directory)))))
 
 (defun aob-acp--wire-dir (dir)
   "DIR as the agent itself will read it.

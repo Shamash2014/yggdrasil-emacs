@@ -776,7 +776,10 @@ The draft is kept; the next compose to the same target, or a window
 motion up into it, shows it again.  FRAME is the frame whose selected
 window changed."
   (when (and (not (frame-parent frame))
-             (eq frame (selected-frame)))
+             (eq frame (selected-frame))
+             ;; a prompt the box asked, its modes or its preset, reads in
+             ;; the frame under it: that is still working in the box
+             (not (active-minibuffer-window)))
     (dolist (float (frame-list))
       (when (and (frame-live-p float)
                  (eq (frame-parent float) frame)
@@ -850,11 +853,27 @@ key, and the footer then names only what the draft carries.")
   "TEXT with the per-cent a header or mode line would read as its own."
   (replace-regexp-in-string "%" "%%" text t t))
 
+(defun aob-compose--project ()
+  "The name of the project this draft's agent works in.
+Its session's when it goes to one, else the folder the draft was opened
+for — read where it actually is, so a tree reached through a link is
+named once."
+  (let* ((s (and (stringp aob-compose--target)
+                 (aob-session-get aob-compose--target)))
+         (dir (or (and s (or (aob-session-project s) (aob-session-dir s)))
+                  aob-compose--dir
+                  default-directory)))
+    (and dir (not (file-remote-p dir))
+         (file-name-nondirectory (directory-file-name (file-truename dir))))))
+
 (defun aob-compose--header ()
-  "The title row: what the draft is for, and the tags it carries."
+  "The title row: what the draft is for, where, and the tags it carries."
   (concat " "
           (propertize (aob-compose--plain (or aob-compose--label "new agent"))
                       'face 'aob-compose-title)
+          (when-let* ((project (aob-compose--project)))
+            (propertize (aob-compose--plain (concat "  in " project))
+                        'face 'aob-compose-tag))
           (when aob-compose--tags
             (propertize (aob-compose--plain
                          (concat "   " (string-join aob-compose--tags " · ")))

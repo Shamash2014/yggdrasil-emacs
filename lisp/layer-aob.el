@@ -300,6 +300,10 @@ actions keep their tool title.  The short path stays the clickable target."
         (or (and (fboundp 'ygg-task-root-of-here)
                  (ignore-errors (ygg-task-root-of-here)))
             (ygg-aob--buffer-repo)
+            ;; outside any checkout, the project open in the sidebar is
+            ;; the one being worked on, and a session started there is
+            ;; one the sidebar can show
+            (bound-and-true-p ygg-projects--open)
             (and (fboundp 'ygg-space-dir) (ygg-space-dir)))))
 
 ;; compose and artifact review speak vim only: ZZ sends / approves,
@@ -811,13 +815,9 @@ The spawn cannot do this itself: the worktree is made on its way out."
 
 (defun ygg-aob--adopt-trace (buf)
   (with-current-buffer buf
+    ;; where the buffer stands is the trace's own call: it follows the
+    ;; agent into the repository it works in when its folder is none
     (when-let* ((s (aob-session-get aob-trace--session-id)))
-      ;; the buffer stands where its agent works, so magit, the shell and
-      ;; every project command opened from it answer for the agent's tree
-      ;; and not for whatever folder the window happened to inherit
-      (when-let* ((dir (or (aob-session-dir s) (aob-session-project s)))
-                  ((file-directory-p dir)))
-        (setq default-directory (file-name-as-directory dir)))
       (when (boundp 'ygg--space-buffers)
         (when-let* ((id (aob-session-ref s :space)))
           (cl-pushnew buf (gethash id ygg--space-buffers))))))
