@@ -90,13 +90,14 @@ and a config that arranges sessions can address them its own way.")
   (setq-local char-property-alias-alist '((face font-lock-face)))
   (visual-line-mode 1)
   (add-to-invisibility-spec 'markdown-markup)
-  ;; prose is proportional here; a command or a path inside it is not
-  ;; prose, and loses its alignment and its character shapes if drawn
-  ;; in the same face
   (require 'markdown-mode nil t)
+  ;; whatever a face inherits from, it is drawn in this family: one
+  ;; proportional heading is one line that does not line up
   (let ((mono (face-attribute 'default :family nil t)))
-    (dolist (f '(markdown-inline-code-face markdown-pre-face
-                 markdown-code-face markdown-language-keyword-face))
+    (dolist (f '(variable-pitch markdown-inline-code-face markdown-pre-face
+                 markdown-code-face markdown-language-keyword-face
+                 markdown-header-face markdown-header-face-1
+                 markdown-header-face-2 markdown-header-face-3))
       (when (facep f)
         (face-remap-add-relative f :family mono))))
   (when (aob-trace--delta-p)
@@ -139,8 +140,11 @@ clock; `log' is the timestamped row-per-event shape."
   :type 'natnum :group 'aob)
 
 (defface aob-trace-prose
-  '((t :inherit variable-pitch :family "SF Pro Text" :height 1.05))
-  "Face for message and prompt bodies under the delta style."
+  '((t :inherit default :height 1.05))
+  "Face for message and prompt bodies under the delta style.
+One family for the whole interface: a proportional face reads better
+in a paragraph and worse in everything a paragraph here is made of —
+paths, diffs, names, and the grid the rest of the frame stands on."
   :group 'aob)
 
 (defface aob-trace-icon '((t :height 1.6))
