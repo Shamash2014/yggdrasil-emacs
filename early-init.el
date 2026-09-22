@@ -15,6 +15,11 @@
                   file-name-handler-alist ygg--file-name-handler-alist)
             (message "Yggdrasil up in %s (%d GCs)" (emacs-init-time) gcs-done)))
 
+;; a stale .elc beats its source by default, which is how a file compiled
+;; against a package that was not loaded yet can keep breaking every boot
+;; after the source is fixed
+(setq load-prefer-newer t)
+
 (setq native-comp-async-report-warnings-errors nil
       native-comp-jit-compilation t)
 

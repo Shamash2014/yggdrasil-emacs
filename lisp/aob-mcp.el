@@ -43,7 +43,14 @@
   "Seconds a question put to the editing Emacs may take."
   :type 'number :group 'aob-mcp)
 
-(defconst aob-mcp-protocol-version "2024-11-05")
+(defconst aob-mcp-protocol-versions '("2025-06-18" "2025-03-26" "2024-11-05")
+  "Protocol versions this server speaks, newest first.
+A client that asks for one it knows gets that one back.  Answering
+2024-11-05 to a client that asked for a streamable-HTTP version tells
+it to fall back to the transport that version had, which is not the
+one it is already talking over.")
+
+(defconst aob-mcp-protocol-version (car aob-mcp-protocol-versions))
 
 (defvar aob-mcp--tools (make-hash-table :test 'equal)
   "Tool name to spec.  Keyed, so re-registering replaces rather than shadows.")
@@ -126,6 +133,31 @@ process, and writing to it would signal rather than reach anyone."
                       (format "Content-Length: %d\r\n" (length body))
                       "Connection: close\r\n\r\n" body))
         (process-send-eof conn)))))
+
+(defun aob-mcp--accepted (conn)
+  "Answer CONN with an empty 202.
+A notification carries no id and wants no result, but it arrived as an
+HTTP request and the client waits for a response to it like any other:
+saying nothing is how a server that works reads as one that hangs."
+  (when (process-live-p conn)
+    (ignore-errors
+      (process-send-string conn (concat "HTTP/1.1 202 Accepted\r\n"
+                                        "Content-Length: 0\r\n"
+                                        "Connection: close\r\n\r\n"))
+      (process-send-eof conn))))
+
+(defun aob-mcp--not-allowed (conn)
+  "Tell CONN this server takes POST and nothing else.
+A streamable-HTTP client opens a GET to listen for what the server has
+to say on its own; this one never says anything on its own, and a
+clean refusal is what lets the client get on with posting."
+  (when (process-live-p conn)
+    (ignore-errors
+      (process-send-string conn (concat "HTTP/1.1 405 Method Not Allowed\r\n"
+                                        "Allow: POST\r\n"
+                                        "Content-Length: 0\r\n"
+                                        "Connection: close\r\n\r\n"))
+      (process-send-eof conn))))
 
 (defun aob-mcp--result (conn id value)
   (aob-mcp--send conn `(:jsonrpc "2.0" :id ,id :result ,value)))
@@ -234,14 +266,21 @@ other one thinks."
     (pcase method
       ("initialize"
        (aob-mcp--result
-        conn id `(:protocolVersion ,aob-mcp-protocol-version
+        conn id `(:protocolVersion ,(let ((want (plist-get params :protocolVersion)))
+                                      (if (member want aob-mcp-protocol-versions)
+                                          want
+                                        aob-mcp-protocol-version))
                   :capabilities (:tools (:listChanged :false))
                   :serverInfo (:name "aob" :version "0.1"))))
-      ("notifications/initialized" nil)
+      ("notifications/initialized" (aob-mcp--accepted conn))
       ("ping" (aob-mcp--result conn id (list)))
       ("tools/list" (aob-mcp--result conn id `(:tools ,(aob-mcp--listing))))
       ("tools/call" (aob-mcp--call conn id params))
-      (_ (aob-mcp--error conn id -32601 (format "no such method: %s" method))))))
+      (_ (if (null id)
+             ;; any other notification: nothing to answer, but something
+             ;; to say, or the client waits out its own timeout
+             (aob-mcp--accepted conn)
+           (aob-mcp--error conn id -32601 (format "no such method: %s" method)))))))
 
 ;;; Transport
 
@@ -261,7 +300,9 @@ other one thinks."
         ;; a body still arriving is not a malformed one
         (when (or (null len) (>= (string-bytes body) len))
           (remhash conn aob-mcp--partial)
-          (let* ((target (and (string-match "^[A-Z]+ +\\([^ ]+\\)" headers)
+          (let* ((verb (and (string-match "^\\([A-Z]+\\) " headers)
+                            (match-string 1 headers)))
+                 (target (and (string-match "^[A-Z]+ +\\([^ ]+\\)" headers)
                               (match-string 1 headers)))
                  (aob-mcp-session (and target (aob-mcp--query target "session")))
                  (req (condition-case nil
@@ -269,9 +310,10 @@ other one thinks."
                                              :array-type 'list
                                              :false-object nil :null-object nil)
                         (error nil))))
-            (if req
-                (aob-mcp--dispatch conn req)
-              (aob-mcp--error conn nil -32700 "that was not JSON"))))))))
+            (cond ((and verb (not (equal verb "POST")))
+                   (aob-mcp--not-allowed conn))
+                  (req (aob-mcp--dispatch conn req))
+                  (t (aob-mcp--error conn nil -32700 "that was not JSON")))))))))
 
 (defun aob-mcp--sentinel (conn _event)
   (unless (process-live-p conn) (remhash conn aob-mcp--partial)))

@@ -1728,7 +1728,10 @@ was sent with."
                        (nreverse out)))))))
     (kind
      (when-let* ((url (plist-get spec :url)))
-       (list :name name :type (symbol-name kind) :url url)))))
+       ;; headers is not optional in the wire schema: an adapter that
+       ;; validates the entry drops a server that leaves it out
+       (list :name name :type (symbol-name kind) :url url
+             :headers (vconcat (plist-get spec :headers)))))))
 
 (defun aob-acp-project-mcp-servers (project)
   "The servers PROJECT declares in its own MCP file, as entries.
