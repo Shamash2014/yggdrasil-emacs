@@ -984,13 +984,26 @@ that; a project row is only the list this sidebar keeps."
       (aob-acp-resume-entry entry)
       (ygg-projects-refresh))))
 
+(defun ygg-projects--put-away (entry)
+  "Put ENTRY away, by whichever record it is kept in.
+A conversation this Emacs started is marked archived in the file it
+keeps; one found on disk is not in that file at all, so marking it
+there archives nothing and the row comes back.  Its own file moves
+instead."
+  (when (and (fboundp 'aob-acp-archive-entry)
+             (not (plist-get entry :found)))
+    (ignore-errors (aob-acp-archive-entry entry)))
+  (when (fboundp 'aob-transcript-move)
+    (ignore-errors (aob-transcript-move entry "archive")))
+  (when (fboundp 'aob-transcript-forget) (aob-transcript-forget)))
+
 (defun ygg-projects-archive ()
   "Put the conversation on this line away, keeping it resumable."
   (interactive)
   (let ((entry (ygg-projects--entry-at-point)))
     (cond
      ((and (consp entry) (plist-member entry :acp-id))
-      (aob-acp-archive-entry entry)
+      (ygg-projects--put-away entry)
       (ygg-projects-refresh))
      ((aob-session-p entry)
       (user-error "projects: that one is still running — end it first"))
@@ -1006,7 +1019,7 @@ agent holding a conversation open is the reason it cannot be filed."
      ((and (consp entry) (plist-member entry :acp-id))
       (when (y-or-n-p (format "Archive %s? "
                               (or (plist-get entry :name) "this conversation")))
-        (aob-acp-archive-entry entry)
+        (ygg-projects--put-away entry)
         (ygg-projects-refresh)))
      ;; a conversation opened for reading is a session object with no
      ;; agent behind it: there is nothing to end, only something to file
@@ -1015,7 +1028,7 @@ agent holding a conversation open is the reason it cannot be filed."
                (memq (aob-session-state entry) '(done dead failed))))
       (when (y-or-n-p (format "Archive %s? " (aob-session-name entry)))
         (when-let* ((past (aob-session-ref entry :asleep)))
-          (aob-acp-archive-entry past))
+          (ygg-projects--put-away past))
         (aob-remove-session entry)
         (ygg-projects-refresh)))
      ((aob-session-p entry)
@@ -1109,10 +1122,7 @@ discards everything the filter left."
   "Put CANDIDATE away: kept, and out of the list."
   (interactive "sConversation: ")
   (let ((entry (ygg-conversations--entry candidate)))
-    (when (and (fboundp 'aob-acp-archive-entry)
-               (not (plist-get entry :found)))
-      (ignore-errors (aob-acp-archive-entry entry)))
-    (when (fboundp 'aob-transcript-move) (aob-transcript-move entry "archive"))
+    (ygg-projects--put-away entry)
     (ygg-projects-refresh)))
 
 (defun ygg-conversation-discard (candidate)
