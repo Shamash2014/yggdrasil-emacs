@@ -20,6 +20,9 @@
 (declare-function ygg-diagram-replace "ygg-diagram" ())
 (declare-function ygg-diagram-toggle-any-at-point "ygg-diagram" ())
 (defvar ygg-diagram-image-root)
+(defvar ygg-diagram--shown)
+(declare-function ygg-diagram-image-at-point "ygg-diagram" ())
+(declare-function ygg-diagram-md-fence-at-point "ygg-diagram" ())
 
 (defcustom aob-trace-limit 300
   "Events rendered in a trace buffer."
@@ -80,6 +83,7 @@ and a config that arranges sessions can address them its own way.")
     ;; it back, from the line it is drawn on
     (define-key map "E" #'aob-trace-queue-edit)
     (define-key map "X" #'aob-trace-queue-drop)
+    (define-key map "S" #'aob-trace-queue-steer)
     (define-key map "o" #'aob-compose)
     map))
 
@@ -355,10 +359,25 @@ NAME is the agent this session runs; the owner\='s own turns say you."
     ("think" . "Thinking") ("fetch" . "Fetch"))
   "Kind of tool call → the word Delta puts in front of its target.")
 
+(defun aob-trace--mcp (ev)
+  "(SERVER . TOOL) when EV called a tool an MCP server offers, else nil.
+The adapter names such a call mcp__SERVER__TOOL and files it as other,
+which reads as a call nobody could name."
+  (when-let* ((title (plist-get ev :title))
+              ((string-match "\\`mcp__\\([^_]+\\(?:_[^_]+\\)*?\\)__\\([^ ]+\\)" title)))
+    (cons (match-string 1 title)
+          (replace-regexp-in-string "_" " " (match-string 2 title)))))
+
 (defun aob-trace--verb (ev)
-  "The word naming what EV did."
-  (or (cdr (assoc (plist-get ev :kind) aob-trace--verbs))
+  "The word naming what EV did: the server, for a tool an MCP server offers."
+  (or (car (aob-trace--mcp ev))
+      (cdr (assoc (plist-get ev :kind) aob-trace--verbs))
       (capitalize (or (plist-get ev :kind) "Call"))))
+
+(defun aob-trace--target (ev)
+  "What EV did it to: the tool's own name, for one an MCP server offers."
+  (or (cdr (aob-trace--mcp ev))
+      (plist-get ev :title) (plist-get ev :kind) ""))
 
 (defface aob-trace-card
   '((((background dark)) :background "#1c1c1c" :extend t)
@@ -639,7 +658,7 @@ speaks."
             (propertize (concat (if (plist-get ev :parent) "└ " "")
                                 (aob-trace--verb ev) " ")
                         'font-lock-face 'aob-trace-tool)
-            (propertize (or (plist-get ev :title) (plist-get ev :kind) "")
+            (propertize (aob-trace--target ev)
                         'font-lock-face 'aob-trace-target)
             (let ((st (plist-get ev :status)))
               (pcase st
@@ -1154,6 +1173,25 @@ An entry is (TEXT ATTACHMENTS EVENT), as the session keeps it."
       (run-hook-with-args 'aob-queue-change-hook s)
       (aob--dirty s))))
 
+(defun aob-trace-queue-steer ()
+  "Say the queued prompt on this line now, into the turn that is running.
+The first one queued when point is on none of them."
+  (interactive)
+  (let* ((s (or (aob-session-get aob-trace--session-id) (user-error "aob: no session here")))
+         (entry (or (aob-trace--queued-at-point)
+                    (car (aob-session-ref s :queued))
+                    (user-error "aob: nothing is queued")))
+         (ev (nth 2 entry)))
+    (when (nth 1 entry)
+      (user-error "aob: a message with images waits for the turn to end"))
+    (unless (and (fboundp 'aob-acp--steers-p) (ignore-errors (aob-acp--steers-p s)))
+      (user-error "aob: %s takes nothing mid-turn" (aob-session-name s)))
+    (aob-session-put s :queued (delq entry (aob-session-ref s :queued)))
+    (setf (aob-session-events s) (delq ev (aob-session-events s)))
+    (run-hook-with-args 'aob-queue-change-hook s)
+    (let ((aob-prompt-typed (plist-get ev :typed)))
+      (aob-interject s (car entry)))))
+
 (defun aob-trace-queue-drop ()
   "Take the queued prompt on this line back out of the queue."
   (interactive)
@@ -1474,8 +1512,23 @@ not in a folder no command of it runs in."
          (at-end (and (>= (point) (aob-trace--tail-start))
                       (not (aob-trace--queued-at-point))))
          (point-before (point))
-         (starts (mapcar (lambda (w) (cons w (window-start w)))
-                         (get-buffer-window-list (current-buffer) nil t)))
+         ;; each window follows by its own cursor: the buffer's is at the
+         ;; end while a window scrolled up to read has its own higher up,
+         ;; and pinning that window to the bottom takes the page from you
+         (views (mapcar (lambda (w)
+                          (let ((pt (window-point w))
+                                (start (window-start w)))
+                            (list w start pt
+                                  (or (and (>= pt (aob-trace--tail-start))
+                                           (not (save-excursion
+                                                  (goto-char pt)
+                                                  (aob-trace--queued-at-point))))
+                                      ;; held still for a subagent, and not
+                                      ;; moved since: still watching the end
+                                      (eql start (window-parameter w 'aob-trace-held))))))
+                        (get-buffer-window-list (current-buffer) nil t)))
+         ;; a subagent working inside the thread is not the thread moving on
+         (child-tick (plist-get (car (aob-session-events s)) :parent))
          (rebuilt (and (null old) (> (buffer-size) 0)))
          (inhibit-read-only t))
     ;; past `aob-trace-limit' the window sheds its oldest block each tick;
@@ -1539,16 +1592,24 @@ not in a folder no command of it runs in."
             (set-marker aob-trace--input (point))))))
     (setq aob-trace--blocks blocks)
     (aob-trace--ensure-input)
-    (unless at-end
-      (pcase-dolist (`(,win . ,start) starts)
-        (when (and (window-live-p win) (<= start (point-max)))
-          (set-window-start win start t))))
     (when (and rebuilt (not at-end))
       (goto-char (min point-before (point-max))))
     (when at-end
-      (goto-char (point-max))
-      (dolist (w (get-buffer-window-list (current-buffer) nil t))
-        (set-window-point w (point-max))))
+      (goto-char (point-max)))
+    (pcase-dolist (`(,win ,start ,pt ,follow) views)
+      (when (window-live-p win)
+        (cond
+         ((and follow child-tick (<= start (point-max)))
+          (set-window-start win start)
+          (set-window-parameter win 'aob-trace-held start))
+         (follow
+          (set-window-parameter win 'aob-trace-held nil)
+          (set-window-point win (point-max)))
+         (t
+          (set-window-parameter win 'aob-trace-held nil)
+          (when (<= start (point-max))
+            (set-window-start win start t))
+          (set-window-point win (min pt (point-max)))))))
     ;; the fleet takes its place under the trace the first time this
     ;; session delegates — and only that once: the buffer outlives being
     ;; closed, so putting it away is a decision that stays made
@@ -1558,12 +1619,50 @@ not in a folder no command of it runs in."
                (aob-session-subagents s))
       (aob-subagents--show s))))
 
+(defun aob-trace--event-bounds (seq)
+  "Where the text event SEQ was drawn as begins and ends, or nil."
+  (when-let* ((beg (text-property-any (point-min) (point-max) 'aob-event seq)))
+    (cons beg (or (text-property-not-all beg (point-max) 'aob-event seq)
+                  (point-max)))))
+
+(defun aob-trace--event-images (seq)
+  "The image files the lines of event SEQ name, in the order they appear."
+  (when-let* ((bounds (aob-trace--event-bounds seq)))
+    (save-excursion
+      (goto-char (car bounds))
+      (let (out)
+        (while (< (point) (cdr bounds))
+          (when-let* ((path (ygg-diagram-image-at-point)))
+            (unless (member path out) (push path out)))
+          (forward-line 1))
+        (nreverse out)))))
+
 (defun aob-trace-tab ()
-  "Draw the fence or image at point, or expand the event point is on."
+  "Draw the fence at point, or open the event point is on with its pictures.
+An event naming images opens and draws every one of them, not only the
+one its folded line has room for; TAB again folds it and takes them away.
+Anything else expands or collapses as before."
   (interactive)
-  (unless (and (fboundp 'ygg-diagram-toggle-any-at-point)
-               (ygg-diagram-toggle-any-at-point))
-    (aob-trace-toggle)))
+  (let ((seq (get-text-property (point) 'aob-event)))
+    (cond
+     ((and (fboundp 'ygg-diagram-fence-at-point)
+           (or (ygg-diagram-fence-at-point) (ygg-diagram-md-fence-at-point)))
+      (ygg-diagram-toggle-any-at-point))
+     ((and seq (fboundp 'ygg-diagram-image-at-point) (ygg-diagram-image-at-point))
+      (if (memq seq aob-trace--expanded)
+          (let ((drawn (aob-trace--event-images seq)))
+            (setq ygg-diagram--shown
+                  (seq-remove (lambda (c) (and (eq (car c) 'image) (member (cdr c) drawn)))
+                              ygg-diagram--shown))
+            (aob-trace-toggle))
+        (aob-trace-toggle)
+        (dolist (path (aob-trace--event-images seq))
+          (unless (member (cons 'image path) ygg-diagram--shown)
+            (push (cons 'image path) ygg-diagram--shown)))
+        (ygg-diagram-replace)))
+     ((and (fboundp 'ygg-diagram-toggle-any-at-point)
+           (ygg-diagram-toggle-any-at-point)))
+     (t (aob-trace-toggle)))))
 
 (defun aob-trace-toggle ()
   "Expand or collapse the event at point."

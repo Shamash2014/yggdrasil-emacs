@@ -388,11 +388,16 @@ dropped first; a fence that is no longer in the buffer is passed over."
       (when (seq-some (lambda (c) (eq (car c) 'image)) ygg-diagram--shown)
         (save-excursion
           (goto-char (point-min))
-          (while (not (eobp))
-            (when-let* ((path (ygg-diagram-image-at-point))
-                        ((member (cons 'image path) ygg-diagram--shown)))
-              (ygg-diagram--place-image (line-end-position) path width))
-            (forward-line 1)))))))
+          ;; once, under the first line naming it: a trace names a file in
+          ;; its folded row and again in the row opened under it
+          (let (placed)
+            (while (not (eobp))
+              (when-let* ((path (ygg-diagram-image-at-point))
+                          ((member (cons 'image path) ygg-diagram--shown))
+                          ((not (member path placed))))
+                (push path placed)
+                (ygg-diagram--place-image (line-end-position) path width))
+              (forward-line 1))))))))
 
 (defconst ygg-diagram--md-langs '("" "text" "md" "markdown")
   "The language words a fence renders as prose under, the empty one included.")
