@@ -898,7 +898,7 @@ output arrives beside the work rather than in place of it."
                        :height height
                        :background-color (or (ygg-ex--face-background 'ygg-float)
                                              (ygg-ex--face-background 'default))
-                       :border-width 1
+                       :border-width 0
                        :border-color (ygg-ex--face-background 'child-frame-border)
                        :respect-mode-line t
                        :accept-focus nil))

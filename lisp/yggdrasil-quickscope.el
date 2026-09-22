@@ -28,6 +28,12 @@
   "Face for an f/t target that needs one repeated keystroke."
   :group 'ygg-quickscope)
 
+(defvar-local ygg-quickscope-inhibit nil
+  "Non-nil in a buffer where jump targets are not painted.
+The motions still work; only the preview is withheld.  A one-cell mark
+over code is a hint; the same mark over proportional prose is a bar the
+height of the line standing beside every word.")
+
 (defvar-local ygg-quickscope--overlays nil
   "Live overlays painted on the current line.")
 (defvar ygg-quickscope--timer nil)
@@ -103,7 +109,8 @@ touching CURSOR-COL is never a target."
 
 (defun ygg-quickscope--paint ()
   (setq ygg-quickscope--timer nil)
-  (when (and yggdrasil-local-mode (ygg-normal-p) (not (minibufferp)))
+  (when (and yggdrasil-local-mode (ygg-normal-p) (not (minibufferp))
+             (not ygg-quickscope-inhibit))
     (ygg-quickscope--clear)
     (let ((bol (line-beginning-position)))
       (dolist (tg (nconc (ygg-quickscope--forward-targets bol)
@@ -125,7 +132,8 @@ touching CURSOR-COL is never a target."
 (defun ygg-quickscope--post-command ()
   (ygg-quickscope--clear)
   (when ygg-quickscope--timer (cancel-timer ygg-quickscope--timer) (setq ygg-quickscope--timer nil))
-  (when (and yggdrasil-local-mode (ygg-normal-p) (not (minibufferp)))
+  (when (and yggdrasil-local-mode (ygg-normal-p) (not (minibufferp))
+             (not ygg-quickscope-inhibit))
     (setq ygg-quickscope--timer
           (run-with-idle-timer ygg-quickscope-idle-delay nil #'ygg-quickscope--paint))))
 

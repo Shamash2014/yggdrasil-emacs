@@ -255,6 +255,8 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
 ;;; and the sessions that restore them answer to the same prefix.  Rename,
 ;;; pin folder, clone layout, where am I and agent rows are read monthly:
 ;;; they answer to the colon line and to M-x instead of to a letter.
+(require 'ygg-project-scan)
+
 (defvar ygg-leader-workspace-map (make-sparse-keymap) "The p prefix: zones (spaces).")
 
 (yggdrasil-define-keys 'ygg-leader-workspace-map
@@ -273,7 +275,13 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
   "I" #'ygg-project-report :label "project doctor: tools and checks"
   "m" #'ygg-session-pick :label "session picker"
   "w" #'ygg-session-save-project :label "save project session"
-  "r" #'ygg-session-load-project :label "resume project session")
+  "r" #'ygg-session-load-project :label "resume project session"
+  ;; a project is a set of folders, not only its checkout: what is listed
+  ;; here is what its agents are given to see
+  "f" #'ygg-project-add-folder :label "add a folder to this project"
+  "F" #'ygg-project-remove-folder :label "drop a folder from this project"
+  "a" #'ygg-project-add :label "remember a project"
+  "D" #'ygg-project-remove :label "forget a project")
 
 (yggdrasil-leader-def "p" ygg-leader-workspace-map "zones")
 

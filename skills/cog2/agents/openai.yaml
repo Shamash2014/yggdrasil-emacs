@@ -1,0 +1,4 @@
+interface:
+  display_name: "Cog2"
+  short_description: "Goals, Gherkin, debugging, TDD, and final refinement"
+  default_prompt: "Use $cog2 to track this goal, create one-scenario handoffs with exact assertions, implement each with strict test-first TDD, then simplify touched code and review the touched architecture."

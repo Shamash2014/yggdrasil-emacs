@@ -179,40 +179,78 @@ turns it back on."
 (defvar markdown-fontify-code-blocks-natively)
 (declare-function markdown-mode "markdown-mode" ())
 
+(defcustom ygg-ui-markdown-hide-markup t
+  "Render markdown formatted: the asterisks and backticks go invisible."
+  :type 'boolean :group 'ygg-ui)
+
+(defconst ygg-ui-markdown--props '(face invisible display)
+  "What is carried over from the fontified copy onto the answer.")
+
+(defcustom ygg-ui-markdown-max 4000
+  "Longest text markdown-mode is asked to fontify, in characters.
+Its font-lock is quadratic in the size of the buffer — measured on
+Emacs 31: 3ms at 1k, 10ms at 2k, 49ms at 4k, 161ms at 8k, 1.3s at 24k —
+so a long answer is left as plain text rather than stopping the editor
+to decorate it."
+  :type 'natnum :group 'yggdrasil)
+
+(defvar ygg-ui--markdown-buffer nil
+  "One buffer kept in markdown-mode for rendering snippets.")
+
+(defun ygg-ui--markdown-buffer ()
+  "A buffer already in markdown-mode, ready to be filled.
+Standing the mode up costs more than fontifying the text does, and a
+streaming trace asks for this ten times a second."
+  (if (buffer-live-p ygg-ui--markdown-buffer)
+      ygg-ui--markdown-buffer
+    (setq ygg-ui--markdown-buffer
+          (with-current-buffer (get-buffer-create " *ygg-markdown*")
+            (delay-mode-hooks (markdown-mode))
+            (setq-local inhibit-modification-hooks t)
+            (buffer-disable-undo)
+            (current-buffer)))))
+
 (defun ygg-ui-markdown (text)
-  "TEXT carrying markdown-mode's fontification as font-lock-face.
-Only the faces are taken, onto a copy of TEXT that keeps every property
-it already had, so the result drops into a read-only magit-section
-buffer doing its own font-lock.  TEXT is answered as it stands when it
-is not a string, when it is empty, when markdown-mode is missing, and
-whenever the fontification itself goes wrong."
+  "TEXT carrying markdown-mode's rendering as text properties.
+Faces come over as `font-lock-face', and with
+`ygg-ui-markdown-hide-markup' the markup characters come over
+invisible, so bold reads bold rather than showing its asterisks.  TEXT
+is answered as it stands when it is not a string, when it is empty,
+when markdown-mode is missing, and whenever the fontification itself
+goes wrong."
   (if (or (not (stringp text)) (string-empty-p text)
+          (> (length text) ygg-ui-markdown-max)
           (not (or (fboundp 'markdown-mode)
                    (require 'markdown-mode nil t))))
       text
     (or (ignore-errors
           (let ((out (copy-sequence text)))
-            (with-temp-buffer
-              (insert text)
-              (let ((markdown-hide-markup nil)
-                    (markdown-fontify-code-blocks-natively nil))
-                (delay-mode-hooks (markdown-mode))
+            (with-current-buffer (ygg-ui--markdown-buffer)
+              (let ((inhibit-read-only t))
+                (erase-buffer)
+                (insert text))
+              (let ((markdown-hide-markup ygg-ui-markdown-hide-markup)
+                    (markdown-fontify-code-blocks-natively t))
                 (syntax-propertize (point-max))
                 (font-lock-ensure))
-              (let ((pos (point-min)))
-                (while (< pos (point-max))
-                  (let ((next (next-single-property-change
-                               pos 'face nil (point-max)))
-                        (face (get-text-property pos 'face)))
-                    (when face
-                      (let ((had (get-text-property (1- pos) 'font-lock-face
-                                                    out)))
-                        (put-text-property
-                         (1- pos) (1- next) 'font-lock-face
-                         (if had (append (ensure-list face) (ensure-list had))
-                           face)
-                         out)))
-                    (setq pos next)))))
+              (dolist (prop ygg-ui-markdown--props)
+                (let ((pos (point-min)))
+                  (while (< pos (point-max))
+                    (let ((next (next-single-property-change
+                                 pos prop nil (point-max)))
+                          (val (get-text-property pos prop)))
+                      (when val
+                        (if (eq prop 'face)
+                            (let ((had (get-text-property (1- pos) 'font-lock-face
+                                                          out)))
+                              (put-text-property
+                               (1- pos) (1- next) 'font-lock-face
+                               (if had (append (ensure-list val)
+                                               (ensure-list had))
+                                 val)
+                               out))
+                          (put-text-property (1- pos) (1- next) prop val out)))
+                      (setq pos next))))))
             out))
         text)))
 

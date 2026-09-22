@@ -105,6 +105,7 @@
 (require 'layer-tasks)
 (require 'layer-format)
 (require 'layer-markdown)
+(require 'layer-aob)
 (require 'layer-quickfix)
 (require 'layer-pcre)
 (require 'layer-dap)
@@ -162,10 +163,25 @@ render above the top edge on macOS child frames."
     (cons (max 0 (- (plist-get info :parent-frame-width) (car size) 16))
           (max 0 (- (plist-get info :parent-frame-height) (cdr size) 16)))))
 
+(defun ygg--posframe-bottom-bar (info)
+  "Helix's hint panel: flush to the bottom edge, starting at the left."
+  (let ((size (ygg--posframe-size info)))
+    (cons 0 (max 0 (- (plist-get info :parent-frame-height) (cdr size))))))
+
 (elpaca which-key-posframe
-  (setq which-key-posframe-poshandler #'ygg--posframe-bottom-right
-        which-key-posframe-border-width 1
-        which-key-posframe-parameters '((left-fringe . 0) (right-fringe . 0)))
+  ;; Helix shows its hints as a bar across the bottom, key then label,
+  ;; one per line — not a floating box in the corner
+  (setq which-key-posframe-poshandler #'ygg--posframe-bottom-bar
+        which-key-posframe-border-width 0
+        which-key-posframe-min-width 0
+        which-key-posframe-parameters
+        '((left-fringe . 0) (right-fringe . 0)
+          (internal-border-width . 8)))
+  (setq which-key-max-display-columns nil
+        which-key-separator "  "
+        which-key-prefix-prefix ""
+        which-key-show-prefix 'bottom
+        which-key-add-column-padding 2)
   (if (display-graphic-p)
       (which-key-posframe-mode 1)
     (add-hook 'server-after-make-frame-hook
@@ -368,7 +384,7 @@ render above the top edge on macOS child frames."
 (defun ygg--theme-tweaks (&rest _)
   "Face details the modus palette can't express (matches nvim theme.lua)."
   (let* ((dark (memq 'modus-vivendi custom-enabled-themes))
-         (float-bg (if dark "#0f0f0f" "#fafafa")))
+         (float-bg (if dark "#121212" "#f5f5f5")))
     (set-face-attribute 'font-lock-comment-face nil :slant 'italic)
     (set-face-attribute 'font-lock-function-name-face nil :weight 'bold)
     (when (facep 'font-lock-operator-face)
@@ -397,19 +413,17 @@ render above the top edge on macOS child frames."
     (when (facep 'ygg-focus-dim)
       (set-face-attribute 'ygg-focus-dim nil
                           :foreground (if dark "#7a7a7a" "#8a8a8a"))
-      (set-face-attribute 'ygg-focus-border nil
-                          :background (if dark "#202020" "#e6e6e6")))
+      (set-face-attribute 'ygg-focus-border nil :background float-bg))
     (let ((divider (if dark "#080808" "#ffffff")))
       (set-face-attribute 'window-divider nil :foreground divider)
       (dolist (face '(window-divider-first-pixel window-divider-last-pixel))
         (when (facep face)
           (set-face-attribute face nil :foreground divider)))
       (set-face-attribute 'internal-border nil :background divider)
-      (set-face-attribute 'child-frame-border nil
-                          :background (if dark "#202020" "#e6e6e6")))
+      (set-face-attribute 'child-frame-border nil :background float-bg))
     (setq window-divider-default-places t
-          window-divider-default-bottom-width 4
-          window-divider-default-right-width 4)
+          window-divider-default-bottom-width 1
+          window-divider-default-right-width 1)
     (dolist (frame (frame-list))
       (set-frame-parameter frame 'internal-border-width 4))
     (setf (alist-get 'internal-border-width default-frame-alist) 4)
@@ -420,11 +434,9 @@ render above the top edge on macOS child frames."
       (when (facep face)
         (set-face-attribute face nil :background float-bg)))
     (when (facep 'vertico-posframe-border)
-      (set-face-attribute 'vertico-posframe-border nil
-                          :background (if dark "#202020" "#e6e6e6")))
+      (set-face-attribute 'vertico-posframe-border nil :background float-bg))
     (when (facep 'which-key-posframe-border)
-      (set-face-attribute 'which-key-posframe-border nil
-                          :background (if dark "#202020" "#e6e6e6")))
+      (set-face-attribute 'which-key-posframe-border nil :background float-bg))
     (when (facep 'corfu-default)
       (set-face-attribute 'corfu-default nil :background float-bg))
     (when (facep 'corfu-current)
@@ -570,6 +582,8 @@ address space, which is not what a freed cache gives back."
       sentence-end-double-space nil)
 (setq-default indent-tabs-mode nil
               tab-width 4)
+(setq project-mode-line t)
+(add-to-list 'mode-line-misc-info '(project-mode-line project-mode-line-format))
 (global-so-long-mode 1)
 (electric-pair-mode 1)
 (editorconfig-mode 1)
