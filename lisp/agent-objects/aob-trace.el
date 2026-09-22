@@ -540,11 +540,18 @@ remap such as `ygg-focus-dim' cannot outrank it."
               (aob-trace--rollup ev)))))
       (_ (let ((st (aob-trace--status ev)))
            (funcall
-            (if (and (aob-trace--delta-p) (eq (plist-get ev :type) 'thought))
-                ;; a thought is the agent speaking: Delta hangs its mark in
-                ;; the gutter and leaves the line itself clean
-                (lambda (str) (aob-trace--gutter (aob-trace--avatar-glyph) str))
-              (lambda (str) (concat (aob-trace--glyph ev) " " str)))
+            (cond
+             ;; a thought is the agent speaking: Delta hangs its mark in
+             ;; the gutter and leaves the line itself clean
+             ((and (aob-trace--delta-p) (eq (plist-get ev :type) 'thought))
+              (lambda (str) (aob-trace--gutter (aob-trace--avatar-glyph) str)))
+             ;; and the row that opens a turn carries the mark too, kind
+             ;; glyph and all: a turn that starts with a command run is a
+             ;; turn nobody appeared to take
+             ((and (aob-trace--delta-p) (plist-get ev :turn-head))
+              (lambda (str) (aob-trace--gutter (aob-trace--avatar-glyph)
+                                               (concat (aob-trace--glyph ev) " " str))))
+             (t (lambda (str) (concat (aob-trace--glyph ev) " " str))))
             (format "%s%s%s%s"
                    (let ((stamp (aob-trace--stamp time)))
                      (if (string-empty-p stamp) "" (concat stamp " ")))
@@ -741,14 +748,27 @@ them, grouped and in order, or in their own trace."
   (let ((evs (seq-remove (lambda (ev) (plist-get ev :parent))
                          (reverse (seq-take (aob-session-events s)
                                             aob-trace-limit))))
-        (acc nil))
+        (acc nil)
+        ;; the first thing the agent does after you speak — and the first
+        ;; thing in the trace — is where its mark belongs
+        (opening t))
     (while evs
       (let* ((run (seq-take-while #'aob-trace--explores-p evs))
-             (n (length run)))
+             (n (length run))
+             (ev (car evs))
+             ;; a state row is the session speaking, not the agent: the
+             ;; mark belongs on the first thing the agent itself does
+             (head (and opening (not (memq (plist-get ev :type)
+                                           '(prompt state))))))
+        (unless (eq (and (plist-get ev :turn-head) t) head)
+          (plist-put ev :turn-head head)
+          (plist-put ev :line nil))
+        (setq opening (or (eq (plist-get ev :type) 'prompt)
+                          (and opening (eq (plist-get ev :type) 'state))))
         (if (>= n aob-trace-explore-min)
             (progn (push (aob-trace--explore-block s run) acc)
                    (setq evs (nthcdr n evs)))
-          (push (aob-trace--block s (car evs)) acc)
+          (push (aob-trace--block s ev) acc)
           (setq evs (cdr evs)))))
     (let ((blocks (nreverse acc)))
       (when (and blocks (aob-trace--delta-p)
