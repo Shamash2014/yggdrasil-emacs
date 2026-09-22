@@ -486,11 +486,32 @@ spawned by aob are then the same install, logged in once."
 
 (setq aob-acp-show-trace nil)
 
+(defvar ygg-aob--compose-sending nil
+  "Non-nil while a draft is on its way out.
+A trace that opens because something started in the background should
+not take the point; one that opens because you just sent to it should.")
+
 (defun ygg-aob--show-trace (s)
-  "Show S's trace in a split of its own, leaving point where it is."
+  "Show S's trace in a split of its own.
+Point follows only when this is the conversation you just spoke to."
   (unless noninteractive
-    (when-let* ((buf (ignore-errors (aob-trace-buffer s))))
-      (ignore-errors (display-buffer buf ygg-aob-trace-action)))))
+    (when-let* ((buf (ignore-errors (aob-trace-buffer s)))
+                (win (ignore-errors (display-buffer buf ygg-aob-trace-action))))
+      (when (and ygg-aob--compose-sending (window-live-p win))
+        (select-window win))
+      win)))
+
+(defun ygg-aob--compose-opens-trace (fn &rest args)
+  "Put the conversation a draft went to on screen, and stand in it.
+The target is read first: sending kills the draft, and with it the
+buffer-local that says where the words were going."
+  (let* ((tgt (and (boundp 'aob-compose--target) aob-compose--target))
+         (ygg-aob--compose-sending t))
+    (prog1 (apply fn args)
+      (when-let* ((s (and (stringp tgt) (aob-session-get tgt))))
+        (ygg-aob--show-trace s)))))
+
+(advice-add 'aob-compose-send :around #'ygg-aob--compose-opens-trace)
 
 (add-hook 'aob-session-created-hook #'ygg-aob--show-trace 95)
 

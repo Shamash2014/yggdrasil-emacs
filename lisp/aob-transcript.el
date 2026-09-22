@@ -1,26 +1,28 @@
-;;; aob-transcript.el --- read a past conversation without reopening it -*- lexical-binding: t; -*-
+;;; aob-transcript.el --- a conversation that ended, opened as itself -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; Resuming a session starts an agent: a process, a model connection, and
-;; a bill.  Most of the time the question is only what was said, and that
-;; is already on disk — the CLI writes every turn as it happens, under
-;; the config home the session ran with, named by the same id aob keeps
-;; in order to resume it.
+;; A session that ended is still a session.  It has a name, a folder, a
+;; conversation and an id that can bring its agent back — everything a
+;; running one has except the process.  So it opens as one: the same
+;; object, the same trace, the same keys.  There is no second kind of
+;; window for old work.
 ;;
-;; So this reads the file and shows it.  Nothing is spawned, nothing is
-;; resumed, and the conversation is not altered by being looked at.
+;; Nothing is started by opening it.  The turns are read from the file
+;; the CLI wrote as they happened, under the config home the session ran
+;; with.  The agent comes back when you write to it, and not before.
 
 ;;; Code:
 
 (require 'seq)
 (require 'subr-x)
+(require 'aob)
 (require 'aob-trace)
 
 (declare-function ygg-agent--config-env "ygg-agent-conf" (preset cmd project &optional isolate))
 (declare-function aob-acp-resume-entry "aob-acp" (e &optional pref))
 
 (defgroup aob-transcript nil
-  "Reading conversations that already happened."
+  "Conversations that already happened."
   :group 'aob :prefix "aob-transcript-")
 
 (defun aob-transcript--home (agent dir)
@@ -33,8 +35,7 @@
 
 (defun aob-transcript--slug (dir)
   "DIR as the CLI spells it when naming a folder: every slash a dash."
-  (replace-regexp-in-string "/" "-" (directory-file-name
-                                     (expand-file-name dir))))
+  (replace-regexp-in-string "/" "-" (directory-file-name (expand-file-name dir))))
 
 (defun aob-transcript-file (entry)
   "Where ENTRY's conversation was written, if it is still there."
@@ -53,16 +54,18 @@
    ((stringp content) content)
    ;; a json array parses to a vector, not a list
    ((seqp content)
-    (let ((parts (delq nil
-                       (seq-map (lambda (part)
-                                  (let ((type (alist-get 'type part)))
-                                    (cond
-                                     ((equal type "text") (alist-get 'text part))
-                                     ((equal type "tool_use")
-                                      (format "· %s" (or (alist-get 'name part) "tool")))
-                                     (t nil))))
-                                content))))
-      (string-join (append parts nil) "\n")))
+    (string-join
+     (append (delq nil
+                   (seq-map (lambda (part)
+                              (let ((type (alist-get 'type part)))
+                                (cond
+                                 ((equal type "text") (alist-get 'text part))
+                                 ((equal type "tool_use")
+                                  (format "· %s" (or (alist-get 'name part) "tool")))
+                                 (t nil))))
+                            content))
+             nil)
+     "\n"))
    (t nil)))
 
 (defun aob-transcript-turns (file)
@@ -77,8 +80,7 @@
                (rec (and (not (string-empty-p line))
                          (ignore-errors
                            (json-parse-string line :object-type 'alist
-                                              :null-object nil
-                                              :false-object nil))))
+                                              :null-object nil :false-object nil))))
                (kind (and rec (alist-get 'type rec)))
                (msg (and rec (alist-get 'message rec))))
           (when (member kind '("user" "assistant"))
@@ -88,58 +90,34 @@
         (forward-line 1)))
     (nreverse out)))
 
-(defvar-local aob-transcript-entry nil
-  "The conversation this buffer was read from.")
+;;; Opening one
 
-(defvar aob-transcript-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "q") #'quit-window)
-    (define-key map (kbd "R") #'aob-transcript-resume)
-    (define-key map (kbd "RET") #'aob-transcript-resume)
-    (define-key map (kbd "<return>") #'aob-transcript-resume)
-    (define-key map "a" #'aob-transcript-resume)
-    (define-key map "A" #'aob-transcript-resume)
-    map))
-
-;;;###autoload
-(defun aob-transcript-resume ()
-  "Start the conversation this buffer is showing up again.
-Reading it cost nothing; this starts an agent, so it asks first."
-  (interactive)
-  (let ((e (or aob-transcript-entry
-               (user-error "aob: this buffer is not a stored conversation"))))
-    (when (y-or-n-p (format "Pick up %s again? "
-                            (or (plist-get e :name) (plist-get e :agent)
-                                "that conversation")))
-      (let ((s (aob-acp-resume-entry e)))
-        (when (and s (fboundp 'aob-trace)) (aob-trace s))
-        s))))
-
-(defvar ygg-aob--trace-modal)
-
-(defun aob-transcript--plain-keys ()
-  "Take the live trace's verbs off the emulation level.
-They are put there so they outrank everything, which is right for a
-running session and wrong here: the map is still this mode's parent, so
-the verbs remain — they simply stop shadowing the two keys a recording
-needs."
-  (setq-local ygg-aob--trace-modal nil))
-
-(add-hook 'aob-transcript-mode-hook #'aob-transcript--plain-keys)
-
-(define-derived-mode aob-transcript-mode aob-trace-mode "aob-past"
-  "A conversation that already happened, read from disk.
-A session has one surface, whether it is running or not: this is the
-trace, with its measure, its gutter and its keys, over words that were
-written earlier.")
-
-(defun aob-transcript--mark (who)
-  "The gutter mark for WHO, the same one a live trace hangs there."
-  (aob-trace--avatar (list :type (if (equal who "user") 'prompt 'message))))
+(defun aob-transcript--session (entry)
+  "ENTRY as a session object, its turns already in it.
+Asleep: it carries the id its agent answers to, and no process."
+  (let* ((id (concat "acp:" (plist-get entry :acp-id)))
+         (existing (aob-session-get id)))
+    (or existing
+        (let ((s (aob-create-session
+                  :id id :backend 'acp
+                  :name (or (plist-get entry :name) (plist-get entry :agent) "session")
+                  :project (or (plist-get entry :project) (plist-get entry :dir))
+                  :dir (or (plist-get entry :dir) (plist-get entry :project))
+                  :state 'done)))
+          (aob-session-put s :agent (plist-get entry :agent))
+          (aob-session-put s :acp-id (plist-get entry :acp-id))
+          (aob-session-put s :model-id (plist-get entry :model))
+          (aob-session-put s :mode-id (plist-get entry :mode))
+          (aob-session-put s :asleep entry)
+          (dolist (turn (aob-transcript-turns (aob-transcript-file entry)))
+            (aob-event s (if (equal (car turn) "user") 'prompt 'message)
+                       :text (cdr turn)))
+          s))))
 
 ;;;###autoload
 (defun aob-transcript-view (entry)
-  "Show ENTRY's conversation, without starting anything."
+  "Open ENTRY's conversation as the session it was.
+Nothing is started: writing to it is what brings its agent back."
   (interactive
    (list (let* ((entries (append (and (fboundp 'aob-acp-resumable-entries)
                                       (aob-acp-resumable-entries))
@@ -153,29 +131,32 @@ written earlier.")
                                       e))
                               entries)))
            (unless rows (user-error "aob: no past conversations"))
-           (cdr (assoc (completing-read "Read: " (mapcar #'car rows) nil t) rows)))))
-  (let ((file (aob-transcript-file entry)))
-    (unless file
-      (user-error "aob: no transcript on disk for %s"
-                  (or (plist-get entry :name) "that session")))
-    (let ((buf (get-buffer-create
-                (format "*past:%s*" (or (plist-get entry :name) "session")))))
-      (with-current-buffer buf
-        (let ((inhibit-read-only t))
-          (erase-buffer)
-          (aob-transcript-mode)
-          (setq aob-transcript-entry entry)
-          (setq header-line-format
-                (format " %s · %s · read from disk · R to pick up"
-                        (or (plist-get entry :name) "session")
-                        (abbreviate-file-name (or (plist-get entry :dir) ""))))
-          (dolist (turn (aob-transcript-turns file))
-            (insert (aob-trace--gutter
-                     (aob-transcript--mark (car turn))
-                     (aob-trace--prose (aob-trace--md (cdr turn))))
-                    (aob-trace--sep)))
-          (goto-char (point-min))))
-      (pop-to-buffer buf))))
+           (cdr (assoc (completing-read "Open: " (mapcar #'car rows) nil t) rows)))))
+  (unless (aob-transcript-file entry)
+    (user-error "aob: no transcript on disk for %s"
+                (or (plist-get entry :name) "that session")))
+  (let ((s (aob-transcript--session entry)))
+    (aob-trace s)
+    s))
+
+(defun aob-transcript-asleep-p (s)
+  "Whether S is a conversation whose agent is not running."
+  (and (aob-session-ref s :asleep) t))
+
+(defun aob-transcript--wake (fn s &rest args)
+  "Bring S's agent back before sending to it, if it is asleep.
+The session the resume makes is the live one; this one has served its
+purpose and would otherwise sit in every list beside it."
+  (if-let* ((entry (aob-session-ref s :asleep)))
+      (let ((live (aob-acp-resume-entry entry)))
+        (unless live
+          (user-error "aob: %s would not come back" (aob-session-name s)))
+        (aob-session-put s :asleep nil)
+        (ignore-errors (aob-remove-session s))
+        (apply fn live args))
+    (apply fn s args)))
+
+(advice-add 'aob-prompt :around #'aob-transcript--wake)
 
 (provide 'aob-transcript)
 ;;; aob-transcript.el ends here
