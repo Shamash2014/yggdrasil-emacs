@@ -155,7 +155,34 @@
 (dolist (hook '(aob-trace-mode-hook aob-plan-mode-hook aob-subagents-mode-hook))
   (add-hook hook #'ygg-aob--no-quickscope))
 
-(autoload 'ygg-compose-transient "ygg-task-compose" nil t)
+(defun ygg-aob--draft-target ()
+  "The session this draft is going to, when it is going to one."
+  (when-let* ((tgt (bound-and-true-p aob-compose--target))
+              ((stringp tgt)))
+    (aob-session-get tgt)))
+
+(defun ygg-compose-transient ()
+  "Set what this draft runs under.
+A draft to a session that is already up sets that session: its mode,
+its model, the options it answers under.  A draft that will spawn one
+picks the preset it spawns under, which is where cwd, permissions and
+the servers it is handed are decided."
+  (interactive)
+  (if-let* ((s (ygg-aob--draft-target)))
+      (pcase (completing-read (format "%s runs under: " (aob-session-name s))
+                              '("mode" "next mode" "model" "effort / options")
+                              nil t)
+        ("mode" (aob-acp-set-mode s))
+        ("next mode" (aob-acp-cycle-mode s))
+        ("model" (aob-acp-model s))
+        (_ (aob-acp-config s)))
+    (let ((preset (completing-read "Draft spawns under: " (aob-acp-names)
+                                   nil t nil nil aob-acp-default-agent)))
+      (setq aob-compose--target (cons 'new preset)
+            aob-compose--label (concat "→ new " preset))
+      (force-mode-line-update)
+      (message "aob: this draft spawns %s" preset))))
+
 (yggdrasil-localleader-def 'aob-compose-mode "m" #'ygg-compose-transient "modes")
 (yggdrasil-localleader-def 'aob-compose-mode "q" #'aob-compose-hide "hide the box")
 (setq aob-compose-panel-hint "\\ m modes")
