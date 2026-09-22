@@ -287,10 +287,20 @@ actions keep their tool title.  The short path stays the clickable target."
 
 (setq aob-compose-hint "ZZ send · ZA attach · ZQ abort")
 
-;; the box floats over the frame rather than splitting it: a draft to a
-;; session already on screen should not take the layout apart, and the
-;; sidebar is not something a compose box gets to close
-(setq aob-compose-float t)
+;; no float, and nothing new to make room for either: the draft stands in
+;; the window the conversation is in and hands it back when it closes
+(setq aob-compose-float nil)
+
+(defun ygg-aob--compose-display (buffer alist)
+  "Show BUFFER where the conversation is, splitting nothing."
+  (when-let* ((win (ygg-aob--conversation-window)))
+    (window--display-buffer buffer win 'reuse alist)))
+
+(setq aob-compose-display-action
+      '((ygg-aob--compose-display
+         display-buffer-reuse-window
+         display-buffer-at-bottom)
+        (window-height . 12)))
 
 ;; a buffer opened to be written starts in insert state (after
 ;; yggdrasil-local-mode has already forced normal on mode change)

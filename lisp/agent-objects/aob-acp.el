@@ -788,7 +788,8 @@ never learns there was more than one."
                         :title (or (and task (or (plist-get raw :description)
                                                  (plist-get raw :prompt)))
                                    (cdr codex)
-                                   (plist-get u :title))
+                                   (aob-acp--tool-title u raw))
+                        :raw raw
                         :subagent (or task (and (cdr codex) t))
                         :parent (or (aob-acp--parent-of u)
                                     (plist-get meta :parentToolUseId)
@@ -800,16 +801,44 @@ never learns there was more than one."
     (puthash (plist-get u :toolCallId) ev (aob-acp--tools s))
     (aob-acp--child-note s ev nil)))
 
+(defconst aob-acp-tool-detail-keys
+  '(:command :pattern :query :url :file_path :path :filePath :description)
+  "Raw-input keys worth reading, in the order a tool line prefers them.")
+
+(defun aob-acp--tool-title (u raw)
+  "What a tool line says: the tool, and the one thing it is doing.
+An adapter sends the tool\='s name and leaves the command, the path or
+the pattern in its raw input, so a trace of a working agent reads as a
+column of the word bash."
+  (let* ((title (plist-get u :title))
+         (detail (and (listp raw)
+                      (seq-some (lambda (k)
+                                  (let ((v (plist-get raw k)))
+                                    (and (stringp v)
+                                         (not (string-empty-p (string-trim v)))
+                                         v)))
+                                aob-acp-tool-detail-keys)))
+         (one (and detail (aob--first-line detail 110))))
+    (cond ((null one) title)
+          ((null title) one)
+          ;; the adapter that already names what it is doing is left alone
+          ((string-search one title) title)
+          (t (concat title "  " one)))))
+
 (defun aob-acp--tool-update (s u)
   (if-let* ((ev (gethash (plist-get u :toolCallId) (aob-acp--tools s))))
       (let ((old (plist-get ev :status)))
+        (when-let* ((raw (plist-get u :rawInput))) (plist-put ev :raw raw))
         (dolist (key '(:kind :title :status :locations :content :rawOutput))
           (when-let* ((val (plist-get u key))
                       ;; updates re-send the bare tool name; a subagent
                       ;; already traded it for what it was sent to do
                       ((not (and (eq key :title) (plist-get ev :subagent)
                                  (equal val "Task")))))
-            (plist-put ev key val)))
+            (plist-put ev key
+                       (if (eq key :title)
+                           (aob-acp--tool-title u (plist-get ev :raw))
+                         val))))
         (when-let* ((st (aob-acp--diff-stat (plist-get ev :content))))
           (plist-put ev :stat st))
         (when (and (member (plist-get ev :status) '("completed" "failed"))
