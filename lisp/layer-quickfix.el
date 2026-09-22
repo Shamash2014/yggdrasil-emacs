@@ -1328,12 +1328,87 @@ With a RANGE and no ARGS the places those lines name become rows."
   "] l" #'ygg-next-error-any :label "next qf entry"
   "[ l" #'ygg-prev-error-any :label "prev qf entry")
 
+;;; Errors out of the things that produce them: a process, a shell, an agent
+
+(defun ygg-qf--output-buffers ()
+  "Buffers that hold the output of something that ran."
+  (seq-filter
+   (lambda (b)
+     (with-current-buffer b
+       (or (derived-mode-p 'compilation-mode 'comint-mode 'shell-mode
+                           'eshell-mode 'term-mode)
+           (and (fboundp 'ghostel-mode) (derived-mode-p 'ghostel-mode))
+           (get-buffer-process b))))
+   (buffer-list)))
+
+;;;###autoload
+(defun ygg-qf-from-buffer (buffer &optional name)
+  "Read every place BUFFER names into the quickfix.
+Whatever wrote it — a compile, a shell, a container's log — a line
+that names a file and a line is a place to go, and the rest is
+chatter."
+  (interactive
+   (list (get-buffer
+          (completing-read "Errors from: "
+                           (mapcar #'buffer-name (ygg-qf--output-buffers))
+                           nil t nil nil (buffer-name)))))
+  (let* ((buffer (or buffer (current-buffer)))
+         (name (or name (buffer-name buffer)))
+         (n (with-current-buffer buffer
+              (ygg-qf-from-lines (point-min) (point-max) name t))))
+    (message "quickfix: %d from %s" (or n 0) name)
+    n))
+
+;;;###autoload
+(defun ygg-qf-from-process ()
+  "Read the output of something that is running, or has run."
+  (interactive)
+  (let ((buffers (ygg-qf--output-buffers)))
+    (unless buffers (user-error "quickfix: nothing has run here"))
+    (ygg-qf-from-buffer
+     (get-buffer (completing-read "Errors from: "
+                                  (mapcar #'buffer-name buffers) nil t)))))
+
+(declare-function aob-target "aob")
+(declare-function aob-session-events "aob" (s))
+(declare-function aob-session-name "aob" (s))
+(declare-function aob-event-text "aob" (ev))
+
+;;;###autoload
+(defun ygg-qf-from-session (session)
+  "Read the places SESSION mentioned into the quickfix.
+What an agent says about a file is a place to go like any other: the
+list is what it said, read for paths the checkout holds."
+  (interactive (list (if (fboundp 'aob-target) (aob-target)
+                       (user-error "quickfix: no agents here"))))
+  (let* ((text (mapconcat
+                (lambda (ev)
+                  (or (ignore-errors (aob-event-text ev))
+                      (plist-get ev :title) ""))
+                (seq-filter (lambda (ev)
+                              (memq (plist-get ev :type)
+                                    '(message error tool prompt)))
+                            (aob-session-events session))
+                "\n"))
+         (name (aob-session-name session))
+         (n (with-temp-buffer
+              (insert text)
+              (setq default-directory
+                    (or (ignore-errors (aob-session-dir session))
+                        default-directory))
+              (ygg-qf-from-lines (point-min) (point-max) name t))))
+    (message "quickfix: %d from %s" (or n 0) name)
+    n))
+
 (yggdrasil-define-keys 'ygg-leader-quit-map
   "l" #'ygg-quickfix-toggle :label "quickfix"
   "\"" #'ygg-qf-switch :label "which list"
   "c" #'ygg-search-multibuffer :label "search → quickfix"
   "t" #'ygg-qf-todos :label "TODOs → quickfix"
   "e" #'ygg-qf-from-comint :label "buffer errors → quickfix"
+  "p" #'ygg-qf-from-process :label "process output → quickfix"
+  "b" #'ygg-qf-from-buffer :label "a buffer → quickfix"
+  "a" #'ygg-qf-from-session :label "agent said → quickfix"
   "v" #'ygg-qf-from-selection :label "selection → quickfix"
   "D" #'ygg-qf-diagnostics :label "diagnostics → quickfix")
 
