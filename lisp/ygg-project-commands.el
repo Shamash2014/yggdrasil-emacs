@@ -20,6 +20,16 @@
 
 (defconst ygg-project-commands--cargo '("build" "test" "run" "check" "clippy" "fmt"))
 
+(defconst ygg-project-commands--mix '("deps.get" "compile" "test" "format")
+  "Mix tasks every Elixir project has, whatever it is.")
+
+(defconst ygg-project-commands--mix-deps
+  '(("phoenix" "phx.server" "phx.routes")
+    ("ecto" "ecto.migrate" "ecto.rollback" "ecto.reset")
+    ("credo" "credo")
+    ("dialyxir" "dialyzer"))
+  "Tasks worth offering only where the dependency that provides them is.")
+
 (defconst ygg-project-commands--go
   '(("build" . "build ./...") ("test" . "test ./...") ("vet" . "vet ./...")))
 
@@ -169,6 +179,15 @@ unescaped, which is enough for the handful of keys read here."
                        patterns)))))
       (ygg-project-commands--expand (nreverse patterns) dir))))
 
+(defun ygg-project-commands--mix-apps (root)
+  "The apps of an umbrella, which is how Elixir spells a monorepo."
+  (when-let* ((mix (ygg-project-commands--file root "mix.exs"))
+              (dir (expand-file-name "apps" root))
+              ((file-directory-p dir)))
+    (seq-filter (lambda (d) (ygg-project-commands--file d "mix.exs"))
+                (mapcar #'file-name-as-directory
+                        (directory-files dir t "\\`[^.]")))))
+
 (defun ygg-project-commands--members (root)
   "Every monorepo member ROOT declares, whichever manifest declares it."
   (seq-remove
@@ -176,7 +195,8 @@ unescaped, which is enough for the handful of keys read here."
    (delete-dups (append (ygg-project-commands--npm-workspaces root)
                         (ygg-project-commands--pnpm-workspaces root)
                         (ygg-project-commands--cargo-workspaces root)
-                        (ygg-project-commands--go-workspaces root)))))
+                        (ygg-project-commands--go-workspaces root)
+                        (ygg-project-commands--mix-apps root)))))
 
 
 ;;; What one directory can run
@@ -188,6 +208,30 @@ unescaped, which is enough for the handful of keys read here."
                 (format "%s: %s" (file-name-nondirectory (directory-file-name dir))
                         name))
         :dir dir :command command :source source))
+
+(defun ygg-project-commands--text (path)
+  "PATH as a string, or nil."
+  (when (file-readable-p path)
+    (with-temp-buffer (insert-file-contents path) (buffer-string))))
+
+(defun ygg-project-commands--mix-extra (text)
+  "Tasks TEXT\='s dependencies bring with them."
+  (let (out)
+    (pcase-dolist (`(,dep . ,tasks) ygg-project-commands--mix-deps)
+      (when (string-match-p (format ":%s\\_>" (regexp-quote dep)) text)
+        (setq out (append out tasks))))
+    out))
+
+(defun ygg-project-commands--mix-aliases (text)
+  "The aliases TEXT defines, which is where a project keeps its own verbs."
+  (when (string-match "aliases[ \t]*do\\(\\(?:.\\|\n\\)*?\\)\n[ \t]*end" text)
+    (let ((body (match-string 1 text))
+          (start 0)
+          out)
+      (while (string-match "^[ \t]*\"?\\([a-z][A-Za-z0-9_.?!-]*\\)\"?:[ \t]*\\[" body start)
+        (push (match-string 1 body) out)
+        (setq start (match-end 0)))
+      (nreverse out))))
 
 (defun ygg-project-commands--justfile (dir)
   (ygg-project-commands--first dir "justfile" "Justfile"))
@@ -268,6 +312,17 @@ for it."
       (pcase-dolist (`(,name . ,args) ygg-project-commands--go)
         (push (ygg-project-commands--entry name dir root 'go (format "go %s" args))
               out)))
+    (when-let* ((mix (ygg-project-commands--file dir "mix.exs")))
+      (let ((text (ygg-project-commands--text mix)))
+        ;; an alias may shadow a task of the same name — it is still one
+        ;; thing to run, and one row
+        (dolist (name (delete-dups
+                       (append ygg-project-commands--mix
+                               (ygg-project-commands--mix-extra text)
+                               (ygg-project-commands--mix-aliases text))))
+          (push (ygg-project-commands--entry name dir root 'mix
+                                             (format "mix %s" name))
+                out))))
     (dolist (command (ygg-project-commands--python dir root))
       (push command out))
     (nreverse out)))

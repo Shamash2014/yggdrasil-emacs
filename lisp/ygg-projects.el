@@ -154,13 +154,22 @@ you looked at another is a row you have to open twice.")
                 (aob-sessions))))
 
 (defun ygg-projects--past (root)
-  "Conversations in ROOT that ended but can be picked up again."
-  (when (fboundp 'aob-acp-resumable-entries)
-    (seq-filter (lambda (e)
-                  (equal root (file-name-as-directory
-                               (expand-file-name (or (plist-get e :project)
-                                                     (plist-get e :dir) "/")))))
-                (ignore-errors (aob-acp-resumable-entries)))))
+  "Conversations in ROOT that ended but can be picked up again.
+The ones this Emacs started, and the ones the CLI left on disk before
+it ever did — a project you have just taken in has a history whether
+or not this Emacs was there for it."
+  (let* ((known (and (fboundp 'aob-acp-resumable-entries)
+                     (seq-filter
+                      (lambda (e)
+                        (equal root (file-name-as-directory
+                                     (expand-file-name (or (plist-get e :project)
+                                                           (plist-get e :dir) "/")))))
+                      (ignore-errors (aob-acp-resumable-entries)))))
+         (ids (mapcar (lambda (e) (plist-get e :acp-id)) known))
+         (found (and (fboundp 'aob-transcript-found)
+                     (seq-remove (lambda (e) (member (plist-get e :acp-id) ids))
+                                 (ignore-errors (aob-transcript-found root))))))
+    (append known found)))
 
 (defun ygg-projects--agents (root)
   "What ROOT has going, and everything it could go back to.

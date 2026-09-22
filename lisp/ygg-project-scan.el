@@ -46,6 +46,8 @@ handed to that project's agents as an additional directory."
   "Cached scan, since the set of repositories on disk moves slowly.")
 
 (declare-function project-known-project-roots "project" ())
+(declare-function ygg-projects--scan-worktrees "ygg-projects" ())
+(declare-function aob-transcript-found "aob-transcript" (project &optional agent))
 
 (defun ygg-project-scan--walk-1 (dir)
   "Repositories under DIR, by their `.git', which may be a file or a folder."
@@ -287,7 +289,15 @@ when the last of it settles.  Nothing here blocks."
            (cons "layout"
                  (lambda ()
                    (when (fboundp 'ygg-project-workspaces)
-                     (ygg-project-workspaces root)))))
+                     (ygg-project-workspaces root))))
+           (cons "worktrees"
+                 (lambda ()
+                   (when (fboundp 'ygg-projects--scan-worktrees)
+                     (ygg-projects--scan-worktrees))))
+           (cons "sessions"
+                 (lambda ()
+                   (when (fboundp 'aob-transcript-found)
+                     (aob-transcript-found root)))))
      callback)))
 
 ;;;###autoload

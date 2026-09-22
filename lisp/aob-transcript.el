@@ -48,6 +48,42 @@
               ((file-readable-p file)))
     file))
 
+;;;###autoload
+(defun aob-transcript-found (project &optional agent)
+  "Conversations AGENT left on disk for PROJECT, newest first.
+The CLI writes one file per conversation under its config home.  What
+this Emacs knows about is what it started itself, which for a project
+you have only just taken in is none of them."
+  (let* ((agent (or agent (bound-and-true-p aob-acp-default-agent) "claude"))
+         (dir (expand-file-name
+               (format "projects/%s" (aob-transcript--slug project))
+               (aob-transcript--home agent project))))
+    (when (file-directory-p dir)
+      (let ((files (sort (directory-files dir t "\\.jsonl\\'")
+                         (lambda (a b)
+                           (time-less-p
+                            (file-attribute-modification-time (file-attributes b))
+                            (file-attribute-modification-time (file-attributes a)))))))
+        (let (seen)
+          (mapcar (lambda (file)
+                    (let* ((entry (list :agent agent
+                                        :acp-id (file-name-base file)
+                                        :project (file-name-as-directory
+                                                  (expand-file-name project))
+                                        :dir (file-name-as-directory
+                                              (expand-file-name project))
+                                        :found t))
+                           (name (aob-transcript--name entry file))
+                           ;; a day is not a name when there were six of
+                           ;; them that day
+                           (name (if (member name seen)
+                                     (format "%s %s" name
+                                             (substring (plist-get entry :acp-id) 0 4))
+                                   name)))
+                      (push name seen)
+                      (plist-put entry :name name)))
+                  files))))))
+
 (defun aob-transcript--text (content)
   "The words in CONTENT, whatever shape the record used for it."
   (cond
