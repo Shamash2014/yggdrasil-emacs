@@ -348,6 +348,21 @@ NAME is the agent this session runs; the owner\='s own turns say you."
               (ms (round (* 1000 (- done start)))))
     (if (< ms 1000) (format "%dms" ms) (format "%.1fs" (/ ms 1000.0)))))
 
+(defcustom aob-trace-card-width 0
+  "Columns a command card shows before it is clipped.
+Zero follows `aob-trace-measure\='.  A card is a row in a log: what ran
+and how long it took.  The command itself is under TAB, whole."
+  :type 'natnum :group 'aob)
+
+(defun aob-trace--one-line (text)
+  "TEXT as the single line a card has room for."
+  (let* ((line (car (split-string (or text "") "\n" t)))
+         (room (max 12 (- (if (> aob-trace-card-width 0)
+                              aob-trace-card-width
+                            aob-trace-measure)
+                          12))))
+    (truncate-string-to-width (string-trim (or line "")) room)))
+
 (defun aob-trace--card (ev body)
   "BODY as a command card: tinted, monospaced, its timing on the right."
   (let* ((meta (concat "› " (or (aob-trace--elapsed ev) "")))
@@ -509,7 +524,8 @@ remap such as `ygg-focus-dim' cannot outrank it."
        (if (aob-trace--delta-p)
            (if (equal (plist-get ev :kind) "execute")
                (aob-trace--card
-                ev (or (plist-get ev :title) (plist-get ev :kind) ""))
+                ev (aob-trace--one-line
+                    (or (plist-get ev :title) (plist-get ev :kind) "")))
            (concat
             (aob-trace--prose
              (concat (if (plist-get ev :parent) "└ " "")
@@ -758,13 +774,19 @@ them, grouped and in order, or in their own trace."
              (ev (car evs))
              ;; a state row is the session speaking, not the agent: the
              ;; mark belongs on the first thing the agent itself does
-             (head (and opening (not (memq (plist-get ev :type)
-                                           '(prompt state))))))
+             ;; the agent's own doing: a permission is the adapter
+             ;; asking and a state row is the session speaking
+             ;; a boolean, not the tail `memq' hands back: the stored
+             ;; value is compared with it, and a list never equals t
+             (head (and opening
+                        (memq (plist-get ev :type) '(tool message thought))
+                        t)))
         (unless (eq (and (plist-get ev :turn-head) t) head)
           (plist-put ev :turn-head head)
           (plist-put ev :line nil))
         (setq opening (or (eq (plist-get ev :type) 'prompt)
-                          (and opening (eq (plist-get ev :type) 'state))))
+                          (and opening (not (memq (plist-get ev :type)
+                                                  '(tool message thought))))))
         (if (>= n aob-trace-explore-min)
             (progn (push (aob-trace--explore-block s run) acc)
                    (setq evs (nthcdr n evs)))
