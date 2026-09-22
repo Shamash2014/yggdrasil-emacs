@@ -2301,6 +2301,23 @@ this is the other verb, for a session that is over for good."
         (kill-buffer buf))
       (message "%s deleted" name))))
 
+(declare-function aob-transcript-file "aob-transcript" (entry))
+(declare-function aob-transcript-turns "aob-transcript" (file))
+
+(defun aob-acp--seed-history (s entry)
+  "Put ENTRY\='s past turns in S, so a resumed conversation opens on itself.
+The adapter reloads the conversation on its own side and says nothing
+about what was in it, so a resumed session\='s trace starts blank.  Only
+where S has no events of its own: an adapter that does replay must not
+be doubled."
+  (when (and (fboundp 'aob-transcript-file)
+             (fboundp 'aob-transcript-turns)
+             (null (aob-session-events s)))
+    (when-let* ((file (ignore-errors (aob-transcript-file entry))))
+      (dolist (turn (ignore-errors (aob-transcript-turns file)))
+        (aob-event s (if (equal (car turn) "user") 'prompt 'message)
+                   :text (cdr turn))))))
+
 (defun aob-acp-resume-entry (e &optional pref)
   "Respawn persisted entry E, restoring its conversation; return the session.
 PREF overrides `aob-acp-restore-preference' for this one entry.
@@ -2346,6 +2363,7 @@ Prompts sent while it opens queue and fire on readiness."
      (lambda (init) (aob-acp--restore-open init acp-id cwd name verb pref))
      (lambda (s res)
        (aob-session-put s :restored-by (car verb))
+       (aob-acp--seed-history s e)
        (aob-acp--session-opened s res acp-id "session resumed")))))
 
 (defun aob-acp--restore-target ()

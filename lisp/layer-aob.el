@@ -498,12 +498,27 @@ spawned by aob are then the same install, logged in once."
 A trace that opens because something started in the background should
 not take the point; one that opens because you just sent to it should.")
 
+(defun ygg-aob--conversation-window ()
+  "A window already given over to a conversation, if the frame has one.
+One window holds whatever conversation you are reading: a resumed or
+forked session is a new buffer, and without this each one splits the
+frame again until the sidebar is squeezed out of it."
+  (seq-find (lambda (w)
+              (and (not (window-parameter w 'window-side))
+                   (not (window-dedicated-p w))
+                   (buffer-local-value 'aob-buffer-session-id (window-buffer w))))
+            (window-list nil 'no-minibuf)))
+
 (defun ygg-aob--show-trace (s)
-  "Show S's trace in a split of its own.
+  "Show S's trace in the window conversations are read in.
 Point follows only when this is the conversation you just spoke to."
   (unless noninteractive
     (when-let* ((buf (ignore-errors (aob-trace-buffer s)))
-                (win (ignore-errors (display-buffer buf ygg-aob-trace-action))))
+                (win (or (when-let* ((w (ygg-aob--conversation-window)))
+                           (unless (eq (window-buffer w) buf)
+                             (set-window-buffer w buf))
+                           w)
+                         (ignore-errors (display-buffer buf ygg-aob-trace-action)))))
       (when (and ygg-aob--compose-sending (window-live-p win))
         (select-window win))
       win)))
