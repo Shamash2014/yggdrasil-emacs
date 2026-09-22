@@ -509,30 +509,35 @@ cannot spill past the text area and mark every line truncated."
     (nreverse out)))
 
 (with-eval-after-load 'vui
-  (vui-defcomponent ygg-projects-card (root open)
-    "One project: a line in the list, or an opened block when OPEN.
-Nothing is drawn above the head line: a row that slid down as it
-opened would take the hand that pressed TAB with it."
-    :render
-    (if (not open)
-        (vui-text (ygg-projects--head-text root))
-      (vui-region
-       :face 'ygg-projects-card
-       (apply #'vui-vstack
-              (cons (vui-text (ygg-projects--head-text root))
-                    (ygg-projects--rows root))))))
+  ;; expanded where vui is loaded, never before: byte-compiled in a
+  ;; session that has not loaded it, `vui-defcomponent' is not yet a
+  ;; macro, compiles to a function call, and the file signals on load
+  (eval '(progn
+    (vui-defcomponent ygg-projects-card (root open)
+        "One project: a line in the list, or an opened block when OPEN.
+    Nothing is drawn above the head line: a row that slid down as it
+    opened would take the hand that pressed TAB with it."
+        :render
+        (if (not open)
+            (vui-text (ygg-projects--head-text root))
+          (vui-region
+           :face 'ygg-projects-card
+           (apply #'vui-vstack
+                  (cons (vui-text (ygg-projects--head-text root))
+                        (ygg-projects--rows root))))))
 
-  (vui-defcomponent ygg-projects-view (roots open)
-    "The projects as a list, the open one lifted out of it as a card."
-    :render
-    (apply #'vui-vstack
-           (apply #'append
-                  (mapcar (lambda (root)
-                            (let ((card (vui-component 'ygg-projects-card
-                                                       :key root :root root
-                                                       :open (equal root open))))
-                              (list card)))
-                          roots)))))
+      (vui-defcomponent ygg-projects-view (roots open)
+        "The projects as a list, the open one lifted out of it as a card."
+        :render
+        (apply #'vui-vstack
+               (apply #'append
+                      (mapcar (lambda (root)
+                                (let ((card (vui-component 'ygg-projects-card
+                                                           :key root :root root
+                                                           :open (equal root open))))
+                                  (list card)))
+                              roots)))))
+        t))
 
 (defun ygg-projects--row-at-point ()
   "What the line point is on stands for, as (ROOT . KIND)."

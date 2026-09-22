@@ -662,13 +662,19 @@ that will be correct a second later."
         (unless (string-prefix-p "layer-" (file-name-nondirectory f))
           (when (and (ygg--elc-stale-p f) (ygg--readable-elisp-p f))
             (when (ignore-errors (byte-compile-file f)) (setq done (1+ done)))))))
-    (when (and (fboundp 'native-comp-available-p) (native-comp-available-p))
-      (dolist (d dirs) (native-compile-async d nil)))
+    ;; native compilation is left to the jit: it works from the .elc,
+    ;; where the macros are already expanded, while an async compile of
+    ;; the source would re-expand them in a subprocess that has loaded
+    ;; none of the packages they come from
     (when (called-interactively-p 'interactive)
       (message "recompiled %d file%s" done (if (= done 1) "" "s")))
     done))
 
-(run-with-idle-timer 3 nil #'ygg-recompile-lisp)
+(add-hook 'elpaca-after-init-hook
+          ;; not a bare idle timer: a daemon is idle long before elpaca has
+          ;; finished, and a file compiled before the package whose macros
+          ;; it uses is loaded compiles those macros as function calls
+          (lambda () (run-with-idle-timer 5 nil #'ygg-recompile-lisp)))
 
 ;;; emacsclient reaches this session (agent tooling relies on it)
 (require 'server)

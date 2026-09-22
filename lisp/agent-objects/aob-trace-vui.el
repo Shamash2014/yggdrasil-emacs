@@ -33,7 +33,8 @@ The vui path is a prototype; flip to `vui' only to A/B it."
   "The mounted vui root instance backing this trace buffer.")
 
 (when (featurep 'vui)
-  (vui-defcomponent aob-trace-view (session)
+  ;; see ygg-projects.el: the macro must expand where vui is loaded
+  (eval '(vui-defcomponent aob-trace-view (session)
     "Render SESSION's trace: one keyed text block per top-level event.
 The block strings come straight from `aob-trace--block', so glyphs,
 faces and the `aob-event' navigation properties are unchanged — vui only
@@ -49,7 +50,8 @@ owns layout and diffing."
                          (vui-text (concat (aob-trace--block s ev) "\n")
                            :key (plist-get ev :seq))))
                      (reverse (seq-take (aob-session-events s)
-                                        aob-trace-limit)))))))))
+                                        aob-trace-limit))))))))
+        t))
 
 (define-derived-mode aob-trace-vui-mode vui-mode "aob-trace"
   "Operation trace of one agent session, drawn by vui.el."
