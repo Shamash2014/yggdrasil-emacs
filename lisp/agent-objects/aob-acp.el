@@ -1865,6 +1865,14 @@ the adapters store their sessions under."
     (setq aob-acp--opened-any t)
     (dolist (pair (seq-partition aob-acp-session-refs 2))
       (aob-session-put s (car pair) (cadr pair)))
+    ;; the servers bound by whoever opened this session are what it was
+    ;; meant to be handed.  The handshake is asynchronous, so by the time
+    ;; the adapter asks what to open with, a caller's `let' is long
+    ;; unwound and the session would go out with none of them
+    (let ((servers aob-acp-mcp-servers)
+          (fn open))
+      (setq open (lambda (init)
+                   (let ((aob-acp-mcp-servers servers)) (funcall fn init)))))
     (if prepare
         (funcall prepare s
                  (lambda (err)

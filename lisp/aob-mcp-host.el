@@ -100,10 +100,18 @@ whatever Emacs happens to be first on PATH."
   (format "%x%x" (random (expt 2 28)) (float-time)))
 
 (defun aob-mcp-host-session (token)
-  "The session TOKEN was spawned for, if it still exists."
-  (when-let* ((id (gethash token aob-mcp-host--tokens))
-              ((fboundp 'aob-session-get)))
-    (aob-session-get id)))
+  "The session TOKEN was spawned for, if it still exists.
+The table is a cache, not the record: a session carries its own token,
+and it is put there after the session is created — which is one line
+too late for `aob-session-created-hook\=' to have seen it."
+  (when (fboundp 'aob-session-get)
+    (or (when-let* ((id (gethash token aob-mcp-host--tokens)))
+          (aob-session-get id))
+        (when-let* ((s (seq-find (lambda (s)
+                                   (equal token (aob-session-ref s :mcp-token)))
+                                 (aob-sessions))))
+          (puthash token (aob-session-id s) aob-mcp-host--tokens)
+          s))))
 
 (defun aob-mcp-host--claim (session)
   "Record SESSION under the token it was spawned with."
@@ -121,7 +129,7 @@ whatever Emacs happens to be first on PATH."
         :url (format "%s?session=%s" (aob-mcp-url) token)))
 
 (defun aob-mcp-host--around-spawn (fn &rest args)
-  "Give every session this Emacs spawns the sidecar, under its own token."
+  "Give every session this Emacs opens the sidecar, under its own token."
   (aob-mcp-host-start)
   (let* ((token (aob-mcp-host--token))
          (aob-acp-mcp-servers (cons (aob-mcp-host-spec token)
@@ -135,8 +143,11 @@ whatever Emacs happens to be first on PATH."
   "Hand the sidecar to every ACP session this Emacs opens."
   :global t :group 'aob-mcp
   (if aob-mcp-host-mode
-      (advice-add 'aob-acp-spawn :around #'aob-mcp-host--around-spawn)
-    (advice-remove 'aob-acp-spawn #'aob-mcp-host--around-spawn)
+      ;; every way in, not just `aob-acp-spawn': a resumed conversation
+      ;; and a forked one are sessions of this Emacs too, and a draft
+      ;; that spawns goes through the same funnel
+      (advice-add 'aob-acp--open :around #'aob-mcp-host--around-spawn)
+    (advice-remove 'aob-acp--open #'aob-mcp-host--around-spawn)
     (aob-mcp-host-stop)))
 
 (provide 'aob-mcp-host)
