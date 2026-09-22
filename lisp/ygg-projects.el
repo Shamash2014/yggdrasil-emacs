@@ -302,8 +302,99 @@ commands, and counting them would ask for another scan."
                   (setq done t)
                   (run-at-time 0 nil #'ygg-projects-refresh))))))))
 
-(defun ygg-projects--terminals (root)
-  (let ((n (length (cdr (ygg-projects--root-buffers root)))))
+(defvar ygg-projects--docker-cache (make-hash-table :test #'equal)
+  "Root to the containers docker last said were running for it.")
+
+(defvar ygg-projects--docker-pending (make-hash-table :test #'equal))
+
+(defun ygg-projects--docker-p (root)
+  "Whether ROOT is a project docker would have anything to say about."
+  (and (executable-find "docker")
+       (seq-some (lambda (name) (file-exists-p (expand-file-name name root)))
+                 '("docker-compose.yml" "docker-compose.yaml"
+                   "compose.yml" "compose.yaml" "Dockerfile"))))
+
+(defun ygg-projects--docker-key (name)
+  (downcase (replace-regexp-in-string "[^a-z0-9]" "" (downcase (or name "")))))
+
+(defun ygg-projects--docker-names (root)
+  "What compose might have called ROOT\='s project.
+The folder is one answer and often the wrong one: a worktree is named
+for its branch, and the containers were started under the name of the
+repository it came out of."
+  (delete-dups
+   (delq nil
+         (list (ygg-projects--docker-key
+                (file-name-nondirectory (directory-file-name root)))
+               (when-let* ((common (ignore-errors
+                                     (with-temp-buffer
+                                       (let ((default-directory root))
+                                         (when (zerop (call-process
+                                                       "git" nil t nil "rev-parse"
+                                                       "--path-format=absolute"
+                                                       "--git-common-dir"))
+                                           (string-trim (buffer-string))))))))
+                 (ygg-projects--docker-key
+                  (file-name-base (directory-file-name
+                                   (file-name-directory
+                                    (directory-file-name common))))))))))
+
+(defun ygg-projects--containers (root)
+  "The containers docker last reported for ROOT."
+  (gethash root ygg-projects--docker-cache))
+
+(defun ygg-projects--scan-docker ()
+  "Ask docker what is running for the projects on show, without waiting.
+Only where the project has something docker-shaped in it: `docker ps\='
+on every row of a list of thirty is a second of nothing."
+  (dolist (root (ygg-projects--roots))
+    (when (and (ygg-projects--docker-p root)
+               (not (gethash root ygg-projects--docker-pending)))
+      (puthash root t ygg-projects--docker-pending)
+      (let ((buf (generate-new-buffer " *ygg-docker*"))
+            (want (ygg-projects--docker-names root)))
+        (condition-case nil
+            (make-process
+             :name "ygg-docker" :buffer buf :noquery t
+             :command '("docker" "ps" "--format"
+                        "{{.Names}}\t{{.Label \"com.docker.compose.project\"}}\t{{.Status}}\t{{.Label \"com.docker.compose.project.working_dir\"}}")
+             :sentinel
+             (lambda (proc _event)
+               (unless (process-live-p proc)
+                 (remhash root ygg-projects--docker-pending)
+                 (let* ((out (and (buffer-live-p buf)
+                                  (with-current-buffer buf (buffer-string))))
+                        (was (gethash root ygg-projects--docker-cache))
+                        (rows (delq nil
+                                    (mapcar
+                                     (lambda (line)
+                                       (let* ((cols (split-string line "\t"))
+                                              (name (nth 0 cols))
+                                              (project (nth 1 cols))
+                                              (status (nth 2 cols))
+                                              (home (nth 3 cols)))
+                                         (when (and name
+                                                    (or (and home
+                                                             (not (string-empty-p home))
+                                                             (string-prefix-p
+                                                              (expand-file-name root)
+                                                              (file-name-as-directory
+                                                               (expand-file-name home))))
+                                                        (member (ygg-projects--docker-key
+                                                                 (or project name))
+                                                                want)))
+                                           (list :name name :status status))))
+                                     (split-string (or out "") "\n" t)))))
+                   (when (buffer-live-p buf) (kill-buffer buf))
+                   (puthash root rows ygg-projects--docker-cache)
+                   (unless (equal was rows) (ygg-projects-refresh))))))
+          (error (remhash root ygg-projects--docker-pending)
+                 (when (buffer-live-p buf) (kill-buffer buf))))))))
+
+(defun ygg-projects--processes (root)
+  "What ROOT has running that you can go and look at."
+  (let ((n (+ (length (cdr (ygg-projects--root-buffers root)))
+              (length (ygg-projects--containers root)))))
     (cons n n)))
 
 (defun ygg-projects--folders (root)
@@ -410,8 +501,15 @@ scan already learned not to do."
                                c))
                        (and (fboundp 'ygg-project-commands)
                             (ygg-project-commands root))))
-    ('terminals (mapcar (lambda (b) (cons (buffer-name b) b))
-                        (cdr (ygg-projects--root-buffers root))))
+    ('processes
+     (append
+      (mapcar (lambda (b) (cons (buffer-name b) b))
+              (cdr (ygg-projects--root-buffers root)))
+      (mapcar (lambda (c)
+                (cons (plist-get c :name)
+                      (list 'docker :name (plist-get c :name)
+                            :status (plist-get c :status))))
+              (ygg-projects--containers root))))
     ('folders (mapcar (lambda (d) (cons (abbreviate-file-name
                                         (directory-file-name d))
                                        d))
@@ -429,6 +527,13 @@ scan already learned not to do."
             ((< secs (* 7 86400)) (format "%dd" (round secs 86400)))
             (t (format-time-string "%b %-d" ts))))))
 
+(defun ygg-projects--docker-status (status)
+  "STATUS as a badge: \"Up 21 hours (healthy)\" is a sentence, 21h is a badge."
+  (let ((status (or status "")))
+    (if (string-match "\\`Up \\([0-9]+\\) \\([a-z]\\)" status)
+        (concat (match-string 1 status) (match-string 2 status))
+      (downcase (or (car (split-string status " " t)) "")))))
+
 (defun ygg-projects--entry-badge (payload)
   "What PAYLOAD has to say for itself at the right edge.
 A running conversation says what it is doing; one that ended says how
@@ -436,7 +541,10 @@ long ago, since a list of six conversations from today is told apart
 by when, not by that they were all today."
   (cond ((and (fboundp 'aob-session-p) (aob-session-p payload))
          (format "%s" (aob-session-state payload)))
-        ((and (consp payload) (plist-member payload :acp-id))
+        ((and (consp payload) (eq (car payload) 'docker))
+         (ygg-projects--docker-status (plist-get (cdr payload) :status)))
+        ((and (consp payload) (proper-list-p payload)
+              (plist-member payload :acp-id))
          (or (ygg-projects--ago (plist-get payload :ts))
              (when-let* ((file (and (fboundp 'aob-transcript-file)
                                     (ignore-errors (aob-transcript-file payload)))))
@@ -545,14 +653,14 @@ cannot spill past the text area and mark every line truncated."
   "ROOT's rows as (KIND ICON LABEL COUNT)."
   (let ((agents (ygg-projects--agents root))
         (cmds (ygg-projects--commands root))
-        (terms (ygg-projects--terminals root))
+        (terms (ygg-projects--processes root))
         (wts (ygg-projects--worktrees root)))
     (list (list 'agents "▲"
                 "Sessions" (ygg-projects--counts (car agents) (cdr agents)))
           (list 'commands (ygg-projects--icon "nf-md-console" ">")
                 "Commands" (ygg-projects--counts (car cmds) (cdr cmds)))
-          (list 'terminals (ygg-projects--icon "nf-md-console_line" "T")
-                "Terminals" (ygg-projects--counts (car terms) (cdr terms)))
+          (list 'processes (ygg-projects--icon "nf-md-console_line" "T")
+                "Processes" (ygg-projects--counts (car terms) (cdr terms)))
           (list 'worktrees (ygg-projects--icon "nf-md-source_branch" "W")
                 "Worktrees" (ygg-projects--counts (car wts) (cdr wts)))
           (let ((n (length (ygg-projects--folders root))))
@@ -792,7 +900,8 @@ agent holding a conversation open is the reason it cannot be filed."
   (when (fboundp 'aob-transcript-forget) (aob-transcript-forget))
   (ygg-projects-refresh)
   (ygg-projects--scan-commands)
-  (ygg-projects--scan-worktrees))
+  (ygg-projects--scan-worktrees)
+  (ygg-projects--scan-docker))
 
 (defun ygg-projects-next () (interactive) (ygg-projects--goto 1))
 (defun ygg-projects-prev () (interactive) (ygg-projects--goto -1))
@@ -864,7 +973,14 @@ The line keeps its place on screen; what opens, opens below it."
                        (let ((default-directory root))
                          (compile (format "just %s" entry)))))
           ('folders (dired entry))
-          ('terminals (pop-to-buffer entry))
+          ('processes
+           (if (and (consp entry) (eq (car entry) 'docker))
+               (let ((default-directory root)
+                     (name (plist-get (cdr entry) :name)))
+                 (async-shell-command
+                  (format "docker logs --tail 200 -f %s" (shell-quote-argument name))
+                  (format "*docker: %s*" name)))
+             (pop-to-buffer entry)))
           ('worktrees (if (fboundp 'ygg-space-open)
                           (ygg-space-open entry)
                         (dired entry))))
@@ -876,7 +992,7 @@ The line keeps its place on screen; what opens, opens below it."
                    (if (fboundp 'ygg-task-run) (call-interactively #'ygg-task-run)
                      (user-error "projects: no task runner"))))
       ('folders (call-interactively #'ygg-project-add-folder))
-      ('terminals (let ((default-directory root))
+      ('processes (let ((default-directory root))
                     (if (fboundp 'ghostel) (call-interactively #'ghostel)
                       (user-error "projects: no terminal"))))
       ('worktrees (let ((default-directory root))
