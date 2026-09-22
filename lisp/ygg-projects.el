@@ -592,7 +592,11 @@ where nothing can be read."
      (propertize (concat head
                          (propertize first 'font-lock-face 'ygg-projects-entry)
                          (ygg-projects--right
-                          (propertize badge 'font-lock-face 'ygg-projects-count)))
+                          (propertize badge 'font-lock-face 'ygg-projects-count)
+                          ;; the row is as tall as it needs, unless its
+                          ;; name carries on below, where the air belongs
+                          (unless (and rest (not (string-empty-p rest)))
+                            (+ 1.0 ygg-projects-entry-spacing))))
                  'ygg-project root 'ygg-row kind 'ygg-entry payload)
      (when (and rest (not (string-empty-p rest)))
        (concat
@@ -605,7 +609,7 @@ where nothing can be read."
                  ;; saying there was another column
                  (propertize (truncate-string-to-width rest wrap)
                              'font-lock-face 'ygg-projects-entry)
-                 (ygg-projects--right ""))
+                 (ygg-projects--right "" (+ 1.0 ygg-projects-entry-spacing)))
          'ygg-project root 'ygg-row kind 'ygg-entry payload 'ygg-cont t))))))
 
 (defun ygg-projects--entry-nodes (root kind)
@@ -627,7 +631,7 @@ overriding it hands the glyph to a font that has no such character."
 (defun ygg-projects--width ()
   (- ygg-projects-width 4))
 
-(defun ygg-projects--right (text)
+(defun ygg-projects--right (text &optional height)
   "TEXT pushed to the right edge, with the line padded out behind it.
 The target is the window edge, not a column count: a nerd-icon glyph is
 drawn wider than the one column it measures, so a numeric `align-to'
@@ -637,7 +641,13 @@ cannot spill past the text area and mark every line truncated."
   (concat (propertize " " 'display
                       `(space :align-to (- right ,(+ 2 (string-width text)))))
           text
-          (propertize " " 'display '(space :align-to right))))
+          ;; HEIGHT makes the last glyph of the row taller than the text,
+          ;; which is the only thing that opens a line up here: a
+          ;; line-spacing property on the newline is ignored in this
+          ;; buffer, whatever the manual says it does elsewhere
+          (propertize " " 'display (if height
+                                       `(space :align-to right :height ,height)
+                                     '(space :align-to right)))))
 
 (defun ygg-projects--pad ()
   "A blank line as wide as a card."
@@ -800,23 +810,6 @@ A sublist is a list of things, not a paragraph: what tells one row
 from the next is the space around it."
   :type 'number :group 'ygg-projects)
 
-(defun ygg-projects--space-entries ()
-  "Put air under each entry, but not between the two lines of one.
-The property has to sit on the newline that ends the line — on the
-first character it is read by nothing — and vui writes those newlines
-itself, so this runs over what it drew."
-  (let ((inhibit-read-only t))
-    (save-excursion
-      (goto-char (point-min))
-      (while (not (eobp))
-        (let ((eol (line-end-position)))
-          (when (and (get-text-property (line-beginning-position) 'ygg-entry)
-                     (< eol (point-max))
-                     (not (get-text-property (1+ eol) 'ygg-cont)))
-            (put-text-property eol (1+ eol)
-                               'line-spacing ygg-projects-entry-spacing)))
-        (forward-line 1)))))
-
 (defun ygg-projects-refresh ()
   "Redraw the sidebar from what the projects are running now.
 Point is kept on the row it was on rather than at the offset that row
@@ -833,7 +826,6 @@ the sidebar moving on its own."
           (vui-update-props ygg-projects--instance
                             (list :roots (ygg-projects--roots)
                                   :open ygg-projects--open))
-          (ygg-projects--space-entries)
           (ygg-projects--goto-row row)
           (when (and (window-live-p win) start (<= start (point-max)))
             (set-window-start win start t)))))))
