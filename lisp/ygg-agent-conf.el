@@ -44,36 +44,108 @@ plugin brings, which is not the same set the CLI will hand to a session."
                      ;; wire builder recognises; a vector is not
                      (nreverse env))))))))
 
-;;;###autoload
-(defun ygg-agent-user-mcp-servers (agent &optional project)
-  "The MCP servers AGENT\='s own configuration declares, in wire shape.
-A session opened from here goes through session/new, which carries the
-servers it is given and nothing else — so the ones the CLI would have
-loaded from its config have to be handed over too, or an agent started
-from Emacs reaches fewer tools than the same agent started by hand."
-  (when (equal agent "claude")
-    (let* ((file (expand-file-name "~/.claude.json"))
-           (json (and (file-readable-p file) (ygg-agent--read-json file)))
-           (tables
-            (and json
-                 (delq nil
-                       (list (gethash "mcpServers" json)
-                             (when-let* ((project)
-                                         (projects (gethash "projects" json))
-                                         (entry (or (gethash (directory-file-name
-                                                              (expand-file-name project))
-                                                             projects)
-                                                    (gethash (file-name-as-directory
-                                                              (expand-file-name project))
-                                                             projects))))
-                               (gethash "mcpServers" entry))))))
-           out)
-      (dolist (table tables)
+(defun ygg-agent--json-mcp (file &optional project)
+  "The servers FILE declares, and the ones it declares for PROJECT."
+  (when-let* (((file-readable-p (expand-file-name file)))
+              (json (ygg-agent--read-json (expand-file-name file))))
+    (let (out)
+      (dolist (table (delq nil
+                           (list (gethash "mcpServers" json)
+                                 (when-let* ((project)
+                                             (projects (gethash "projects" json))
+                                             (entry (or (gethash (directory-file-name
+                                                                  (expand-file-name project))
+                                                                 projects)
+                                                        (gethash (file-name-as-directory
+                                                                  (expand-file-name project))
+                                                                 projects))))
+                                   (gethash "mcpServers" entry)))))
         (when (hash-table-p table)
           (maphash (lambda (name spec)
                      (push (ygg-agent--mcp-spec name spec) out))
                    table)))
       (delq nil (nreverse out)))))
+
+(defun ygg-agent--toml-strings (value)
+  "The quoted strings in VALUE, a TOML scalar or inline array."
+  (let ((out nil) (start 0))
+    (while (string-match "\"\\([^\"]*\\)\"" value start)
+      (push (match-string 1 value) out)
+      (setq start (match-end 0)))
+    (nreverse out)))
+
+(defun ygg-agent--toml-mcp (file)
+  "The servers FILE declares, read as much TOML as this needs.
+Only the `mcp_servers\=' tables: a section head, its scalars and its
+env table.  Anything else in the file is somebody else\='s business."
+  (when (file-readable-p (expand-file-name file))
+    (with-temp-buffer
+      (insert-file-contents (expand-file-name file))
+      (goto-char (point-min))
+      (let ((servers (make-hash-table :test 'equal))
+            (order nil)
+            name mode)
+        (while (not (eobp))
+          (let ((line (string-trim (buffer-substring-no-properties
+                                    (line-beginning-position)
+                                    (line-end-position)))))
+            (cond
+             ;; a section under mcp_servers names a server, and what
+             ;; follows the name says which part of it: nothing is the
+             ;; server, env is its environment, anything else — argent
+             ;; keeps a table per tool down there — is not ours
+             ((string-match "\\`\\[mcp_servers\\.\\([^]]+\\)\\]\\'" line)
+              (let* ((parts (split-string (match-string 1 line) "\\." t))
+                     (server (car parts))
+                     (rest (cdr parts)))
+                (setq name server
+                      mode (cond ((null rest) 'server)
+                                 ((equal rest '("env")) 'env)))
+                (when (and (eq mode 'server) (not (gethash server servers)))
+                  (puthash server (list :name server) servers)
+                  (push server order))))
+             ((string-prefix-p "[" line) (setq name nil mode nil))
+             ((and name mode
+                   (string-match "\\`\\([A-Za-z_][A-Za-z0-9_]*\\)[ \t]*=[ \t]*\\(.*\\)\\'" line))
+              (let* ((key (match-string 1 line))
+                     (values (ygg-agent--toml-strings (match-string 2 line)))
+                     (spec (gethash name servers)))
+                (when spec
+                  (puthash name
+                           (pcase (cons mode key)
+                             (`(env . ,_) (plist-put spec :env
+                                                     (append (plist-get spec :env)
+                                                             (list (list :name key
+                                                                         :value (or (car values) ""))))))
+                             ('(server . "command") (plist-put spec :command (car values)))
+                             ('(server . "url") (plist-put spec :url (car values)))
+                             ('(server . "args") (plist-put spec :args (vconcat values)))
+                             (_ spec))
+                           servers)))))
+            (forward-line 1)))
+        (delq nil
+              (mapcar (lambda (n)
+                        (let ((spec (gethash n servers)))
+                          (cond ((plist-get spec :url) (plist-put spec :type "http"))
+                                ((plist-get spec :command) spec))))
+                      (nreverse order)))))))
+
+;;;###autoload
+(defun ygg-agent-user-mcp-servers (agent &optional project)
+  "The MCP servers AGENT\='s own configuration declares, in wire shape.
+A session gets what session/new carries and nothing else, so the
+servers the CLI would have loaded from its own config have to be
+handed over too — for whichever CLI is behind this session, since an
+agent started from Emacs should reach what that agent reaches when it
+is started by hand."
+  (pcase agent
+    ("claude" (ygg-agent--json-mcp "~/.claude.json" project))
+    ("gemini" (ygg-agent--json-mcp "~/.gemini/settings.json" project))
+    ("codex" (ygg-agent--toml-mcp "~/.codex/config.toml"))
+    ((pred stringp)
+     ;; anything else: the two places the others keep it
+     (or (ygg-agent--json-mcp (format "~/.%s/settings.json" agent) project)
+         (ygg-agent--json-mcp (format "~/.%s.json" agent) project)))))
 
 (defconst ygg-agent--config-homes
   '(("claude" :var "CLAUDE_CONFIG_DIR" :marker ".claude-config-dir" :home "~/.claude"
