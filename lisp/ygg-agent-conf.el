@@ -160,6 +160,13 @@ You are running inside Emacs, and the `aob` MCP server is that editor.
   answer: `xref_references` and `xref_apropos` for who calls what,
   `imenu_symbols` for a file's shape, `treesit_info` for the parse, and
   `diagnostics` for what a checker says about a file that is open.
+- Talk to the other conversations open here, not only to the ones you
+  sent: `session_list` gives every one of them with its id, state,
+  name and folder, and `session_say` puts words into one — into the
+  turn it is running where its agent takes steering, queued for its
+  next turn where it does not.  Address a session by its id; two
+  conversations can carry one name and a name that fits both is
+  refused rather than guessed.
 - `tool_names` lists everything this server offers."
   "What every session started from here is told about this editor.
 Written into the config home the session runs under, which is where
