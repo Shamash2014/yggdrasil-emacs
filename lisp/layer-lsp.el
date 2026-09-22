@@ -214,19 +214,10 @@ so whichever completes last re-modes the stragglers."
   (add-to-list 'treesit-language-source-alist
                '(dockerfile "https://github.com/camdencheek/tree-sitter-dockerfile")))
 
-;; docker-compose files get a dedicated mode (compose-key completion); its LSP
-;; (docker-compose-langserver) is wired above when the binary is present.
-(when (fboundp 'elpaca)
-  (elpaca (docker-compose-mode :host github :repo "meqif/docker-compose-mode")))
-;; both treesit-auto and yaml-mode prepend a generic \.ya?ml\' entry that would
-;; shadow compose files; prepend the compose names AFTER those settle (idle)
-;; so docker-compose*.yml AND Compose V2 compose*.yaml win.
-(run-with-idle-timer
- 2.5 nil
- (lambda ()
-   (dolist (re '("\\(?:^\\|/\\)docker-compose\\(?:\\.[^/]+\\)?\\.ya?ml\\'"
-                 "\\(?:^\\|/\\)compose\\(?:\\.[^/]+\\)?\\.ya?ml\\'"))
-     (add-to-list 'auto-mode-alist (cons re 'docker-compose-mode)))))
+;; compose files are yaml and nothing else: docker-compose-mode was
+;; archived in 2024 and its whole offer — completion of compose keys —
+;; is what a yaml language server does from the published schema, which
+;; is also the one that knows this year's spec.
 (run-with-idle-timer
  2 nil (lambda ()
          (require 'treesit)
@@ -391,9 +382,12 @@ so whichever completes last re-modes the stragglers."
   (when ygg-lsp--python-server
     (add-to-list 'eglot-server-programs
                  (cons '(python-mode python-ts-mode) ygg-lsp--python-server)))
-  (when (ygg-lsp--executable "docker-compose-langserver")
+  ;; yaml, schema and all: SchemaStore's compose entry matches both the
+  ;; docker-compose*.y{a,}ml and the compose*.y{a,}ml names
+  (when (ygg-lsp--executable "yaml-language-server")
     (add-to-list 'eglot-server-programs
-                 '(docker-compose-mode . ("docker-compose-langserver" "--stdio"))))
+                 '((yaml-mode yaml-ts-mode)
+                   . ("yaml-language-server" "--stdio"))))
   ;; harper: grammar/spell checker for prose (no other LSP owns these modes)
   (when (ygg-lsp--executable "harper-ls")
     (add-to-list 'eglot-server-programs
@@ -424,7 +418,7 @@ so whichever completes last re-modes the stragglers."
 (ygg-lsp--hook-when "expert" '(elixir-ts-mode-hook elixir-mode-hook heex-ts-mode-hook))
 (when ygg-lsp--python-server
   (dolist (h '(python-mode-hook python-ts-mode-hook)) (add-hook h #'eglot-ensure)))
-(ygg-lsp--hook-when "docker-compose-langserver" '(docker-compose-mode-hook))
+(ygg-lsp--hook-when "yaml-language-server" '(yaml-mode-hook yaml-ts-mode-hook))
 (ygg-lsp--hook-when "harper-ls" '(markdown-mode-hook gfm-mode-hook))
 (ygg-lsp--hook-when "rust-analyzer" '(rust-mode-hook rust-ts-mode-hook))
 (ygg-lsp--hook-when "gopls" '(go-mode-hook go-ts-mode-hook))
