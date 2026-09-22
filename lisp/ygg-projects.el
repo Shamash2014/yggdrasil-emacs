@@ -894,6 +894,23 @@ agent holding a conversation open is the reason it cannot be filed."
 (with-eval-after-load 'aob-transcript
   (add-hook 'aob-transcript-titles-hook #'ygg-projects--on-import))
 
+(defun ygg-projects-import ()
+  "Take the project on this line in again.
+What an import found is cached — its conversations, its worktrees, its
+containers, what it can run — so this drops that first: it is for when
+the answers have changed underneath, or one of them was wrong."
+  (interactive)
+  (let ((root (or (get-text-property (line-beginning-position) 'ygg-project)
+                  ygg-projects--open
+                  (user-error "projects: no project on this line"))))
+    (when (fboundp 'aob-transcript-forget) (aob-transcript-forget))
+    (remhash root ygg-projects--worktrees-cache)
+    (remhash root ygg-projects--docker-cache)
+    (ygg-projects--scan-docker)
+    (if (fboundp 'ygg-project-import)
+        (ygg-project-import root)
+      (user-error "projects: nothing to import with"))))
+
 (defun ygg-projects-rescan ()
   "Redraw, and look again for what the projects can run."
   (interactive)
@@ -1020,6 +1037,7 @@ The line keeps its place on screen; what opens, opens below it."
     (define-key map "g" #'ygg-projects-rescan)
     (define-key map "+" #'project-switch-project)
     (define-key map "A" #'ygg-projects-add)
+    (define-key map "I" #'ygg-projects-import)
     (define-key map "D" #'ygg-projects-delete)
     (define-key map "-" #'ygg-projects-archive)
     (define-key map "x" #'ygg-projects-archive-ask)
