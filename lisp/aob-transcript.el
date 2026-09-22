@@ -44,19 +44,34 @@ keychains, and every row of the sidebar asks for it.")
       (expand-file-name (if (equal agent "codex") "~/.codex" "~/.claude"))))
 
 (defun aob-transcript--slug (dir)
-  "DIR as the CLI spells it when naming a folder: every slash a dash."
-  (replace-regexp-in-string "/" "-" (directory-file-name (expand-file-name dir))))
+  "DIR as the CLI spells it when naming a folder.
+Every character that is not a letter or a digit becomes a dash — the
+dots included, which is how a worktree of justfin.git is filed under
+justfin-git and not under justfin.git."
+  (replace-regexp-in-string "[^A-Za-z0-9]" "-"
+                            (directory-file-name (expand-file-name dir))))
+
+(defun aob-transcript--homes (agent dir)
+  "Every config home AGENT may have written DIR\='s conversations under.
+The one a session from here runs with, and the one the CLI uses when
+you start it yourself — a project has a history from both."
+  (delete-dups
+   (delq nil (list (aob-transcript--home agent dir)
+                   (expand-file-name
+                    (if (equal agent "codex") "~/.codex" "~/.claude"))))))
 
 (defun aob-transcript-file (entry)
   "Where ENTRY's conversation was written, if it is still there."
-  (when-let* ((id (plist-get entry :acp-id))
-              (dir (or (plist-get entry :dir) (plist-get entry :project)))
-              (home (aob-transcript--home (or (plist-get entry :agent) "claude") dir))
-              (file (expand-file-name
-                     (format "projects/%s/%s.jsonl" (aob-transcript--slug dir) id)
-                     home))
-              ((file-readable-p file)))
-    file))
+  (or (when-let* ((file (plist-get entry :file)) ((file-readable-p file))) file)
+      (when-let* ((id (plist-get entry :acp-id))
+                  (dir (or (plist-get entry :dir) (plist-get entry :project))))
+        (seq-some
+         (lambda (home)
+           (let ((file (expand-file-name
+                        (format "projects/%s/%s.jsonl" (aob-transcript--slug dir) id)
+                        home)))
+             (and (file-readable-p file) file)))
+         (aob-transcript--homes (or (plist-get entry :agent) "claude") dir)))))
 
 (defvar aob-transcript--titles (make-hash-table :test 'equal)
   "File to (MTIME . TITLE): reading the head of one is not free.")
@@ -167,24 +182,30 @@ The CLI writes one file per conversation under its config home.  What
 this Emacs knows about is what it started itself, which for a project
 you have only just taken in is none of them."
   (let* ((agent (or agent (bound-and-true-p aob-acp-default-agent) "claude"))
-         (dir (expand-file-name
-               (format "projects/%s" (aob-transcript--slug project))
-               (aob-transcript--home agent project)))
-         (key (cons agent dir)))
-    (when (file-directory-p dir)
+         (dirs (seq-filter
+                #'file-directory-p
+                (mapcar (lambda (home)
+                          (expand-file-name
+                           (format "projects/%s" (aob-transcript--slug project))
+                           home))
+                        (aob-transcript--homes agent project))))
+         (dir (car dirs))
+         (key (cons agent dirs)))
+    (when dirs
       ;; the folder's own clock says when a conversation was added to it
       ;; or written to; until it moves, the listing stands
-      (let ((stamp (aob-transcript--mtime dir))
+      (let ((stamp (mapcar #'aob-transcript--mtime dirs))
             (cell (gethash key aob-transcript--found)))
         (if (and cell (equal (car cell) stamp))
             (cdr cell)
-          (let ((entries (aob-transcript--found-1 project agent dir)))
+          (let ((entries (aob-transcript--found-1 project agent dirs)))
             (puthash key (cons stamp entries) aob-transcript--found)
             entries))))))
 
-(defun aob-transcript--found-1 (project agent dir)
-  "Read DIR, which holds AGENT\='s conversations about PROJECT."
-  (let ((files (sort (directory-files dir t "\\.jsonl\\'")
+(defun aob-transcript--found-1 (project agent dirs)
+  "Read DIRS, which hold AGENT\='s conversations about PROJECT."
+  (let ((files (sort (seq-mapcat (lambda (dir) (directory-files dir t "\\.jsonl\\'"))
+                                 dirs)
                          (lambda (a b)
                            (time-less-p
                             (file-attribute-modification-time (file-attributes b))
@@ -200,6 +221,9 @@ you have only just taken in is none of them."
                                         :ts (float-time
                                              (file-attribute-modification-time
                                               (file-attributes file)))
+                                        ;; which home it came out of is
+                                        ;; not derivable from the entry
+                                        :file file
                                         :found t))
                            ;; the list first: an opening line is a read,
                            ;; and a hundred reads is not a listing.  What
