@@ -449,7 +449,7 @@ render above the top edge on macOS child frames."
       (set-face-attribute 'doom-modeline-bar nil
                           :background (if dark "#333333" "#d8d8d8")))
     (set-face-attribute 'mode-line nil
-                        :background (if dark "#0f0f0f" "#e8e8e8")
+                        :background (if dark "#121212" "#e8e8e8")
                         :foreground (if dark "#bcbcbc" "#1f1f1f")
                         :box nil :overline nil :underline nil)
     (when (facep 'mode-line-active)

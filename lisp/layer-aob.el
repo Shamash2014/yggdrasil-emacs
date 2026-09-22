@@ -128,6 +128,7 @@
 (declare-function aob-acp-set-mode "aob-acp")
 (declare-function aob-acp-model "aob-acp")
 (declare-function aob-acp-goal "aob-acp")
+(declare-function aob-transcript-wake "aob-transcript" (s))
 (declare-function aob-acp-cycle-mode "aob-acp")
 (declare-function aob-acp-config "aob-acp")
 (declare-function aob-deliver-to "aob-deliver")
@@ -141,6 +142,7 @@
   (yggdrasil-localleader-def mode "E" #'aob-acp-config "effort / options")
   (yggdrasil-localleader-def mode "g" #'aob-acp-goal "goal")
   (yggdrasil-localleader-def mode "w" #'aob-deliver-to "answer goes…")
+  (yggdrasil-localleader-def mode "r" #'aob-transcript-wake "wake it (resume acp)")
   (yggdrasil-localleader-def mode "t" #'aob-subagents "subagents"))
 
 (defvar ygg-quickscope-inhibit)

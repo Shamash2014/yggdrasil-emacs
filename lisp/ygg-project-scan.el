@@ -8,6 +8,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'project)
 
@@ -38,6 +39,15 @@ handed to that project's agents as an additional directory."
   :type '(alist :key-type directory :value-type (repeat directory))
   :group 'yggdrasil)
 
+(defcustom ygg-project-scan-cache-file
+  (locate-user-emacs-file "var/project-scan.eld")
+  "Where the list of repositories found on disk is kept between runs."
+  :type 'file :group 'yggdrasil)
+
+(defcustom ygg-project-scan-ttl 86400
+  "Seconds a saved scan is trusted before the tree is walked again."
+  :type 'natnum :group 'yggdrasil)
+
 (defvar ygg-project-scan--found nil
   "Cached scan, since the set of repositories on disk moves slowly.")
 
@@ -67,12 +77,80 @@ handed to that project's agents as an additional directory."
                   (and (file-directory-p dir) (ygg-project-scan--walk-1 dir))))
               ygg-project-search-paths))
 
+(defun ygg-project-scan--save (roots)
+  "Keep ROOTS for the next run."
+  (ignore-errors
+    (make-directory (file-name-directory ygg-project-scan-cache-file) t)
+    (with-temp-file ygg-project-scan-cache-file
+      (prin1 (list :when (float-time) :paths ygg-project-search-paths
+                   :depth ygg-project-search-depth :roots roots)
+             (current-buffer))))
+  roots)
+
+(defun ygg-project-scan--load ()
+  "The saved scan, when it is still worth believing."
+  (ignore-errors
+    (when (file-readable-p ygg-project-scan-cache-file)
+      (let ((saved (with-temp-buffer
+                     (insert-file-contents ygg-project-scan-cache-file)
+                     (read (current-buffer)))))
+        ;; a scan of other folders, or to another depth, answers a
+        ;; different question
+        (when (and (equal (plist-get saved :paths) ygg-project-search-paths)
+                   (equal (plist-get saved :depth) ygg-project-search-depth)
+                   (< (- (float-time) (or (plist-get saved :when) 0))
+                      ygg-project-scan-ttl))
+          (plist-get saved :roots))))))
+
+(defun ygg-project-scan-async (&optional callback)
+  "Walk the tree without holding Emacs up; CALLBACK gets the roots.
+Half a second of `find' is not much until it is the half second before
+the sidebar appears."
+  (let ((left (length ygg-project-search-paths))
+        (acc nil))
+    (if (zerop left)
+        (when callback (funcall callback nil))
+      (dolist (path ygg-project-search-paths)
+        (let* ((dir (directory-file-name (expand-file-name path)))
+               (buf (generate-new-buffer " *ygg-scan*")))
+          (if (not (file-directory-p dir))
+              (progn (kill-buffer buf)
+                     (when (zerop (cl-decf left))
+                       (setq ygg-project-scan--found
+                             (ygg-project-scan--save (nreverse acc)))
+                       (when callback (funcall callback ygg-project-scan--found))))
+            (make-process
+             :name "ygg-scan" :buffer buf :noquery t
+             :command (list "find" dir "-maxdepth"
+                            (number-to-string ygg-project-search-depth)
+                            "-name" ".git" "-prune")
+             :sentinel
+             (lambda (proc _e)
+               (when (memq (process-status proc) '(exit signal))
+                 (when (buffer-live-p buf)
+                   (with-current-buffer buf
+                     (goto-char (point-min))
+                     (while (not (eobp))
+                       (let ((line (buffer-substring-no-properties
+                                    (line-beginning-position) (line-end-position))))
+                         (unless (string-empty-p line)
+                           (push (file-name-directory line) acc)))
+                       (forward-line 1)))
+                   (kill-buffer buf))
+                 (when (zerop (cl-decf left))
+                   (setq ygg-project-scan--found
+                         (ygg-project-scan--save (nreverse acc)))
+                   (when callback
+                     (funcall callback ygg-project-scan--found))))))))))))
+
 (defun ygg-project-roots (&optional refresh)
   "Every repository worth offering: the ones found, and the ones remembered.
 Remembered roots come first — you opened them, so you meant them — and a
 project outside every search path is still reachable through them."
   (when (or refresh (null ygg-project-scan--found))
-    (setq ygg-project-scan--found (ygg-project-scan--walk)))
+    (setq ygg-project-scan--found
+          (or (and (not refresh) (ygg-project-scan--load))
+              (ygg-project-scan--save (ygg-project-scan--walk)))))
   (let ((known (and (fboundp 'project-known-project-roots)
                     (project-known-project-roots))))
     ;; the list file keeps `~/...' and find prints absolute paths, so the
@@ -125,7 +203,9 @@ project outside every search path is still reachable through them."
 (defun ygg-project-rescan ()
   "Look for repositories again, after adding or moving one."
   (interactive)
-  (message "ygg: %d repositories" (length (ygg-project-roots t))))
+  (ygg-project-scan-async
+   (lambda (roots)
+     (message "ygg: %d repositories" (length roots)))))
 
 (defun ygg-project--key (dir)
   (file-name-as-directory (expand-file-name dir)))

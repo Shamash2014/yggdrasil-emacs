@@ -92,6 +92,23 @@
 
 ;;; Opening one
 
+(defun aob-transcript--name (entry)
+  "What to call ENTRY's session, told apart from the others.
+Every conversation with one agent is called the same thing, and a trace
+is named after its session — so without this, opening a second one
+walks into the first one's buffer."
+  (let* ((base (or (plist-get entry :name) (plist-get entry :agent) "session"))
+         (file (aob-transcript-file entry))
+         (day (and file (format-time-string
+                         "%b %-d"
+                         (file-attribute-modification-time
+                          (file-attributes file)))))
+         (name (if day (format "%s · %s" base day) base)))
+    ;; two on the same day still need telling apart
+    (if (seq-find (lambda (s) (equal (aob-session-name s) name)) (aob-sessions))
+        (format "%s %s" name (substring (or (plist-get entry :acp-id) "") 0 4))
+      name)))
+
 (defun aob-transcript--session (entry)
   "ENTRY as a session object, its turns already in it.
 Asleep: it carries the id its agent answers to, and no process."
@@ -100,7 +117,7 @@ Asleep: it carries the id its agent answers to, and no process."
     (or existing
         (let ((s (aob-create-session
                   :id id :backend 'acp
-                  :name (or (plist-get entry :name) (plist-get entry :agent) "session")
+                  :name (aob-transcript--name entry)
                   :project (or (plist-get entry :project) (plist-get entry :dir))
                   :dir (or (plist-get entry :dir) (plist-get entry :project))
                   :state 'done)))
@@ -135,8 +152,14 @@ Nothing is started: writing to it is what brings its agent back."
   (unless (aob-transcript-file entry)
     (user-error "aob: no transcript on disk for %s"
                 (or (plist-get entry :name) "that session")))
-  (let ((s (aob-transcript--session entry)))
-    (aob-trace s)
+  (let* ((s (aob-transcript--session entry))
+         (buf (aob-trace-buffer s))
+         ;; creating the session already put its trace on screen; showing
+         ;; it again is how one conversation ends up in two windows
+         (win (or (get-buffer-window buf 'visible)
+                  (display-buffer buf (or (bound-and-true-p ygg-aob-trace-action)
+                                          t)))))
+    (when (window-live-p win) (select-window win))
     s))
 
 (defun aob-transcript-asleep-p (s)
@@ -157,6 +180,23 @@ purpose and would otherwise sit in every list beside it."
     (apply fn s args)))
 
 (advice-add 'aob-prompt :around #'aob-transcript--wake)
+
+;;;###autoload
+(defun aob-transcript-wake (s)
+  "Bring S's agent back without saying anything to it.
+Writing to a sleeping conversation wakes it anyway; this is for when
+you want it awake first — to set a mode or a model, or just to have it
+there."
+  (interactive (list (aob-target)))
+  (let ((entry (or (aob-session-ref s :asleep)
+                   (user-error "aob: %s is already awake" (aob-session-name s)))))
+    (let ((live (aob-acp-resume-entry entry)))
+      (unless live
+        (user-error "aob: %s would not come back" (aob-session-name s)))
+      (aob-session-put s :asleep nil)
+      (ignore-errors (aob-remove-session s))
+      (when (fboundp 'aob-trace) (aob-trace live))
+      live)))
 
 (provide 'aob-transcript)
 ;;; aob-transcript.el ends here

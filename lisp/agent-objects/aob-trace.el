@@ -90,6 +90,15 @@ and a config that arranges sessions can address them its own way.")
   (setq-local char-property-alias-alist '((face font-lock-face)))
   (visual-line-mode 1)
   (add-to-invisibility-spec 'markdown-markup)
+  ;; prose is proportional here; a command or a path inside it is not
+  ;; prose, and loses its alignment and its character shapes if drawn
+  ;; in the same face
+  (require 'markdown-mode nil t)
+  (let ((mono (face-attribute 'default :family nil t)))
+    (dolist (f '(markdown-inline-code-face markdown-pre-face
+                 markdown-code-face markdown-language-keyword-face))
+      (when (facep f)
+        (face-remap-add-relative f :family mono))))
   (when (aob-trace--delta-p)
     (setq-local line-spacing 0.3)
     (setq-local left-margin-width 4)
@@ -130,7 +139,7 @@ clock; `log' is the timestamped row-per-event shape."
   :type 'natnum :group 'aob)
 
 (defface aob-trace-prose
-  '((t :inherit variable-pitch :family "SF Pro Text" :height 1.15))
+  '((t :inherit variable-pitch :family "SF Pro Text" :height 1.05))
   "Face for message and prompt bodies under the delta style."
   :group 'aob)
 
@@ -231,7 +240,7 @@ LIVE says the text is still arriving and will be redrawn again shortly."
 (defun aob-trace--status (ev)
   (pcase (plist-get ev :status)
     ("queued" (propertize "⋯ queued" 'face 'shadow))
-    ("pending" (propertize "…" 'face 'shadow))
+    ("pending" (propertize "⋯" 'face 'shadow))
     ("in_progress" (propertize "⟳" 'face 'warning))
     ("completed" (propertize "✓" 'face 'success))
     ("failed" (propertize "✗" 'face 'error))
@@ -307,7 +316,7 @@ NAME is the agent this session runs; the owner\='s own turns say you."
       (capitalize (or (plist-get ev :kind) "Call"))))
 
 (defface aob-trace-card
-  '((((background dark)) :background "#1a1a1a" :extend t)
+  '((((background dark)) :background "#1c1c1c" :extend t)
     (t :background "#f4f4f4" :extend t))
   "Face behind a command card."
   :group 'aob)
@@ -439,10 +448,30 @@ remap such as `ygg-focus-dim' cannot outrank it."
   (if (not (aob-trace--delta-p))
       str
     (let ((copy (copy-sequence str)))
-      (add-face-text-property 0 (length copy) 'aob-trace-prose t copy)
+      ;; markdown arrives as `font-lock-face'; putting prose in `face'
+      ;; does not merge with it, it hides it — the alias is a fallback
+      ;; for when `face' is absent.  Prose goes under the same property,
+      ;; last, so bold and code keep what they set and inherit the rest.
       (let ((i 0) (len (length copy)))
         (while (< i len)
-          (when (eq (aref copy i) ?\n)
+          (let* ((next (next-single-property-change i 'font-lock-face copy len))
+                 (cur (get-text-property i 'font-lock-face copy)))
+            (put-text-property i next 'font-lock-face
+                               (append (cond ((null cur) nil)
+                                             ((listp cur) cur)
+                                             (t (list cur)))
+                                       (list 'aob-trace-prose))
+                               copy)
+            (setq i next))))
+      ;; a paragraph break is a blank line, so the extra height goes on
+      ;; the newline that opens one.  On every newline it is not
+      ;; paragraph air at all — it is a third again the height of every
+      ;; wrapped line in the answer
+      (let ((i 0) (len (length copy)))
+        (while (< i len)
+          (when (and (eq (aref copy i) ?\n)
+                     (< (1+ i) len)
+                     (eq (aref copy (1+ i)) ?\n))
             (put-text-property i (1+ i) 'line-spacing
                                aob-trace-paragraph-space copy))
           (setq i (1+ i))))
@@ -647,7 +676,7 @@ space in it is a phrase, not a path, and is left alone."
          (text (string-join names ", "))
          (text (if (<= (length text) aob-trace-explore-width)
                    text
-                 (concat (substring text 0 (1- aob-trace-explore-width)) "…"))))
+                 (concat (substring text 0 (1- aob-trace-explore-width)) "⋯"))))
     (string-join
      (list (propertize (format-time-string "%H:%M:%S" (plist-get (car evs) :ts))
                        'face 'shadow)
@@ -1069,8 +1098,8 @@ than only in the compose buffer."
   :group 'aob)
 
 (defface aob-trace-comment
-  '((((background dark)) :background "#1d2027" :extend t)
-    (t :background "#eef1f6" :extend t))
+  '((((background dark)) :background "#1c1c1c" :extend t)
+    (t :background "#eeeeee" :extend t))
   "Face behind a comment card."
   :group 'aob)
 

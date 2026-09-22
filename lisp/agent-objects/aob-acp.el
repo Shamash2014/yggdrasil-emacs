@@ -27,13 +27,8 @@
   ;; isolated agents run unattended in a throwaway worktree — that is
   ;; what makes their full-permission :mode safe (and dontAsk is NOT
   ;; that mode: it denies whatever isn't pre-approved)
-  '(("claude" :command ("npx" "-y" "@agentclientprotocol/claude-agent-acp")
-     :mode "auto")
-    ("claude-isolated" :command ("npx" "-y" "@agentclientprotocol/claude-agent-acp")
-     :worktree t :mode "bypassPermissions")
+  '(("claude" :command ("npx" "-y" "@agentclientprotocol/claude-agent-acp"))
     ("codex" :command ("npx" "-y" "@agentclientprotocol/codex-acp"))
-    ("codex-isolated" :command ("npx" "-y" "@agentclientprotocol/codex-acp")
-     :worktree t :mode "agent-full-access")
     ("gemini" :command ("gemini" "--experimental-acp"))
     ;; pi-acp spawns `pi --mode rpc'; first use needs `pi --terminal-login'.
     ;; No :worktree/:mode until a live session/new shows availableModes —
@@ -41,11 +36,10 @@
     ("pi" :command ("npx" "-y" "pi-acp"))
     ;; hermes-agent[acp] via uvx; logs to stderr, ACP JSON-RPC on stdout
     ("hermes" :command ("uvx" "--from" "hermes-agent[acp]" "hermes-acp")))
-  "Agent definitions: NAME → plist with :command argv and optional
-:worktree, which runs every session of that agent in an isolated git
-worktree, and :mode, a permission-mode id the session switches to the
-moment it opens — before its first prompt runs.  Both are the agent's
-traits, not spawn-time flags."
+  "What starts an adapter: NAME → plist with :command argv.
+Only the process lives here.  How a session is to behave — worktree,
+permission mode, model, effort — is a preset, because the same binary
+answers to several of them; see `aob-acp-presets'."
   :type '(alist :key-type string :value-type plist)
   :group 'aob)
 
@@ -154,11 +148,25 @@ another session does can reach it.
 
 Nil keys the connection the way it always was, by agent and tree.")
 
+(defun aob-acp--conn-env (agent project)
+  "The environment a connection for AGENT on PROJECT would be started with."
+  (and aob-acp-environment-function
+       (ignore-errors
+         (funcall aob-acp-environment-function
+                  agent project project aob-acp-isolate))))
+
 (defun aob-acp--conn-key (agent project)
-  "What the connection for AGENT on PROJECT is filed under."
-  (if aob-acp-isolate
-      (list agent project aob-acp-isolate)
-    (cons agent project)))
+  "What the connection for AGENT on PROJECT is filed under.
+The environment is part of it.  A process is started with the
+environment of whoever opened it and keeps it for life, so a session
+asking for a different one — another config home, another set of
+credentials — must not be handed a connection that already has
+somebody else\='s.  Without this the second caller silently runs as the
+first."
+  (let ((env (aob-acp--conn-env agent project)))
+    (append (list agent project)
+            (and aob-acp-isolate (list aob-acp-isolate))
+            (and env (list (secure-hash 'sha1 (format "%S" env)))))))
 
 (defun aob-acp--live-conn (agent project)
   (let ((proc (gethash (aob-acp--conn-key agent project) aob-acp--conns)))
@@ -926,10 +934,20 @@ redrawing the parent's line."
 (defun aob-acp--flush-queue (s)
   (when-let* ((q (aob-session-ref s :queued)))
     (aob-session-put s :queued nil)
-    (dolist (e q)
-      (when-let* ((ev (nth 2 e)))
-        (plist-put ev :status nil)
-        (plist-put ev :line nil)))
+    ;; a queued prompt is written before the session is open; a restored
+    ;; one then replays its history on top of it, so the words you just
+    ;; typed would sit above a conversation from hours earlier.  They go
+    ;; out now, so they are the newest thing said.
+    (let ((events (aob-session-events s))
+          (moved nil))
+      (dolist (e q)
+        (when-let* ((ev (nth 2 e)))
+          (plist-put ev :status nil)
+          (plist-put ev :line nil)
+          (when (memq ev events)
+            (setq events (delq ev events))
+            (push ev moved))))
+      (setf (aob-session-events s) (append (nreverse moved) events)))
     (run-hook-with-args 'aob-queue-change-hook s)
     (aob-acp--prompt-1 s (mapconcat #'car q "\n\n")
                        (apply #'append (mapcar #'cadr q))
@@ -1568,6 +1586,44 @@ never opens — so it is sent the empty vector it was sent before."
       (and (plist-member (plist-get init :agentCapabilities) :mcpCapabilities)
            t)))
 
+(defcustom aob-acp-presets
+  '(("claude" :agent "claude" :mode "auto")
+    ("claude-isolated" :agent "claude" :worktree t :mode "bypassPermissions")
+    ("codex" :agent "codex")
+    ("codex-isolated" :agent "codex" :worktree t :mode "agent-full-access")
+    ("gemini" :agent "gemini")
+    ("pi" :agent "pi")
+    ("hermes" :agent "hermes"))
+  "How a session is started: NAME → plist over one agent.
+:agent names the adapter in `aob-acp-agents'; the rest is what this way
+of working wants from it — :worktree for a checkout of its own, :mode a
+permission mode applied as it opens, :model, and :config, a plist of
+config options set once the session is up.
+
+An isolated worker is not another agent, it is the same one asked for
+different things, which is why it is a preset and not a second entry in
+the agent table."
+  :type '(alist :key-type string :value-type plist)
+  :group 'aob)
+
+(defun aob-acp-preset (name)
+  "NAME as a preset plist.
+A name that is only an agent is a preset of itself, so a caller may
+pass either and old configuration keeps working."
+  (or (cdr (assoc name aob-acp-presets))
+      (and (assoc name aob-acp-agents) (list :agent name))))
+
+(defun aob-acp-preset-agent (name)
+  "The adapter NAME runs on."
+  (or (plist-get (aob-acp-preset name) :agent) name))
+
+(defun aob-acp-names ()
+  "Everything that can be spawned: presets, and agents without one."
+  (let ((presets (mapcar #'car aob-acp-presets)))
+    (append presets
+            (seq-remove (lambda (a) (member a presets))
+                        (mapcar #'car aob-acp-agents)))))
+
 (defcustom aob-acp-project-mcp-file ".mcp.json"
   "Where a checkout declares the MCP servers its work needs.
 The file claude reads when it runs itself.  Over ACP nothing reads it
@@ -1682,13 +1738,24 @@ Bind this around a spawn to tag one: `aob-acp--with-init' fires inline on
 an already-live connection, so an `aob-session-put' after the spawn
 returns would lose the race against the request that carries the tag.")
 
+(defun aob-acp--session-cap (init key)
+  "Whether INIT declares session capability KEY.
+A capability map answers with an object describing the capability, and
+one with nothing to describe is the empty object — which parses to nil
+here, exactly like a key that was never there.  Presence is the signal,
+so presence is what is asked.  An adapter that spells a capability out
+as false is read as offering it; the spec omits what it does not have,
+and no adapter seen here writes false."
+  (let ((caps (or (plist-get (plist-get init :agentCapabilities)
+                             :sessionCapabilities)
+                  (plist-get init :sessionCapabilities))))
+    (and (plist-member caps key) t)))
+
 (defun aob-acp--extra-dirs (s init)
   "S's `:extra-dirs' as an additionalDirectories vector, or nil.
 Gated on the capability — an adapter that never advertised it rejects the
 parameter outright rather than ignoring it."
-  (when (plist-get (plist-get (plist-get init :agentCapabilities)
-                              :sessionCapabilities)
-                   :additionalDirectories)
+  (when (aob-acp--session-cap init :additionalDirectories)
     (when-let* ((dirs (aob-session-ref s :extra-dirs)))
       (vconcat (mapcar #'aob-acp--wire-dir dirs)))))
 
@@ -1769,15 +1836,16 @@ through the handshake and fires the moment the session is ready.
 NAME stands in for the agent when the session is numbered, so a session
 started for something already named says so in every list it shows up in."
   (interactive
-   (let ((agent (completing-read "ACP agent: " (mapcar #'car aob-acp-agents)
+   (let ((agent (completing-read "ACP agent: " (aob-acp-names)
                                  nil t nil nil aob-acp-default-agent)))
      (list agent (read-string (format "%s » " agent)))))
-  (let* ((spec (cdr (assoc agent aob-acp-agents)))
+  (let* ((spec (aob-acp-preset agent))
+         (base (or (plist-get spec :agent) agent))
          (project (aob-acp--project))
          (worktree (plist-get spec :worktree))
          (dir (if worktree (aob-acp--worktree-path project agent) project))
          (cwd (directory-file-name (expand-file-name dir)))
-         (s (aob-acp--open agent (aob-acp--gen-name (or name agent)) project dir
+         (s (aob-acp--open base (aob-acp--gen-name (or name agent)) project dir
                            (lambda (init)
                              (list "session/new"
                                    (list :cwd (aob-acp--wire-dir cwd)
@@ -1787,8 +1855,13 @@ started for something already named says so in every list it shows up in."
                            (and worktree
                                 (lambda (_s done)
                                   (aob-acp--worktree-make project dir done))))))
+    (aob-session-put s :preset agent)
     (when-let* ((want (plist-get spec :mode)))
       (aob-session-put s :want-mode want))
+    (when-let* ((want (plist-get spec :model)))
+      (aob-session-put s :want-model want))
+    (when-let* ((want (plist-get spec :config)))
+      (aob-session-put s :want-config want))
     (when (or atts (and intent (not (string-empty-p intent))))
       (aob-acp--queue s intent atts)
       (aob-set-state s 'working))
@@ -1859,10 +1932,10 @@ started for something already named says so in every list it shows up in."
 
 (defcustom aob-acp-models
   '(("claude" "opus" "sonnet" "haiku")
-    ("claude-isolated" "opus" "sonnet" "haiku")
-    ("codex" "gpt-5-codex" "gpt-5")
-    ("codex-isolated" "gpt-5-codex" "gpt-5"))
+    ("codex" "gpt-5-codex" "gpt-5"))
   "Models to offer per agent before a session is up to ask.
+Keyed by the adapter, not by the preset: which models exist is a fact
+about the agent, and every preset over it inherits them.
 The live list arrives with the handshake; this only seeds the picker, and
 a name that is not offered is reported rather than forced."
   :type '(alist :key-type string :value-type (repeat string))
@@ -1877,7 +1950,7 @@ With no INTENT the first turn is written in a compose buffer rather than
 the minibuffer, and the session is spawned when that is sent: a first
 prompt is the longest one there is, and it can carry attachments."
   (interactive
-   (let* ((agent (completing-read "ACP agent: " (mapcar #'car aob-acp-agents)
+   (let* ((agent (completing-read "ACP agent: " (aob-acp-names)
                                   nil t nil nil aob-acp-default-agent))
           (roots (and (fboundp 'ygg-project-roots)
                       (mapcar #'abbreviate-file-name (ygg-project-roots))))
@@ -1885,7 +1958,7 @@ prompt is the longest one there is, and it can carry attachments."
                     "Project: " roots nil nil
                     (abbreviate-file-name (or (aob-acp--project)
                                               default-directory))))
-          (offered (cdr (assoc agent aob-acp-models)))
+          (offered (cdr (assoc (aob-acp-preset-agent agent) aob-acp-models)))
           (model (let ((pick (completing-read
                               (format "Model (%s, empty for its default): "
                                       (string-join offered "/"))
@@ -1995,10 +2068,7 @@ back to the other when the adapter advertises only one."
 The spec puts `sessionCapabilities' at the top of the result; adapters
 here nest it under `agentCapabilities', the way additionalDirectories is
 already read."
-  (or (plist-get (plist-get (plist-get init :agentCapabilities)
-                            :sessionCapabilities)
-                 :resume)
-      (plist-get (plist-get init :sessionCapabilities) :resume)))
+  (aob-acp--session-cap init :resume))
 
 (defun aob-acp--restore-open (init acp-id cwd name verb &optional pref)
   "The open form that brings ACP-ID back, honouring PREF.
@@ -2329,7 +2399,7 @@ what frees the name for the new one to take."
   "Resume one of AGENT's own stored sessions for this project.
 Reaches the agent's full history via session/list — sessions started
 from the terminal included, not just ones this client persisted."
-  (interactive (list (completing-read "Agent: " (mapcar #'car aob-acp-agents)
+  (interactive (list (completing-read "Agent: " (aob-acp-names)
                                       nil t nil nil aob-acp-default-agent)))
   (let* ((project (aob-acp--project))
          (cwd (directory-file-name (expand-file-name project)))
