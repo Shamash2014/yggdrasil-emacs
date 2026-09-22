@@ -894,19 +894,19 @@ agent holding a conversation open is the reason it cannot be filed."
 (with-eval-after-load 'aob-transcript
   (add-hook 'aob-transcript-titles-hook #'ygg-projects--on-import))
 
+(defun ygg-projects-forget-root (root)
+  "Drop what the sidebar has cached about ROOT."
+  (remhash root ygg-projects--worktrees-cache)
+  (remhash root ygg-projects--docker-cache))
+
 (defun ygg-projects-import ()
   "Take the project on this line in again.
-What an import found is cached — its conversations, its worktrees, its
-containers, what it can run — so this drops that first: it is for when
-the answers have changed underneath, or one of them was wrong."
+The same import a project gets when it first arrives: for when the
+answers have changed underneath, or one of them was wrong."
   (interactive)
   (let ((root (or (get-text-property (line-beginning-position) 'ygg-project)
                   ygg-projects--open
                   (user-error "projects: no project on this line"))))
-    (when (fboundp 'aob-transcript-forget) (aob-transcript-forget))
-    (remhash root ygg-projects--worktrees-cache)
-    (remhash root ygg-projects--docker-cache)
-    (ygg-projects--scan-docker)
     (if (fboundp 'ygg-project-import)
         (ygg-project-import root)
       (user-error "projects: nothing to import with"))))

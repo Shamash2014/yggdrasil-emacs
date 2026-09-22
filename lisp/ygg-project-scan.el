@@ -47,6 +47,9 @@ handed to that project's agents as an additional directory."
 
 (declare-function project-known-project-roots "project" ())
 (declare-function ygg-projects--scan-worktrees "ygg-projects" ())
+(declare-function ygg-projects--scan-docker "ygg-projects" ())
+(declare-function ygg-projects-forget-root "ygg-projects" (root))
+(declare-function aob-transcript-forget "aob-transcript" ())
 (declare-function aob-transcript-found "aob-transcript" (project &optional agent))
 
 (defun ygg-project-scan--walk-1 (dir)
@@ -275,6 +278,10 @@ when the last of it settles.  Nothing here blocks."
                                               (ygg-project-roots))
                                       nil t)))
   (let ((root (ygg-project--key root)))
+    ;; an import is also a re-import: whatever was cached about this
+    ;; project is what the import is being run to replace
+    (when (fboundp 'aob-transcript-forget) (aob-transcript-forget))
+    (when (fboundp 'ygg-projects-forget-root) (ygg-projects-forget-root root))
     (ygg-project-import--run
      root
      (list (cons "skills"
@@ -295,6 +302,10 @@ when the last of it settles.  Nothing here blocks."
                  (lambda ()
                    (when (fboundp 'ygg-projects--scan-worktrees)
                      (ygg-projects--scan-worktrees))))
+           (cons "containers"
+                 (lambda ()
+                   (when (fboundp 'ygg-projects--scan-docker)
+                     (ygg-projects--scan-docker))))
            (cons "sessions"
                  (lambda ()
                    (when (fboundp 'aob-transcript-found)
