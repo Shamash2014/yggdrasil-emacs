@@ -10,6 +10,7 @@
 (require 'aob-trace)
 (require 'aob-workflow)
 (require 'ygg-diagram nil t)
+(require 'aob-transcript nil t)
 
 (defmacro aob-tests--with-session (var &rest body)
   "Bind VAR to a wired-up fake ACP session over a `cat' connection."
@@ -2250,3 +2251,33 @@ the host weighs it at, and no keys."
       (should-not (buffer-live-p draft))
       (should (buffer-live-p other))
       (kill-buffer other))))
+
+(ert-deftest aob-streaming-text-stays-bounded-until-asked ()
+  "Chunks past the live prefix wait in :parts rather than re-joining."
+  (let ((aob-event-live-prefix 100)
+        (ev (list :type 'message :text "")))
+    (dotimes (_ 40) (aob-event-push-text ev "0123456789"))
+    (should (<= (length (aob-event-text-so-far ev)) (+ aob-event-live-prefix 10)))
+    (should (plist-get ev :parts))
+    (should (equal (aob-event-text ev) (mapconcat #'identity
+                                                  (make-list 40 "0123456789") "")))))
+
+(ert-deftest aob-transcript-reads-only-the-end ()
+  "A long log is read from its tail, whole lines only."
+  (skip-unless (fboundp 'aob-transcript--insert-tail))
+  (let ((file (make-temp-file "aob-transcript" nil ".jsonl")))
+    (unwind-protect
+        (progn
+          (with-temp-file file
+            (dotimes (i 5000) (insert (format "{\"n\":%d,\"pad\":\"%s\"}\n" i
+                                              (make-string 200 ?x)))))
+          (with-temp-buffer
+            (aob-transcript--insert-tail file 600)
+            (should (equal (count-lines (point-min) (point-max)) 600))
+            (goto-char (point-min))
+            (should (equal (alist-get 'n (json-parse-string
+                                          (buffer-substring-no-properties
+                                           (point) (line-end-position))
+                                          :object-type 'alist))
+                           4400))))
+      (delete-file file))))

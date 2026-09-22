@@ -222,6 +222,18 @@ Computed once and cached into the event's `:line', so the render-diff's
                                 (- (length text) aob-trace-block-max-chars))
                         'face 'shadow))))
 
+(defun aob-trace--body (ev)
+  "EV's words as a block: bounded, and joined only once they have settled.
+While the answer is still arriving it is drawn from the prefix
+`aob-event-push-text' keeps, since joining every chunk at redraw speed
+is quadratic in the length of the turn."
+  (if (not (aob-trace--live-p ev))
+      (aob-trace--bound (aob-event-text ev))
+    (let ((head (aob-event-text-so-far ev)))
+      (if (< (length head) aob-event-live-prefix)
+          (string-trim-right head)
+        (concat (aob-trace--bound head) (propertize "\n…" 'face 'shadow))))))
+
 (defcustom aob-trace-live-markdown-max 1500
   "Longest answer decorated while it is still arriving, in characters.
 A streaming message is re-fontified on every redraw, so its cost is
@@ -421,7 +433,7 @@ margin string is never looked at."
                      (propertize (aob-trace--bound (aob-event-text ev))
                                  'font-lock-face 'aob-trace-queued)
                    (aob-trace--prose
-                    (aob-trace--md (aob-trace--bound (aob-event-text ev))
+                    (aob-trace--md (aob-trace--body ev)
                                    (aob-trace--live-p ev)))))
                 (when-let* ((n (plist-get ev :images)) ((> n 0)))
                   (concat " " (mapconcat #'identity
@@ -547,8 +559,8 @@ remap such as `ygg-focus-dim' cannot outrank it."
                            (propertize (aob-trace--bound (aob-event-text ev))
                                        'font-lock-face 'aob-trace-queued)
                          (aob-trace--prose
-                          (aob-trace--md
-                           (aob-trace--bound (aob-event-text ev)))))
+                          (aob-trace--md (aob-trace--body ev)
+                                         (aob-trace--live-p ev))))
                        (when-let* ((n (plist-get ev :images))
                                    ((> n 0)))
                          (concat " " (mapconcat #'identity

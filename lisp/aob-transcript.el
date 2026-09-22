@@ -68,11 +68,40 @@
      "\n"))
    (t nil)))
 
+(defun aob-transcript--insert-tail (file lines)
+  "Insert the last LINES lines of FILE into the current buffer.
+A conversation's log is written whole — tool results and all — and runs
+to tens of megabytes; only its end is ever shown, so only its end is
+read.  The window is widened until it holds enough lines or reaches the
+start of the file."
+  (let* ((size (file-attribute-size (file-attributes file)))
+         (span (min size 262144))
+         (whole nil))
+    (while (progn
+             (erase-buffer)
+             (setq whole (>= span size))
+             (insert-file-contents file nil (- size span) size)
+             (and (not whole)
+                  (< (count-lines (point-min) (point-max)) (1+ lines))
+                  (setq span (min size (* span 8))))))
+    (goto-char (point-min))
+    ;; the first line of a window that starts mid-file is half a record
+    (unless whole
+      (forward-line 1)
+      (delete-region (point-min) (point)))
+    (let ((extra (- (count-lines (point-min) (point-max)) lines)))
+      (when (> extra 0)
+        (goto-char (point-min))
+        (forward-line extra)
+        (delete-region (point-min) (point))))))
+
 (defun aob-transcript-turns (file)
-  "FILE as a list of (WHO . TEXT), oldest first."
+  "FILE as a list of (WHO . TEXT), oldest first.
+Only its last records: a session keeps `aob-event-cap' events and drops
+the older half past that, so reading further back is work thrown away."
   (let (out)
     (with-temp-buffer
-      (insert-file-contents file)
+      (aob-transcript--insert-tail file aob-event-cap)
       (goto-char (point-min))
       (while (not (eobp))
         (let* ((line (buffer-substring-no-properties
@@ -92,13 +121,12 @@
 
 ;;; Opening one
 
-(defun aob-transcript--name (entry)
+(defun aob-transcript--name (entry file)
   "What to call ENTRY's session, told apart from the others.
 Every conversation with one agent is called the same thing, and a trace
 is named after its session — so without this, opening a second one
 walks into the first one's buffer."
   (let* ((base (or (plist-get entry :name) (plist-get entry :agent) "session"))
-         (file (aob-transcript-file entry))
          (day (and file (format-time-string
                          "%b %-d"
                          (file-attribute-modification-time
@@ -109,15 +137,15 @@ walks into the first one's buffer."
         (format "%s %s" name (substring (or (plist-get entry :acp-id) "") 0 4))
       name)))
 
-(defun aob-transcript--session (entry)
-  "ENTRY as a session object, its turns already in it.
+(defun aob-transcript--session (entry file)
+  "ENTRY as a session object read from FILE, its turns already in it.
 Asleep: it carries the id its agent answers to, and no process."
   (let* ((id (concat "acp:" (plist-get entry :acp-id)))
          (existing (aob-session-get id)))
     (or existing
         (let ((s (aob-create-session
                   :id id :backend 'acp
-                  :name (aob-transcript--name entry)
+                  :name (aob-transcript--name entry file)
                   :project (or (plist-get entry :project) (plist-get entry :dir))
                   :dir (or (plist-get entry :dir) (plist-get entry :project))
                   :state 'done)))
@@ -126,7 +154,7 @@ Asleep: it carries the id its agent answers to, and no process."
           (aob-session-put s :model-id (plist-get entry :model))
           (aob-session-put s :mode-id (plist-get entry :mode))
           (aob-session-put s :asleep entry)
-          (dolist (turn (aob-transcript-turns (aob-transcript-file entry)))
+          (dolist (turn (aob-transcript-turns file))
             (aob-event s (if (equal (car turn) "user") 'prompt 'message)
                        :text (cdr turn)))
           s))))
@@ -149,10 +177,10 @@ Nothing is started: writing to it is what brings its agent back."
                               entries)))
            (unless rows (user-error "aob: no past conversations"))
            (cdr (assoc (completing-read "Open: " (mapcar #'car rows) nil t) rows)))))
-  (unless (aob-transcript-file entry)
-    (user-error "aob: no transcript on disk for %s"
-                (or (plist-get entry :name) "that session")))
-  (let* ((s (aob-transcript--session entry))
+  (let* ((file (or (aob-transcript-file entry)
+                   (user-error "aob: no transcript on disk for %s"
+                               (or (plist-get entry :name) "that session"))))
+         (s (aob-transcript--session entry file))
          (buf (aob-trace-buffer s))
          ;; creating the session already put its trace on screen; showing
          ;; it again is how one conversation ends up in two windows

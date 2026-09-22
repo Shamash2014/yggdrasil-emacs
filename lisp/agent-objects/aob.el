@@ -204,8 +204,17 @@ last turn's total."
 ;; (TAB expand), never per chunk — per-chunk concat is quadratic and
 ;; falls over on the long outputs 1M-context sessions produce
 
+(defcustom aob-event-live-prefix 4000
+  "Characters of a streaming answer kept joined as it arrives.
+Views cut a block well before this, so the prefix is all any of them
+can show; the rest waits in `:parts' until the turn settles."
+  :type 'natnum :group 'aob)
+
 (defun aob-event-push-text (ev text)
-  (plist-put ev :parts (cons text (plist-get ev :parts)))
+  (if (and (null (plist-get ev :parts))
+           (< (length (or (plist-get ev :text) "")) aob-event-live-prefix))
+      (plist-put ev :text (concat (or (plist-get ev :text) "") text))
+    (plist-put ev :parts (cons text (plist-get ev :parts))))
   (plist-put ev :line nil)
   (when (< (length (or (plist-get ev :head) "")) 60)
     (plist-put ev :head (aob--first-line
@@ -219,6 +228,13 @@ last turn's total."
         (plist-put ev :text txt)
         txt)
     (or (plist-get ev :text) "")))
+
+(defun aob-event-text-so-far (ev)
+  "EV's text as far as it has been joined, without draining `:parts'.
+At most `aob-event-live-prefix' characters — what a still-arriving
+answer can be drawn from without re-joining it ten times a second.
+`aob-event-text' is for once the turn has settled."
+  (or (plist-get ev :text) ""))
 
 (defun aob-event-head (ev &optional limit)
   (let ((head (or (plist-get ev :head)
@@ -1115,9 +1131,14 @@ accepting a candidate replaces the word rather than splicing into it."
 (defvar aob--files-cache (make-hash-table :test #'equal))
 
 (defun aob--project-files (dir)
-  (or (gethash dir aob--files-cache)
-      (puthash dir (ignore-errors (process-lines "git" "-C" dir "ls-files"))
-               aob--files-cache)))
+  "DIR's tracked files, asked of git once.
+A miss is cached as itself: outside a repo the answer is no files, and
+`or' over a nil entry would fork git again on every keystroke."
+  (let ((known (gethash dir aob--files-cache 'miss)))
+    (if (eq known 'miss)
+        (puthash dir (ignore-errors (process-lines "git" "-C" dir "ls-files"))
+                 aob--files-cache)
+      known)))
 
 (defun aob-files-cache-clear ()
   "Drop the @file completion cache (it goes stale as files are added)."
