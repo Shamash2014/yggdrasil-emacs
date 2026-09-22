@@ -120,13 +120,20 @@ worth having in a window wide enough to need one, and a window nobody
 widened is not that window."
   (dolist (win (get-buffer-window-list (current-buffer) nil t))
     (let* ((total (window-total-width win))
+           ;; the gutter costs four columns, which a narrow window does
+           ;; not have to spare: the mark goes inline there instead
+           (gutter (if (>= total 60) 4 0))
            (slack (if (> aob-trace-measure 0)
-                      (max 0 (- total aob-trace-measure 4))
+                      (max 0 (- total aob-trace-measure gutter))
                     0)))
-      (set-window-margins win 4 slack)
+      (set-window-margins win gutter slack)
       (set-window-fringes win 0 0)
       (with-current-buffer (window-buffer win)
-        (setq-local fill-column (max 20 (- total 4 slack)))
+        (setq-local fill-column (max 20 (- total gutter slack)))
+        ;; a word broken in half is a window that stopped wrapping on
+        ;; words; nothing here wants character wrapping
+        (setq-local word-wrap t)
+        (setq-local truncate-lines nil)
         ;; a card was clipped to the width it was drawn at; a window that
         ;; changed width is a window whose cards are the wrong length
         (let ((now (window-body-width win)))
