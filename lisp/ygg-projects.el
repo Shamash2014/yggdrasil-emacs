@@ -29,6 +29,23 @@
 (declare-function aob-session-state "aob" (s))
 (declare-function aob-session-p "aob" (x))
 (declare-function ygg-aob-session-subagents "layer-aob" (s))
+(declare-function aob-session-id "aob" (s))
+(declare-function aob-session-events "aob" (s))
+(declare-function aob-session-started "aob" (s))
+(defvar aob-trace--session-id)
+
+(defvar ygg-projects--on-screen nil
+  "Ids of the sessions a window was showing when the sidebar last drew.")
+
+(defun ygg-projects--traced-ids ()
+  "Ids of the sessions whose traces are on screen."
+  (delete-dups
+   (delq nil (mapcar (lambda (win)
+                       (buffer-local-value 'aob-trace--session-id (window-buffer win)))
+                     ;; every visible frame, not the selected one: a redraw
+                     ;; from a timer must not decide the answer by which
+                     ;; frame happened to be current
+                     (window-list-1 nil nil 'visible)))))
 (declare-function aob-acp-resumable-entries "aob-acp" ())
 (declare-function aob-transcript-file "aob-transcript" (entry))
 (declare-function aob-acp-resume-entry "aob-acp" (e &optional pref))
@@ -111,6 +128,14 @@ you are on." :group 'ygg-projects)
   "Face behind the line point is on: the only fill in the sidebar.
 Untinted, and a full step off the ground — a grey nudged by less than
 #0a reads as a rendering artefact rather than a choice."
+  :group 'ygg-projects)
+
+(defface ygg-projects-on-screen
+  '((((background dark)) :foreground "#7E9CD8" :weight bold)
+    (t :foreground "#4C6FA6" :weight bold))
+  "Face for the conversation whose trace is on screen.
+Colour, not fill: the one filled line is the line point is on, and a
+second fill beside it reads as the cursor having moved."
   :group 'ygg-projects)
 
 (defface ygg-projects-label '((t :inherit default))
@@ -508,39 +533,57 @@ scan already learned not to do."
 
 ;;; What a row holds, when you open it
 
+(defun ygg-projects--session-ts (s)
+  "When S last had something to say, as a number."
+  (float-time (or (plist-get (car (aob-session-events s)) :ts)
+                  (ignore-errors (aob-session-started s)))))
+
 (defun ygg-projects--entries (root kind)
   "The things ROOT's KIND row stands for: (LABEL . PAYLOAD) each."
   (pcase kind
-    ('agents (let ((all (ygg-projects--sessions root))
-                   out)
-               ;; no result form here: `nreverse' would rewire the list
-               ;; and leave OUT pointing at what is now its last cell,
-               ;; which is one session however many are running
-               (dolist (s (seq-remove (lambda (x)
-                                        (and (fboundp 'aob-subagent-p)
-                                             (aob-subagent-p x)))
-                                      all))
-                 (push (cons (aob-session-name s) s) out)
-                 ;; what it sent, under it, marked rather than indented: a
-                 ;; row this narrow has no columns to spare.  A spawned one
-                 ;; is a session of its own; a reported one is a plist the
-                 ;; agent mentioned and nothing can be done with
-                 (dolist (kid (and (fboundp 'aob-subagent-children)
-                                   (aob-subagent-children s)))
-                   (push (cons (format "└ %s" (aob-session-name kid)) kid) out))
-                 (dolist (sub (and (fboundp 'ygg-aob-session-subagents)
-                                   (ygg-aob-session-subagents s)))
-                   (push (cons (format "└ %s" (or (plist-get sub :title)
-                                                  (plist-get sub :name)
-                                                  "subagent"))
-                               (cons s sub))
-                         out)))
-               ;; ended, but the conversation is still there to pick up
-               (dolist (e (ygg-projects--past root))
-                 (push (cons (or (plist-get e :name) (plist-get e :agent) "session")
-                             e)
-                       out))
-               (setq out (nreverse out))))
+    ('agents
+     (let* ((live (seq-remove (lambda (x)
+                                (and (fboundp 'aob-subagent-p)
+                                     (aob-subagent-p x)))
+                              (ygg-projects--sessions root)))
+            (groups
+             (mapcar
+              (lambda (s)
+                ;; what it sent goes under it, marked rather than
+                ;; indented: a row this narrow has no columns to spare.
+                ;; A spawned one is a session of its own; a reported one
+                ;; is a plist the agent mentioned and nothing can be
+                ;; done with
+                (cons (ygg-projects--session-ts s)
+                      (append
+                       (list (cons (aob-session-name s) s))
+                       (mapcar (lambda (kid)
+                                 (cons (format "└ %s" (aob-session-name kid)) kid))
+                               (and (fboundp 'aob-subagent-children)
+                                    (aob-subagent-children s)))
+                       (mapcar (lambda (sub)
+                                 (cons (format "└ %s"
+                                               (or (plist-get sub :title)
+                                                   (plist-get sub :name)
+                                                   "subagent"))
+                                       (cons s sub)))
+                               (and (fboundp 'ygg-aob-session-subagents)
+                                    (ygg-aob-session-subagents s))))))
+              live))
+            ;; ended, but the conversation is still there to pick up
+            (past (mapcar (lambda (e)
+                            (cons (or (ygg-projects--entry-ts e) 0)
+                                  (list (cons (or (plist-get e :name)
+                                                  (plist-get e :agent)
+                                                  "session")
+                                              e))))
+                          (ygg-projects--past root))))
+       ;; newest first, running or ended alike: what happened today is
+       ;; what the row is opened for, and a session's own rows go with it
+       (apply #'append
+              (mapcar #'cdr
+                      (sort (append groups past)
+                            (lambda (a b) (> (car a) (car b))))))))
     ('commands (mapcar (lambda (c)
                          (cons (format "%s  %s" (plist-get c :name)
                                        (propertize (format "%s" (plist-get c :source))
@@ -675,9 +718,36 @@ where nothing can be read."
                  (ygg-projects--right "" (+ 1.0 ygg-projects-entry-spacing)))
          'ygg-project root 'ygg-row kind 'ygg-entry payload 'ygg-cont t))))))
 
+(defun ygg-projects--on-screen-p (payload)
+  "Non-nil when PAYLOAD is a session a window is showing."
+  (and (fboundp 'aob-session-p) (aob-session-p payload)
+       (member (aob-session-id payload) ygg-projects--on-screen)
+       t))
+
+(defun ygg-projects--mark-row (text face)
+  "Put FACE over everything TEXT already wears.
+The row is dressed in `font-lock-face\=', and a `face\=' laid over it is
+not merged with it but hides it — so the mark joins the same property,
+first, where what it sets wins and the rest is still read from behind
+it."
+  (let ((i 0) (len (length text)))
+    (while (< i len)
+      (let* ((end (next-single-property-change i 'font-lock-face text len))
+             (old (get-text-property i 'font-lock-face text)))
+        (put-text-property i end 'font-lock-face
+                           (cons face (cond ((null old) nil)
+                                            ((listp old) old)
+                                            (t (list old))))
+                           text)
+        (setq i end))))
+  text)
+
 (defun ygg-projects--entry-nodes (root kind)
   (mapcar (lambda (cell)
-            (vui-text (ygg-projects--entry-text (car cell) root kind (cdr cell))))
+            (let ((text (ygg-projects--entry-text (car cell) root kind (cdr cell))))
+              (when (ygg-projects--on-screen-p (cdr cell))
+                (ygg-projects--mark-row text 'ygg-projects-on-screen))
+              (vui-text text)))
           (or (ygg-projects--entries root kind)
               (list (cons "— none —" nil)))))
 
@@ -873,6 +943,7 @@ Point is kept on the row it was on rather than at the offset that row
 used to occupy: a redraw that lands the cursor somewhere else reads as
 the sidebar moving on its own."
   (interactive)
+  (setq ygg-projects--on-screen (ygg-projects--traced-ids))
   (when-let* ((buf (get-buffer ygg-projects-buffer-name)))
     (with-current-buffer buf
       (when ygg-projects--instance
@@ -1150,6 +1221,50 @@ discards everything the filter left."
   (ygg-projects--scan-worktrees)
   (ygg-projects--scan-docker))
 
+(defun ygg-projects-first ()
+  "Go to the first row."
+  (interactive)
+  (goto-char (point-min))
+  (unless (and (get-text-property (line-beginning-position) 'ygg-project)
+               (not (get-text-property (line-beginning-position) 'ygg-cont)))
+    (ygg-projects--goto 1)))
+
+(defun ygg-projects-last ()
+  "Go to the last row."
+  (interactive)
+  (goto-char (point-max))
+  (ygg-projects--goto -1))
+
+(defun ygg-projects--open-p ()
+  "Whether the row point is on is showing what it stands for."
+  (let ((root (get-text-property (line-beginning-position) 'ygg-project))
+        (kind (get-text-property (line-beginning-position) 'ygg-row)))
+    (cond ((null root) nil)
+          ((get-text-property (line-beginning-position) 'ygg-entry) nil)
+          ((eq kind 'project) (equal root ygg-projects--open))
+          (t (and (member (cons root kind) ygg-projects--open-row) t)))))
+
+(defun ygg-projects-open-row ()
+  "Open what this line stands for, or go into it when it is a thing."
+  (interactive)
+  (cond ((get-text-property (line-beginning-position) 'ygg-entry)
+         (ygg-projects-visit))
+        ((not (ygg-projects--open-p)) (ygg-projects-toggle))))
+
+(defun ygg-projects-close-row ()
+  "Close what this line stands for, else go up to the project above it."
+  (interactive)
+  (if (ygg-projects--open-p)
+      (ygg-projects-toggle)
+    (ygg-projects--goto -1 t)))
+
+(defun ygg-projects-forward-rows (n)
+  "Move N rows, the way a half page moves a list."
+  (dotimes (_ (abs n)) (ygg-projects--goto (if (< n 0) -1 1))))
+
+(defun ygg-projects-down-half () (interactive) (ygg-projects-forward-rows 5))
+(defun ygg-projects-up-half () (interactive) (ygg-projects-forward-rows -5))
+
 (defun ygg-projects-next () (interactive) (ygg-projects--goto 1))
 (defun ygg-projects-prev () (interactive) (ygg-projects--goto -1))
 (defun ygg-projects-next-project () (interactive) (ygg-projects--goto 1 t))
@@ -1289,7 +1404,20 @@ row was picked from."
     (define-key map "K" #'ygg-projects-prev-project)
     (define-key map "n" #'ygg-projects-next)
     (define-key map "p" #'ygg-projects-prev)
-    (define-key map "g" #'ygg-projects-rescan)
+    ;; g is the goto prefix everywhere else, so it is one here too and
+    ;; the rescan moves to r
+    (define-key map "gg" #'ygg-projects-first)
+    (define-key map "G" #'ygg-projects-last)
+    ;; the movements normal state has, answering in rows: a panel one
+    ;; column wide has nothing to say to a character left or right, so
+    ;; they close and open instead, the way a tree does
+    (define-key map "h" #'ygg-projects-close-row)
+    (define-key map "l" #'ygg-projects-open-row)
+    (define-key map (kbd "C-d") #'ygg-projects-down-half)
+    (define-key map (kbd "C-u") #'ygg-projects-up-half)
+    (define-key map "}" #'ygg-projects-next-project)
+    (define-key map "{" #'ygg-projects-prev-project)
+    (define-key map "r" #'ygg-projects-rescan)
     (define-key map "+" #'project-switch-project)
     (define-key map "A" #'ygg-projects-add)
     (define-key map "I" #'ygg-projects-import)
@@ -1387,6 +1515,13 @@ window configuration, a session load, a compose box making room.")
           (with-current-buffer buf (ygg-projects--trim-window)))))))
 
 (add-hook 'window-configuration-change-hook #'ygg-projects--restore)
+
+(defun ygg-projects--follow-trace (&rest _)
+  "Redraw when another conversation comes on screen, so the fill follows it."
+  (unless (equal (ygg-projects--traced-ids) ygg-projects--on-screen)
+    (ygg-projects-refresh)))
+
+(add-hook 'window-configuration-change-hook #'ygg-projects--follow-trace)
 
 (defun ygg-projects-close ()
   "Close the sidebar, and mean it: it stays closed until you open it."
