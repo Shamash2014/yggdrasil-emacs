@@ -536,8 +536,15 @@ levels deep, each a child of the one before it."
 (defun ygg-aob--space-for-agent (s)
   "Nest a space for S under its project, and name it after S.
 A conversation opened for reading gets none: it has no process, and a
-space is where a process works."
+space is where a process works.  A subagent gets none either: it works
+in the space of the session that sent it, and opening it must not take
+you out of that one."
+  (when-let* (((ygg-aob--subagent-p s))
+              (parent (aob-session-get (aob-session-ref s :parent-session)))
+              (space (aob-session-ref parent :space)))
+    (aob-session-put s :space space))
   (when (and ygg-aob-space-per-agent
+             (not (ygg-aob--subagent-p s))
              (fboundp 'ygg-space--spawn)
              (fboundp 'ygg-space-rename)
              ;; a session that is created already finished is a
@@ -760,12 +767,19 @@ buffer-local that says where the words were going."
 ;; and what it is running inside.  An agent that does not know the editor
 ;; has an MCP server shells out for what the editor already knows, and
 ;; delegates inside its own context instead of opening a session
-(declare-function ygg-agent-write-instructions "ygg-agent-conf" (home))
+(declare-function ygg-agent-remove-instructions "ygg-agent-conf" (home))
+(defvar ygg-agent-instructions)
+
+;; what this editor offers goes out with every session, in the request
+;; that opens it, and not in a memory file only some config homes carry
+(setq aob-acp-system-append (lambda (_s) ygg-agent-instructions))
 
 (defun ygg-aob--with-instructions (fn agent &rest args)
-  "Tell the session being spawned what this editor offers it."
+  "Clear the old written copy of the instructions from the home the session uses.
+The system prompt carries them now; left in the memory file they are
+read twice."
   (when (and (fboundp 'ygg-agent--config-env)
-             (fboundp 'ygg-agent-write-instructions))
+             (fboundp 'ygg-agent-remove-instructions))
     (ignore-errors
       (let* ((root (or (bound-and-true-p aob-acp-start-dir)
                        (ignore-errors (project-root (project-current nil)))
@@ -773,7 +787,7 @@ buffer-local that says where the words were going."
              (entry (ygg-agent--config-env agent agent root))
              (home (and (stringp entry) (string-match "=\\(.*\\)\\'" entry)
                         (match-string 1 entry))))
-        (ygg-agent-write-instructions home))))
+        (ygg-agent-remove-instructions home))))
   (apply fn agent args))
 
 (advice-add 'aob-acp-spawn :around #'ygg-aob--with-instructions)
@@ -1217,6 +1231,32 @@ not a list anyone can pick out of."
   (ygg-ui-cut (or (ygg-aob--task-slug s) (aob-session-name s))
               (or width ygg-aob-pick-width)))
 
+(defun ygg-aob-switch ()
+  "Go to any live session, whatever project or space it is in.
+The most in need of you first, each with its state and its project, so
+a name two projects share is told apart by where it is."
+  (interactive)
+  (let* ((live (seq-sort-by #'ygg-aob--score #'>
+                            (seq-remove #'ygg-aob--put-down-p (aob-live-sessions))))
+         (cands (mapcar (lambda (s)
+                          (cons (format "%-28s %-8s %s"
+                                        (truncate-string-to-width (aob-session-name s) 28 nil nil "…")
+                                        (aob-session-state s)
+                                        (abbreviate-file-name
+                                         (directory-file-name
+                                          (or (aob-session-project s) (aob-session-dir s) ""))))
+                                s))
+                        live)))
+    (unless cands (user-error "no live sessions"))
+    (ygg-aob--goto
+     (cdr (assoc (completing-read "Session: "
+                                  (lambda (str pred action)
+                                    (if (eq action 'metadata)
+                                        '(metadata (display-sort-function . identity))
+                                      (complete-with-action action cands str pred)))
+                                  nil t)
+                 cands)))))
+
 (defun ygg-aob-pick ()
   "Go to an agent IN THE CURRENT SPACE, flash-style: labeled hints in the
 echo area, one keypress jumps.  Only this space's agents are offered;
@@ -1417,6 +1457,7 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "C" #'ygg-aob-talk-existing :label "talk existing"
   "R" #'ygg-aob-resume-pick :label "resume a folder"
   "o" #'ygg-aob-pick :label "go to"
+  "j" #'ygg-aob-switch :label "switch session, any project"
   "r" #'ygg-aob-resolve-next :label "resolve"
   "t" #'ygg-task-adopt :label "task from this chat"
   "c" #'ygg-daemon-oneshot :label "compose: a draft, its mode on \\ m"
@@ -1429,6 +1470,7 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 (declare-function ygg-project-import "ygg-project-scan" (root &optional callback))
 (declare-function ygg-projects-add "ygg-projects" (dir))
 (declare-function ygg-projects-toggle-archived "ygg-projects" ())
+(declare-function ygg-projects-toggle-past "ygg-projects" ())
 (declare-function ygg-conversations "ygg-projects" (&optional all))
 
 (yggdrasil-define-keys 'ygg-leader-agent-map
@@ -1439,7 +1481,8 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "p" #'ygg-project-import :label "import project"
   "P" #'ygg-projects-add :label "add project"
   "k" #'ygg-conversations :label "conversations"
-  "z" #'ygg-projects-toggle-archived :label "archived on/off")
+  "z" #'ygg-projects-toggle-past :label "old sessions on/off"
+  "Z" #'ygg-projects-toggle-archived :label "archived on/off")
 
 (yggdrasil-define-keys 'ygg-leader-agent-map
   ;; works on the visual selection: region is what the answer replaces
@@ -1489,6 +1532,127 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 ;; every session this Emacs opens is told about the sidecar; the sidecar
 ;; itself is not started until the first spawn asks for it
 (aob-mcp-host-mode 1)
+
+;;; Skills after a slash, presets after an at — the words compose knew
+
+(require 'ygg-preset nil t)
+(declare-function ygg-preset-list "ygg-preset" (&optional root))
+(declare-function ygg-preset-name "ygg-preset" (d))
+(declare-function ygg-preset-body "ygg-preset" (d))
+(declare-function ygg-preset-skill-files "ygg-preset" (root))
+(declare-function ygg-preset--parse "ygg-preset" (file))
+(defvar aob-capf-command-functions)
+(defvar aob-capf-mention-functions)
+(defvar aob-compose-before-send-functions)
+
+(defvar ygg-aob--preset-cache (make-hash-table :test #'equal)
+  "Root to (TIME SKILLS . PRESETS): three hundred skill files are not read
+on every keystroke of a popup.")
+
+(defun ygg-aob--skills-of (root)
+  "ROOT's skills as commands, the name and the line that says what each is for."
+  (seq-uniq
+   (mapcar (lambda (file)
+             (let ((fields (car (ygg-preset--parse file))))
+               (list :name (or (plist-get fields :name)
+                               (file-name-nondirectory
+                                (directory-file-name (file-name-directory file))))
+                     :description (or (plist-get fields :description) ""))))
+           (ygg-preset-skill-files root))
+   (lambda (a b) (equal (plist-get a :name) (plist-get b :name)))))
+
+(defun ygg-aob--presets-of (dir)
+  "(SKILLS . PRESETS) for the project DIR is in, read at most every half minute."
+  (when (featurep 'ygg-preset)
+    (let* ((root (file-name-as-directory
+                  (expand-file-name (or (and dir (locate-dominating-file dir ".git"))
+                                        dir default-directory))))
+           (hit (gethash root ygg-aob--preset-cache)))
+      (if (and hit (< (- (float-time) (car hit)) 30))
+          (cdr hit)
+        (let ((val (cons (ignore-errors (ygg-aob--skills-of root))
+                         (ignore-errors (ygg-preset-list root)))))
+          (puthash root (cons (float-time) val) ygg-aob--preset-cache)
+          val)))))
+
+(defun ygg-aob--skill-commands (dir)
+  "DIR's skills, for the popup a slash opens."
+  (car (ygg-aob--presets-of dir)))
+
+(defun ygg-aob--preset-mentions (dir)
+  "DIR's presets, for the popup an at opens."
+  (mapcar (lambda (p) (cons (ygg-preset-name p) "  preset"))
+          (cdr (ygg-aob--presets-of dir))))
+
+(defun ygg-aob--expand-presets (text)
+  "TEXT with every @preset it names carried after it in the preset's own words.
+A mention the agent cannot open is a word; the body is what was meant.
+A file of the same name is the file, and is left to the agent."
+  (let* ((dir (or (bound-and-true-p aob-compose--dir) default-directory))
+         blocks)
+    (dolist (p (cdr (ygg-aob--presets-of dir)))
+      (let ((name (ygg-preset-name p)))
+        (when (and (string-match-p (concat "@" (regexp-quote name)
+                                           "\\(?:[^[:alnum:]_-]\\|\\'\\)")
+                                   text)
+                   (not (file-exists-p (expand-file-name name dir))))
+          (push (format "<preset name=\"%s\">\n%s\n</preset>"
+                        name (string-trim (or (ygg-preset-body p) "")))
+                blocks))))
+    (when blocks
+      (concat text "\n\n" (string-join (nreverse blocks) "\n\n")))))
+
+(defcustom ygg-aob-diff-max-chars 60000
+  "How much of a checkout's diff an @diff carries before it is cut."
+  :type 'natnum :group 'aob)
+
+(defvar ygg-aob--dirty-cache (make-hash-table :test #'equal)
+  "Root to (TIME . DIRTY): git is asked at most every few seconds, not per key.")
+
+(defun ygg-aob--repo (dir)
+  (when-let* ((top (and dir (locate-dominating-file dir ".git"))))
+    (file-name-as-directory (expand-file-name top))))
+
+(defun ygg-aob--dirty-p (root)
+  "Whether ROOT's checkout has changes against HEAD, as git said lately."
+  (let ((hit (gethash root ygg-aob--dirty-cache)))
+    (if (and hit (< (- (float-time) (car hit)) 5))
+        (cdr hit)
+      (let ((dirty (not (zerop (let ((default-directory root))
+                                 (call-process "git" nil nil nil "diff" "--quiet" "HEAD"))))))
+        (puthash root (cons (float-time) dirty) ygg-aob--dirty-cache)
+        dirty))))
+
+(defun ygg-aob--diff-mention (dir)
+  "diff, for the popup an at opens, when the checkout has changed anything."
+  (when-let* ((root (ygg-aob--repo dir))
+              ((ygg-aob--dirty-p root)))
+    (list (cons "diff" "  what the checkout changed"))))
+
+(defun ygg-aob--expand-diff (text)
+  "TEXT with the checkout's diff carried after it when it says @diff."
+  (when-let* (((string-match-p "@diff\\(?:[^[:alnum:]_-]\\|\\'\\)" text))
+              (root (ygg-aob--repo (or (bound-and-true-p aob-compose--dir)
+                                       default-directory)))
+              (diff (with-temp-buffer
+                      (let ((default-directory root))
+                        (call-process "git" nil t nil "diff" "HEAD"))
+                      (buffer-string)))
+              ((not (string-empty-p (string-trim diff)))))
+    (concat text "\n\n<diff>\n"
+            (if (> (length diff) ygg-aob-diff-max-chars)
+                (concat (substring diff 0 ygg-aob-diff-max-chars)
+                        (format "\n… %d more characters left out"
+                                (- (length diff) ygg-aob-diff-max-chars)))
+              diff)
+            "</diff>")))
+
+(with-eval-after-load 'aob
+  (add-hook 'aob-capf-command-functions #'ygg-aob--skill-commands)
+  (add-hook 'aob-capf-mention-functions #'ygg-aob--preset-mentions)
+  (add-hook 'aob-capf-mention-functions #'ygg-aob--diff-mention)
+  (add-hook 'aob-compose-before-send-functions #'ygg-aob--expand-presets)
+  (add-hook 'aob-compose-before-send-functions #'ygg-aob--expand-diff))
 
 (provide 'layer-aob)
 ;;; layer-aob.el ends here

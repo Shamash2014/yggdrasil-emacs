@@ -1104,7 +1104,14 @@ attachments whose [[ImageN]] survived the user's editing ride along."
     ;; whatever the draft goes to — a session, a spawn, a caller — it is
     ;; words the owner typed, and a spawn queues its first turn right here
     (let ((aob-prompt-typed t))
-      (cond ((and session aob-compose--steer (null atts))
+      (cond ((and session (null atts)
+                  (or aob-compose--steer
+                      ;; a turn that takes words mid-way gets them now: a
+                      ;; subagent can keep a turn open for an hour, and a
+                      ;; queued message waits behind all of it
+                      (and (eq (aob-session-state session) 'working)
+                           (fboundp 'aob-acp--steers-p)
+                           (ignore-errors (aob-acp--steers-p session)))))
              (aob-interject session text))
             (session (aob-prompt session text atts))
             ((stringp tgt) (user-error "aob: target session is gone"))
@@ -1224,6 +1231,10 @@ untracked files, and absolute or ~ paths all resolve live off disk."
   "Functions called with the compose directory, each returning command plists.
 What they return completes after `/' beside the session's own commands.")
 
+(defvar aob-capf-mention-functions nil
+  "Functions of the compose directory returning more @-words, as (NAME . WHAT).
+WHAT is what the popup says beside NAME: a preset, say.")
+
 (defun aob--capf-commands ()
   "Commands of the target session, else the union across live sessions,
 and whatever `aob-capf-command-functions' add for the compose directory."
@@ -1252,13 +1263,14 @@ moment the sign is typed rather than one character after it."
   (let ((anchor (if (minibufferp) (minibuffer-prompt-end)
                   (line-beginning-position))))
     (cond
-     ;; the /command token — only as the very first thing typed
-     ((and (> (point) anchor)
-           (eq (char-after anchor) ?/)
-           (not (string-match-p "[[:space:]]"
-                                (buffer-substring anchor (point)))))
+     ;; a /command token — at the start of the input, or after a space
+     ;; anywhere in it, where a skill is named mid-sentence; a path has
+     ;; no space before its slashes, so it is left to the @ branch
+     ((save-excursion
+        (re-search-backward "\\(?:^\\|[[:space:]]\\)\\(/\\)[^/[:space:]]*\\="
+                            (max anchor (- (point) 200)) t))
       (when-let* ((cmds (aob--capf-commands)))
-        (list (1+ anchor) (point)
+        (list (match-end 1) (point)
               (mapcar (lambda (c) (plist-get c :name)) cmds)
               :company-prefix-length t
               :annotation-function
@@ -1266,21 +1278,32 @@ moment the sign is typed rather than one character after it."
                 (when-let* ((c (seq-find (lambda (x)
                                            (equal (plist-get x :name) cand))
                                          cmds)))
-                  (concat "  " (or (plist-get c :description) ""))))
+                  ;; a skill's description is a paragraph; the popup
+                  ;; has room for its first line
+                  (concat "  " (truncate-string-to-width
+                                (car (split-string (or (plist-get c :description) "")
+                                                   "[.\n]" t))
+                                48 nil nil "…"))))
               :exclusive 'no)))
      ;; an @file token
      ((save-excursion
         (re-search-backward "@\\([^@[:space:]]*\\)\\="
                             (max anchor (- (point) 200)) t))
-      (let ((dir (aob--capf-dir)))
+      (let* ((dir (aob--capf-dir))
+             (words (seq-mapcat (lambda (fn) (ignore-errors (funcall fn dir)))
+                                aob-capf-mention-functions)))
         (list (1+ (match-beginning 0)) (point)
-              (completion-table-merge (aob--project-folders dir)
+              (completion-table-merge (mapcar #'car words)
+                                      (aob--project-folders dir)
                                       (aob--capf-file-table dir))
               :company-prefix-length t
-              ;; a folder and a file are written the same way, so the
-              ;; popup says which one a word is
+              ;; a preset, a folder and a file are written the same way,
+              ;; so the popup says which one a word is
               :annotation-function
-              (lambda (cand) (if (string-suffix-p "/" cand) "  folder" "  file"))
+              (lambda (cand)
+                (cond ((cdr (assoc cand words)))
+                      ((string-suffix-p "/" cand) "  folder")
+                      (t "  file")))
               :exclusive 'no)))
      ;; a #definition token — the code itself, not a path to go read
      ((save-excursion
