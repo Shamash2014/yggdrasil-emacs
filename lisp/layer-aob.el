@@ -292,15 +292,20 @@ actions keep their tool title.  The short path stays the clickable target."
 (setq aob-compose-float nil)
 
 (defun ygg-aob--compose-display (buffer alist)
-  "Show BUFFER where the conversation is, splitting nothing."
+  "Show BUFFER as a box over the conversation it is going to.
+Above that window rather than across the frame: a draft belongs to one
+conversation, and the sidebar and whatever else is open are not its to
+rearrange."
   (when-let* ((win (ygg-aob--conversation-window)))
-    (window--display-buffer buffer win 'reuse alist)))
+    (with-selected-window win
+      (display-buffer-in-direction buffer (cons '(direction . above) alist)))))
 
 (setq aob-compose-display-action
-      '((ygg-aob--compose-display
-         display-buffer-reuse-window
+      '((display-buffer-reuse-window
+         ygg-aob--compose-display
          display-buffer-at-bottom)
-        (window-height . 12)))
+        (window-height . 12)
+        (preserve-size . (nil . t))))
 
 ;; a buffer opened to be written starts in insert state (after
 ;; yggdrasil-local-mode has already forced normal on mode change)
