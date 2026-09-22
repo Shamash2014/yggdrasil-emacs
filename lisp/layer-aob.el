@@ -503,16 +503,58 @@ swept, so an orphan heals the moment anything looks for it."
 (declare-function ygg-space-child "yggdrasil-spacetree")
 (declare-function ygg-space-rename "yggdrasil-spacetree" (name))
 
+(declare-function ygg-space--tabs "yggdrasil-spacetree" ())
+(declare-function ygg-space--id-of "yggdrasil-spacetree" (tab))
+(declare-function ygg-space-task-p "yggdrasil-spacetree" (tab))
+(declare-function ygg-space--spawn "yggdrasil-spacetree" (parent))
+(declare-function ygg-space--set "yggdrasil-spacetree" (tab key val))
+
+(defun ygg-aob--project-space-id (dir)
+  "The space standing for DIR\='s tree, if one does.
+An agent\='s space hangs off its project, not off whichever agent space
+the last spawn left you standing in: that is how ten agents end up ten
+levels deep, each a child of the one before it."
+  (when-let* ((root (and (fboundp 'ygg-space-root) (ygg-space-root dir)))
+              ((fboundp 'ygg-space--tabs))
+              ((fboundp 'ygg-space--dir-of)))
+    (seq-some (lambda (tab)
+                (and (not (and (fboundp 'ygg-space-task-p) (ygg-space-task-p tab)))
+                     ;; an agent's own space stands on the same tree and
+                     ;; is not the tree: hanging the next agent off it is
+                     ;; the staircase this is here to stop
+                     (not (alist-get 'ygg-agent tab))
+                     (when-let* ((home (ygg-space--dir-of tab)))
+                       (equal (file-name-as-directory (expand-file-name home))
+                              (file-name-as-directory (expand-file-name root))))
+                     (ygg-space--id-of tab)))
+              (ygg-space--tabs))))
+
 (defun ygg-aob--space-for-agent (s)
-  "Nest a child space under the current one and name it after S."
+  "Nest a space for S under its project, and name it after S.
+A conversation opened for reading gets none: it has no process, and a
+space is where a process works."
   (when (and ygg-aob-space-per-agent
-             (fboundp 'ygg-space-child)
-             (fboundp 'ygg-space-rename))
+             (fboundp 'ygg-space--spawn)
+             (fboundp 'ygg-space-rename)
+             ;; a session that is created already finished is a
+             ;; conversation opened for reading: its `:asleep' entry is
+             ;; put on it a line after this hook runs, so the state is
+             ;; what there is to go on
+             (not (aob-session-ref s :asleep))
+             (not (memq (aob-session-state s) '(done dead failed))))
     (condition-case err
-        (let ((default-directory (or (aob-session-dir s)
-                                     (aob-session-project s)
-                                     default-directory)))
-          (ygg-space-child)
+        (let* ((default-directory (or (aob-session-dir s)
+                                      (aob-session-project s)
+                                      default-directory))
+               ;; the project's space, else the root: anything but the
+               ;; space the last agent made, which is where you are
+               ;; standing when its spawn has just finished
+               (parent (or (ygg-aob--project-space-id default-directory)
+                           (bound-and-true-p ygg-space--root-id)
+                           (ygg-space--current-id))))
+          (let ((tab (ygg-space--spawn parent)))
+            (when (and tab (fboundp 'ygg-space--set))
+              (ygg-space--set tab 'ygg-agent (aob-session-id s))))
           (ygg-space-rename (or (aob-session-name s) "agent"))
           (aob-session-put s :space (ygg-space--current-id)))
       (error (message "aob: no space for %s (%s)"

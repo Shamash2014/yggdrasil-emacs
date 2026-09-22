@@ -181,7 +181,10 @@ Asleep: it carries the id its agent answers to, and no process."
     (or existing
         (let ((s (aob-create-session
                   :id id :backend 'acp
-                  :name (aob-transcript--name entry file)
+                  :name (if (plist-get entry :found)
+                            ;; already named for its day when it was found
+                            (plist-get entry :name)
+                          (aob-transcript--name entry file))
                   :project (or (plist-get entry :project) (plist-get entry :dir))
                   :dir (or (plist-get entry :dir) (plist-get entry :project))
                   :state 'done)))
