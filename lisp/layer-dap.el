@@ -40,6 +40,8 @@
 (declare-function dape--breakpoint-file-name "dape")
 (declare-function dape--breakpoint-line "dape")
 (declare-function dape--source-breakpoint-p "dape")
+(declare-function ygg-list-vim-keys "yggdrasil-verbs")
+(defvar dape-info-parent-mode-map)
 
 (defvar dape-configs)
 (defvar dape-buffer-window-arrangement)
@@ -115,8 +117,8 @@
 ;;; Flutter/Dart + web tuning. Mutate the built-in entries' `modes' in place
 ;;; (not the whole literal) so a dape upgrade keeps its command-args/ensure.
 (with-eval-after-load 'dape
-  ;; treesit-auto puts Flutter buffers in `dart-ts-mode', but dape's flutter
-  ;; config only binds `dart-mode' — so it never offered itself in real buffers
+  ;; Dart uses dart-mode (non-ts); flutter configuration supports both
+  ;; dart-mode and dart-ts-mode for extensibility
   (when-let* ((cfg (assq 'flutter dape-configs)))
     (setf (plist-get (cdr cfg) 'modes) '(dart-mode dart-ts-mode)))
   ;; React .tsx is `tsx-ts-mode', missing from the chrome config's modes
@@ -164,6 +166,7 @@
                  (side . bottom) (slot . 0) (window-height . 0.3)
                  (dedicated . weakly)
                  (window-parameters . ((no-delete-other-windows . t)))))
+  (ygg-list-vim-keys dape-info-parent-mode-map)
   ;; margin/fringe breakpoint glyphs, auto-chosen by `dape' per frame capability
   (dape-breakpoint-global-mode 1)
   (ignore-errors (dape-breakpoint-load)))

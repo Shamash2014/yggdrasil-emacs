@@ -43,11 +43,32 @@
 
 ;;; Entry points
 
+(declare-function ygg--jump-push "yggdrasil-motions")
+(declare-function ygg-jump-back "yggdrasil-motions")
+
+(defun ygg-dired-jump ()
+  "Open dired on this file, leaving a jump so C-o comes back."
+  (interactive)
+  (ygg--jump-push)
+  (call-interactively #'dired-jump))
+
+(declare-function better-jumper-get-jumps "better-jumper")
+(declare-function better-jumper-jump-list-struct-idx "better-jumper")
+
+(defun ygg-dired-jump-back ()
+  "Jump back (vim C-o); from a fresh listing, to the jump that opened it."
+  (interactive)
+  ;; a listing is never pushed, so from the head of the list step 0, not 1
+  (ygg-jump-back
+   (if (and (fboundp 'better-jumper-get-jumps)
+            (eql (better-jumper-jump-list-struct-idx (better-jumper-get-jumps)) -1))
+       0 1)))
+
 (yggdrasil-define-keys 'ygg-leader-file-map
-  "j" #'dired-jump :label "jump to dired")
+  "j" #'ygg-dired-jump :label "jump to dired")
 
 (yggdrasil-define-keys 'normal
-  "-" #'dired-jump :label "dired")
+  "-" #'ygg-dired-jump :label "dired")
 
 ;;; Modal keys, bound straight into dired-mode-map (oil.nvim muscle memory)
 
@@ -174,6 +195,7 @@
   (define-key ygg-dired-goto-map "x" #'ygg-dired-open-external)
   (define-key ygg-dired-goto-map "s" #'dired-sort-toggle-or-edit)
   (define-key ygg-dired-goto-map "p" #'dired-display-file)
+  (define-key dired-mode-map (kbd "C-o") #'ygg-dired-jump-back)
   (define-key dired-mode-map "y" (let ((m (make-sparse-keymap)))
                                    (define-key m "y" #'ygg-dired-copy-path)
                                    m))

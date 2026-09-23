@@ -283,6 +283,12 @@ zero-width, unlike Helix selections."
     (ygg--delete-selections))
   (ygg--verb-exit))
 
+(defun ygg-delete-via-blackhole ()
+  "Delete every selection via the black-hole register (Helix A-d)."
+  (interactive)
+  (setq ygg--pending-register ?_)
+  (ygg-delete))
+
 (declare-function ygg-select-line "yggdrasil-selection")
 
 (defun ygg-delete-dwim (&optional n)
@@ -326,6 +332,12 @@ whole line (vim dd, count deletes N lines)."
   (let (points)
     (ygg-with-verb (setq points (ygg--change-collapse)))
     (ygg-enter-insert-at points)))
+
+(defun ygg-change-via-blackhole ()
+  "Change every selection via the black-hole register (Helix A-c)."
+  (interactive)
+  (setq ygg--pending-register ?_)
+  (ygg-change))
 
 ;;; y — yank
 
@@ -515,6 +527,86 @@ Routes through `ygg-paste-function' when set so a read-only page buffer
       (ygg-do-selections (lambda (beg end _dir) (ygg--join-lines beg end)))))
   (ygg--verb-exit))
 
+(defun ygg--join-lines-space (beg end)
+  "Join from BEG to END with next line, selecting inserted space (Helix A-J).
+Returns position of the first inserted space, or nil if no join occurred."
+  (let ((lbeg (line-number-at-pos beg))
+        (lend (line-number-at-pos
+               (if (and (> end beg)
+                        (save-excursion (goto-char end) (bolp)))
+                   (1- end)
+                 end)))
+        (space-positions nil))
+    (goto-char beg)
+    (when (> lend lbeg)
+      (dotimes (_ (- lend lbeg))
+        (end-of-line)
+        (let ((join-pos (point)))
+          (forward-line 1)
+          (skip-chars-forward " \t")
+          (delete-region join-pos (point))
+          (goto-char join-pos)
+          (unless (eolp)
+            (insert " ")
+            (push join-pos space-positions)))))
+    (if space-positions
+        (car (reverse space-positions))
+      nil)))
+
+(defun ygg-join-lines-space (&optional _n)
+  "Join lines, selecting inserted spaces (Helix A-J)."
+  (interactive "p")
+  (ygg-with-verb
+    (let ((markers
+           (cl-loop for r in (ygg--verb-regions)
+                    collect (pcase-let ((`(,beg ,end ,_) r))
+                              (ygg--join-lines-space beg end)))))
+      (ygg--install-selection-set
+       (delq nil
+             (mapcar (lambda (m) (and m (list m (min (1+ m) (point-max)) nil)))
+                     markers)))))
+  (ygg--verb-exit))
+
+;;; [ SPC / ] SPC — add newlines above/below
+
+(defun ygg-add-newline-above (&optional count)
+  "Insert empty lines above each selection (Helix [[ and add_newline_above)."
+  (interactive "p")
+  (let ((count (max 1 (or count 1))))
+    (ygg-with-verb
+      (let* ((regions (ygg--verb-regions))
+             (newline-text (make-string count ?\n)))
+        (dolist (r (reverse regions))
+          (pcase-let ((`(,beg ,_ ,_) r))
+            (save-excursion
+              (goto-char beg)
+              (beginning-of-line)
+              (insert newline-text))))
+        (ygg--install-selection-set
+         (mapcar (lambda (r)
+                   (pcase-let ((`(,b ,e ,p) r))
+                     (list (+ b (* count 1)) (+ e (* count 1)) p)))
+                 regions))))
+    (ygg--verb-exit)))
+
+(defun ygg-add-newline-below (&optional count)
+  "Insert empty lines below each selection (Helix ] and add_newline_below)."
+  (interactive "p")
+  (let ((count (max 1 (or count 1))))
+    (ygg-with-verb
+      (let* ((regions (ygg--verb-regions))
+             (newline-text (make-string count ?\n)))
+        (dolist (r (reverse regions))
+          (pcase-let ((`(,_ ,end ,_) r))
+            (save-excursion
+              (goto-char end)
+              (end-of-line)
+              (forward-line 1)
+              (beginning-of-line)
+              (insert newline-text))))
+        (ygg--install-selection-set regions)))
+    (ygg--verb-exit)))
+
 ;;; > / < — indent, keeping the selection active
 
 (defun ygg--indent-lines (beg end amount)
@@ -587,41 +679,47 @@ Routes through `ygg-paste-function' when set so a read-only page buffer
     (indent-to indent)
     (point)))
 
-(defun ygg-open-below ()
-  "Open a new line below each selection's end line, then insert there."
-  (interactive)
+(defun ygg-open-below (&optional count)
+  "Open a new line below each selection's end line, then insert there.
+COUNT opens that many lines, each holding the inserted text (vim 3o)."
+  (interactive "p")
   (let (points)
     (ygg-with-verb
       (setq points (ygg--collect-insert-points
                     (lambda (beg end _dir) (ygg--open-below beg end)))))
-    (ygg-enter-insert-at points)))
+    (ygg-enter-insert-at points count #'ygg--open-below)))
 
-(defun ygg-open-above ()
-  "Open a new line above each selection's start line, then insert there."
-  (interactive)
+(defun ygg-open-above (&optional count)
+  "Open a new line above each selection's start line, then insert there.
+COUNT opens that many lines, each holding the inserted text (vim 3O)."
+  (interactive "p")
   (let (points)
     (ygg-with-verb
       (setq points (ygg--collect-insert-points
                     (lambda (beg end _dir) (ygg--open-above beg end)))))
-    (ygg-enter-insert-at points)))
+    (ygg-enter-insert-at points count #'ygg--open-below)))
 
 ;;; i / a — insert at selection edges
 
-(defun ygg-insert-before ()
-  "Enter insert at the start of every selection."
-  (interactive)
+(defun ygg-insert-before (&optional count)
+  "Enter insert at the start of every selection.
+COUNT inserts the typed text that many times (vim 3i)."
+  (interactive "p")
   (ygg-enter-insert-at
-   (ygg--collect-insert-points (lambda (beg _end _dir) beg))))
+   (ygg--collect-insert-points (lambda (beg _end _dir) beg))
+   count))
 
-(defun ygg-insert-after ()
+(defun ygg-insert-after (&optional count)
   "Enter insert after the end of every selection.
 Vim semantics: never hop over a newline — `a' on an empty line (or a
-selection ending in one) appends on that line, not the next."
-  (interactive)
+selection ending in one) appends on that line, not the next.  COUNT
+inserts the typed text that many times."
+  (interactive "p")
   (ygg-enter-insert-at
    (ygg--collect-insert-points
     (lambda (beg end _dir)
-      (if (eq (char-before end) ?\n) (max beg (1- end)) end)))))
+      (if (eq (char-before end) ?\n) (max beg (1- end)) end)))
+   count))
 
 ;;; I / A — insert at first-non-blank / end of each selection's line
 
@@ -635,17 +733,21 @@ selection ending in one) appends on that line, not the next."
 (defun ygg--line-end (pos)
   (save-excursion (goto-char pos) (end-of-line) (point)))
 
-(defun ygg-insert-bol ()
-  "Enter insert at the first non-blank of each selection's line."
-  (interactive)
+(defun ygg-insert-bol (&optional count)
+  "Enter insert at the first non-blank of each selection's line.
+COUNT inserts the typed text that many times."
+  (interactive "p")
   (ygg-enter-insert-at
-   (ygg--collect-insert-points (lambda (beg _end _dir) (ygg--line-first-non-blank beg)))))
+   (ygg--collect-insert-points (lambda (beg _end _dir) (ygg--line-first-non-blank beg)))
+   count))
 
-(defun ygg-insert-eol ()
-  "Enter insert at the end of each selection's line."
-  (interactive)
+(defun ygg-insert-eol (&optional count)
+  "Enter insert at the end of each selection's line.
+COUNT inserts the typed text that many times."
+  (interactive "p")
   (ygg-enter-insert-at
-   (ygg--collect-insert-points (lambda (_beg end _dir) (ygg--line-end end)))))
+   (ygg--collect-insert-points (lambda (_beg end _dir) (ygg--line-end end)))
+   count))
 
 ;;; R — vim overwrite (Replace) mode: type over existing text
 
@@ -670,6 +772,25 @@ Helix replace-with-kill lives on visual `p' (select, then paste over)."
   (interactive)
   (when (fboundp 'better-jumper-set-jump) (better-jumper-set-jump))
   (message "yggdrasil: saved to jumplist"))
+
+;;; g $ — keep pipe
+
+(defun ygg-keep-pipe (command)
+  "Keep only selections for which COMMAND exits 0 (Helix keep_pipe / g $)."
+  (interactive (list (ygg--shell-line "keep pipe: ")))
+  (let* ((regions (ygg--verb-regions))
+         (survivors (cl-loop for r in regions
+                             collect (pcase-let ((`(,beg ,end ,_) r))
+                                       (when (zerop (call-process-region beg end shell-file-name
+                                                                         nil nil nil
+                                                                         shell-command-switch command))
+                                         r)))))
+    (setq survivors (delq nil survivors))
+    (unless survivors
+      (user-error "No selections remaining"))
+    (ygg--install-selection-set survivors)
+    (pcase-let ((`(,b ,e ,_) (car (last survivors))))
+      (ygg-set-selection b e))))
 
 ;;; | / M-| / ! / M-! — shell pipe verbs
 
@@ -854,6 +975,28 @@ windows (sidebar, quickfix, agent trace) too."
           (when (> cur floor)
             (window-resize win (- floor cur) horiz t)))))))
 
+(defun ygg-window-open-file-right ()
+  "Open file at point in a split to the right (Helix C-w f)."
+  (interactive)
+  (let ((filename (word-at-point t)))
+    (unless filename (user-error "No file at point"))
+    (select-window (split-window-right))
+    (find-file filename)))
+
+(defun ygg-window-open-file-below ()
+  "Open file at point in a split below (Helix C-w F, brief reversed)."
+  (interactive)
+  (let ((filename (word-at-point t)))
+    (unless filename (user-error "No file at point"))
+    (select-window (split-window-below))
+    (find-file filename)))
+
+(defun ygg-window-new-scratch ()
+  "Create a new scratch buffer in a split to the right (C-w n)."
+  (interactive)
+  (select-window (split-window-right))
+  (switch-to-buffer (generate-new-buffer "*scratch*")))
+
 ;;; Z-prefix buffer commands
 
 (defun ygg-save-and-kill-buffer ()
@@ -915,6 +1058,40 @@ windows (sidebar, quickfix, agent trace) too."
 (global-set-key (kbd "C-j") #'ygg-window-down)
 (global-set-key (kbd "C-k") #'ygg-window-up)
 (global-set-key (kbd "C-l") #'ygg-window-right)
+(global-set-key (kbd "C-w") ygg-window-map)
+(define-key minibuffer-local-map (kbd "C-w") #'backward-kill-word)
+
+;;; Vim navigation for list buffers that keep their own verbs
+
+(declare-function ygg-scroll-half-down "yggdrasil-motions")
+(declare-function ygg-scroll-half-up "yggdrasil-motions")
+(declare-function ygg-goto-first "yggdrasil-motions")
+(declare-function ygg-goto-last-line "yggdrasil-motions")
+(defvar tabulated-list-mode-map)
+(defvar Buffer-menu-mode-map)
+
+(defvar ygg-list-goto-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "g" (cons "first line" #'ygg-goto-first))
+    (define-key map "r" (cons "refresh" #'revert-buffer))
+    (define-key map "?" (cons "this mode's keys" #'describe-mode))
+    map)
+  "The g prefix in list buffers; g r takes over g's revert.")
+
+(defun ygg-list-vim-keys (map)
+  "Bind j k, C-d C-u, g g and G into list MAP."
+  (define-key map "j" #'next-line)
+  (define-key map "k" #'previous-line)
+  (define-key map (kbd "C-d") #'ygg-scroll-half-down)
+  (define-key map (kbd "C-u") #'ygg-scroll-half-up)
+  (define-key map "g" ygg-list-goto-map)
+  (define-key map "G" #'ygg-goto-last-line))
+
+(with-eval-after-load 'tabulated-list
+  (ygg-list-vim-keys tabulated-list-mode-map))
+
+;; preloaded with no feature; its own k and C-d shadow the parent (d deletes)
+(ygg-list-vim-keys Buffer-menu-mode-map)
 
 (defun ygg--float-frame ()
   "A child frame floating over this frame that takes focus, or nil."
@@ -952,34 +1129,90 @@ frame up with nothing above steps into the float."
 (defun ygg-window-right () (interactive) (ygg--windmove 'right))
 
 (defun ygg--number-bounds ()
-  "Bounds of the number at point, or the next one on this line."
+  "Bounds of hex/binary/octal/decimal number at point, or the next on this line."
   (save-excursion
-    (skip-chars-backward "0-9")
-    (when (eq (char-before) ?-) (backward-char))
-    (if (looking-at "-?[0-9]+")
-        (cons (point) (match-end 0))
-      (when (re-search-forward "-?[0-9]+" (line-end-position) t)
-        (cons (match-beginning 0) (match-end 0))))))
+    (let ((start-pos (point)))
+      ;; Try to match at current position or after backing up slightly
+      (let ((found nil))
+        ;; First, try matching at point
+        (when (looking-at "-?\\(?:0[xX][0-9a-fA-F]+\\|0[bB][01]+\\|0[oO][0-7]+\\|[0-9]+\\)")
+          (setq found (cons (point) (match-end 0))))
+        ;; If that didn't work, try backing up to find a number we're inside
+        (unless found
+          (skip-chars-backward "-0-9a-fA-FxXbBoO")
+          (when (and (> (point) (point-min)) (not (memq (char-before) '(?\s ?\t ?\n ?\r))))
+            (backward-char))
+          (when (looking-at "-?\\(?:0[xX][0-9a-fA-F]+\\|0[bB][01]+\\|0[oO][0-7]+\\|[0-9]+\\)")
+            (setq found (cons (point) (match-end 0)))))
+        ;; If still not found, search forward
+        (unless found
+          (goto-char start-pos)
+          (when (re-search-forward "-?\\(?:0[xX][0-9a-fA-F]+\\|0[bB][01]+\\|0[oO][0-7]+\\|[0-9]+\\)" (line-end-position) t)
+            (setq found (cons (match-beginning 0) (match-end 0)))))
+        found))))
 
 (defun ygg--number-increment-at (pos count)
-  "Add COUNT to the number at or after POS; return the end of the new
-number, or nil when POS has none."
+  "Add COUNT to number at POS; return end pos or nil.
+Preserves hex/binary/octal base, case, and zero padding width."
   (goto-char pos)
   (let ((bounds (ygg--number-bounds)))
     (when bounds
-      (let ((num (string-to-number
-                  (buffer-substring-no-properties (car bounds) (cdr bounds)))))
-        (delete-region (car bounds) (cdr bounds))
-        (goto-char (car bounds))
-        (insert (number-to-string (+ num count)))
-        (point)))))
+      (let* ((text (buffer-substring-no-properties (car bounds) (cdr bounds)))
+             (negative (string-prefix-p "-" text))
+             (stripped (if negative (substring text 1) text))
+             (radix 10) (case-sensitive t) (padding 0) (value 0))
+        (cond
+         ((string-match "\\`0[xX]\\([0-9a-fA-F]+\\)" stripped)
+          (let ((hex-digits (match-string 1 stripped)))
+            (setq radix 16
+                  case-sensitive (not (null (string-match "[A-F]" hex-digits)))
+                  padding (length hex-digits)
+                  value (string-to-number hex-digits 16))))
+         ((string-match "\\`0[bB]\\([01]+\\)" stripped)
+          (setq radix 2 padding (length (match-string 1 stripped))
+                value (string-to-number (match-string 1 stripped) 2)))
+         ((string-match "\\`0[oO]\\([0-7]+\\)" stripped)
+          (setq radix 8 padding (length (match-string 1 stripped))
+                value (string-to-number (match-string 1 stripped) 8)))
+         (t
+          (setq radix 10 padding (length stripped) value (string-to-number stripped))))
+        (let* ((unsigned-val (if negative (- value) value))
+               (new-value (+ unsigned-val count)))
+          (delete-region (car bounds) (cdr bounds))
+          (goto-char (car bounds))
+          (insert (ygg--format-number new-value radix case-sensitive padding))
+          (point))))))
+
+(defun ygg--format-number (value radix case-sensitive padding)
+  "Format VALUE in RADIX with PADDING width and optional CASE-SENSITIVE hex."
+  (let* ((is-negative (< value 0))
+         (abs-value (abs value))
+         (formatted (cond
+                      ((= radix 16)
+                       (let ((hex (format (if case-sensitive "%X" "%x") abs-value)))
+                         (concat "0x" (make-string (max 0 (- padding (length hex))) ?0) hex)))
+                      ((= radix 2)
+                       (let ((bin (format "%b" abs-value)))
+                         (concat "0b" (make-string (max 0 (- padding (length bin))) ?0) bin)))
+                      ((= radix 8)
+                       (let ((oct (format "%o" abs-value)))
+                         (concat "0o" (make-string (max 0 (- padding (length oct))) ?0) oct)))
+                      (t
+                       (let ((dec (format "%d" abs-value)))
+                         (concat (make-string (max 0 (- padding (length dec))) ?0) dec))))))
+    (concat (when is-negative "-") formatted)))
 
 (defun ygg-number-increment (&optional count)
-  "Add COUNT (default 1) to the number at or after point, vim C-a style."
+  "Add COUNT (default 1) to numbers at all selections."
   (interactive "p")
-  (let ((end (ygg--number-increment-at (point) (or count 1))))
-    (unless end (user-error "No number on this line"))
-    (goto-char (1- end))))
+  (ygg-with-verb
+    (let ((any-found nil))
+      (ygg-do-selections
+       (lambda (beg end _dir)
+         (ignore end)
+         (when (ygg--number-increment-at beg (or count 1)) (setq any-found t))))
+      (unless any-found (user-error "No number on this line"))))
+  (ygg--verb-exit))
 
 (defun ygg-number-decrement (&optional count)
   "Subtract COUNT (default 1) from the number at or after point."
@@ -1091,6 +1324,7 @@ is preserved."
   "!" #'ygg-rotate-text :label "rotate token"
   "(" #'ygg-rotate-text-backward :label "rotate token back"
   "|" #'ygg-pipe-discard :label "pipe (discard)"
+  "$" #'ygg-keep-pipe :label "keep pipe"
   "A" #'ygg-insert-command-after :label "append command")
 
 ;;; Macros, vim keys: q records into a register / stops, @ plays, @@ replays
@@ -1157,8 +1391,12 @@ A yank register (list of texts) plays as vim does: its text as keys."
       (unless ygg--macro-last-register (user-error "No previously played macro"))
       (setq reg ygg--macro-last-register))
     (setq ygg--macro-last-register reg)
-    (let ((ygg--replaying t))
-      (execute-kbd-macro (ygg--macro-executable reg) count))))
+    (if (eq reg ?:)
+        (if (fboundp 'ygg-ex-repeat-last)
+            (ygg-ex-repeat-last (or count 1))
+          (user-error "yggdrasil: ex command history not available"))
+      (let ((ygg--replaying t))
+        (execute-kbd-macro (ygg--macro-executable reg) count)))))
 
 (yggdrasil-define-keys 'normal
   "q" #'ygg-macro-record :label "record macro"
@@ -1245,12 +1483,34 @@ active in normal state, which would silently scope undo to it)."
   "H" #'windmove-swap-states-left :label "swap left"
   "J" #'windmove-swap-states-down :label "swap down"
   "K" #'windmove-swap-states-up :label "swap up"
-  "L" #'windmove-swap-states-right :label "swap right")
+  "L" #'windmove-swap-states-right :label "swap right"
+  "C-w" #'other-window :label "other"
+  "C-s" #'ygg-window-split-below :label "split below"
+  "C-v" #'ygg-window-split-right :label "split right"
+  "C-q" #'delete-window :label "close"
+  "C-o" #'delete-other-windows :label "only"
+  "C-h" #'ygg-window-left :label "left"
+  "C-j" #'ygg-window-down :label "down"
+  "C-k" #'ygg-window-up :label "up"
+  "C-l" #'ygg-window-right :label "right"
+  "t" #'ygg-window-swap-next :label "swap"
+  "f" #'ygg-window-open-file-right :label "open file right"
+  "F" #'ygg-window-open-file-below :label "open file below"
+  "n" #'ygg-window-new-scratch :label "new scratch")
 
 (yggdrasil-define-keys 'ygg-z-cap-map
   "Z" #'ygg-save-and-kill-buffer :label "save & quit"
   "Q" #'ygg-kill-buffer-no-save :label "quit!"
   "S" #'ygg-daemon-stage-composed :label "stage")
+
+(yggdrasil-define-keys 'normal
+  "[ SPC" #'ygg-add-newline-above :label "add line above"
+  "] SPC" #'ygg-add-newline-below :label "add line below")
+
+(yggdrasil-define-keys 'ygg-selections-map
+  "J" #'ygg-join-lines-space :label "join with space selection"
+  "d" #'ygg-delete-via-blackhole :label "delete (no yank)"
+  "c" #'ygg-change-via-blackhole :label "change (no yank)")
 
 (provide 'yggdrasil-verbs)
 ;;; yggdrasil-verbs.el ends here

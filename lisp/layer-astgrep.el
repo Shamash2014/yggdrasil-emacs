@@ -272,6 +272,14 @@ its place; applying a file back to front keeps the earlier ranges true."
           (write-region (point-min) (point-max) path nil 'silent)))))
   (length edits))
 
+(declare-function yggdrasil-define-local-keys "yggdrasil-core")
+
+(defvar ygg-ast-grep-preview-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "q" #'quit-window)
+    map)
+  "Keys of the rewrite preview, over normal state.")
+
 (defun ygg-ast-grep--rewrite-offer (dir records)
   "Show what RECORDS change under DIR and write it when told to."
   (let ((buf (get-buffer-create "*ast-grep-rewrite*")))
@@ -281,7 +289,8 @@ its place; applying a file back to front keeps the earlier ranges true."
         (erase-buffer)
         (insert (ygg-ast-grep--preview records)))
       (goto-char (point-min))
-      (view-mode 1))
+      (view-mode 1)
+      (yggdrasil-define-local-keys 'normal ygg-ast-grep-preview-map))
     (ygg-ui-show buf t)
     (if (yes-or-no-p (format "Apply this rewrite across %s? "
                              (abbreviate-file-name dir)))

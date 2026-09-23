@@ -16,6 +16,7 @@
 (require 'yggdrasil-selection)
 (require 'seq)
 (require 'repeat)
+(require 'ring)
 
 (declare-function ygg-downcase "yggdrasil-verbs")
 (declare-function ygg-upcase "yggdrasil-verbs")
@@ -26,6 +27,8 @@
 (declare-function ffap-file-at-point "ffap")
 (declare-function ffap "ffap")
 (declare-function yggdrasil-leader-def "yggdrasil-leader")
+(declare-function flymake-diagnostics "flymake")
+(declare-function flymake-diagnostic-beg "flymake")
 
 ;;; The one wrapper every motion is built on
 
@@ -173,6 +176,10 @@ since point sits before the char under a backward scan, not after it."
 ;;; f t F T + M-. repeat
 
 (defvar-local ygg--last-find nil "(CHAR FORWARD TILL) of the last f/t/F/T.")
+(defvar-local ygg--mark-last-jump-pos nil
+  "Position before the last jump, for '' and backtick marks.")
+(defvar-local ygg--change-list nil
+  "Change positions, most recent first, capped at `ygg--change-list-max'.")
 
 (defun ygg--do-find (ch forward till n)
   (let ((s (string ch)) (n (max 1 (or n 1))))
@@ -220,9 +227,16 @@ since point sits before the char under a backward scan, not after it."
 
 ;;; Line motions: 0 $ gh gl gs
 
-(defun ygg-goto-line-start ()
-  (interactive)
-  (ygg-each-selection-update (ygg--motion #'beginning-of-line)))
+(defun ygg-goto-line-start (&optional n)
+  "Line start, or column N (1-indexed) when count given (Helix g| goto_column)."
+  (interactive "p")
+  (if (and n (> n 1))
+      (ygg-each-selection-update
+       (ygg--motion
+        (lambda ()
+          (beginning-of-line)
+          (goto-char (min (+ (line-beginning-position) (1- n)) (line-end-position))))))
+    (ygg-each-selection-update (ygg--motion #'beginning-of-line))))
 
 (defun ygg-goto-line-end ()
   "Line end, cursor ON the last character (Helix gl / vim $)."
@@ -267,6 +281,7 @@ since point sits before the char under a backward scan, not after it."
 
 (defun ygg--jump-push ()
   "Record point as a jump origin (called before a jump motion)."
+  (setq ygg--mark-last-jump-pos (point-marker))
   (when (fboundp 'better-jumper-set-jump) (better-jumper-set-jump)))
 
 (defun ygg--jump-to (m &optional linewise)
@@ -324,6 +339,18 @@ With LINEWISE, land on the target line's first non-blank (vim `')."
 (defvar ygg--marks-global nil
   "A-Z global marks: alist CHAR -> (FILE . POS) for file buffers, or
 CHAR -> marker for non-file buffers (traces, scratch, …).")
+(defvar-local ygg--mark-last-yank-beg nil
+  "Start of the last yank/change region, for '[ mark.")
+(defvar-local ygg--mark-last-yank-end nil
+  "End of the last yank/change region, for '] mark.")
+
+(defun ygg--record-yank-boundaries (regions)
+  "Record the boundaries of a yank/change operation from REGIONS."
+  (when regions
+    (let ((beg (apply #'min (mapcar #'car regions)))
+          (end (apply #'max (mapcar #'cadr regions))))
+      (setq ygg--mark-last-yank-beg (copy-marker beg)
+            ygg--mark-last-yank-end (copy-marker end)))))
 
 (defun ygg-mark-set ()
   (interactive)
@@ -341,13 +368,61 @@ CHAR -> marker for non-file buffers (traces, scratch, …).")
           (push (cons ch val) ygg--marks-global))))
      (t (user-error "Invalid mark: %c" ch)))))
 
+(defvar ygg--marks-global-saved nil
+  "The file-backed global marks, as savehist stores them.")
+
+(defun ygg--marks-global-stash ()
+  (setq ygg--marks-global-saved
+        (seq-filter (lambda (cell) (and (consp (cdr cell)) (stringp (cadr cell))))
+                    ygg--marks-global)))
+
+(defun ygg--marks-global-restore ()
+  (dolist (cell ygg--marks-global-saved)
+    (unless (assq (car cell) ygg--marks-global)
+      (push cell ygg--marks-global))))
+
+(with-eval-after-load 'savehist
+  (add-to-list 'savehist-additional-variables 'ygg--marks-global-saved)
+  (add-hook 'savehist-save-hook #'ygg--marks-global-stash)
+  (add-hook 'savehist-mode-hook #'ygg--marks-global-restore))
+
 (defun ygg-mark-jump (&optional linewise)
   "Jump to the mark named by the next key.
 LINEWISE (vim `') lands on the line's first non-blank; without it (vim
-backtick) the exact stored position."
+backtick) the exact stored position. Special marks: '' (last jump),
+'. (last change), '^ (last insert exit), '[ (yank start), '] (yank end)."
   (interactive)
   (let ((ch (read-char)))
     (cond
+     ((eq ch ?')
+      (if linewise (user-error "'' is already linewise")
+        (unless ygg--mark-last-jump-pos (user-error "No previous jump"))
+        (ygg--jump-push)
+        (ygg--jump-to ygg--mark-last-jump-pos t)))
+     ((eq ch ?`)
+      (unless ygg--mark-last-jump-pos (user-error "No previous jump"))
+      (ygg--jump-push)
+      (ygg--jump-to ygg--mark-last-jump-pos linewise))
+     ((eq ch ?.)
+      (unless ygg--change-list (user-error "Change list empty"))
+      (let ((pos (car ygg--change-list)))
+        (ygg--jump-push)
+        (ygg-each-selection-update
+         (ygg--motion (lambda ()
+                        (goto-char (min (max pos (point-min)) (point-max)))
+                        (when linewise (back-to-indentation)))))))
+     ((eq ch ?^)
+      (unless ygg--last-insert (user-error "Last insert position not set"))
+      (ygg--jump-push)
+      (ygg--jump-to ygg--last-insert linewise))
+     ((eq ch ?\[)
+      (unless ygg--mark-last-yank-beg (user-error "Mark '[ not set"))
+      (ygg--jump-push)
+      (ygg--jump-to ygg--mark-last-yank-beg linewise))
+     ((eq ch ?\])
+      (unless ygg--mark-last-yank-end (user-error "Mark '] not set"))
+      (ygg--jump-push)
+      (ygg--jump-to ygg--mark-last-yank-end linewise))
      ((and (>= ch ?a) (<= ch ?z))
       (let ((m (and ygg--marks-local (gethash ch ygg--marks-local))))
         (unless (and m (marker-buffer m)) (user-error "Mark %c not set" ch))
@@ -444,8 +519,6 @@ backtick) the exact stored position."
 
 ;;; Change list: g ; (older) / g , (newer)
 
-(defvar-local ygg--change-list nil
-  "Change positions, most recent first, capped at `ygg--change-list-max'.")
 (defvar-local ygg--change-list-idx nil
   "Walk index into `ygg--change-list'; reset by any buffer modification.")
 (defconst ygg--change-list-max 100)
@@ -466,11 +539,20 @@ keystroke O(buffer size)."
       (setcdr (nthcdr (1- ygg--change-list-max) ygg--change-list) nil)))
   (setq ygg--change-list-idx nil))
 
+(defun ygg--record-change-bounds (beg end _len)
+  "Record change boundaries for '[ and '] marks."
+  (unless (markerp ygg--mark-last-yank-beg) (setq ygg--mark-last-yank-beg (make-marker)))
+  (unless (markerp ygg--mark-last-yank-end) (setq ygg--mark-last-yank-end (make-marker)))
+  (set-marker ygg--mark-last-yank-beg beg)
+  (set-marker ygg--mark-last-yank-end end))
+
 (add-hook 'yggdrasil-local-mode-hook
           (lambda ()
             (if yggdrasil-local-mode
-                (add-hook 'after-change-functions #'ygg--change-list-record nil t)
-              (remove-hook 'after-change-functions #'ygg--change-list-record t))))
+                (progn (add-hook 'after-change-functions #'ygg--change-list-record nil t)
+                       (add-hook 'after-change-functions #'ygg--record-change-bounds nil t))
+              (progn (remove-hook 'after-change-functions #'ygg--change-list-record t)
+                     (remove-hook 'after-change-functions #'ygg--record-change-bounds t)))))
 
 (defun ygg--change-list-goto (idx)
   (setq ygg--change-list-idx idx)
@@ -601,26 +683,46 @@ in a normal buffer just widen."
 (defun ygg-search-next ()
   "Repeat the last search in its own direction."
   (interactive)
-  (ygg--research (> ygg--search-dir 0)))
+  (ygg--research (> ygg--search-dir 0))
+  (ygg--hlsearch ygg--last-search))
 
 (defun ygg-search-prev ()
   "Repeat the last search against its direction."
   (interactive)
-  (ygg--research (< ygg--search-dir 0)))
+  (ygg--research (< ygg--search-dir 0))
+  (ygg--hlsearch ygg--last-search))
 
 (defun ygg-search-word-forward ()
   (interactive)
   (pcase-let ((`(,beg ,end ,_) (ygg-selection-effective-bounds)))
-    (setq ygg--last-search (regexp-quote (buffer-substring-no-properties beg end))
-          ygg--search-dir 1))
+    (let ((sel (and (> (- end beg) 1)
+                    (buffer-substring-no-properties beg end)))
+          (word (or (and (> (- end beg) 1)
+                         (buffer-substring-no-properties beg end))
+                    (thing-at-point 'symbol t))))
+      (if word
+          (setq ygg--last-search
+                (if sel (regexp-quote sel)
+                  (concat "\\_<" (regexp-quote word) "\\_>"))
+                ygg--search-dir 1)
+        (user-error "No word under cursor"))))
   (ygg--research t)
   (ygg--hlsearch ygg--last-search))
 
 (defun ygg-search-word-backward ()
   (interactive)
   (pcase-let ((`(,beg ,end ,_) (ygg-selection-effective-bounds)))
-    (setq ygg--last-search (regexp-quote (buffer-substring-no-properties beg end))
-          ygg--search-dir -1))
+    (let ((sel (and (> (- end beg) 1)
+                    (buffer-substring-no-properties beg end)))
+          (word (or (and (> (- end beg) 1)
+                         (buffer-substring-no-properties beg end))
+                    (thing-at-point 'symbol t))))
+      (if word
+          (setq ygg--last-search
+                (if sel (regexp-quote sel)
+                  (concat "\\_<" (regexp-quote word) "\\_>"))
+                ygg--search-dir -1)
+        (user-error "No word under cursor"))))
   (ygg--research nil)
   (ygg--hlsearch ygg--last-search))
 
@@ -647,13 +749,21 @@ in a normal buffer just widen."
           isearch-case-fold-search case-fold-search
           isearch-lax-whitespace nil
           isearch-regexp-lax-whitespace nil)
+    (isearch-lazy-highlight-new-loop (window-start) (window-end))
+    (add-hook 'window-scroll-functions #'ygg--hlsearch-on-scroll nil t)))
+
+(defun ygg--hlsearch-on-scroll (_win _pos)
+  "Refresh highlights on window scroll when hlsearch is active."
+  (when (and isearch-lazy-highlight-last-string
+             (not (equal isearch-lazy-highlight-last-string "")))
     (isearch-lazy-highlight-new-loop (window-start) (window-end))))
 
 (defun ygg-hlsearch-clear ()
   "Clear search highlighting (vim :nohlsearch)."
   (interactive)
   (lazy-highlight-cleanup t)
-  (setq isearch-lazy-highlight-last-string nil))
+  (setq isearch-lazy-highlight-last-string nil)
+  (remove-hook 'window-scroll-functions #'ygg--hlsearch-on-scroll t))
 
 ;;; Scrolling (vim keys): C-d C-u half page, C-f C-b page, C-e C-y line
 
@@ -720,10 +830,12 @@ in a normal buffer just widen."
 
 (defun ygg-next-error ()
   (interactive)
+  (ygg--record-bracket-motion 1 "d")
   (when (fboundp 'flymake-goto-next-error) (call-interactively #'flymake-goto-next-error)))
 
 (defun ygg-prev-error ()
   (interactive)
+  (ygg--record-bracket-motion -1 "d")
   (when (fboundp 'flymake-goto-prev-error) (call-interactively #'flymake-goto-prev-error)))
 
 (defun ygg--bracketed-goto (finder)
@@ -745,8 +857,15 @@ in a normal buffer just widen."
         (when (and (not hit) (bobp) (looking-at re)) (setq hit (point)))
         hit))))
 
-(defun ygg-next-comment () (interactive) (ygg--bracketed-goto (lambda () (ygg--find-comment-line 1))))
-(defun ygg-prev-comment () (interactive) (ygg--bracketed-goto (lambda () (ygg--find-comment-line -1))))
+(defun ygg-next-comment ()
+  (interactive)
+  (ygg--record-bracket-motion 1 "c")
+  (ygg--bracketed-goto (lambda () (ygg--find-comment-line 1))))
+
+(defun ygg-prev-comment ()
+  (interactive)
+  (ygg--record-bracket-motion -1 "c")
+  (ygg--bracketed-goto (lambda () (ygg--find-comment-line -1))))
 
 (defun ygg--find-indent-line (dir)
   (let ((cur (current-indentation)))
@@ -759,8 +878,15 @@ in a normal buffer just widen."
               (setq hit (progn (back-to-indentation) (point)))))
           hit)))))
 
-(defun ygg-next-indent () (interactive) (ygg--bracketed-goto (lambda () (ygg--find-indent-line 1))))
-(defun ygg-prev-indent () (interactive) (ygg--bracketed-goto (lambda () (ygg--find-indent-line -1))))
+(defun ygg-next-indent ()
+  (interactive)
+  (ygg--record-bracket-motion 1 "i")
+  (ygg--bracketed-goto (lambda () (ygg--find-indent-line 1))))
+
+(defun ygg-prev-indent ()
+  (interactive)
+  (ygg--record-bracket-motion -1 "i")
+  (ygg--bracketed-goto (lambda () (ygg--find-indent-line -1))))
 
 (defun ygg--find-conflict (dir)
   (save-excursion
@@ -770,8 +896,15 @@ in a normal buffer just widen."
             (re-search-backward "^<\\{7\\}" nil t))
       (line-beginning-position))))
 
-(defun ygg-next-conflict () (interactive) (ygg--bracketed-goto (lambda () (ygg--find-conflict 1))))
-(defun ygg-prev-conflict () (interactive) (ygg--bracketed-goto (lambda () (ygg--find-conflict -1))))
+(defun ygg-next-conflict ()
+  (interactive)
+  (ygg--record-bracket-motion 1 "x")
+  (ygg--bracketed-goto (lambda () (ygg--find-conflict 1))))
+
+(defun ygg-prev-conflict ()
+  (interactive)
+  (ygg--record-bracket-motion -1 "x")
+  (ygg--bracketed-goto (lambda () (ygg--find-conflict -1))))
 
 (defun ygg--sibling-file (dir)
   (let ((cur (buffer-file-name)))
@@ -785,13 +918,21 @@ in a normal buffer just widen."
 
 (defun ygg-next-file ()
   (interactive)
+  (ygg--record-bracket-motion 1 "f")
   (let ((f (ygg--sibling-file 1))) (when f (find-file f))))
 (defun ygg-prev-file ()
   (interactive)
+  (ygg--record-bracket-motion -1 "f")
   (let ((f (ygg--sibling-file -1))) (when f (find-file f))))
 
-(defun ygg-next-window () (interactive) (other-window 1))
-(defun ygg-prev-window () (interactive) (other-window -1))
+(defun ygg-next-window ()
+  (interactive)
+  (ygg--record-bracket-motion 1 "w")
+  (other-window 1))
+(defun ygg-prev-window ()
+  (interactive)
+  (ygg--record-bracket-motion -1 "w")
+  (other-window -1))
 
 (defun ygg-next-error-any ()
   "next-error when an error buffer exists, else flymake."
@@ -800,6 +941,116 @@ in a normal buffer just widen."
 (defun ygg-prev-error-any ()
   (interactive)
   (if (ignore-errors (next-error-find-buffer)) (previous-error) (ygg-prev-error)))
+
+;;; g M — last modified file
+
+(defvar-local ygg--modified-file-ring nil
+  "Ring of recently modified file buffers, oldest first.")
+
+(defun ygg--record-buffer-modified ()
+  "Record current buffer in the modified file ring (file buffers only)."
+  (when (and (buffer-file-name) (not (buffer-modified-p)))
+    (unless ygg--modified-file-ring
+      (setq ygg--modified-file-ring (make-ring 50)))
+    (ring-insert ygg--modified-file-ring (current-buffer))))
+
+(add-hook 'after-save-hook #'ygg--record-buffer-modified)
+
+(defun ygg-goto-last-modified-file ()
+  "Go to the most recently modified file buffer."
+  (interactive)
+  (unless ygg--modified-file-ring (user-error "No modified files in ring"))
+  (let* ((current (current-buffer))
+         (buffers (ring-elements ygg--modified-file-ring))
+         (target (car (delq current buffers))))
+    (unless target (user-error "No other modified files"))
+    (ygg--jump-push)
+    (switch-to-buffer target)))
+
+;;; g J / g K — move by textual line ignoring visual wrap
+
+(defun ygg-goto-textual-line-down (&optional n)
+  "Move down N textual lines, ignoring visual wrap."
+  (interactive "p")
+  (let ((line-move-visual nil))
+    (ygg-each-selection-update
+     (ygg--motion (lambda () (ygg--vmove n))))))
+
+(defun ygg-goto-textual-line-up (&optional n)
+  "Move up N textual lines, ignoring visual wrap."
+  (interactive "p")
+  (let ((line-move-visual nil))
+    (ygg-each-selection-update
+     (ygg--motion (lambda () (ygg--vmove (- n)))))))
+
+;;; [ D / ] D — first / last diagnostic in buffer
+
+(defun ygg--find-flymake-diagnostics ()
+  "Return sorted list of all flymake diagnostics in current buffer."
+  (sort (flymake-diagnostics (point-min) (point-max))
+        (lambda (a b) (< (flymake-diagnostic-beg a) (flymake-diagnostic-beg b)))))
+
+(defun ygg-goto-first-diagnostic ()
+  "Go to first diagnostic in buffer (flymake)."
+  (interactive)
+  (ygg--record-bracket-motion -1 "D")
+  (let ((diags (ygg--find-flymake-diagnostics)))
+    (if diags
+        (ygg--bracketed-goto (lambda () (flymake-diagnostic-beg (car diags))))
+      (message "no diagnostics"))))
+
+(defun ygg-goto-last-diagnostic ()
+  "Go to last diagnostic in buffer (flymake)."
+  (interactive)
+  (ygg--record-bracket-motion 1 "D")
+  (let ((diags (ygg--find-flymake-diagnostics)))
+    (if diags
+        (ygg--bracketed-goto (lambda () (flymake-diagnostic-beg (car (last diags)))))
+      (message "no diagnostics"))))
+
+;;; [ p / ] p — previous / next paragraph
+
+(defun ygg-goto-next-paragraph (&optional n)
+  "Move to next paragraph N times."
+  (interactive "p")
+  (ygg--record-bracket-motion 1 "p")
+  (ygg--bracketed-goto (lambda () (forward-paragraph n) (point))))
+
+(defun ygg-goto-prev-paragraph (&optional n)
+  "Move to previous paragraph N times."
+  (interactive "p")
+  (ygg--record-bracket-motion -1 "p")
+  (ygg--bracketed-goto (lambda () (forward-paragraph (- n)) (point))))
+
+;;; z m — recenter view middle
+
+(defun ygg-view-middle ()
+  "Recenter view to middle (same as ygg-view-center, provided for completeness)."
+  (interactive)
+  (recenter))
+
+;;; z SPC / z DEL — page down/up
+
+(defun ygg-view-page-down ()
+  "Page down (half-page scroll)."
+  (interactive)
+  (ygg-scroll-half-down))
+
+(defun ygg-view-page-up ()
+  "Page up (half-page scroll)."
+  (interactive)
+  (ygg-scroll-half-up))
+
+;;; Bracket repeat via repeat-mode
+
+(defvar ygg--last-bracket-motion nil
+  "Stores (direction . letter) of last bracket motion, e.g. (1 . \"d\").")
+
+(defun ygg--record-bracket-motion (dir letter)
+  "Record DIR (1 or -1) and LETTER for bracket motion repeats."
+  (setq ygg--last-bracket-motion (cons dir letter))
+  (when (and dir letter)
+    (setq repeat-mode t)))
 
 ;;; Bindings
 
@@ -814,6 +1065,8 @@ in a normal buffer just widen."
   "W" #'ygg-W
   "E" #'ygg-E
   "B" #'ygg-B
+  "{" #'ygg-goto-prev-paragraph
+  "}" #'ygg-goto-next-paragraph
   "f" #'ygg-find-forward
   "t" #'ygg-till-forward
   "F" #'ygg-find-backward
@@ -830,6 +1083,8 @@ in a normal buffer just widen."
   "7" #'digit-argument
   "8" #'digit-argument
   "9" #'digit-argument
+  "<home>" #'ygg-goto-line-start
+  "<end>" #'ygg-goto-line-end
   "$" #'ygg-goto-line-end
   "^" #'ygg-goto-first-non-blank
   "H" #'ygg-H
@@ -858,10 +1113,14 @@ in a normal buffer just widen."
   "[ e" #'ygg-prev-error
   "] d" #'ygg-next-error
   "[ d" #'ygg-prev-error
+  "] D" #'ygg-goto-last-diagnostic
+  "[ D" #'ygg-goto-first-diagnostic
   "] c" #'ygg-next-comment
   "[ c" #'ygg-prev-comment
   "] i" #'ygg-next-indent
   "[ i" #'ygg-prev-indent
+  "] p" #'ygg-goto-next-paragraph
+  "[ p" #'ygg-goto-prev-paragraph
   "] q" #'ygg-next-error-any
   "[ q" #'ygg-prev-error-any
   "] f" #'ygg-next-file
@@ -874,7 +1133,7 @@ in a normal buffer just widen."
 (yggdrasil-define-keys 'ygg-goto-map
   "g" #'ygg-goto-first :label "buffer start"
   "e" #'ygg-goto-last :label "buffer end"
-  "h" #'ygg-goto-line-start :label "line start"
+  "h" #'ygg-goto-line-start :label "line start / column N"
   "l" #'ygg-goto-line-end :label "line end"
   "s" #'ygg-goto-first-non-blank :label "first non-blank"
   "d" #'ygg-goto-definition :label "definition"
@@ -885,6 +1144,9 @@ in a normal buffer just widen."
   "c" #'ygg-goto-comment :label "comment"
   "." #'ygg-goto-last-change :label "last change"
   "m" #'ygg-mark-set :label "set mark"
+  "M" #'ygg-goto-last-modified-file :label "last modified file"
+  "J" #'ygg-goto-textual-line-down :label "textual line down"
+  "K" #'ygg-goto-textual-line-up :label "textual line up"
   "u" #'ygg-downcase :label "downcase"
   "U" #'ygg-upcase :label "upcase"
   ";" #'ygg-change-list-older :label "older change"
@@ -898,10 +1160,14 @@ in a normal buffer just widen."
 
 (yggdrasil-define-keys 'ygg-view-map
   "z" #'ygg-view-center
+  "c" #'ygg-view-center :label "center"
   "t" #'ygg-view-top
   "b" #'ygg-view-bottom
+  "m" #'ygg-view-middle :label "middle"
   "j" #'ygg-view-down
   "k" #'ygg-view-up
+  "SPC" #'ygg-view-page-down :label "page down"
+  "DEL" #'ygg-view-page-up :label "page up"
   "n" #'ygg-narrow-indirect :label "narrow (indirect)"
   "w" #'ygg-widen-indirect :label "widen")
 

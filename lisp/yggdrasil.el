@@ -24,5 +24,22 @@
   ":" #'ygg-ex :label "ex"
   "C-v" #'ygg-rect-enter :label "visual block")
 
+(dolist (cmd '(ygg-treesit-expand ygg-treesit-shrink ygg-treesit-prev-sibling
+               ygg-treesit-next-sibling ygg-treesit-select-children
+               ygg-treesit-select-siblings ygg-treesit-parent-node-end
+               ygg-treesit-parent-node-start))
+  (autoload cmd "yggdrasil-match" nil t))
+
+(yggdrasil-define-keys 'ygg-selections-map
+  "o" #'ygg-treesit-expand :label "expand"
+  "i" #'ygg-treesit-shrink :label "shrink"
+  "p" #'ygg-treesit-prev-sibling :label "prev sibling"
+  "[" #'ygg-treesit-prev-sibling :label "prev sibling"
+  "]" #'ygg-treesit-next-sibling :label "next sibling"
+  "I" #'ygg-treesit-select-children :label "select children"
+  "a" #'ygg-treesit-select-siblings :label "select siblings"
+  "e" #'ygg-treesit-parent-node-end :label "parent node end"
+  "b" #'ygg-treesit-parent-node-start :label "parent node start")
+
 (provide 'yggdrasil)
 ;;; yggdrasil.el ends here

@@ -22,6 +22,9 @@
 
 (defconst ygg-match--quote-chars '(?\" ?\' ?\`))
 
+(defvar ygg-match--textobject-count 1
+  "Enclosing level a bracket textobject selects; 1 is the innermost.")
+
 ;;; mm — jump to matching bracket
 
 (defun ygg-match--scan-line-for-bracket ()
@@ -56,32 +59,41 @@
               (when pos (goto-char pos) (ygg-match--bracket-bounds))))))
     (scan-error (message "yggdrasil: unbalanced brackets") nil)))
 
+(defun ygg-match--unmoved (anchor cursor)
+  "The `ygg-each-selection-update' result that leaves ANCHOR/CURSOR as is."
+  (cons anchor (if (>= cursor anchor) (1+ cursor) cursor)))
+
 (defun ygg-match-jump ()
-  "Select from the bracket at/near point to its match, inclusive."
+  "Move to the match of the bracket at/near point; in visual state,
+select from that bracket to its match, inclusive."
   (interactive)
   (ygg-each-selection-update
    (lambda (anchor cursor _dir)
      (pcase (ygg-match--bracket-bounds)
-       (`(,beg ,end ,fwd) (if fwd (cons beg end) (cons end beg)))
-       (_ (cons anchor cursor))))))
+       (`(,beg ,end ,fwd)
+        (cond ((ygg-visual-p) (if fwd (cons beg end) (cons end beg)))
+              (fwd (cons (1- end) end))
+              (t (cons beg (1+ beg)))))
+       (_ (ygg-match--unmoved anchor cursor))))))
 
 ;;; Enclosing-pair finders shared by textobjects and surround ops
 
-(defun ygg-match--find-enclosing-syntax (open)
-  ;; syntax-ppss hasn't "entered" a pair whose opener is AT point — check it
-  (let ((found (if (eq (char-after) open)
-                   (point)
-                 (cl-find-if (lambda (pos) (eq (char-after pos) open))
-                             (reverse (nth 9 (syntax-ppss)))))))
-    (when found
-      (condition-case nil
-          (save-excursion (goto-char found) (forward-sexp 1) (cons found (point)))
-        (scan-error nil)))))
+(defun ygg-match--enclosing-syntax-levels (open)
+  "Pairs opened by OPEN around point as ((BEG . END)...), innermost first."
+  (let ((openers (cl-remove-if-not (lambda (pos) (eq (char-after pos) open))
+                                   (reverse (nth 9 (syntax-ppss))))))
+    ;; syntax-ppss hasn't "entered" a pair whose opener is AT point — check it
+    (when (eq (char-after) open) (push (point) openers))
+    (delq nil (mapcar (lambda (beg)
+                        (condition-case nil
+                            (save-excursion (goto-char beg) (forward-sexp 1) (cons beg (point)))
+                          (scan-error nil)))
+                      openers))))
 
-(defun ygg-match--find-enclosing-charscan (open close)
+(defun ygg-match--find-enclosing-charscan (open close &optional exclude-opener-at-point)
   (save-excursion
     (let ((start (point)) (depth 0) beg)
-      (when (eq (char-after) open)
+      (when (and (not exclude-opener-at-point) (eq (char-after) open))
         (setq beg (point)))
       (while (and (not beg) (> (point) (point-min)))
         (backward-char 1)
@@ -97,6 +109,44 @@
                    (if (zerop depth2) (setq end (1+ (point))) (setq depth2 (1- depth2)))))
             (unless end (forward-char 1)))
           (when end (cons beg end)))))))
+
+(defun ygg-match--enclosing-charscan-levels (open close)
+  (let (levels bounds)
+    (save-excursion
+      (while (setq bounds (ygg-match--find-enclosing-charscan open close (and levels t)))
+        (push bounds levels)
+        (goto-char (car bounds))))
+    (nreverse levels)))
+
+(defun ygg-match--enclosing-levels (open close)
+  (if (eq open ?<)
+      (ygg-match--enclosing-charscan-levels open close)
+    (ygg-match--enclosing-syntax-levels open)))
+
+(defun ygg-match--bracket-levels (open close)
+  "Levels of OPEN/CLOSE pairs around point, innermost first; outside any,
+those of the next pair on the line, else of the previous one (targets.el)."
+  (or (ygg-match--enclosing-levels open close)
+      (save-excursion
+        (let ((start (point)))
+          (or (and (search-forward (char-to-string open) (line-end-position) t)
+                   (progn (backward-char 1) (ygg-match--enclosing-levels open close)))
+              (progn (goto-char start)
+                     (and (search-backward (char-to-string close) (line-beginning-position) t)
+                          (ygg-match--enclosing-levels open close))))))))
+
+(defun ygg-match--find-enclosing-char (c)
+  "Nearest C on each side of point within the line as (BEG . END), END
+past the closing C; a C at point opens the pair."
+  (let* ((s (char-to-string c))
+         (lb (line-beginning-position)) (le (line-end-position))
+         (beg (if (eq (char-after) c)
+                  (point)
+                (save-excursion (and (search-backward s lb t) (point)))))
+         (end (and beg (save-excursion
+                         (goto-char (1+ beg))
+                         (and (search-forward s le t) (point))))))
+    (when end (cons beg end))))
 
 (defun ygg-match--find-enclosing-quote (qc)
   (let ((ppss (syntax-ppss)))
@@ -139,9 +189,8 @@
 
 (defun ygg-match--bracket-textobj-bounds (c which)
   (pcase-let ((`(,open . ,close) (cdr (assq c ygg-match--bracket-pairs))))
-    (let ((bounds (if (memq c '(?< ?>))
-                       (ygg-match--find-enclosing-charscan open close)
-                     (ygg-match--find-enclosing-syntax open))))
+    (let ((bounds (nth (1- ygg-match--textobject-count)
+                       (ygg-match--bracket-levels open close))))
       (when bounds
         (if (eq which 'around) bounds (cons (1+ (car bounds)) (1- (cdr bounds))))))))
 
@@ -388,11 +437,22 @@ indentation (blank lines pass through); `ai' adds the header line above."
    ((eq c ?i) (ygg-match--indent-bounds which))
    ((eq c ?t) (ygg-match--tag-bounds which))))
 
+(defun ygg-match--textobject-level-bounds (c which level)
+  (let ((ygg-match--textobject-count level))
+    (ygg-match--textobject-bounds c which)))
+
 (defun ygg-match--apply-textobject (c which)
-  (ygg-each-selection-update
-   (lambda (anchor cursor _dir)
-     (let ((bounds (ygg-match--textobject-bounds c which)))
-       (if bounds (cons (car bounds) (cdr bounds)) (cons anchor cursor))))))
+  "Select object C per WHICH; a count picks the Nth enclosing bracket
+level, and a selection already equal to it grows one level out."
+  (let ((level (max 1 (prefix-numeric-value current-prefix-arg))))
+    (ygg-each-selection-update
+     (lambda (anchor cursor _dir)
+       (let ((bounds (ygg-match--textobject-level-bounds c which level)))
+         (when (and bounds (assq c ygg-match--bracket-pairs)
+                    (equal bounds (cons (min anchor cursor) (max anchor (1+ cursor)))))
+           (setq bounds (or (ygg-match--textobject-level-bounds c which (1+ level))
+                            bounds)))
+         (if bounds (cons (car bounds) (cdr bounds)) (ygg-match--unmoved anchor cursor)))))))
 
 (defun ygg-match-inside (c)
   "Select inside the pair/thing for C."
@@ -406,12 +466,71 @@ indentation (blank lines pass through); `ai' adds the header line above."
 
 ;;; Surround (ms / md / mr)
 
-(defun ygg-match--surround-pair (c)
+(defun ygg-match--read-tag ()
+  (let* ((input (read-string "<" "" nil))
+         (name (and (string-match "^\\([^ \t/>]+\\)" input)
+                    (match-string 1 input))))
+    (when (and name (not (string-empty-p name)))
+      (cons (format "<%s>" input)
+            (format "</%s>" name)))))
+
+(defun ygg-match--read-function ()
+  (let ((name (read-string "function: " "" nil)))
+    (when (and name (not (string-empty-p name)))
+      (cons (format "%s(" name) ")"))))
+
+(defun ygg-match--surround-pair (c &optional tight)
+  "Opening and closing strings for surrounding with C; TIGHT drops the
+space an opening bracket pads with."
   (cond
+   ((eq c 27) nil)
+   ((memq c '(?t ?<)) (ygg-match--read-tag))
+   ((eq c ?f) (ygg-match--read-function))
    ((assq c ygg-match--bracket-pairs)
-    (let ((p (cdr (assq c ygg-match--bracket-pairs))))
-      (cons (char-to-string (car p)) (char-to-string (cdr p)))))
-   ((memq c ygg-match--quote-chars) (cons (char-to-string c) (char-to-string c)))))
+    (pcase-let ((`(,open . ,close) (cdr (assq c ygg-match--bracket-pairs)))
+                (pad (if (and (not tight) (memq c '(?\( ?\[ ?\{))) " " "")))
+      (cons (concat (string open) pad) (concat pad (string close)))))
+   ((and (characterp c) (>= c 32) (/= c 127)) (cons (string c) (string c)))))
+
+(defun ygg-match--surround-bounds (c)
+  "Delimiters of the C pair around point as
+\(OUTER-BEG INNER-BEG INNER-END OUTER-END), or nil."
+  (pcase c
+    (?t (let ((outer (ygg-match--tag-bounds 'around))
+              (inner (ygg-match--tag-bounds 'inside)))
+          (when (and outer inner)
+            (list (car outer) (car inner) (cdr inner) (cdr outer)))))
+    (?f (pcase (car (ygg-match--enclosing-levels ?\( ?\)))
+          (`(,open . ,end)
+           (list (save-excursion (goto-char open) (skip-syntax-backward "w_") (point))
+                 (1+ open) (1- end) end))))
+    (_ (pcase (cond
+               ((memq c ygg-match--quote-chars) (ygg-match--find-enclosing-quote c))
+               ((assq c ygg-match--bracket-pairs)
+                (pcase-let ((`(,open . ,close) (cdr (assq c ygg-match--bracket-pairs))))
+                  (car (ygg-match--enclosing-levels open close))))
+               ((characterp c) (ygg-match--find-enclosing-char c)))
+         (`(,beg . ,end) (list beg (1+ beg) (1- end) end))))))
+
+(defun ygg-match--surround-targets (c)
+  "Distinct delimiters of the C pair around each selection, as markers."
+  (let (targets)
+    (ygg-do-selections
+     (lambda (beg _end _dir)
+       (let ((bounds (save-excursion (goto-char beg) (ygg-match--surround-bounds c))))
+         (when bounds (cl-pushnew bounds targets :test #'equal)))))
+    ;; insertion types keep a nested or adjacent pair's delimiters out of this one's
+    (mapcar (lambda (bounds) (cl-mapcar #'copy-marker bounds '(t nil t nil)))
+            targets)))
+
+(defun ygg-match--rewrite-surround (c pair)
+  (save-excursion
+    (dolist (target (ygg-match--surround-targets c))
+      (pcase-let ((`(,obeg ,ibeg ,iend ,oend) target))
+        (delete-region iend oend)
+        (goto-char iend) (insert (cdr pair))
+        (delete-region obeg ibeg)
+        (goto-char obeg) (insert (car pair))))))
 
 (defun ygg-match-surround (c)
   "Wrap every selection with the pair for C."
@@ -429,29 +548,15 @@ indentation (blank lines pass through); `ai' adds the header line above."
   "Delete the enclosing pair for C around every selection."
   (interactive (list (read-char)))
   (ygg-with-verb
-    (ygg-do-selections
-     (lambda (beg _end _dir)
-       (save-excursion
-         (goto-char beg)
-         (let ((bounds (ygg-match--textobject-bounds c 'around)))
-           (when bounds
-             (goto-char (cdr bounds)) (delete-char -1)
-             (goto-char (car bounds)) (delete-char 1))))))))
+    (ygg-match--rewrite-surround c '("" . ""))))
 
 (defun ygg-match-replace-surround (c1 c2)
   "Replace the enclosing pair for C1 with the pair for C2."
   (interactive (list (read-char) (read-char)))
-  (let ((pair (ygg-match--surround-pair c2)))
+  (let ((pair (ygg-match--surround-pair c2 t)))
     (when pair
       (ygg-with-verb
-        (ygg-do-selections
-         (lambda (beg _end _dir)
-           (save-excursion
-             (goto-char beg)
-             (let ((bounds (ygg-match--textobject-bounds c1 'around)))
-               (when bounds
-                 (goto-char (1- (cdr bounds))) (delete-char 1) (insert (cdr pair))
-                 (goto-char (car bounds)) (delete-char 1) (insert (car pair)))))))))))
+        (ygg-match--rewrite-surround c1 pair)))))
 
 ;;; Prefix self-promotion
 
@@ -576,11 +681,95 @@ class/struct/impl node — so t means type in code, tag in markup.")
   (interactive)
   (ygg-match--treesit-select-sibling nil))
 
+(defun ygg-match--select-treesit-nodes (nodes-of)
+  "Replace each selection with one per node NODES-OF returns for the
+named node covering it; a selection it returns nothing for stays."
+  (unless (ygg-match--treesit-ready-p)
+    (user-error "tree-sitter unavailable"))
+  (let (regions)
+    (dolist (region (ygg--selection-regions))
+      (pcase-let ((`(,beg ,end ,_) region))
+        (let ((nodes (funcall nodes-of (treesit-node-on beg end nil t))))
+          (if nodes
+              (dolist (node nodes)
+                (push (cons (treesit-node-start node) (treesit-node-end node)) regions))
+            (push (cons beg end) regions)))))
+    (setq ygg-match--treesit-stack nil)
+    (ygg--install-regions (sort (delete-dups regions) (lambda (a b) (< (car a) (car b)))))))
+
+;;;###autoload
+(defun ygg-treesit-select-children ()
+  "Select every named child of the node covering each selection."
+  (interactive)
+  (ygg-match--select-treesit-nodes
+   (lambda (node) (and node (treesit-node-children node t)))))
+
+;;;###autoload
+(defun ygg-treesit-select-siblings ()
+  "Select every named sibling of the node covering each selection."
+  (interactive)
+  (ygg-match--select-treesit-nodes
+   (lambda (node)
+     (let ((parent (and node (treesit-parent-until
+                              node (lambda (p) (> (treesit-node-child-count p) 1))))))
+       (and parent (treesit-node-children parent t))))))
+
+(defun ygg-match--parent-node-target (beg end cursor forward)
+  "Cell the parent-node motion lands on from the selection BEG..END:
+FORWARD, the one just past the covering node; else its first cell, or
+the enclosing node's when CURSOR is already there (Helix)."
+  (let ((node (treesit-node-on beg end nil t)))
+    (when node
+      (let ((start (treesit-node-start node)))
+        (cond
+         (forward (treesit-node-end node))
+         ((/= start cursor) start)
+         (t (let ((parent (treesit-parent-until
+                           node (lambda (p) (and (treesit-node-check p 'named)
+                                                 (< (treesit-node-start p) start))))))
+              (if parent (treesit-node-start parent) start))))))))
+
+(defun ygg-match--move-parent-node (forward)
+  (unless (ygg-match--treesit-ready-p)
+    (user-error "tree-sitter unavailable"))
+  (ygg-each-selection-update
+   (lambda (anchor cursor _dir)
+     (let ((target (ygg-match--parent-node-target
+                    (min anchor cursor) (max anchor (1+ cursor)) cursor forward)))
+       (cond
+        ((or (null target) (>= target (point-max))) (ygg-match--unmoved anchor cursor))
+        ((not (ygg-visual-p)) (cons target (1+ target)))
+        ((>= target anchor) (cons anchor (1+ target)))
+        (t (cons anchor target)))))))
+
+;;;###autoload
+(defun ygg-treesit-parent-node-end ()
+  "Move past the end of the node covering each selection; visual extends."
+  (interactive)
+  (ygg-match--move-parent-node t))
+
+;;;###autoload
+(defun ygg-treesit-parent-node-start ()
+  "Move to the start of the node covering each selection, or of its
+parent when already there; visual extends."
+  (interactive)
+  (ygg-match--move-parent-node nil))
+
 (yggdrasil-define-keys 'ygg-match-map
   "+" #'ygg-treesit-expand :label "expand"
   "-" #'ygg-treesit-shrink :label "shrink"
   "n" #'ygg-treesit-next-sibling :label "next sibling"
   "N" #'ygg-treesit-prev-sibling :label "prev sibling")
+
+;; Helix's Alt tree keys, minus A-n: V n is already skip-to-next-match
+(yggdrasil-define-keys 'ygg-selections-map
+  "o" #'ygg-treesit-expand :label "expand"
+  "i" #'ygg-treesit-shrink :label "shrink"
+  "p" #'ygg-treesit-prev-sibling :label "prev sibling"
+  "I" #'ygg-treesit-select-children :label "select children"
+  "a" #'ygg-treesit-select-siblings :label "select siblings"
+  "e" #'ygg-treesit-parent-node-end :label "parent node end"
+  "b" #'ygg-treesit-parent-node-start :label "parent node start")
 
 (provide 'yggdrasil-match)
 ;;; yggdrasil-match.el ends here

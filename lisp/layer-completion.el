@@ -111,7 +111,43 @@
     (define-key corfu-map (kbd "C-u") #'corfu-scroll-down)
     (define-key corfu-map (kbd "RET") #'corfu-insert)
     (define-key corfu-map (kbd "TAB") #'corfu-complete)
-    (define-key corfu-map [tab] #'corfu-complete)))
+    (define-key corfu-map [tab] #'corfu-complete)
+    (advice-add 'corfu--exhibit :before #'ygg-corfu--ghost-clear)
+    (advice-add 'corfu--teardown :after #'ygg-corfu--ghost-clear)
+    (advice-add 'corfu--preview-current :after #'ygg-corfu--ghost-show)))
+
+(defvar corfu--index)
+(defvar corfu--candidates)
+(defvar corfu--base)
+(declare-function corfu--preview-current-p "corfu")
+
+(defface ygg-corfu-ghost '((t :inherit shadow))
+  "The rest of the selected candidate, shown after point."
+  :group 'yggdrasil)
+
+(defvar ygg-corfu--ghost nil)
+
+(defun ygg-corfu--ghost-clear (&rest _)
+  (when ygg-corfu--ghost
+    (delete-overlay ygg-corfu--ghost)
+    (setq ygg-corfu--ghost nil)))
+
+(defun ygg-corfu--ghost-show (beg end)
+  "Show the rest of the selected candidate after point, as nvim-cmp's ghost text."
+  (ygg-corfu--ghost-clear)
+  (when-let* (((= (point) end))
+              ((not (corfu--preview-current-p)))
+              ((>= corfu--index 0))
+              (cand (nth corfu--index corfu--candidates))
+              (typed (buffer-substring-no-properties
+                      (min end (+ beg (length corfu--base))) end))
+              ((string-prefix-p typed cand completion-ignore-case))
+              (rest (substring-no-properties cand (length typed)))
+              ((not (string-empty-p rest))))
+    (setq ygg-corfu--ghost (make-overlay end end nil t))
+    (overlay-put ygg-corfu--ghost 'window (selected-window))
+    (overlay-put ygg-corfu--ghost 'after-string
+                 (propertize rest 'face 'ygg-corfu-ghost 'cursor 0))))
 
 ;; kind icon in the corfu popup (snacks completion feel)
 (when (fboundp 'elpaca)

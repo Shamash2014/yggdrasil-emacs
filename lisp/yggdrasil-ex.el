@@ -13,7 +13,43 @@
 (require 'yggdrasil-core)
 (require 'yggdrasil-selection)
 
+;;; History
+
+(defvar ygg-ex-history nil
+  "History list for ex commands.")
+
+(eval-after-load 'savehist
+  '(add-to-list 'savehist-additional-variables 'ygg-ex-history))
+
 ;;; Range parsing
+
+(defvar-local ygg--marks-local nil
+  "Hash table CHAR -> marker, for a-z buffer-local marks (from motions).")
+
+(defun ygg-ex--mark-line (char)
+  "Line number of mark CHAR, or nil if unset."
+  (cond
+   ((and (>= char ?a) (<= char ?z))
+    (when-let* ((m (and ygg--marks-local (gethash char ygg--marks-local))))
+      (and (marker-buffer m) (line-number-at-pos (marker-position m)))))
+   (t nil)))
+
+(defun ygg-ex--search-line (re-string forward)
+  "Line number of first match of RE-STRING, or nil if no match.
+Search forward if FORWARD is non-nil, backward if nil.
+Wraps around the buffer."
+  (save-excursion
+    (when (if forward
+              (progn (forward-line 1)
+                     (or (re-search-forward re-string nil t)
+                         (progn (goto-char (point-min))
+                                (re-search-forward re-string nil t))))
+            (progn (forward-line -1)
+                   (end-of-line)
+                   (or (re-search-backward re-string nil t)
+                       (progn (goto-char (point-max))
+                              (re-search-backward re-string nil t)))))
+      (line-number-at-pos (match-beginning 0)))))
 
 (defun ygg-ex--last-line ()
   "Last real line: a trailing newline's phantom empty line doesn't count."
@@ -28,6 +64,34 @@
       (setq pos (1+ pos)))
     pos))
 
+(defun ygg-ex--parse-pattern (string pos-cell forward)
+  "Parse /re/ or ?re? pattern starting at (car POS-CELL) in STRING.
+Return (LINE . new-pos) or nil if no closing delimiter found.
+FORWARD is non-nil for /, nil for ?."
+  (let* ((len (length string))
+         (delim (if forward ?/ ??))
+         (start (1+ (car pos-cell)))
+         (i start)
+         (end-pos nil))
+    (while (< i len)
+      (cond
+       ((and (eq (aref string i) ?\\) (< (1+ i) len))
+        (setq i (+ i 2)))
+       ((eq (aref string i) delim)
+        (setq end-pos i)
+        (setq i len))
+       (t (setq i (1+ i)))))
+    (if (null end-pos)
+        (and (string-empty-p (substring string start)) nil)
+      (let* ((pattern (substring string start end-pos))
+             (unescaped (replace-regexp-in-string (concat "\\" (string delim))
+                                                   (string delim) pattern t t))
+             (re (ygg-regexp unescaped))
+             (line (ygg-ex--search-line re forward)))
+        (if line
+            (cons line (1+ end-pos))
+          (user-error "yggdrasil: pattern not found: %s" unescaped))))))
+
 (defun ygg-ex--parse-address (string pos-cell)
   "Parse one ex address at (car POS-CELL) in STRING, advancing it.
 Return a line number, or nil when no address starts there."
@@ -41,12 +105,33 @@ Return a line number, or nil when no address starts there."
           (setq base (line-number-at-pos (point)) pos (1+ pos)))
          ((eq c ?$)
           (setq base (ygg-ex--last-line) pos (1+ pos)))
+         ((eq c ?/)
+          (let ((result (ygg-ex--parse-pattern string pos-cell t)))
+            (if result
+                (setq base (car result) pos (cdr result))
+              (setcar pos-cell pos))))
+         ((eq c ??)
+          (let ((result (ygg-ex--parse-pattern string pos-cell nil)))
+            (if result
+                (setq base (car result) pos (cdr result))
+              (setcar pos-cell pos))))
          ((eq c ?')
           (let ((mc (and (< (1+ pos) len) (aref string (1+ pos)))))
-            (unless ygg--last-visual
-              (user-error "yggdrasil: no previous visual selection"))
-            (pcase-let ((`(,vb ,ve ,_) ygg--last-visual))
-              (setq base (line-number-at-pos (if (eq mc ?<) vb ve))))
+            (cond
+             ((eq mc ?<)
+              (unless ygg--last-visual
+                (user-error "yggdrasil: no previous visual selection"))
+              (pcase-let ((`(,_vb ,ve ,_) ygg--last-visual))
+                (setq base (line-number-at-pos ve))))
+             ((eq mc ?>)
+              (unless ygg--last-visual
+                (user-error "yggdrasil: no previous visual selection"))
+              (pcase-let ((`(,vb ,_ve ,_) ygg--last-visual))
+                (setq base (line-number-at-pos vb))))
+             (t
+              (setq base (ygg-ex--mark-line mc))
+              (unless base
+                (user-error "yggdrasil: mark %c not set" mc))))
             (setq pos (+ pos 2))))
          ((<= ?0 c ?9)
           (let ((start pos))
@@ -85,13 +170,20 @@ STRING carries no range; REST is the unconsumed tail of STRING."
         (if (null beg)
             (cons nil string)
           (let ((p (ygg-ex--skip-ws string (car pos-cell))))
-            (if (and (< p len) (eq (aref string p) ?,))
-                (progn
-                  (setcar pos-cell (ygg-ex--skip-ws string (1+ p)))
-                  (let ((end (ygg-ex--parse-address string pos-cell)))
-                    (unless end (user-error "yggdrasil: malformed range"))
-                    (cons (cons beg end) (substring string (car pos-cell)))))
-              (cons (cons beg beg) (substring string (car pos-cell))))))))))
+            (cond
+             ((and (< p len) (eq (aref string p) ?,))
+              (setcar pos-cell (ygg-ex--skip-ws string (1+ p)))
+              (let ((end (ygg-ex--parse-address string pos-cell)))
+                (unless end (user-error "yggdrasil: malformed range"))
+                (cons (cons beg end) (substring string (car pos-cell)))))
+             ((and (< p len) (eq (aref string p) ?\;))
+              (save-excursion
+                (ygg-ex--goto-line beg)
+                (setcar pos-cell (ygg-ex--skip-ws string (1+ p)))
+                (let ((end (ygg-ex--parse-address string pos-cell)))
+                  (unless end (user-error "yggdrasil: malformed range"))
+                  (cons (cons beg end) (substring string (car pos-cell))))))
+             (t (cons (cons beg beg) (substring string (car pos-cell)))))))))))
 
 (defun ygg-ex--line-range-bounds (range)
   "Char (BEG END) spanning whole lines (car RANGE)..(cdr RANGE)."
@@ -106,6 +198,76 @@ STRING carries no range; REST is the unconsumed tail of STRING."
 (defun ygg-ex--goto-line (line)
   (goto-char (point-min))
   (forward-line (1- line)))
+
+;;; Live preview for :s
+
+(defvar ygg-ex--preview-overlays nil
+  "List of overlays created for :s preview.")
+
+(defun ygg-ex--preview-clear ()
+  "Remove all :s preview overlays."
+  (when ygg-ex--preview-overlays
+    (mapc #'delete-overlay ygg-ex--preview-overlays)
+    (setq ygg-ex--preview-overlays nil)))
+
+(defun ygg-ex--preview-update (buf input)
+  "Update :s preview for INPUT in BUF.
+Parses range and substitute, creates overlays showing replacements.
+Errors are caught and silent."
+  (condition-case nil
+      (when (buffer-live-p buf)
+        (with-current-buffer buf
+          (pcase-let ((`(,range . ,rest) (ygg-ex--parse-range input)))
+            (when (and range (string-prefix-p "s" (string-trim-left rest)))
+              (let* ((args (string-trim-left (substring (string-trim-left rest) 1)))
+                     (target-range (or range (ygg-ex--selection-line-span)
+                                       (cons (line-number-at-pos (point))
+                                             (line-number-at-pos (point)))))
+                     parts)
+                (when (and args (not (string-empty-p args)))
+                  (condition-case nil
+                      (setq parts (ygg-ex--split-delimited args))
+                    (error nil)))
+                (if parts
+                    (pcase-let ((`(,re ,rep ,flags) parts))
+                      (let ((re (ygg-regexp re))
+                            (case-fold-search (and (cl-find ?i flags) t))
+                            (global-p (and (cl-find ?g flags) t))
+                            (data nil))
+                        (save-excursion
+                          (pcase-let ((`(,beg ,end) (ygg-ex--line-range-bounds target-range)))
+                            (goto-char beg)
+                            (let ((last-line nil))
+                              (while (and (< (point) end)
+                                          (re-search-forward re end t)
+                                          (< (match-beginning 0) end))
+                                (let* ((mbeg (match-beginning 0))
+                                       (mend (match-end 0))
+                                       (line (line-number-at-pos mbeg))
+                                       (empty (= mbeg mend))
+                                       (replacement (match-substitute-replacement rep nil nil)))
+                                  (when (or global-p (not (equal line last-line)))
+                                    (push (list mbeg mend empty replacement) data)
+                                    (setq last-line line))
+                                  (when (and empty (< (point) (point-max)))
+                                    (forward-char 1)))))))
+                        (ygg-ex--preview-clear)
+                        (dolist (item (nreverse data))
+                          (pcase-let ((`(,mbeg ,mend ,empty ,replacement) item))
+                            (let ((ov (make-overlay mbeg mend)))
+                              (if empty
+                                  (overlay-put ov 'after-string (propertize replacement
+                                                                  'face 'match))
+                                (progn
+                                  (overlay-put ov 'display (propertize (buffer-substring mbeg mend)
+                                                                        'face '(strike-through)))
+                                  (overlay-put ov 'after-string (propertize replacement
+                                                                  'face 'match))))
+                              (overlay-put ov 'ygg-ex-preview t)
+                              (overlay-put ov 'priority 100)
+                              (push ov ygg-ex--preview-overlays))))))
+                  (ygg-ex--preview-clear)))))))
+    (error nil)))
 
 ;;; Substitute
 
@@ -1147,9 +1309,23 @@ An anonymous command is skipped: with no name there is nothing to type."
 ;;; Completion + entry point
 
 (defun ygg-ex--split-prefix (string)
-  (if (string-match "\\`[0-9%.$'<>,+-]*" string)
-      (cons (match-string 0 string) (substring string (match-end 0)))
-    (cons "" string)))
+  (let ((i 0) (len (length string)))
+    (while (and (< i len)
+                (let ((c (aref string i)))
+                  (cond
+                   ((memq c '(?0 ?1 ?2 ?3 ?4 ?5 ?6 ?7 ?8 ?9 ?% ?. ?$ ?, ?\;)) t)
+                   ((eq c ?')
+                    (< (1+ i) len))
+                   ((memq c '(?/ ??))
+                    (let ((j (1+ i)))
+                      (while (and (< j len) (not (eq (aref string j) c)))
+                        (when (eq (aref string j) ?\\) (setq j (1+ j)))
+                        (setq j (1+ j)))
+                      (< j len)))
+                   ((memq c '(?+ ?-)) t)
+                   (t nil))))
+      (setq i (1+ i)))
+    (cons (substring string 0 i) (substring string i))))
 
 (defvar ygg-ex--names
   (append (mapcar #'car ygg-ex--commands) (mapcar #'car ygg-ex--abbrevs))
@@ -1226,6 +1402,13 @@ untouched."
     map)
   "Completion map where SPC/? type literally (\":w file.txt\" stays \"w\").")
 
+(defun ygg-ex-repeat-last (count)
+  "Replay the last ex command COUNT times (for @:)."
+  (unless (and ygg-ex-history (car ygg-ex-history))
+    (user-error "yggdrasil: no previous ex command"))
+  (let ((cmd (car ygg-ex-history)))
+    (dotimes (_ count) (ygg-ex--execute cmd))))
+
 ;;;###autoload
 (defun ygg-ex ()
   "Read an ex command line from the minibuffer and execute it."
@@ -1234,8 +1417,19 @@ untouched."
          (ygg-ex--names (car candidates))
          (ygg-ex--annotations (cadr candidates))
          (minibuffer-local-completion-map ygg-ex--minibuffer-map)
-         (input (completing-read ":" #'ygg-ex--completion-table nil nil)))
-    (ygg-ex--execute input)))
+         (buf (current-buffer)))
+    (unwind-protect
+        (ygg-ex--execute
+         (minibuffer-with-setup-hook
+             (lambda ()
+               (add-hook 'post-command-hook
+                         (lambda ()
+                           (ygg-ex--preview-update
+                            buf (minibuffer-contents-no-properties)))
+                         nil t))
+           (completing-read ":" #'ygg-ex--completion-table nil nil nil
+                            'ygg-ex-history)))
+      (ygg-ex--preview-clear))))
 
 (provide 'yggdrasil-ex)
 ;;; yggdrasil-ex.el ends here

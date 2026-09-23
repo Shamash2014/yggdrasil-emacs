@@ -19,21 +19,38 @@
 (defvar-local ygg--echo-primary nil
   "Start marker of the primary span during insert.")
 (defvar-local ygg--echo-last nil)
-(defvar-local ygg--echo-group nil)
 (defvar-local ygg--echo-cursor-ovs nil)
+
+(defvar-local ygg--insert-group nil
+  "Change group making the insert session in progress one undo step.")
+(defvar-local ygg--insert-anchor nil
+  "Position the recorded edits of the insert session are relative to.
+It moves with the text like a marker that stays before an insertion.")
+(defvar-local ygg--insert-changes nil
+  "Edits of the insert session so far, newest first, as
+\(OFFSET DELETED TEXT): at anchor plus OFFSET, DELETED chars were
+replaced by TEXT.")
+(defvar-local ygg--insert-count nil
+  "(COUNT . OPEN-LINE) for a counted insert session, or nil.
+OPEN-LINE, when non-nil, opens the line each extra copy goes on.")
+(defvar ygg--insert-unrecorded nil
+  "Non-nil while edits are made that the insert session must not record.")
+(defvar ygg--repeat-count nil
+  "Count a dot replay hands to the insert session it re-enters.")
 
 (defvar ygg--replaying nil
   "Bound to t around a `.' or @-macro `execute-kbd-macro' call, here and in
 yggdrasil-verbs.el, so replayed commands don't re-journal or re-record.")
 
 (defvar-local ygg--repeat-vector nil
-  "Key vector `.' replays: one verb's keys, or entry+typed-text+escape.")
+  "What dot replays: a verb's key vector, or an insert session as
+\(insert KEYS COUNT CHANGES EXIT-OFFSET).")
 (defvar-local ygg--repeat-tick nil
   "buffer-chars-modified-tick as of the end of the previous command.")
 (defvar-local ygg--repeat-verb-pending nil
   "(KEYS) set by `ygg-with-verb' when it changes the buffer; promoted to
 `ygg--repeat-vector' in `ygg--post-command' unless insert state follows,
-in which case the insert-exit path folds it in with the typed text.")
+in which case the insert-exit path journals the whole session.")
 (defvar-local ygg--repeat-insert-entry nil
   "(KEYS . ENTRY-CHANGED-P) for the insert session in progress, or nil.")
 
@@ -312,6 +329,53 @@ unless insert state follows, in which case insert-exit does instead."
   (dolist (ov ygg--secondaries)
     (overlay-put ov 'ygg-dir (- (ygg--dir ov)))))
 
+(defun ygg-shrink-to-line-bounds ()
+  "Shrink multi-line selections to line bounds; single-line unchanged."
+  (interactive)
+  (let ((m (mark t)))
+    (when m
+      (let* ((p (point))
+             (forward-p (> p m))
+             (beg (min p m))
+             (end (max p m))
+             (start-line (line-number-at-pos beg))
+             (end-line (line-number-at-pos end)))
+        (unless (eq start-line end-line)
+          (save-excursion
+            (goto-char beg)
+            (let ((new-beg (line-beginning-position)))
+              (goto-char end)
+              (let ((new-end (if (bolp) (point) (line-beginning-position 2))))
+                (if forward-p
+                    (ygg-set-selection new-beg new-end)
+                  (ygg-set-selection new-end new-beg)))))))))
+  (dolist (ov ygg--secondaries)
+    (when (overlay-buffer ov)
+      (let* ((start (overlay-start ov))
+             (end (overlay-end ov))
+             (start-line (line-number-at-pos start))
+             (end-line (line-number-at-pos end)))
+        (unless (eq start-line end-line)
+          (save-excursion
+            (goto-char start)
+            (let ((new-start (line-beginning-position)))
+              (goto-char end)
+              (let ((new-end (if (bolp) (point) (line-beginning-position 2))))
+                (move-overlay ov new-start new-end)))))))))
+
+(defun ygg-ensure-selections-forward ()
+  "Set every selection to forward direction."
+  (interactive)
+  (let ((m (mark t)))
+    (when m
+      (when (<= (point) m)
+        (set-mark (point))
+        (goto-char (1+ m)))
+      (setq mark-active t)))
+  (dolist (ov ygg--secondaries)
+    (when (< (ygg--dir ov) 0)
+      (overlay-put ov 'ygg-dir 1))))
+
 (defun ygg-keep-primary ()
   "Drop all secondary selections."
   (interactive)
@@ -382,6 +446,24 @@ unless insert state follows, in which case insert-exit does instead."
        (cons (save-excursion (goto-char (min anchor cursor)) (line-beginning-position))
              (save-excursion (goto-char end)
                              (if (bolp) (point) (line-beginning-position 2))))))))
+
+(defun ygg-extend-to-line-start ()
+  "Extend every selection to the beginning of its line."
+  (interactive)
+  (ygg-each-selection-update
+   (lambda (anchor cursor _dir)
+     (let ((line-start (save-excursion (goto-char cursor) (line-beginning-position))))
+       (cons anchor line-start)))))
+
+(defun ygg-extend-to-line-end ()
+  "Extend every selection to the end of its line (cursor on last char)."
+  (interactive)
+  (ygg-each-selection-update
+   (lambda (anchor cursor _dir)
+     (let ((line-end (save-excursion (goto-char cursor) (end-of-line)
+                                      (unless (bolp) (backward-char 1))
+                                      (point))))
+       (cons anchor line-end)))))
 
 (defun ygg-select-buffer ()
   "Select the whole buffer as a single selection."
@@ -734,10 +816,14 @@ the group holding the primary stays primary."
 
 ;;; Insert entry with N cursors + echo engine
 
-(defun ygg-enter-insert-at (positions)
+(defun ygg-enter-insert-at (positions &optional count open-line)
   "Enter insert state with a cursor at each of POSITIONS (primary first).
 With one position this is a plain insert entry; with several, typed text
-is mirrored at every cursor until insert state exits."
+is mirrored at every cursor until insert state exits.  A COUNT above one
+repeats the session's edits on exit, each extra copy on a line opened by
+OPEN-LINE (called with point twice) when that is given (vim 3o)."
+  (let ((count (or ygg--repeat-count count)))
+    (setq ygg--insert-count (and count (> count 1) (cons count open-line))))
   (setq ygg--repeat-insert-entry
         (unless ygg--replaying
           (cons (this-command-keys-vector)
@@ -758,9 +844,7 @@ is mirrored at every cursor until insert state exits."
                       (overlay-put ov 'face 'ygg-secondary-cursor)
                       (overlay-put ov 'priority 100)
                       ov))
-                  ygg--echo-spans))
-    (setq ygg--echo-group (prepare-change-group))
-    (activate-change-group ygg--echo-group))
+                  ygg--echo-spans)))
   (ygg-clear-secondaries)
   (set-mark (point))
   (ygg-insert-state))
@@ -772,13 +856,9 @@ is mirrored at every cursor until insert state exits."
   (mapc #'delete-overlay ygg--echo-cursor-ovs)
   (when ygg--echo-primary (set-marker ygg--echo-primary nil))
   (setq ygg--echo-spans nil ygg--echo-primary nil
-        ygg--echo-last nil ygg--echo-group nil
-        ygg--echo-cursor-ovs nil))
+        ygg--echo-last nil ygg--echo-cursor-ovs nil))
 
 (defun ygg--echo-abort (&optional msg)
-  (when ygg--echo-group
-    (undo-amalgamate-change-group ygg--echo-group)
-    (accept-change-group ygg--echo-group))
   (ygg--echo-teardown)
   (when msg (message "yggdrasil: %s" msg)))
 
@@ -789,7 +869,8 @@ is mirrored at every cursor until insert state exits."
    (t
     (let ((new (buffer-substring-no-properties ygg--echo-primary (point))))
       (unless (string= new ygg--echo-last)
-        (let ((ygg--inhibit-normalize t))
+        (let ((ygg--inhibit-normalize t)
+              (ygg--insert-unrecorded t))
           (dolist (span ygg--echo-spans)
             (when (marker-buffer (car span))
               (save-excursion
@@ -807,25 +888,82 @@ is mirrored at every cursor until insert state exits."
                            ygg--echo-spans))
           (pbeg (marker-position ygg--echo-primary))
           (pend (point)))
-      (when ygg--echo-group
-        (undo-amalgamate-change-group ygg--echo-group)
-        (accept-change-group ygg--echo-group)
-        (setq ygg--echo-group nil))
       (ygg--echo-teardown)
       (dolist (r regions)
         (ygg-add-selection (car r) (max (cdr r) (car r))))
       (ygg-set-selection pbeg (max pend pbeg)))))
 
-(defun ygg--repeat-finish-insert ()
-  "Fold this insert session into the `.' journal if it changed the buffer.
-Typed text is read before `ygg--echo-finish' or the vim-collapse below
-touch point or the markers; the exit key is normalized to <escape> so
-replay is safe regardless of how insert was actually left (jk, C-g, ...)."
+;;; Insert sessions: one undo step, recorded edits for dot and counts
+
+(defun ygg--shift-anchor (anchor beg end deleted)
+  "Where ANCHOR lands after DELETED chars at BEG became the text BEG..END."
+  (cond ((<= anchor beg) anchor)
+        ((>= anchor (+ beg deleted)) (+ anchor (- end beg deleted)))
+        (t beg)))
+
+(defun ygg--insert-record-change (beg end deleted)
+  (unless ygg--insert-unrecorded
+    (let ((offset (- beg ygg--insert-anchor))
+          (text (buffer-substring-no-properties beg end))
+          (last (car ygg--insert-changes)))
+      (if (and last (zerop deleted) (zerop (nth 1 last))
+               (= offset (+ (nth 0 last) (length (nth 2 last)))))
+          (setcar ygg--insert-changes
+                  (list (nth 0 last) 0 (concat (nth 2 last) text)))
+        (push (list offset deleted text) ygg--insert-changes))))
+  (setq ygg--insert-anchor
+        (ygg--shift-anchor ygg--insert-anchor beg end deleted)))
+
+(defun ygg--insert-apply-changes (changes anchor)
+  "Make CHANGES, oldest first, relative to ANCHOR; return the moved anchor."
+  (pcase-dolist (`(,offset ,deleted ,text) changes)
+    (let* ((beg (max (point-min) (min (+ anchor offset) (point-max))))
+           (end (min (+ beg deleted) (point-max))))
+      (delete-region beg end)
+      (goto-char beg)
+      (insert text)
+      (setq anchor (ygg--shift-anchor anchor beg (point) (- end beg)))))
+  anchor)
+
+(defun ygg--insert-prepare-group ()
+  "A change group that also takes in edits this command made before insert.
+Those are the c deletion or the o newline, so one undo reverts them too."
+  (let ((undo buffer-undo-list))
+    (when (and ygg--repeat-tick
+               (/= ygg--repeat-tick (buffer-chars-modified-tick)))
+      (while (and (consp undo) (car undo))
+        (setq undo (cdr undo))))
+    (list (cons (current-buffer) undo))))
+
+(defun ygg--insert-begin ()
+  (setq ygg--insert-anchor (point)
+        ygg--insert-changes nil
+        ygg--insert-group (ygg--insert-prepare-group))
+  (activate-change-group ygg--insert-group)
+  (add-hook 'after-change-functions #'ygg--insert-record-change nil t))
+
+(add-hook 'ygg-insert-entry-hook #'ygg--insert-begin)
+
+(defun ygg--insert-close-group ()
+  (when ygg--insert-group
+    (undo-amalgamate-change-group ygg--insert-group)
+    (accept-change-group ygg--insert-group)
+    (setq ygg--insert-group nil)))
+
+(defun ygg--insert-repeat-count (count open-line changes exit-offset)
+  "Make CHANGES COUNT - 1 more times from point, as vim 3i and 3o do."
+  (let ((ygg--inhibit-normalize t))
+    (dotimes (_ (1- count))
+      (when open-line (goto-char (funcall open-line (point) (point))))
+      (goto-char (+ (ygg--insert-apply-changes changes (point)) exit-offset)))))
+
+(defun ygg--repeat-finish-insert (count changes exit-offset)
+  "Journal this insert session for dot when it changed the buffer."
   (when ygg--repeat-insert-entry
     (pcase-let ((`(,keys . ,entry-changed) ygg--repeat-insert-entry))
-      (let ((typed (buffer-substring-no-properties ygg--echo-primary (point))))
-        (when (or entry-changed (> (length typed) 0))
-          (setq ygg--repeat-vector (vconcat keys typed (kbd "<escape>"))))))
+      (when (or entry-changed changes)
+        (setq ygg--repeat-vector
+              (list 'insert keys count changes exit-offset))))
     (setq ygg--repeat-insert-entry nil)))
 
 (defun ygg--insert-exit ()
@@ -833,7 +971,16 @@ replay is safe regardless of how insert was actually left (jk, C-g, ...)."
 Vim/Helix step back onto the last typed character and drop any span the
 insert left behind; without this, the next verb acts on the whole typed
 text plus one char."
-  (ygg--repeat-finish-insert)
+  (remove-hook 'after-change-functions #'ygg--insert-record-change t)
+  (let ((changes (reverse ygg--insert-changes))
+        (exit-offset (if ygg--insert-anchor (- (point) ygg--insert-anchor) 0)))
+    (pcase-let ((`(,count . ,open-line) ygg--insert-count))
+      (setq ygg--insert-count nil
+            ygg--insert-changes nil
+            ygg--insert-anchor nil)
+      (when (and count (or changes open-line))
+        (ygg--insert-repeat-count count open-line changes exit-offset))
+      (ygg--repeat-finish-insert count changes exit-offset)))
   (if ygg--echo-spans
       (ygg--echo-finish)
     (when (> (point) (line-beginning-position))
@@ -841,7 +988,8 @@ text plus one char."
     (set-mark (point))
     (when ygg--echo-primary
       (set-marker ygg--echo-primary nil)
-      (setq ygg--echo-primary nil))))
+      (setq ygg--echo-primary nil)))
+  (ygg--insert-close-group))
 
 (add-hook 'ygg-insert-exit-hook #'ygg--insert-exit)
 
@@ -858,8 +1006,22 @@ text plus one char."
   "Vim `.': replay the last buffer-changing verb COUNT times."
   (interactive "p")
   (unless ygg--repeat-vector (user-error "Nothing to repeat"))
-  (let ((ygg--replaying t))
-    (execute-kbd-macro ygg--repeat-vector count)))
+  (let ((ygg--replaying t)
+        (record ygg--repeat-vector))
+    (if (vectorp record)
+        (execute-kbd-macro record count)
+      (dotimes (_ (max 1 (or count 1)))
+        (apply #'ygg--repeat-insert (cdr record))))))
+
+(defun ygg--repeat-insert (keys count changes exit-offset)
+  "Re-enter insert with KEYS and COUNT, remake CHANGES, then leave insert."
+  (let ((ygg--repeat-count count))
+    (execute-kbd-macro keys))
+  (when ygg--insert-p
+    (unwind-protect
+        (goto-char (+ (ygg--insert-apply-changes changes ygg--insert-anchor)
+                      exit-offset))
+      (ygg-normal-state))))
 
 ;;; Default bindings owned by this module
 
@@ -899,17 +1061,22 @@ text plus one char."
   "K" #'ygg-remove-matching :label "remove matching"
   "C" #'ygg-copy-selection-up :label "copy up"
   "-" #'ygg-merge-selections :label "merge selections"
-  "_" #'ygg-merge-consecutive-selections :label "merge consecutive")
+  "_" #'ygg-merge-consecutive-selections :label "merge consecutive"
+  "x" #'ygg-shrink-to-line-bounds :label "shrink to line"
+  ">" #'ygg-ensure-selections-forward :label "forward")
 
 (yggdrasil-define-keys 'insert
-  "C-/" #'ygg-insert-undo)
+  "C-/" #'ygg-insert-undo
+  "C-<delete>" #'kill-word)
 
 (yggdrasil-define-keys 'ygg-goto-map
   "v" #'ygg-reselect-last :label "last visual")
 
 (yggdrasil-define-keys 'visual
   "n" #'ygg-select-next-match :label "add next match"
-  "N" #'ygg-select-prev-match :label "add prev match")
+  "N" #'ygg-select-prev-match :label "add prev match"
+  "<home>" #'ygg-extend-to-line-start :label "extend to line start"
+  "<end>" #'ygg-extend-to-line-end :label "extend to line end")
 
 (yggdrasil-define-keys 'ygg-selections-map
   "n" #'ygg-skip-to-next-match :label "skip to next match")

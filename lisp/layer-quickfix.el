@@ -307,15 +307,12 @@ down."
   (let ((m (make-sparse-keymap)))
     (define-key m "j" #'ygg-qf-next)
     (define-key m "k" #'ygg-qf-prev)
-    (define-key m "n" #'ygg-qf-next)
-    (define-key m "N" #'ygg-qf-prev)
-    (define-key m (kbd "C-j") #'ygg-qf-next)
-    (define-key m (kbd "C-k") #'ygg-qf-prev)
+    (define-key m "i" #'wgrep-change-to-wgrep-mode)
     (define-key m (kbd "RET") #'ygg-qf-open)
     (define-key m "o" #'compilation-display-error)
     (define-key m "p" #'ygg-qf-preview-toggle)
     (define-key m "q" #'quit-window)
-    (define-key m "g" #'ygg-qf-first)
+    (define-key m "g g" #'ygg-qf-first)
     (define-key m "G" #'ygg-qf-last)
     (define-key m "d" #'ygg-qf-drop)
     (define-key m "f" #'ygg-qf-filter)
@@ -333,22 +330,18 @@ down."
     (define-key m "zz" #'recenter)
     (define-key m "zt" (lambda () (interactive) (recenter 0)))
     (define-key m "zb" (lambda () (interactive) (recenter -1)))
-    (define-key m "?" #'ygg-ai-why)
     m)
   "The keys a quickfix panel keeps above the modal states.
 Without lifting these, normal state answers j and k with line motion and
 the panel stops behaving like a list.")
 
-(defun ygg-qf--lift-keys ()
-  "Let this panel's own navigation win over the modal layer."
-  (setq ygg--special-lift-alist (list (cons t ygg-qf-panel-map))))
+(yggdrasil-define-mode-keys 'grep-mode 'normal ygg-qf-panel-map)
 
 (defun ygg-qf--enable-preview ()
   (when (derived-mode-p 'grep-mode 'compilation-mode)
     (hl-line-mode 1)
     (setq-local truncate-lines t)
     (setq ygg-qf--preview-on ygg-qf-preview)
-    (ygg-qf--lift-keys)
     (add-hook 'post-command-hook #'ygg-qf--settle nil t)
     (add-hook 'post-command-hook #'ygg-qf--preview-schedule nil t)))
 
@@ -367,9 +360,9 @@ the panel stops behaving like a list.")
   ;; editing text shouldn't yank preview windows around; restore on exit
   (add-hook 'wgrep-setup-hook (lambda () (yggdrasil-local-mode 1)
                                 (setq-local ygg-qf--preview-on nil)))
-  (advice-add 'wgrep-finish-edit :after (lambda (&rest _) (yggdrasil-local-mode -1)
+  (advice-add 'wgrep-finish-edit :after (lambda (&rest _) (ygg-normal-state)
                                           (ygg-qf--enable-preview)))
-  (advice-add 'wgrep-abort-changes :after (lambda (&rest _) (yggdrasil-local-mode -1)
+  (advice-add 'wgrep-abort-changes :after (lambda (&rest _) (ygg-normal-state)
                                             (ygg-qf--enable-preview)))
   (define-key wgrep-mode-map [remap ygg-save-and-kill-buffer] #'wgrep-finish-edit)
   (define-key wgrep-mode-map [remap ygg-kill-buffer-no-save] #'wgrep-abort-changes))
@@ -997,9 +990,12 @@ as locations (a `mouse-face') are touched — this skips grep's own header."
 (add-hook 'compilation-finish-functions #'ygg-qf--style-on-finish)
 
 (defun ygg-qf--style-on-finish-keys (buffer _status)
-  (when (buffer-live-p buffer)
+  "Give a finished compile that is not a grep the panel's keys too."
+  (when (and (buffer-live-p buffer)
+             (ygg-qf--quickfix-buffer-p buffer))
     (with-current-buffer buffer
-      (when (derived-mode-p 'grep-mode 'compilation-mode) (ygg-qf--lift-keys)))))
+      (unless (derived-mode-p 'grep-mode)
+        (yggdrasil-define-local-keys 'normal ygg-qf-panel-map)))))
 
 (add-hook 'compilation-finish-functions #'ygg-qf--style-on-finish-keys)
 
@@ -1035,12 +1031,7 @@ With REPLACE, clear it first."
         ;; and the hit you would read first is the one off the top
         (when fresh
           (goto-char (point-min))
-          (ignore-errors (compilation-next-error 1))))
-      ;; curated content (activity/diagnostics/pushes) is not editable
-      ;; file text, so wgrep's `i' stays out and `i' falls through to modal
-      ;; insert (a no-op here, buffer read-only).  Navigation is lifted the
-      ;; same way every quickfix lifts it.
-      (ygg-qf--lift-keys))
+          (ignore-errors (compilation-next-error 1)))))
     (setq next-error-last-buffer buf)
     (select-window (display-buffer buf))))
 

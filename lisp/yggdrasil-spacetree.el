@@ -934,22 +934,75 @@ the bar is drawn from has moved."
     (select-window (ygg-ui-main-window))
     (ygg-space--goto-id (cdr line))))
 
+(defun ygg-space-tree--forward-space (n)
+  "Move N rows, stopping only on a space's row."
+  (let ((moved 0))
+    (while (and (zerop moved)
+                (zerop (forward-line n))
+                (not (eobp)))
+      (when (ygg-space-tree--id-at-point)
+        (setq moved 1)))
+    (beginning-of-line)))
+
+(defun ygg-space-tree-next ()
+  "Move to the next space row."
+  (interactive)
+  (ygg-space-tree--forward-space 1))
+
+(defun ygg-space-tree-prev ()
+  "Move to the previous space row."
+  (interactive)
+  (ygg-space-tree--forward-space -1))
+
+(defun ygg-space-tree-forward-rows (n)
+  "Move N space rows, the way a half page moves a list."
+  (dotimes (_ (abs n))
+    (ygg-space-tree--forward-space (if (< n 0) -1 1))))
+
+(defun ygg-space-tree-down-half ()
+  "Move down several space rows."
+  (interactive)
+  (ygg-space-tree-forward-rows 5))
+
+(defun ygg-space-tree-up-half ()
+  "Move up several space rows."
+  (interactive)
+  (ygg-space-tree-forward-rows -5))
+
+(defun ygg-space-tree-first ()
+  "Go to the first space row."
+  (interactive)
+  (goto-char (point-min))
+  (unless (ygg-space-tree--id-at-point)
+    (ygg-space-tree--forward-space 1)))
+
+(defun ygg-space-tree-last ()
+  "Go to the last space row."
+  (interactive)
+  (goto-char (point-max))
+  (beginning-of-line)
+  (unless (ygg-space-tree--id-at-point)
+    (ygg-space-tree--forward-space -1)))
+
 (defun ygg-space-tree-help ()
   "Echo the sidebar keys."
   (interactive)
   (message "RET/click switch · j k h l move · 1-9 jump · a add · r rename · d close · q hide"))
 
 (defun ygg-space-tree-close ()
-  "Close the space at point with its subtree; stay where you are if outside it."
+  "Close the space at point with its subtree; ask first."
   (interactive)
-  (when-let* ((id (ygg-space-tree--id-at-point)))
-    (let ((ids (ygg-space--subtree-ids id)))
-      (if (memql (ygg-space--current-id) ids)
-          (progn (ygg-space--goto-id id) (ygg-space-close))
-        (let ((ygg-space--closing t))
-          (dolist (i ids)
-            (when-let* ((idx (ygg-space--index-of-id i)))
-              (tab-bar-close-tab (1+ idx)))))))))
+  (when-let* ((id (ygg-space-tree--id-at-point))
+              (tab (ygg-space--tab-by-id id))
+              (name (ygg-space--name tab)))
+    (when (y-or-n-p (format "Close space %s? " name))
+      (let ((ids (ygg-space--subtree-ids id)))
+        (if (memql (ygg-space--current-id) ids)
+            (progn (ygg-space--goto-id id) (ygg-space-close))
+          (let ((ygg-space--closing t))
+            (dolist (i ids)
+              (when-let* ((idx (ygg-space--index-of-id i)))
+                (tab-bar-close-tab (1+ idx))))))))))
 
 ;;;###autoload
 (defun ygg-space-tree ()
@@ -968,12 +1021,14 @@ the bar is drawn from has moved."
 (defvar-keymap ygg-space-tree-mode-map
   "RET" #'ygg-space-tree--select-at-point
   "<mouse-1>" #'ygg-space-tree--mouse-select
-  "j" #'next-line
-  "k" #'previous-line
+  "j" #'ygg-space-tree-next
+  "k" #'ygg-space-tree-prev
   "h" #'ygg-space-tree-parent
   "l" #'ygg-space-tree-child
-  "g g" #'beginning-of-buffer
-  "G" #'end-of-buffer
+  "g g" #'ygg-space-tree-first
+  "G" #'ygg-space-tree-last
+  "C-d" #'ygg-space-tree-down-half
+  "C-u" #'ygg-space-tree-up-half
   "a" #'ygg-space-tree-add-child
   "r" #'ygg-space-tree-rename
   "d" #'ygg-space-tree-close

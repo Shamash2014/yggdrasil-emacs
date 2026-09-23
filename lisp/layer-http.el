@@ -86,12 +86,19 @@
 
 ;;; Sending
 
+(define-derived-mode ygg-http-response-mode special-mode "http-response"
+  "Read-only view of the last HTTP response.")
+
+(defvar ygg-modal-special-modes)
+(with-eval-after-load 'yggdrasil-core
+  (add-to-list 'ygg-modal-special-modes 'ygg-http-response-mode))
+
 (defun ygg-http--show (method url resp elapsed)
   (with-current-buffer (get-buffer-create ygg-http-response-buffer)
     (let ((inhibit-read-only t)
           (code (and resp (request-response-status-code resp))))
       (erase-buffer)
-      (unless (derived-mode-p 'special-mode) (special-mode))
+      (unless (derived-mode-p 'ygg-http-response-mode) (ygg-http-response-mode))
       (insert (propertize (format "%s %s\n" method url) 'face 'bold)
               (propertize (format "%s · %.2fs\n"
                                   (or code "no response") elapsed)

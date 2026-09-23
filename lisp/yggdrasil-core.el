@@ -22,7 +22,9 @@ comint/shell and REPLs stay modal (insert types at the prompt, normal
 gives vim scroll and output navigation); true terminals are denied."
   :type '(repeat symbol))
 
-(defcustom ygg-modal-special-modes '(compilation-mode image-mode xwidget-webkit-mode)
+(defcustom ygg-modal-special-modes
+  '(compilation-mode image-mode xwidget-webkit-mode
+    help-mode Info-mode messages-buffer-mode apropos-mode occur-mode eww-mode)
   "Special-mode families that get the full modal layer anyway.
 Their buffers gain motions, visual state, and the yank operator; the
 mode keeps only the keys in `ygg-modal-special-keep'."
@@ -33,6 +35,19 @@ mode keeps only the keys in `ygg-modal-special-keep'."
 TAB is intentionally absent: it is the C-i character, and jumplist
 forward (C-i) must win everywhere, so compilation's next-error yields."
   :type '(repeat string))
+
+(defcustom ygg-modal-special-mode-keep
+  '((help-mode ("<tab>" . "TAB") ("[ h" . "l") ("] h" . "r"))
+    (Info-mode ("<tab>" . "TAB") "u" ("] n" . "n") ("[ p" . "p")
+               ("[ h" . "l") ("] h" . "r"))
+    (apropos-mode ("<tab>" . "TAB"))
+    (occur-mode ("i" . "e"))
+    (eww-mode ("<tab>" . "TAB") ("[ h" . "l") ("] h" . "r")))
+  "Extra keys kept per mode family, on top of the shared keep list.
+Each entry is (MODE . SPECS).  A SPEC is a KEY keeping its mode binding,
+\(KEY . FROM) moving the mode binding of FROM to KEY, or (KEY . COMMAND).
+The <tab> key is the GUI tab event, so C-i stays jumplist forward."
+  :type '(alist :key-type symbol :value-type (repeat sexp)))
 
 ;;; Regex dialect (PCRE via pcre2el)
 
@@ -82,19 +97,119 @@ free because this layer selects lines Kakoune-style with x.")
     (ygg--insert-p . ,ygg-insert-map)))
 (add-to-list 'emulation-mode-map-alists 'ygg--emulation-alist)
 
-(defvar-local ygg--special-lift-alist nil
-  "Per-buffer emulation alist lifting a few mode keys above the states.
-Built by `ygg--modalize-special' for `ygg-modal-special-modes' buffers.")
-;; prepended after ygg's own alist, so the kept mode keys win
-(add-to-list 'emulation-mode-map-alists 'ygg--special-lift-alist)
+(defvar ygg--mode-keys (make-hash-table :test #'equal)
+  "State-scoped mode keymaps, keyed by (MODE . STATE).
+Each value is a list of keymaps: the one bindings go into, then the
+keymaps lifted whole.")
+
+(defvar-local ygg--local-keys nil
+  "This buffer's own state-scoped keymaps, as (STATE . KEYMAPS).")
+
+(defvar-local ygg--special-keep-map nil
+  "Mode keys a ygg-modal-special-modes buffer keeps in normal and visual.")
+
+(defvar-local ygg--mode-keys-alist nil
+  "Emulation alist of this buffer's mode keys, one entry per state.
+Built by ygg--mode-keys-refresh.")
+;; prepended after ygg's own alist, so mode keys win over the states
+(add-to-list 'emulation-mode-map-alists 'ygg--mode-keys-alist)
+
+(defconst ygg--state-vars
+  '((visual . ygg--visual-p) (normal . ygg--normal-p) (insert . ygg--insert-p)))
+
+(defun ygg--mode-keys-state-maps (state)
+  "Keymaps lifted in STATE here, strongest first.
+Buffer keys, then active minor modes, then the major mode and its
+parents, then the kept special-mode keys."
+  (let ((chain (derived-mode-all-parents major-mode))
+        minor major)
+    (maphash (lambda (key maps)
+               (when (eq (cdr key) state)
+                 (let ((mode (car key)))
+                   (cond ((memq mode chain) (push (cons mode maps) major))
+                         ((and (boundp mode) (symbol-value mode))
+                          (setq minor (append minor maps)))))))
+             ygg--mode-keys)
+    (append (alist-get state ygg--local-keys)
+            minor
+            (mapcan (lambda (mode) (copy-sequence (alist-get mode major)))
+                    chain)
+            (and ygg--special-keep-map (memq state '(normal visual))
+                 (list ygg--special-keep-map)))))
+
+(defun ygg--mode-keys-refresh ()
+  "Recompute this buffer's mode keys for every state."
+  (setq ygg--mode-keys-alist
+        (let (alist)
+          (pcase-dolist (`(,state . ,var) ygg--state-vars)
+            (when-let* ((maps (ygg--mode-keys-state-maps state)))
+              (push (cons var (make-composed-keymap maps)) alist)))
+          (nreverse alist))))
+
+(defun ygg--mode-keys-refresh-all ()
+  (dolist (buf (buffer-list))
+    (with-current-buffer buf
+      (when ygg--state (ygg--mode-keys-refresh)))))
+
+(defun ygg--mode-keys-hook (mode)
+  "The function MODE's hook runs to recompute mode keys."
+  (or (get mode 'ygg--mode-keys-hook)
+      (put mode 'ygg--mode-keys-hook
+           (lambda ()
+             (if (and (boundp mode) (not (local-variable-p mode)))
+                 (ygg--mode-keys-refresh-all)
+               (ygg--mode-keys-refresh))))))
+
+(defun ygg--bind-into (maps bindings)
+  "Put BINDINGS into MAPS and return MAPS, grown when a keymap was lifted.
+BINDINGS are repeating KEY DEF bound in the first of MAPS, or one
+keymap added to MAPS whole."
+  (if (and (keymapp (car bindings)) (null (cdr bindings)))
+      (if (memq (car bindings) maps) maps (append maps bindings))
+    (while bindings
+      (define-key (car maps) (kbd (pop bindings)) (pop bindings)))
+    maps))
+
+(defun yggdrasil-define-mode-keys (mode states &rest bindings)
+  "Bind BINDINGS for MODE in each of STATES, above yggdrasil's own maps.
+MODE is a major or minor mode, loaded yet or not.  STATES is a state
+symbol or a list of them.  BINDINGS are repeating KEY DEF, or one
+keymap lifted whole.  A major mode's keys reach the modes derived from
+it, the more derived mode winning; an active minor mode's keys win over
+any major mode's, and yggdrasil-define-local-keys over both."
+  (dolist (state (ensure-list states))
+    (let* ((key (cons mode state))
+           (old (gethash key ygg--mode-keys))
+           (new (ygg--bind-into (or old (list (make-sparse-keymap))) bindings)))
+      (unless (eq new old)
+        (puthash key new ygg--mode-keys)
+        (add-hook (intern (format "%s-hook" mode)) (ygg--mode-keys-hook mode))
+        (ygg--mode-keys-refresh-all)))))
+
+(defun yggdrasil-define-local-keys (states &rest bindings)
+  "Bind BINDINGS in this buffer only, in each of STATES, above all mode keys.
+STATES and BINDINGS are as in yggdrasil-define-mode-keys.  A major
+mode change drops them, so a mode hook is the place to call this."
+  (dolist (state (ensure-list states))
+    (setf (alist-get state ygg--local-keys)
+          (ygg--bind-into (or (alist-get state ygg--local-keys)
+                              (list (make-sparse-keymap)))
+                          bindings)))
+  (ygg--mode-keys-refresh))
 
 (defun ygg--modalize-special ()
   "Give this special-mode buffer the modal layer, keeping select mode keys."
   (let ((keep (make-sparse-keymap)))
-    (dolist (k ygg-modal-special-keep)
-      (when-let* ((def (local-key-binding (kbd k))))
-        (define-key keep (kbd k) def)))
-    (setq ygg--special-lift-alist (list (cons t keep))))
+    (dolist (spec (append ygg-modal-special-keep
+                          (mapcan (lambda (entry)
+                                    (and (derived-mode-p (car entry))
+                                         (copy-sequence (cdr entry))))
+                                  ygg-modal-special-mode-keep)))
+      (let* ((key (if (consp spec) (car spec) spec))
+             (from (if (consp spec) (cdr spec) spec))
+             (def (if (stringp from) (local-key-binding (kbd from)) from)))
+        (when def (define-key keep (kbd key) def))))
+    (setq ygg--special-keep-map keep))
   (yggdrasil-local-mode 1))
 
 (defvar ygg-normal-entry-hook nil)
@@ -295,7 +410,8 @@ Example: (yggdrasil-key \\='normal \"x\" #\\='my-command)")
   "Yggdrasil modal editing in this buffer."
   :init-value nil
   (if yggdrasil-local-mode
-      (ygg--switch-state 'normal)
+      (progn (ygg--mode-keys-refresh)
+             (ygg--switch-state 'normal))
     (setq ygg--normal-p nil ygg--visual-p nil ygg--insert-p nil
           ygg--state nil ygg--modeline-tag ""
           cursor-type t)))
@@ -340,7 +456,9 @@ Example: (yggdrasil-key \\='normal \"x\" #\\='my-command)")
   "C-o" #'ygg-insert-one-command :label "one normal cmd"
   "C-r" #'ygg-insert-register :label "insert register"
   "C-w" #'ygg-insert-kill-word :label "delete word back"
-  "C-u" #'ygg-insert-kill-to-bol :label "delete to line start")
+  "C-u" #'ygg-insert-kill-to-bol :label "delete to line start"
+  "<home>" #'beginning-of-line
+  "<end>" #'end-of-line)
 
 ;; g i stays LSP find-implementation (nvim habit, layer-lsp)
 (yggdrasil-define-keys 'ygg-goto-map

@@ -454,7 +454,7 @@ starts there; q gives the window back to the terminal."
         (insert text))
       (setq buffer-read-only t)
       (setq ygg-term-find--terminal term)
-      (use-local-map ygg-term-find-map)
+      (yggdrasil-define-local-keys 'normal ygg-term-find-map)
       (unless yggdrasil-local-mode (yggdrasil-local-mode 1))
       (goto-char (point-max)))
     (set-window-buffer win buf)
@@ -520,6 +520,15 @@ The side it lands on becomes the default for the next terminal."
 
 (when (fboundp 'elpaca)
   (elpaca docker))
+
+(declare-function ygg-list-vim-keys "yggdrasil-verbs")
+(declare-function tablist-do-kill-lines "tablist")
+(defvar tablist-minor-mode-map)
+
+;; tablist's minor map outranks docker's; its k moves to x, free in every menu
+(with-eval-after-load 'tablist
+  (ygg-list-vim-keys tablist-minor-mode-map)
+  (define-key tablist-minor-mode-map "x" #'tablist-do-kill-lines))
 
 (declare-function docker-compose-run-docker-compose-async-with-buffer "docker-compose" (action &rest args))
 
