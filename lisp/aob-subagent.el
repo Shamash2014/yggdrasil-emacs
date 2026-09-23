@@ -1,39 +1,18 @@
 ;;; aob-subagent.el --- a delegation you can hold, not only watch -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; aob has always known about subagents the way a log knows about them: a
-;; tool call went out with a name on it, and the trace says so.  That is
-;; an observation, not a handle.  Nothing can be asked how it is getting
-;; on, told to stop, or answered when it finishes, because there is no
-;; object — only events that mention one.
-;;
-;; A spawned subagent here is an ordinary aob session that remembers who
-;; sent it.  Everything sessions already do — a trace of its own, a
-;; worktree, permissions, resume — it does, and the parent link is one
-;; ref rather than a second kind of thing to maintain.  The observed
-;; delegations stay: an agent that farms work out internally still
-;; reports it, and those remain read-only rows.
+;; A subagent is the Agent or Task call an agent makes inside its own
+;; turn (claude), or the thread codex names for one.  Each becomes a
+;; session of its own, read-only, whose trace holds the steps it took.
 
 ;;; Code:
 
 (require 'seq)
 (require 'subr-x)
+(require 'cl-lib)
 (require 'aob)
 
-(declare-function aob-acp-spawn "aob-acp" (agent &optional intent atts name))
 (declare-function aob-trace "aob-trace" (s))
-(defvar aob-acp-session-refs)
-(defvar aob-acp-start-dir)
-
-(defgroup aob-subagent nil
-  "Agents sent by other agents."
-  :group 'aob :prefix "aob-subagent-")
-
-(defcustom aob-subagent-agent nil
-  "Which agent a delegation uses when the caller names none.
-Nil means whatever `aob-acp-default-agent' says."
-  :type '(choice (const :tag "the default agent" nil) string)
-  :group 'aob-subagent)
 
 (defun aob-subagent-parent (s)
   "The session that sent S, or nil when nobody did."
@@ -51,75 +30,141 @@ Nil means whatever `aob-acp-default-agent' says."
                   (equal id (aob-session-ref other :parent-session)))
                 (aob-sessions))))
 
-(defun aob-subagent-live-children (s)
-  "The sessions S sent that are still going."
-  (seq-remove (lambda (c) (memq (aob-session-state c) '(dead done)))
-              (aob-subagent-children s)))
+(defun aob-subagent-native-p (s)
+  "Whether S is a subagent its agent runs inside its own turn."
+  (and (aob-session-ref s :native-tool-id) t))
 
-(defun aob-subagent-descendants (s)
-  "Everything below S, however deep it was delegated."
-  (let (out (queue (aob-subagent-children s)))
-    (while queue
-      (let ((c (pop queue)))
-        (unless (memq c out)
-          (push c out)
-          (setq queue (append queue (aob-subagent-children c))))))
-    (nreverse out)))
+(defun aob-subagent--native-kids (root)
+  "ROOT's table of subagent call id to the session tracing it."
+  (or (aob-session-ref root :native-kids)
+      (let ((h (make-hash-table :test #'equal)))
+        (aob-session-put root :native-kids h)
+        h)))
 
-;;;###autoload
-(defun aob-subagent-spawn (parent intent &optional agent dir model)
-  "Send INTENT to a new agent on PARENT's behalf and return the session.
-The session is real from the moment it is made: it has an id before it
-has connected, so whoever asked can be told which one it is rather than
-that one is coming."
-  (require 'aob-acp)
-  (let* ((parent-id (if (stringp parent) parent (aob-session-id parent)))
-         (owner (aob-session-get parent-id))
-         (dir (file-name-as-directory
-               (expand-file-name (or dir
-                                     (and owner (aob-session-dir owner))
-                                     default-directory))))
-         (agent (or agent aob-subagent-agent
-                    (and owner (aob-session-ref owner :agent))
-                    (bound-and-true-p aob-acp-default-agent)))
-         (default-directory dir)
-         (aob-acp-start-dir dir)
-         (aob-acp-session-refs (append (list :parent-session parent-id)
-                                       (and model (list :want-model model))
-                                       aob-acp-session-refs))
-         (s (aob-acp-spawn agent intent)))
-    (when (and s model) (aob-session-put s :want-model model))
-    s))
+(defun aob-subagent--native-name (ev)
+  (aob--first-line (or (plist-get ev :title) "subagent") 60))
 
-;;;###autoload
-(defun aob-subagent-kill (s)
-  "Stop S and everything it sent.
-A delegation outliving the hand that stopped it is the failure this
-exists to prevent: children go first, so none is left talking to a
-model with nobody reading."
-  (interactive (list (aob-target)))
-  (dolist (c (aob-subagent-descendants s))
-    (ignore-errors (aob--call c :kill)))
-  (ignore-errors (aob--call s :kill))
-  s)
+(defun aob-subagent--native-state (ev)
+  "The state the subagent call EV puts its session in."
+  (let ((status (plist-get ev :status)))
+    (cond ((equal status "failed") 'failed)
+          ((or (member status '(nil "pending" "in_progress"))
+               (> (or (plist-get ev :child-live) 0) 0))
+           'working)
+          (t 'done))))
 
-(defun aob-subagent-status (s)
-  "What S is doing, as a plist fit to hand back over a wire."
-  (list :id (aob-session-id s)
-        :name (aob-session-name s)
-        :state (format "%s" (aob-session-state s))
-        :dir (aob-session-dir s)
-        :parent (aob-session-ref s :parent-session)
-        :children (mapcar #'aob-session-id (aob-subagent-children s))
-        :last (or (ignore-errors (aob-session-blurb s)) "")))
+(defun aob-subagent--native-open (root owner ev)
+  "A session for the subagent call EV, made by OWNER on ROOT's stream."
+  (let* ((tid (plist-get ev :tool-id))
+         (kid (aob-create-session
+               :id (format "%s/%s" (aob-session-id owner) tid)
+               :backend 'native-subagent
+               :name (aob-subagent--native-name ev)
+               :project (aob-session-project owner)
+               :dir (aob-session-dir owner)
+               :state 'working
+               :refs (list :parent-session (aob-session-id owner)
+                           :native-root (aob-session-id root)
+                           :native-tool-id tid
+                           :agent (aob-session-ref root :agent)))))
+    (puthash tid (aob-session-id kid) (aob-subagent--native-kids root))
+    (aob-turn-begin kid)
+    kid))
 
-(defun aob-subagent--orphan (s _old new)
-  "Stop S's children when S reaches NEW, so none is left running alone."
-  (when (memq new '(dead done))
-    (dolist (c (aob-subagent-live-children s))
-      (ignore-errors (aob--call c :kill)))))
+(defun aob-subagent--native-prompt (kid ev)
+  "Give KID the prompt EV sent it, once, as the first thing in its trace."
+  (when-let* (((not (aob-session-ref kid :prompted)))
+              (raw (plist-get ev :raw))
+              ((listp raw))
+              (text (plist-get raw :prompt))
+              ((stringp text)))
+    (aob-session-put kid :prompted t)
+    (let ((p (aob-event kid 'prompt)))
+      (aob-event-push-text p text)
+      (setf (aob-session-events kid)
+            (append (delq p (aob-session-events kid)) (list p))))))
 
-(add-hook 'aob-state-change-hook #'aob-subagent--orphan)
+(defun aob-subagent--native-sync (kid ev)
+  "Bring KID's name, prompt and state level with its call EV."
+  (let ((name (aob-subagent--native-name ev)))
+    (unless (equal name (aob-session-name kid))
+      (aob-rename-session kid name)))
+  (aob-subagent--native-prompt kid ev)
+  (let ((new (aob-subagent--native-state ev)))
+    (unless (eq new (aob-session-state kid))
+      (if (eq new 'working) (aob-turn-begin kid) (aob-turn-end kid))
+      (aob-set-state kid new)))
+  (aob--dirty kid))
+
+(defun aob-subagent--native-take (kid ev)
+  "Put the step EV into KID's own events, once."
+  (unless (plist-get ev :native-routed)
+    (plist-put ev :native-routed t)
+    (push ev (aob-session-events kid))
+    (when (> (cl-incf (aob-session-nevents kid)) aob-event-cap)
+      (let ((keep (/ aob-event-cap 2)))
+        (setf (aob-session-events kid) (seq-take (aob-session-events kid) keep)
+              (aob-session-nevents kid) keep)))))
+
+(defun aob-subagent--native-note (s ev)
+  "Keep the subagent EV belongs to, or is, in step with EV of stream S."
+  (unless (aob-subagent-native-p s)
+    (let* ((kids (aob-session-ref s :native-kids))
+           (pid (plist-get ev :parent))
+           (owner (or (and kids pid (aob-session-get (gethash pid kids))) s)))
+      (unless (eq owner s)
+        (aob-subagent--native-take owner ev)
+        (aob--dirty owner))
+      (when (and (eq (plist-get ev :type) 'tool) (plist-get ev :subagent))
+        (aob-subagent--native-sync
+         (or (aob-session-native-child s ev)
+             (aob-subagent--native-open s owner ev))
+         ev)))))
+
+(add-hook 'aob-event-change-functions #'aob-subagent--native-note)
+
+(defun aob-subagent--native-settle (s _old new)
+  "Fail S's running subagents when S is gone: no update will close them."
+  (when (memq new '(dead failed))
+    (dolist (c (aob-subagent-children s))
+      (when (and (aob-subagent-native-p c) (eq (aob-session-state c) 'working))
+        (aob-turn-end c)
+        (aob-set-state c 'failed)))))
+
+(add-hook 'aob-state-change-hook #'aob-subagent--native-settle)
+
+(defun aob-subagent--native-drop (s)
+  "Take S's subagents out of the registry with it."
+  (dolist (c (aob-subagent-children s))
+    (when (aob-subagent-native-p c)
+      (aob-remove-session c))))
+
+(add-hook 'aob-session-removed-hook #'aob-subagent--native-drop)
+
+(defun aob-subagent--native-refuse (s &rest _)
+  (user-error "aob: %s is a subagent its agent runs and takes no messages; talk to %s"
+              (aob-session-name s)
+              (if-let* ((p (aob-subagent-parent s)))
+                  (aob-session-name p)
+                "the agent that sent it")))
+
+(defun aob-subagent--native-forget (s &rest _)
+  (when-let* ((root (aob-session-get (aob-session-ref s :native-root)))
+              (kids (aob-session-ref root :native-kids)))
+    (remhash (aob-session-ref s :native-tool-id) kids))
+  (aob-remove-session s))
+
+(defun aob-subagent--native-focus (s &rest _)
+  (aob-trace s))
+
+(aob-register-backend
+ 'native-subagent
+ (list :prompt #'aob-subagent--native-refuse
+       :interject #'aob-subagent--native-refuse
+       :cancel #'aob-subagent--native-refuse
+       :flush #'ignore
+       :kill #'aob-subagent--native-forget
+       :focus #'aob-subagent--native-focus))
 
 (provide 'aob-subagent)
 ;;; aob-subagent.el ends here

@@ -83,6 +83,11 @@ symbols `in'/`out' as placeholders for the temp paths."
         (concat (if (fboundp 'ygg-mise-prefix) (ygg-mise-prefix) "")
                 (mapconcat #'shell-quote-argument argv " "))))
 
+(defvar ygg-diagram--rendering (make-hash-table :test #'equal)
+  "SVG path to the callbacks waiting on the render already making it.
+A buffer redrawn while a diagram renders asks for it again, and one
+renderer per redraw is a process storm on a streaming trace.")
+
 (defun ygg-diagram--render (lang src on-done)
   "Render LANG SRC to an SVG, then call (ON-DONE svg-path).
 A cache hit resolves synchronously; a miss renders async so Emacs never blocks."
@@ -95,36 +100,48 @@ A cache hit resolves synchronously; a miss renders async so Emacs never blocks."
     (cond
      ((null spec) (funcall on-done nil "no renderer"))
      ((file-exists-p svg) (funcall on-done svg nil))
+     ((gethash svg ygg-diagram--rendering)
+      (push on-done (gethash svg ygg-diagram--rendering)))
      (t
-      (make-directory ygg-diagram--cache-dir t)
-      (let* ((input (nth 0 spec)) (output (nth 1 spec)) (tpl (nthcdr 2 spec))
-             (in (and (eq input 'file)
-                      (make-temp-file "ygg-dia" nil (ygg-diagram--ext lang) src)))
-             (argv (mapcar (lambda (x) (cond ((eq x 'in) in) ((eq x 'out) svg) (t x))) tpl))
-             (argv (if (eq input 'arg) (append argv (list src)) argv))
-             (obuf (generate-new-buffer " *ygg-diagram*"))
-             (proc (make-process
-                    :name "ygg-diagram" :noquery t :buffer obuf
-                    :command (ygg-diagram--login-argv argv)
-                    :sentinel
-                    (lambda (p _e)
-                      (when (memq (process-status p) '(exit signal))
-                        (when (and (eq output 'stdout)
-                                   (eq (process-status p) 'exit)
-                                   (zerop (process-exit-status p)))
-                          (with-current-buffer (process-buffer p)
-                            (write-region (point-min) (point-max) svg nil 'silent)))
-                        (let ((ok (and (eq (process-status p) 'exit)
-                                       (zerop (process-exit-status p))
-                                       (file-exists-p svg)))
-                              (log (with-current-buffer (process-buffer p) (buffer-string))))
-                          (kill-buffer (process-buffer p))
-                          (when in (ignore-errors (delete-file in)))
-                          (if ok (funcall on-done svg nil)
-                            (funcall on-done nil
-                                     (car (last (split-string (string-trim log) "\n")))))))))))
-        (when (eq input 'stdin)
-          (process-send-string proc src) (process-send-eof proc)))))))
+      (puthash svg (list on-done) ygg-diagram--rendering)
+      (condition-case err
+          (let* ((_ (make-directory ygg-diagram--cache-dir t))
+                 (input (nth 0 spec)) (output (nth 1 spec)) (tpl (nthcdr 2 spec))
+                 (in (and (eq input 'file)
+                          (make-temp-file "ygg-dia" nil (ygg-diagram--ext lang) src)))
+                 (argv (mapcar (lambda (x) (cond ((eq x 'in) in) ((eq x 'out) svg) (t x))) tpl))
+                 (argv (if (eq input 'arg) (append argv (list src)) argv))
+                 (obuf (generate-new-buffer " *ygg-diagram*"))
+                 (proc (make-process
+                        :name "ygg-diagram" :noquery t :buffer obuf
+                        :command (ygg-diagram--login-argv argv)
+                        :sentinel
+                        (lambda (p _e)
+                          (when (memq (process-status p) '(exit signal))
+                            (let ((waiting (gethash svg ygg-diagram--rendering))
+                                  (log ""))
+                              (remhash svg ygg-diagram--rendering)
+                              (ignore-errors
+                                (with-current-buffer (process-buffer p)
+                                  (when (and (eq output 'stdout)
+                                             (eq (process-status p) 'exit)
+                                             (zerop (process-exit-status p)))
+                                    (write-region (point-min) (point-max) svg nil 'silent))
+                                  (setq log (buffer-string))))
+                              (ignore-errors (kill-buffer (process-buffer p)))
+                              (when in (ignore-errors (delete-file in)))
+                              (let ((ok (and (eq (process-status p) 'exit)
+                                             (zerop (process-exit-status p))
+                                             (file-exists-p svg))))
+                                (dolist (done waiting)
+                                  (ignore-errors
+                                    (if ok (funcall done svg nil)
+                                      (funcall done nil
+                                               (car (last (split-string (string-trim log) "\n"))))))))))))))
+            (when (eq input 'stdin)
+              (process-send-string proc src) (process-send-eof proc)))
+        (error (remhash svg ygg-diagram--rendering)
+               (funcall on-done nil (error-message-string err))))))))
 
 (defun ygg-diagram--image (file width)
   "A display string for the image FILE scaled to at most WIDTH pixels.
@@ -374,7 +391,8 @@ A redraw leaves overlays behind collapsed rather than gone, so they are
 dropped first; a fence that is no longer in the buffer is passed over."
   (mapc #'delete-overlay (ygg-diagram--overlays))
   (when ygg-diagram--shown
-    (let ((width (window-body-width nil t)))
+    ;; a redraw from a timer runs in whatever window is selected
+    (let ((width (window-body-width (get-buffer-window nil t) t)))
       (save-excursion
         (goto-char (point-min))
         (while (re-search-forward ygg-diagram--open-re nil t)

@@ -59,13 +59,20 @@ session taking the first one's key is a session that disappears."
       (format "%s#%d" id n))))
 
 (defun aob-create-session (&rest args)
-  (let ((s (apply #'aob-session--create
-                  (append args (list :started (current-time) :nevents 0)))))
+  "Make and register a session from ARGS; :refs are put on it before the hook."
+  (let* ((refs (plist-get args :refs))
+         (args (cl-loop for (k v) on args by #'cddr
+                        unless (eq k :refs) append (list k v)))
+         (s (apply #'aob-session--create
+                   (append args (list :started (current-time) :nevents 0)))))
     ;; before the hook, which is where a session's id is written down
     (setf (aob-session-id s) (aob--free-id (aob-session-id s)))
     (puthash (aob-session-id s) s aob--sessions)
     (setq aob--order (cons (aob-session-id s)
                            (delete (aob-session-id s) aob--order)))
+    ;; and what the session is — its agent, who sent it — for the same
+    ;; reason: a hook that decides by it must not find it missing
+    (cl-loop for (k v) on refs by #'cddr do (aob-session-put s k v))
     (run-hook-with-args 'aob-session-created-hook s)
     (aob--dirty)
     s))
@@ -99,6 +106,22 @@ flushes as soon as the turn ends, and two prompts cannot be in flight at
 once, so the work that would follow waits for the queued turn instead."
   (and (aob-session-ref s :queued) t))
 
+(defun aob-queue-move (s entry by)
+  "Move ENTRY, queued for S, BY places: negative goes earlier, positive later.
+Queued prompts go out as one message in queue order, so the order is the
+order they are read in."
+  (let* ((q (aob-session-ref s :queued))
+         (at (or (seq-position q entry #'eq)
+                 (user-error "aob: that message has already gone")))
+         (to (max 0 (min (1- (length q)) (+ at by)))))
+    (unless (= at to)
+      (let ((rest (delq entry (copy-sequence q))))
+        (aob-session-put s :queued (append (seq-take rest to) (list entry)
+                                           (nthcdr to rest))))
+      (run-hook-with-args 'aob-queue-change-hook s)
+      (aob--dirty s))
+    to))
+
 (defun aob-set-state (s new)
   (let ((old (aob-session-state s)))
     (unless (eq old new)
@@ -114,6 +137,9 @@ once, so the work that would follow waits for the queued turn instead."
   :type 'natnum :group 'aob)
 
 (defvar aob--seq 0)
+
+(defvar aob-event-change-functions nil
+  "Run with (SESSION EVENT) each time EVENT is made or changes in place.")
 
 (defvar aob-event-functions nil
   "Abnormal hook run with (SESSION EVENT) after an event is stored on the session.")
@@ -163,7 +189,15 @@ is, so the line stays the work you asked for and not five borrowed
 voices taking turns in it."
   (unless (plist-get ev :parent)
     (setf (aob-session-summary s) ev))
+  (run-hook-with-args 'aob-event-change-functions s ev)
   (aob--dirty s))
+
+(defun aob-session-native-child (s ev)
+  "The session S's subagent call EV is traced in, or nil for none."
+  (when-let* ((root (or (aob-session-get (aob-session-ref s :native-root)) s))
+              (kids (aob-session-ref root :native-kids))
+              (id (gethash (plist-get ev :tool-id) kids)))
+    (aob-session-get id)))
 
 (defun aob-session-subagents (s)
   "Every subagent S delegated to, in the order it sent them.
@@ -185,6 +219,187 @@ what the trace already rolls up, read back as a list."
         ((>= n 1000000) (format "%.1fM" (/ n 1000000.0)))
         ((>= n 1000) (format "%.1fk" (/ n 1000.0)))
         (t (number-to-string n))))
+
+;;; Meter — what a turn and a session cost in time, tokens and money.
+;;; Only what the agent reports: cost when it sends one, tokens always.
+
+(defvar aob-meter-change-hook nil
+  "Run with a session when its clock or spend would read differently.")
+
+(defun aob-duration-short (secs &optional exact)
+  "SECS as a span: seconds under a minute, then minutes, then hours.
+Coarse unless EXACT, so a live label changes once a minute, not once a
+second.  EXACT keeps the seconds a settled turn took."
+  (let ((secs (max 0 (floor (or secs 0)))))
+    (cond ((< secs 60) (format "%ds" secs))
+          ((< secs 3600)
+           (if (and exact (> (mod secs 60) 0))
+               (format "%dm %ds" (/ secs 60) (mod secs 60))
+             (format "%dm" (/ secs 60))))
+          (t (format "%dh%02dm" (/ secs 3600) (/ (mod secs 3600) 60))))))
+
+(defun aob-cost-short (amount &optional currency)
+  "AMOUNT of CURRENCY rounded up to the cent, so a fraction never reads as free."
+  (when amount
+    (concat (if (member currency '(nil "USD")) "$" (concat currency " "))
+            (format "%.2f" (/ (ceiling (- (* amount 100) 1e-9)) 100.0)))))
+
+(defvar aob--clock-timer nil)
+
+(defun aob-turn-begin (s)
+  "Start S's turn clock; return the stamp that owns it."
+  (let ((stamp (float-time)))
+    (aob-session-put s :turn-start stamp)
+    (aob-session-put s :turn-cost nil)
+    (unless (timerp aob--clock-timer)
+      (setq aob--clock-timer (run-with-timer 1 1 #'aob--clock-tick)))
+    stamp))
+
+(defun aob-turn-end (s &optional stamp)
+  "Stop the turn clock S started at STAMP; return the seconds it ran.
+An answer to a turn a newer one has already replaced adds only the time
+before that newer turn began, so no second is counted twice."
+  (let* ((live (aob-session-ref s :turn-start))
+         (stamp (or stamp live))
+         (now (float-time)))
+    (when (and stamp live)
+      (let ((own (eql stamp live)))
+        (aob-session-put s :work-secs
+                         (+ (or (aob-session-ref s :work-secs) 0)
+                            (max 0 (- (if own now live) stamp))))
+        (when own
+          (aob-session-put s :turn-start nil)
+          (aob-session-put s :turn-secs (- now stamp)))
+        (run-hook-with-args 'aob-meter-change-hook s)
+        (- now stamp)))))
+
+(defun aob-session-turn-secs (s)
+  "Seconds S's running turn has taken so far, or nil between turns."
+  (when-let* ((start (aob-session-ref s :turn-start)))
+    (- (float-time) start)))
+
+(defun aob-session-work-secs (s)
+  "Seconds S has spent in turns, the running one included."
+  (+ (or (aob-session-ref s :work-secs) 0) (or (aob-session-turn-secs s) 0)))
+
+(defun aob-session-clock (s &optional with-total)
+  "S's clock: the running turn, marked live, else the total it has worked.
+WITH-TOTAL puts the total after a running turn where there is room."
+  (if-let* ((secs (aob-session-turn-secs s)))
+      (concat (aob-duration-short secs) "…"
+              (when with-total
+                (concat " / " (aob-duration-short (aob-session-work-secs s)))))
+    (let ((total (aob-session-work-secs s)))
+      (and (> total 0) (aob-duration-short total)))))
+
+(defun aob--clock-tick ()
+  (let ((running nil))
+    (dolist (s (aob-sessions))
+      (when (aob-session-ref s :turn-start)
+        (setq running t)
+        (let ((label (aob-session-clock s)))
+          (unless (equal label (aob-session-ref s :clock-shown))
+            (aob-session-put s :clock-shown label)
+            (run-hook-with-args 'aob-meter-change-hook s)))))
+    (unless running
+      (cancel-timer aob--clock-timer)
+      (setq aob--clock-timer nil))))
+
+(defun aob--clock-on-state (s _old new)
+  (when (memq new '(idle done dead failed))
+    (aob-turn-end s)))
+
+(add-hook 'aob-state-change-hook #'aob--clock-on-state)
+
+(defun aob-usage-note-cost (s amount &optional currency autonomous)
+  "Take AMOUNT, S's running cost as the agent reports it, in CURRENCY.
+The figure is cumulative and falls back when the agent's own count
+restarts; a fall banks what came before.  What it grew by counts toward
+the running turn unless AUTONOMOUS work the agent did on its own spent
+it.  A first figure for a conversation resumed from disk carries turns
+from before, so it is no turn's own, and so is a fork's.  A zero says
+nothing: a crashed or failed start reports one before the count goes on."
+  (when (and (numberp amount) (> amount 0))
+    (let* ((prev (aob-session-ref s :cost-reading))
+           (grew (cond ((null prev)
+                        (unless (or (aob-session-ref s :restored-by)
+                                    (aob-session-ref s :cost-inherited))
+                          amount))
+                       ((< amount prev)
+                        (aob-session-put s :cost-banked
+                                         (+ (or (aob-session-ref s :cost-banked) 0) prev))
+                        amount)
+                       (t (- amount prev)))))
+      (aob-session-put s :cost-reading amount)
+      (when currency (aob-session-put s :cost-currency currency))
+      (when (and grew (not autonomous) (aob-session-ref s :turn-start))
+        (aob-session-put s :turn-cost (+ (or (aob-session-ref s :turn-cost) 0) grew)))
+      (run-hook-with-args 'aob-meter-change-hook s))))
+
+(defun aob-session-cost (s)
+  "What S has cost so far, as the agent counts it, or nil when it never said."
+  (when-let* ((reading (aob-session-ref s :cost-reading)))
+    (+ reading (or (aob-session-ref s :cost-banked) 0))))
+
+(defun aob-usage-note-turn (s usage)
+  "Add one turn's token USAGE, as the prompt response reports it, to S's totals."
+  (dolist (k '(:inputTokens :outputTokens :cachedReadTokens
+               :cachedWriteTokens :thoughtTokens :totalTokens))
+    (when-let* ((n (plist-get usage k)))
+      (when (numberp n)
+        (aob-session-put s :tokens
+                         (plist-put (aob-session-ref s :tokens) k
+                                    (+ n (or (plist-get (aob-session-ref s :tokens) k) 0)))))))
+  (aob-session-put s :turns (1+ (or (aob-session-ref s :turns) 0)))
+  (run-hook-with-args 'aob-meter-change-hook s))
+
+(defun aob-session-spend (s)
+  "S's spend in a word: its cost when the agent reports one, else its tokens."
+  (let ((cost (aob-session-cost s)))
+    (if (and cost (> cost 0))
+        (aob-cost-short cost (aob-session-ref s :cost-currency))
+      (when-let* ((n (plist-get (aob-session-ref s :tokens) :totalTokens))
+                  ((> n 0)))
+        (concat (aob-tokens-short n) " tok")))))
+
+(defun aob-turn-meter (ev &optional currency)
+  "The muted tail of stop event EV: how long the turn took and what it spent."
+  (let ((out (plist-get (plist-get ev :usage) :outputTokens))
+        (secs (plist-get ev :secs))
+        (cost (plist-get ev :cost)))
+    (mapconcat #'identity
+               (delq nil (list (and secs (aob-duration-short secs t))
+                               (and out (> out 0) (concat (aob-tokens-short out) " out"))
+                               (and cost (> cost 0) (aob-cost-short cost currency))))
+               " · ")))
+
+(defun aob-usage-describe (s)
+  "S's spend, whole: time, every token count the agent sent, and cost."
+  (let ((tk (aob-session-ref s :tokens)))
+    (mapconcat
+     #'identity
+     (delq nil
+           (list (format "%s: %d turn%s in %s" (aob-session-name s)
+                         (or (aob-session-ref s :turns) 0)
+                         (if (eql (aob-session-ref s :turns) 1) "" "s")
+                         (aob-duration-short (aob-session-work-secs s) t))
+                 (when tk
+                   (mapconcat
+                    #'identity
+                    (delq nil
+                          (mapcar (lambda (kv)
+                                    (when-let* ((n (plist-get tk (car kv))) ((> n 0)))
+                                      (concat (aob-tokens-short n) " " (cdr kv))))
+                                  '((:inputTokens . "in") (:outputTokens . "out")
+                                    (:thoughtTokens . "thought")
+                                    (:cachedReadTokens . "cache read")
+                                    (:cachedWriteTokens . "cache write")
+                                    (:totalTokens . "total"))))
+                    " · "))
+                 (when-let* ((cost (aob-session-cost s)))
+                   (aob-cost-short cost (aob-session-ref s :cost-currency)))
+                 (when-let* ((ctx (aob-session-ctx s))) (concat ctx " ctx"))))
+     " · ")))
 
 (defun aob-session-cwd (s)
   "Where S actually works: its worktree when isolated, else the project.
@@ -352,6 +567,24 @@ fleet has no session of its own and follows the global tick."
   (interactive)
   (aob--render-all))
 
+(defun aob--line-start (n)
+  "Where line N of this buffer begins, or the last line when it has fewer."
+  (save-excursion
+    (goto-char (point-min))
+    (forward-line (1- n))
+    (when (and (eobp) (bolp) (not (bobp))) (forward-line -1))
+    (point)))
+
+(defun aob--redraw-keeping-lines (redraw)
+  "Call REDRAW, then put point and each window on this buffer back on its line."
+  (let ((here (line-number-at-pos))
+        (wins (mapcar (lambda (w) (cons w (line-number-at-pos (window-point w))))
+                      (get-buffer-window-list nil nil t))))
+    (prog1 (funcall redraw)
+      (dolist (w wins)
+        (set-window-point (car w) (aob--line-start (cdr w))))
+      (goto-char (aob--line-start here)))))
+
 ;;; Backends — a symbol mapped to a plist of verb implementations
 
 (defvar aob--backends nil)
@@ -432,15 +665,15 @@ tool or a workflow put there is nobody standing at the keyboard.")
   (aob--call s :prompt text attachments))
 
 (defun aob-cancel (s)
-  "Cancel S's current turn; press c again (cc) to fully cancel.
-The first c stops the turn — queued prompts survive.  A second,
-consecutive c drops the queue too, so nothing flushes back in.  Work
+  "Cancel S's current turn; cancel again right away to fully cancel.
+The first cancel stops the turn — queued prompts survive.  A second,
+consecutive one drops the queue too, so nothing flushes back in.  Work
 already produced always survives."
   (interactive (list (aob-target)))
   (let ((full (eq last-command 'aob-cancel)))
     (aob--call s :cancel full)
     (message "aob: %s %s" (aob-session-name s)
-             (if full "fully cancelled — queue dropped" "cancelled (cc to drop queue)"))))
+             (if full "fully cancelled — queue dropped" "cancelled (again to drop queue)"))))
 
 (defun aob-interject (s text)
   "Say TEXT to S now, into the turn it is running when it takes one."
@@ -528,9 +761,10 @@ keeps writing into the trace it was already writing into."
                         (completing-read-multiple prompt labels))
                   content)
           (let ((ans (completing-read prompt labels)))
-            (push (if (member ans labels)
-                      (cons (plist-get q :key) ans)
-                    (cons (concat (plist-get q :key) "_custom") ans))
+            (push (cons (if (member ans labels)
+                            (plist-get q :key)
+                          (or (plist-get q :custom) (plist-get q :key)))
+                        ans)
                   content)))))
     (aob--call s :resolve d (nreverse content))))
 
@@ -713,6 +947,10 @@ focus unless NO-FOCUS.  Returns the window it stands in."
                      :respect-header-line t
                        :respect-mode-line t
                        :accept-focus t))))
+        ;; the box stands over the foot of the frame, and the end of the
+        ;; conversation under it is what the draft answers
+        (when (fboundp 'aob-trace-uncover-all)
+          (with-selected-frame parent (aob-trace-uncover-all)))
         (unless no-focus
           (select-frame-set-input-focus frame)
           (select-window (frame-root-window frame)))
@@ -1457,6 +1695,37 @@ Proceed based on it."
 (defvar aob-modeline-string "")
 (put 'aob-modeline-string 'risky-local-variable t)
 
+(defface aob-modeline-blocked '((t :inherit error :weight bold))
+  "Agents waiting on you." :group 'aob)
+(defface aob-modeline-working '((t :foreground "#C0A36E"))
+  "Agents at work." :group 'aob)
+(defface aob-modeline-sub '((t :foreground "#8A9A7B"))
+  "Delegated agents at work." :group 'aob)
+(defface aob-modeline-queued '((t :inherit shadow))
+  "Messages waiting for a turn." :group 'aob)
+
+(declare-function nerd-icons-mdicon "nerd-icons")
+(declare-function ygg-aob-switch "layer-aob")
+
+(defvar aob-modeline--map
+  (let ((map (make-sparse-keymap)))
+    (define-key map [mode-line mouse-1]
+                (lambda () (interactive)
+                  (when (fboundp 'ygg-aob-switch)
+                    (call-interactively #'ygg-aob-switch))))
+    map))
+
+(defun aob--modeline-pill (icon fallback n face tip)
+  (propertize
+   (concat "  "
+           (or (and (require 'nerd-icons nil t)
+                    (ignore-errors (nerd-icons-mdicon icon :face face)))
+               (propertize fallback 'face face))
+           (propertize (format " %d" n) 'face face))
+   'help-echo (format "%d %s — mouse-1: switch agent" n tip)
+   'mouse-face 'mode-line-highlight
+   'local-map aob-modeline--map))
+
 (defun aob--modeline-refresh (&rest _)
   (let ((blocked 0) (working 0) (queued 0) (subs 0))
     (dolist (s (aob-sessions))
@@ -1471,13 +1740,18 @@ Proceed based on it."
     (setq aob-modeline-string
           (concat
            (when (> blocked 0)
-             (propertize (format " ■%d" blocked) 'face 'error))
+             (aob--modeline-pill "nf-md-hand_back_right_outline" "■" blocked
+                                 'aob-modeline-blocked "waiting on you"))
            (when (> working 0)
-             (propertize (format " ●%d" working) 'face 'warning))
+             (aob--modeline-pill "nf-md-robot_outline" "●" working
+                                 'aob-modeline-working "agents working"))
            (when (> subs 0)
-             (propertize (format " └%d" subs) 'face 'warning))
+             (aob--modeline-pill "nf-md-source_branch" "└" subs
+                                 'aob-modeline-sub "subagents working"))
            (when (> queued 0)
-             (propertize (format " »%d" queued) 'face 'shadow))))
+             (aob--modeline-pill "nf-md-tray_full" "»" queued
+                                 'aob-modeline-queued "messages queued"))
+           (when (> (+ blocked working subs queued) 0) "  ")))
     (force-mode-line-update t)))
 
 (define-minor-mode aob-modeline-mode
@@ -1503,17 +1777,9 @@ Proceed based on it."
 
 (defvar aob-object-map
   (let ((map (make-sparse-keymap)))
-    ;; j/k stay motions everywhere — cancel lives on c, never on k
-    (define-key map "j" #'next-line)
-    (define-key map "k" #'previous-line)
-    (define-key map "p" #'aob-compose)
+    ;; a letter here shadows a motion or operator; the other verbs live
+    ;; under the host's localleader
     (define-key map "i" #'aob-steer)
-    (define-key map "c" #'aob-cancel)
-    (define-key map "K" #'aob-kill-session)
-    (define-key map "r" #'aob-resolve)
-    (define-key map "R" #'aob-rename-session)
-    (define-key map "E" #'aob-dired)
-    (define-key map "g" #'aob-rerender)
     (define-key map (kbd "RET") #'aob-focus)
     map)
   "Verbs shared by every buffer that renders sessions.")

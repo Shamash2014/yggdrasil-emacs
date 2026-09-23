@@ -150,23 +150,19 @@ is started by hand."
 (defcustom ygg-agent-instructions
   "## This editor (aob)
 
-You are running inside Emacs. Its aob MCP server is how you work with
-the editor, and you must use it wherever it covers the job.
+You are running inside Emacs. Plan and delegate with your own built-in
+tools: your todo or plan tool, and your subagent tool (Task or Agent).
+The editor mirrors both. Your plan becomes this session's tasks.md, and
+each subagent gets a trace of its own. When the user changes that list,
+the changes reach you as a note with the next message.
 
-- Delegation: spawn subagents with subagent_spawn, never with the
-  built-in Task or Agent tool. Follow them with subagent_list and
-  subagent_status, stop them with subagent_kill. A subagent spawned this
-  way is a session of its own in the editor: visible, steerable, and not
-  spending your context.
-- Code questions: ask the editor before reaching for grep or a shell.
-  xref_references and xref_apropos for who calls what, imenu_symbols for
-  a file's shape, treesit_info for the parse, diagnostics for what a
-  checker says about an open file.
+Use the aob MCP server only for what your own tools cannot do:
+
+- Code questions: xref_references and xref_apropos for who calls what,
+  imenu_symbols for a file's shape, treesit_info for the parse,
+  diagnostics for what a checker says about an open file.
 - Other conversations: session_list gives every conversation open here
-  with its id, state, name and folder; session_say puts words into one,
-  into the turn it is running where its agent takes steering, queued for
-  its next turn where it does not. Address a session by its id: a name
-  that fits two conversations is refused rather than guessed.
+  with its id; session_say puts words into one. Address it by its id.
 - tool_names lists everything the server offers."
   "What every session started from here is told about this editor.
 It goes out in the request that opens the session, appended to the

@@ -76,33 +76,38 @@
                                  (mapcar #'car aob-deliver-destinations)
                                  nil t)))
      (list s (cdr (assoc pick aob-deliver-destinations)))))
-  (if (eq where 'trace)
-      (progn (aob-session-put s :deliver nil)
-             (message "aob: answers stay in the trace"))
-    (aob-session-put
-     s :deliver
-     (list :where where
-           :buffer (current-buffer)
-           :beg (copy-marker (if (and (eq where 'region) (use-region-p))
-                                 (region-beginning)
-                               (point)))
-           :end (and (eq where 'region) (use-region-p)
-                     (copy-marker (region-end)))))
-    (message "aob: next answer goes %s"
-             (car (rassq where aob-deliver-destinations)))))
+  (aob-session-put s :deliver (aob-deliver--plan where))
+  (message (if (eq where 'trace) "aob: answers stay in the trace" "aob: next answer goes %s")
+           (car (rassq where aob-deliver-destinations))))
+
+(defun aob-deliver--plan (where)
+  "Where WHERE points from here and now, or nil for the trace alone."
+  (unless (eq where 'trace)
+    (list :where where
+          :buffer (current-buffer)
+          :beg (copy-marker (if (and (eq where 'region) (use-region-p))
+                                (region-beginning)
+                              (point)))
+          :end (and (eq where 'region) (use-region-p)
+                    (copy-marker (region-end))))))
 
 ;;;###autoload
-(defun aob-ask-to (s where text)
-  "Ask S for TEXT and put the answer WHERE."
+(defun aob-ask-to (s where &optional text)
+  "Ask S for TEXT and put the answer WHERE.
+Without TEXT the question is written in a draft, and asked when it is sent."
   (interactive
    (let* ((s (aob-target))
           (pick (completing-read "Answer goes: "
                                  (mapcar #'car aob-deliver-destinations)
-                                 nil t))
-          (where (cdr (assoc pick aob-deliver-destinations))))
-     (list s where (read-string (format "%s » " (aob-session-name s))))))
-  (aob-deliver-to s where)
-  (aob-prompt s text nil))
+                                 nil t)))
+     (list s (cdr (assoc pick aob-deliver-destinations)))))
+  (let* ((plan (aob-deliver--plan where))
+         (ask (lambda (words _atts)
+                (aob-session-put s :deliver plan)
+                (aob-prompt s words nil))))
+    (if text
+        (funcall ask text nil)
+      (aob-compose ask nil (format "ask:%s" (aob-session-name s))))))
 
 (provide 'aob-deliver)
 ;;; aob-deliver.el ends here

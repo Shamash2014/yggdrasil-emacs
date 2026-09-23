@@ -521,5 +521,88 @@ works and every other preset is something added to one."
                (when (ygg-preset-local-p d) "· local")))
    " "))
 
+;;; Editing — a preset is a file, and this opens the one that wins
+
+(defvar ygg-aob--preset-cache)
+(declare-function project-root "project" (project))
+
+(defun ygg-preset--root ()
+  "The checkout the presets are read for: the draft's, else this buffer's."
+  (or (bound-and-true-p aob-compose--dir)
+      (when-let* (((fboundp 'project-current))
+                  (pr (project-current nil)))
+        (project-root pr))
+      default-directory))
+
+(defun ygg-preset--scope (file root)
+  "Where FILE sits, as the word for it: project, user or config."
+  (let ((file (expand-file-name file)))
+    (cond ((and root (string-prefix-p (expand-file-name ygg-preset-project-directory root) file))
+           "project")
+          ((string-prefix-p (expand-file-name ygg-preset-user-directory) file) "user")
+          (t "config"))))
+
+(defun ygg-preset--read-name (prompt root)
+  "Ask for a preset name, offering ROOT's presets with where each is written."
+  (let* ((ps (ygg-preset-list root))
+         (ann (mapcar (lambda (d)
+                        (cons (ygg-preset-name d)
+                              (concat "  "
+                                      (mapconcat (lambda (f) (ygg-preset--scope f root))
+                                                 (ygg-preset-files d) "+")
+                                      "  "
+                                      (or (ygg-preset-field d :description) ""))))
+                      ps)))
+    (completing-read prompt
+                     (lambda (str pred action)
+                       (if (eq action 'metadata)
+                           `(metadata (annotation-function
+                                       . ,(lambda (c) (cdr (assoc c ann)))))
+                         (complete-with-action action (mapcar #'car ann) str pred))))))
+
+(defun ygg-preset--open (file)
+  "Visit FILE, and forget the presets compose has read once it is saved."
+  (find-file file)
+  (add-hook 'after-save-hook
+            (lambda () (when (boundp 'ygg-aob--preset-cache)
+                         (clrhash ygg-aob--preset-cache)))
+            nil t))
+
+;;;###autoload
+(defun ygg-preset-edit (name)
+  "Open the file preset NAME is written in, the one that wins.
+A preset folded from several places opens the most particular of them,
+the project's before yours before the config's.  A name no preset has
+starts a new one."
+  (interactive (list (ygg-preset--read-name "Edit preset: " (ygg-preset--root))))
+  (let* ((root (ygg-preset--root))
+         (d (seq-find (lambda (x) (equal (ygg-preset-name x) name))
+                      (ygg-preset-list root))))
+    (if d
+        (ygg-preset--open (car (last (ygg-preset-files d))))
+      (ygg-preset-new name))))
+
+;;;###autoload
+(defun ygg-preset-new (name &optional scope)
+  "Start preset NAME in SCOPE: this project, your own, or the config's."
+  (interactive (list (read-string "New preset: ")))
+  (let* ((root (ygg-preset--root))
+         (scope (or scope (completing-read "Where: " '("project" "user" "config") nil t
+                                           nil nil "project")))
+         (dir (pcase scope
+                ("project" (expand-file-name ygg-preset-project-directory root))
+                ("user" ygg-preset-user-directory)
+                (_ ygg-preset-config-directory)))
+         (slug (replace-regexp-in-string "[^a-z0-9-]+" "-" (downcase (string-trim name))))
+         (file (expand-file-name (concat slug ".md") dir)))
+    (when (string-empty-p slug) (user-error "preset: a name is needed"))
+    (make-directory dir t)
+    (unless (file-exists-p file)
+      (with-temp-file file
+        (insert "---\nname: " slug "\ndescription: \n---\n\n# " name "\n\n")))
+    (ygg-preset--open file)
+    (goto-char (point-min))
+    (when (re-search-forward "^description: " nil t) (end-of-line))))
+
 (provide 'ygg-preset)
 ;;; ygg-preset.el ends here

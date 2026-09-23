@@ -28,10 +28,15 @@
 (declare-function aob-session-project "aob" (s))
 (declare-function aob-session-state "aob" (s))
 (declare-function aob-session-p "aob" (x))
+(declare-function ygg-todo-session-file "ygg-todo" (s))
+(declare-function ygg-todo-progress "ygg-todo" (file))
 (declare-function ygg-aob-session-subagents "layer-aob" (s))
+(declare-function ygg-aob-goto-space "layer-aob" (s))
 (declare-function aob-session-id "aob" (s))
 (declare-function aob-session-events "aob" (s))
 (declare-function aob-session-started "aob" (s))
+(declare-function aob-session-clock "aob" (s))
+(declare-function aob-session-spend "aob" (s))
 (defvar aob-trace--session-id)
 
 (defvar ygg-projects--on-screen nil
@@ -71,7 +76,7 @@
   "The projects sidebar."
   :group 'tools :prefix "ygg-projects-")
 
-(defcustom ygg-projects-width 34
+(defcustom ygg-projects-width 40
   "Columns the projects sidebar takes."
   :type 'natnum :group 'ygg-projects)
 
@@ -593,25 +598,14 @@ scan already learned not to do."
              (mapcar
               (lambda (s)
                 ;; what it sent goes under it, marked rather than
-                ;; indented: a row this narrow has no columns to spare.
-                ;; A spawned one is a session of its own; a reported one
-                ;; is a plist the agent mentioned and nothing can be
-                ;; done with
+                ;; indented: a row this narrow has no columns to spare
                 (cons (ygg-projects--session-ts s)
                       (append
                        (list (cons (aob-session-name s) s))
                        (mapcar (lambda (kid)
                                  (cons (format "└ %s" (aob-session-name kid)) kid))
                                (and (fboundp 'aob-subagent-children)
-                                    (aob-subagent-children s)))
-                       (mapcar (lambda (sub)
-                                 (cons (format "└ %s"
-                                               (or (plist-get sub :title)
-                                                   (plist-get sub :name)
-                                                   "subagent"))
-                                       (cons s sub)))
-                               (and (fboundp 'ygg-aob-session-subagents)
-                                    (ygg-aob-session-subagents s))))))
+                                    (aob-subagent-children s))))))
               live))
             ;; ended, but the conversation is still there to pick up
             (past (and ygg-projects-show-past
@@ -684,7 +678,13 @@ A running conversation says what it is doing; one that ended says how
 long ago, since a list of six conversations from today is told apart
 by when, not by that they were all today."
   (cond ((and (fboundp 'aob-session-p) (aob-session-p payload))
-         (format "%s" (aob-session-state payload)))
+         (if-let* (((not (memq (aob-session-state payload) '(dead failed))))
+                   ((fboundp 'ygg-todo-session-file))
+                   (file (ygg-todo-session-file payload))
+                   (progress (ygg-todo-progress file)))
+             (format "%d/%d %s" (car progress) (cdr progress)
+                     (aob-session-state payload))
+           (format "%s" (aob-session-state payload))))
         ((and (consp payload) (proper-list-p payload) (plist-get payload :archived))
          "archived")
         ((and (consp payload) (eq (car payload) 'docker))
@@ -700,6 +700,29 @@ by when, not by that they were all today."
              "ended"))
         (t "")))
 
+(defun ygg-projects--session-meter (s)
+  "S's clock and spend, or nil before it has either."
+  (when (fboundp 'aob-session-clock)
+    (let ((parts (delq nil (list (aob-session-clock s) (aob-session-spend s)))))
+      (and parts (mapconcat #'identity parts " ")))))
+
+(defun ygg-projects--badge (payload)
+  "PAYLOAD's badge, drawn: a session's meter muted beside its state.
+The state is the colour of the state: green at work, orange waiting on
+you, grey once there is nothing to wait for.  Working and idle are said
+by the dot and the running clock already, so a meter stands in for them."
+  (let ((state (ygg-projects--entry-badge payload)))
+    (if (not (and (fboundp 'aob-session-p) (aob-session-p payload)))
+        (propertize state 'font-lock-face 'ygg-projects-count)
+      (let ((meter (ygg-projects--session-meter payload))
+            (said (propertize state 'font-lock-face
+                              (ygg-projects--session-dot payload))))
+        (cond ((null meter) said)
+              ((member state '("working" "idle"))
+               (propertize meter 'font-lock-face 'ygg-projects-count))
+              (t (concat (propertize meter 'font-lock-face 'ygg-projects-count)
+                         " " said)))))))
+
 (defcustom ygg-projects-entry-indent 4
   "Columns an entry is set in from the left.
 A panel is narrow: every column spent on indentation is a column the
@@ -711,7 +734,7 @@ name does not get."
 The badge is the width the name cannot have, so the name is measured
 against what is left and carries on underneath rather than being cut
 where nothing can be read."
-  (let* ((badge (ygg-projects--entry-badge payload))
+  (let* ((badge (ygg-projects--badge payload))
          ;; a rail down the indent, the way a tree says depth without
          ;; spending a column on saying nothing
          (head (concat (make-string (max 0 (- ygg-projects-entry-indent 2)) ?\s)
@@ -738,14 +761,7 @@ where nothing can be read."
      (propertize (concat head
                          (propertize first 'font-lock-face 'ygg-projects-entry)
                          (ygg-projects--right
-                          ;; the badge is the state, so it is the colour of
-                          ;; the state: green at work, orange waiting on
-                          ;; you, grey once there is nothing to wait for
-                          (propertize badge 'font-lock-face
-                                      (if (and (fboundp 'aob-session-p)
-                                               (aob-session-p payload))
-                                          (ygg-projects--session-dot payload)
-                                        'ygg-projects-count))
+                          badge
                           ;; the row is as tall as it needs, unless its
                           ;; name carries on below, where the air belongs
                           (unless (and rest (not (string-empty-p rest)))
@@ -1399,17 +1415,15 @@ row was picked from."
     (ygg-projects--keeping
     (if entry
         (pcase row
-          ;; a session is a struct, a delegation the pair it came from
           ('agents
            (cond
-            ;; a persisted conversation is a plist; a live one a struct,
-            ;; and a delegation the pair it came from
+            ;; a persisted conversation is a plist; a live one a struct.
             ;; reading what was said costs nothing; resuming starts an
             ;; agent, so that is a different key
             ((and (consp entry) (plist-member entry :acp-id))
              (aob-transcript-view entry))
-            ((consp entry) (aob-subagents (car entry)))
-            (t (aob-trace entry))))
+            (t (when (fboundp 'ygg-aob-goto-space) (ygg-aob-goto-space entry))
+               (aob-trace entry))))
           ('commands (if (fboundp 'ygg-project-commands-run)
                          (ygg-project-commands-run entry)
                        (let ((default-directory root))
@@ -1465,11 +1479,9 @@ row was picked from."
     (define-key map "k" #'ygg-projects-prev)
     (define-key map "J" #'ygg-projects-next-project)
     (define-key map "K" #'ygg-projects-prev-project)
-    (define-key map "n" #'ygg-projects-next)
-    (define-key map "p" #'ygg-projects-prev)
-    ;; g is the goto prefix everywhere else, so it is one here too and
-    ;; the rescan moves to r
-    (define-key map "gg" #'ygg-projects-first)
+    ;; g is the goto prefix everywhere else, so it is one here too
+    (define-key map "g g" #'ygg-projects-first)
+    (define-key map "g r" #'ygg-projects-rescan)
     (define-key map "G" #'ygg-projects-last)
     ;; the movements normal state has, answering in rows: a panel one
     ;; column wide has nothing to say to a character left or right, so
@@ -1480,7 +1492,6 @@ row was picked from."
     (define-key map (kbd "C-u") #'ygg-projects-up-half)
     (define-key map "}" #'ygg-projects-next-project)
     (define-key map "{" #'ygg-projects-prev-project)
-    (define-key map "r" #'ygg-projects-rescan)
     (define-key map "+" #'project-switch-project)
     (define-key map "A" #'ygg-projects-add)
     (define-key map "I" #'ygg-projects-import)
@@ -1613,10 +1624,12 @@ turns while nobody is typing."
 (defvar aob-session-created-hook)
 (defvar aob-session-removed-hook)
 (defvar aob-state-change-hook)
+(defvar aob-meter-change-hook)
 (with-eval-after-load 'aob
   (add-hook 'aob-session-created-hook #'ygg-projects--redraw-soon)
   (add-hook 'aob-session-removed-hook #'ygg-projects--redraw-soon)
-  (add-hook 'aob-state-change-hook #'ygg-projects--redraw-soon))
+  (add-hook 'aob-state-change-hook #'ygg-projects--redraw-soon)
+  (add-hook 'aob-meter-change-hook #'ygg-projects--redraw-soon))
 
 (defun ygg-projects-close ()
   "Close the sidebar, and mean it: it stays closed until you open it."

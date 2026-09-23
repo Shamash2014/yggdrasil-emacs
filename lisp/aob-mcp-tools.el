@@ -339,7 +339,7 @@ and never reaches the user's Emacs."
        "no tools registered"))))
 
 
-;;; Delegation — the caller's own subagents
+;;; Other conversations
 
 ;; Who is calling rides in the URL as a token, because a session has no
 ;; id until session/new answers and the server list is part of that call.
@@ -349,64 +349,6 @@ and never reaches the user's Emacs."
 (defun aob-mcp-tools--parent-form (token)
   "A form yielding the session TOKEN was spawned for, or nil."
   `(and (fboundp 'aob-mcp-host-session) (aob-mcp-host-session ,token)))
-
-(defun aob-mcp-tools--session-form (id)
-  "A form yielding the session ID names, or nil."
-  `(and (fboundp 'aob-session-get) (aob-session-get ,id)))
-
-(aob-mcp-deftool
- :name "subagent_spawn"
- :description "Delegate work to a new agent of your own, in this project.
-Returns the new subagent's id straight away, before it has connected —
-poll subagent_status with that id to see how it is getting on. The
-subagent is a session in its own right: it has its own trace and its own
-permissions, and it is stopped when you are stopped."
- :args '((:name "intent" :type string
-          :description "what the subagent is being asked to do; its first turn")
-         (:name "agent" :type string :optional t
-          :description "which agent to use; yours by default")
-         (:name "dir" :type string :optional t
-          :description "directory to work in; yours by default")
-         (:name "model" :type string :optional t
-          :description "model for the subagent; the agent's default otherwise"))
- :handler
- (lambda (args conn id)
-   (let ((intent (plist-get args :intent)))
-     (if (or (null intent) (string-empty-p (string-trim intent)))
-         "a subagent needs something to do: pass intent"
-       (aob-mcp-relay
-        conn id
-        `(let ((parent ,(aob-mcp-tools--parent-form aob-mcp-session)))
-           (cond
-            ((not (fboundp 'aob-subagent-spawn)) (list "no subagent support here"))
-            ((null parent) (list "no calling session: cannot tell who is delegating"))
-            (t (let ((kid (aob-subagent-spawn parent ,intent
-                                              ,(plist-get args :agent)
-                                              ,(plist-get args :dir)
-                                              ,(plist-get args :model))))
-                 (if kid
-                     (list (format "spawned %s" (aob-session-id kid))
-                           (format "name %s" (aob-session-name kid)))
-                   (list "the spawn returned nothing")))))))))))
-
-(aob-mcp-deftool
- :name "subagent_list"
- :description "The subagents you have sent, with their ids and states.
-Cheap: reads the session registry, opens nothing."
- :args nil
- :handler
- (lambda (_args conn id)
-   (aob-mcp-relay
-    conn id
-    `(let ((parent ,(aob-mcp-tools--parent-form aob-mcp-session)))
-       (cond
-        ((not (fboundp 'aob-subagent-children)) (list "no subagent support here"))
-        ((null parent) (list "no calling session"))
-        (t (or (mapcar (lambda (k)
-                         (format "%s  %s  %s" (aob-session-id k)
-                                 (aob-session-state k) (aob-session-name k)))
-                       (aob-subagent-children parent))
-               (list "none sent yet"))))))))
 
 (aob-mcp-deftool
  :name "session_list"
@@ -430,8 +372,8 @@ else's: id, state, name and folder. The ids are what session_say takes."
 
 (aob-mcp-deftool
  :name "session_say"
- :description "Say something to another conversation in this editor —
-a peer, not only a subagent you sent. It lands in that conversation's
+ :description "Say something to another conversation in this editor.
+It lands in that conversation's
 turn where its agent takes steering, and is queued for its next turn
 where it does not. Returns which of the two happened. Use session_list
 for the id."
@@ -491,51 +433,155 @@ for the id."
                                                       (aob-session-state s))))
                (error (list (format "%s would not take it: %s"
                                     (aob-session-name s)
-                                    (error-message-string err)))))))))))))) 
+                                    (error-message-string err))))))))))))))
+
+;;; todo list
 
 (aob-mcp-deftool
- :name "subagent_status"
- :description "How one subagent is getting on: state, directory, its own
-subagents, and the last thing it said."
+ :name "todo_write"
+ :description "Create a new todo list (a tasks.md file the editor keeps) for this session, and make it the session's current list. Returns its path."
+ :args '((:name "title" :type string :optional t
+          :description "Title for the list; defaults to blank.")
+         (:name "slug" :type string :optional t
+          :description "Short name, used in the path; defaults from the title.")
+         (:name "sections" :type string :optional t
+          :description "JSON array of {name, items: [text]}, e.g. [{\"name\": \"Now\", \"items\": [\"item 1\"]}]"))
+ :handler
+ (lambda (args conn id)
+   (let* ((title (let ((v (plist-get args :title))) (and v (not (string-empty-p v)) v)))
+          (slug (let ((v (plist-get args :slug))) (if (and v (not (string-empty-p v))) v (or title "tasks"))))
+          (sections-json (plist-get args :sections))
+          (sections
+           (if sections-json
+               (condition-case _err
+                   (let* ((parsed (json-parse-string sections-json
+                                                      :object-type 'plist
+                                                      :array-type 'list))
+                          (result nil))
+                     (dolist (item parsed (nreverse result))
+                       (let ((name (plist-get item :name))
+                             (items (plist-get item :items)))
+                         (push (cons name items) result))))
+                 (error 'bad))
+             nil)))
+     (if (eq sections 'bad)
+         "sections is not a JSON array of {name, items}; nothing was created"
+     (aob-mcp-relay
+      conn id
+      `(condition-case err
+           (let* ((ygg-todo-by 'agent)
+                  (dir (or (ygg-todo-session-dir ,(aob-mcp-tools--parent-form aob-mcp-session))
+                           (error "no calling session: cannot tell whose list this is")))
+                  (path (ygg-todo-create dir ,slug ,title ',sections)))
+             (ygg-todo-session-bind ,(aob-mcp-tools--parent-form aob-mcp-session) path)
+             (split-string (ygg-todo-format path) "\n"))
+         (error (list (error-message-string err)))))))))
+
+(aob-mcp-deftool
+ :name "todo_list"
+ :description "The current todo list of this session with each item's id, section and state; call it before changing items."
+ :args '((:name "file" :type string :optional t
+          :description "Absolute path of another list to read; the session's current list if not given.")
+         (:name "all" :type string :optional t
+          :description "\"true\" to spell out finished items; otherwise they are listed by id only."))
+ :handler
+ (lambda (args conn id)
+   (aob-mcp-relay
+    conn id
+    `(condition-case err
+         (let* ((file (or ,(plist-get args :file)
+                         (ygg-todo-session-file ,(aob-mcp-tools--parent-form aob-mcp-session)))))
+           (if (null file)
+               (list "no todo list yet: create one with todo_write")
+             (progn
+               (ygg-todo-note-read ,(aob-mcp-tools--parent-form aob-mcp-session) file)
+               (split-string (ygg-todo-format file ,(equal (plist-get args :all) "true")) "\n"))))
+       (error (list (error-message-string err)))))))
+
+(aob-mcp-deftool
+ :name "todo_add"
+ :description "Add an item to a list and return it as [done] id text plus the list's path."
+ :args '((:name "text" :type string
+          :description "The item text.")
+         (:name "section" :type string :optional t
+          :description "The section name; the default section if not given.")
+         (:name "file" :type string :optional t
+          :description "Absolute path of the list; the session's current list if not given."))
+ :handler
+ (lambda (args conn id)
+   (aob-mcp-relay
+    conn id
+    `(condition-case err
+         (let* ((file (or ,(plist-get args :file)
+                         (ygg-todo-session-file ,(aob-mcp-tools--parent-form aob-mcp-session))))
+                (ygg-todo-by 'agent)
+                (item (ygg-todo-add file ,(plist-get args :text)
+                                    ,(plist-get args :section)))
+                (id (plist-get item :id))
+                (text (plist-get item :text))
+                (done (plist-get item :done)))
+           (ignore done text)
+           (list (format "added %s" id)))
+       (error (list (error-message-string err)))))))
+
+(aob-mcp-deftool
+ :name "todo_update"
+ :description "Update an item: mark it done or rewrite its text. At least one of done or text is required. Answers the updated item line."
  :args '((:name "id" :type string
-          :description "the subagent id returned by subagent_spawn"))
+          :description "The item id (e.g., S.1).")
+         (:name "done" :type string :optional t
+          :description "\"true\" to mark done, \"false\" to mark undone.")
+         (:name "text" :type string :optional t
+          :description "New item text; the old text if not given.")
+         (:name "expect" :type string :optional t
+          :description "The item text you last saw, for safety.")
+         (:name "file" :type string :optional t
+          :description "Absolute path of the list; the session's current list if not given."))
  :handler
  (lambda (args conn id)
-   (aob-mcp-relay
-    conn id
-    `(let ((s ,(aob-mcp-tools--session-form (plist-get args :id))))
-       (if (and s (fboundp 'aob-subagent-status))
-           (let ((st (aob-subagent-status s)))
-             (list (format "id %s" (plist-get st :id))
-                   (format "name %s" (plist-get st :name))
-                   (format "state %s" (plist-get st :state))
-                   (format "dir %s" (plist-get st :dir))
-                   (format "children %s"
-                           (or (string-join (plist-get st :children) " ") "none"))
-                   (format "last %s" (plist-get st :last))))
-         (list "no such subagent"))))))
+   (let ((done-str (plist-get args :done))
+         (text (plist-get args :text)))
+     (if (not (or text (member done-str '("true" "false"))))
+         "nothing to change: pass done (\"true\" or \"false\") or text"
+       (aob-mcp-relay
+        conn id
+        `(condition-case err
+             (let* ((file (or ,(plist-get args :file)
+                             (ygg-todo-session-file ,(aob-mcp-tools--parent-form aob-mcp-session))))
+                    (ygg-todo-by 'agent)
+                    (item-id ,(plist-get args :id))
+                    (expect ,(plist-get args :expect))
+                    (item nil))
+               (when ,text
+                 (setq item (ygg-todo-rewrite file item-id ,text expect)
+                       item-id (plist-get item :id)
+                       expect ,text))
+               (when ,(and (member done-str '("true" "false")) t)
+                 (setq item (ygg-todo-set-done file item-id ,(equal done-str "true") expect)))
+               (list (format "%s %s" (plist-get item :id)
+                             (if (plist-get item :done) "done" "open"))))
+           (error (list (error-message-string err)))))))))
 
 (aob-mcp-deftool
- :name "subagent_kill"
- :description "Stop a subagent you sent, and anything it sent in turn.
-Only your own: a session you did not delegate is refused."
- :args '((:name "id" :type string :description "the subagent id to stop"))
+ :name "todo_remove"
+ :description "Remove an item from a list. Answers removed ID."
+ :args '((:name "id" :type string
+          :description "The item id (e.g., S.1).")
+         (:name "expect" :type string :optional t
+          :description "The item text you last saw, for safety.")
+         (:name "file" :type string :optional t
+          :description "Absolute path of the list; the session's current list if not given."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
     conn id
-    `(let ((s ,(aob-mcp-tools--session-form (plist-get args :id)))
-           (parent ,(aob-mcp-tools--parent-form aob-mcp-session)))
-       (cond
-        ((not (fboundp 'aob-subagent-kill)) (list "no subagent support here"))
-        ((null s) (list "no such subagent"))
-        ;; a tool that could stop any session would let one agent reach
-        ;; into another's work
-        ((not (and parent (equal (aob-session-id parent)
-                                 (aob-session-ref s :parent-session))))
-         (list "that subagent is not yours"))
-        (t (aob-subagent-kill s)
-           (list (format "stopped %s and its own" (aob-session-id s)))))))))
+    `(condition-case err
+         (let* ((file (or ,(plist-get args :file)
+                         (ygg-todo-session-file ,(aob-mcp-tools--parent-form aob-mcp-session))))
+                (ygg-todo-by 'agent))
+           (ygg-todo-remove file ,(plist-get args :id) ,(plist-get args :expect))
+           (list (format "removed %s" ,(plist-get args :id))))
+       (error (list (error-message-string err)))))))
 
 (provide 'aob-mcp-tools)
 ;;; aob-mcp-tools.el ends here

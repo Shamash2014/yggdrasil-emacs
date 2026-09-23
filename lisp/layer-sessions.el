@@ -210,7 +210,6 @@ signs and nobody reads a path that way."
 ;; easysession frameset for free; on restore we only reseed the id counter
 ;; so freshly created spaces never collide with restored ones.
 (declare-function ygg-agent-respawn-persisted "layer-agent")
-(declare-function ygg-task-tree-session-select-space "ygg-task-tree")
 
 (defun ygg--agents-respawn-after-load ()
   ;; let the frameset settle before the y-or-n-p respawn offer
@@ -219,7 +218,6 @@ signs and nobody reads a path that way."
 
 (with-eval-after-load 'easysession
   (add-hook 'easysession-after-load-hook #'ygg-space-reseed-ids)
-  (add-hook 'easysession-after-load-hook #'ygg-task-tree-session-select-space t)
   (add-hook 'easysession-after-load-hook #'ygg-space-tree-adopt)
   (add-hook 'easysession-after-load-hook #'ygg--agents-respawn-after-load))
 

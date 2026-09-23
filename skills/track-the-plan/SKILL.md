@@ -1,6 +1,6 @@
 ---
 name: track-the-plan
-description: "Apply when running work that outlives one turn: a project with several checkpoints, threads working in parallel, or anything a person will ask the state of. Author one plan file, then drive it through your own plan tool, which the harness reads and ticks for you."
+description: "Apply when running work that outlives one turn: a project with several checkpoints, threads working in parallel, or anything a person will ask the state of. Author one plan file, then drive it through your own plan tool, which the editor mirrors into the session's tasks.md."
 disable-model-invocation: true
 ---
 
@@ -8,20 +8,20 @@ disable-model-invocation: true
 
 The state of this work lives in one file, and you write to it twice: once
 when you author it, and never again by hand. After that you drive it
-through your plan tool, and the harness does the editing.
+through your plan tool, and the editor carries it into the file.
 
 **Why:** A file you keep updating by hand is a file that drifts, and
 every turn spent rewriting markdown is a turn not spent on the work. The
-harness already watches your plan tool. Marking an item completed there
-ticks it in the file, records who ticked it and when, and does so whether
+editor mirrors your plan tool into the session's tasks.md: an entry you
+mark completed ticks its item, and an entry the file lacks is added, whether
 or not you remember to mention it. Prose about what you did is a claim; a
-completed item in your plan tool is an event the harness saw.
+completed item in your plan tool is an event the editor saw.
 
 ## Author it once
 
-One file named tasks.md, in this task's own directory. That is where the
-harness looks first and where it writes when it has to add an item, so
-using any other name splits the state in two.
+One file named tasks.md, made with todo_write, which binds it to this
+session. That is the file the editor mirrors your plan into, so a list
+kept anywhere else splits the state in two.
 
 A heading per checkpoint, in the order they are to be done. Under each,
 one checklist item per thing that can be separately proved.
@@ -35,17 +35,18 @@ one checklist item per thing that can be separately proved.
     - [ ] tax line appears only when tax applies
     - [ ] promo discount applies before tax
 
-Only two things in that file are read by the harness: checklist lines,
-and the headings that group them. Everything else — prose, tables, links,
-a paragraph on why something is stuck — is invisible to the harness and
-visible to people. Write it. It costs nothing and it is how the file
-stays worth opening.
+The list holds headings and checklist items and nothing else, and it
+changes only through the todo tools. Context — why an item exists, what
+blocks it, the reference to compare against — goes in the item's own
+words or in the task's other documents (the proposal, the design), not
+as prose in the list.
 
 ## Then drive it through your plan tool
 
 Put the same items in your plan tool and mark them completed as you
-finish them. The harness reads your plan at the end of each turn, ticks
-the file for you, and logs each tick against the work.
+finish them. The editor mirrors every plan update into the session's
+tasks.md: completed entries tick, new entries are added. You can also use
+todo_list, todo_add, todo_update and todo_remove directly.
 
 **Copy the item text.** Matching is by the words. Case, a leading number,
 backticks and a full stop at the end are forgiven; nothing else is. "tax
@@ -58,11 +59,10 @@ harness keeps holding the task for it, and the work is done. If a step
 will not finish and you believe it should, suspect your wording before
 anything else, and restate the item exactly as the file has it.
 
-**Do not edit the file to tick something.** A tick the harness makes is
-recorded; a tick you type is a diff. If an item is done and will not
-match, say so in your reply — work you report as left over is added to
-the plan as a new item automatically, which is the supported way to
-correct it.
+**Do not hand-edit the file.** Tick through your plan tool or
+todo_update; a tick you type is a diff the editor was never told about.
+If an item is done and will not match, tick it with todo_update, using
+the id todo_list gives it.
 
 **Ticks are never undone.** Not by the harness and not by you. If
 something believed done turns out not to be, that is a new item, and the
@@ -74,17 +74,17 @@ The harness can tick an item; it cannot tell whether the item was worth
 having. That part does not automate.
 
 **Items that can be proved.** If an item cannot name what would show it
-is done, it is two items or it is a wish. The harness holds a step while
-items are open, so an item nobody can close stops the work.
+is done, it is two items or it is a wish. An item nobody can close
+stays open, and the list keeps saying the work is unfinished.
 
 **Marking completed honestly.** Mark an item completed when the thing
-that shows it is done has run and passed, not when the edit landed. The
-harness will not call a step finished on a red check, but between checks
-your plan tool is the only account of where the work stands.
+that shows it is done has run and passed, not when the edit landed.
+Nothing checks that for you: between checks, the list is the only
+account of where the work stands.
 
 **Saying why, where it is stuck.** A blocked item with no reason reads
-like work in progress. One clause under the heading is enough, and that
-prose is for people, so write it for them.
+like work in progress. Reword it with todo_update to say what blocks it,
+in one clause.
 
 ## Say how often you want to hear
 
@@ -111,9 +111,5 @@ that must not be edited, the review comment that came back twice.
 Put it in the project's own instructions file, where every later thread
 reads it without being told.
 
-The harness already files half of it without being asked. When a
-checkpoint passes after a check failed more than once, it writes that
-down itself — which check, how many times, whether the failure was
-identical each time — because it recorded all of it as it happened. Do
-not repeat that. Write the part it cannot see: why the failure was what
-it was, and what someone should do differently next time.
+Write what a later thread could not see from the code: why the failure
+was what it was, and what someone should do differently next time.

@@ -19,6 +19,7 @@
 
 ;;; Code:
 
+(require 'seq)
 (require 'subr-x)
 (require 'cl-lib)
 
@@ -166,8 +167,21 @@ clean refusal is what lets the client get on with posting."
   (aob-mcp--send conn `(:jsonrpc "2.0" :id ,id
                         :error (:code ,code :message ,message))))
 
+(defun aob-mcp--lines (text)
+  "TEXT as lines, when emacsclient printed a list of strings.
+The printed list carries a quote and a paren per line, which an agent
+pays for in tokens and reads around."
+  (or (and (stringp text)
+           (string-prefix-p "(" (string-trim-left text))
+           (condition-case nil
+               (let ((v (car (read-from-string text))))
+                 (and (consp v) (seq-every-p #'stringp v)
+                      (string-join v "\n")))
+             (error nil)))
+      (format "%s" text)))
+
 (defun aob-mcp--content (text)
-  `(:content [(:type "text" :text ,(format "%s" text))]))
+  `(:content [(:type "text" :text ,(aob-mcp--lines text))]))
 
 (defun aob-mcp-defer (conn id &optional timeout)
   "Park CONN and ID under a fresh key for `aob-mcp-complete' to answer.
@@ -202,11 +216,17 @@ patience rather than ours."
   "How many calls are waiting on something."
   (hash-table-count aob-mcp--pending))
 
-(defun aob-mcp-relay (conn id form)
+(defun aob-mcp-relay (conn id form &optional on-reply)
   "Ask the editing Emacs FORM, answer CONN when it replies.
 The question is a child process, so this Emacs keeps serving while the
-other one thinks."
+other one thinks.  With ON-REPLY, call it with whether the editor
+answered and the text instead of answering CONN."
   (let ((out (generate-new-buffer " *aob-mcp-relay*"))
+        (reply (or on-reply
+                   (lambda (ok text)
+                     (if ok
+                         (aob-mcp--result conn id (aob-mcp--content text))
+                       (aob-mcp--error conn id -32000 text)))))
         (settled nil)
         proc timer)
     (setq proc
@@ -225,11 +245,10 @@ other one thinks."
                              ""))
                      (ok (eq 0 (process-exit-status p))))
                  (when (buffer-live-p out) (kill-buffer out))
-                 (if ok
-                     (aob-mcp--result conn id (aob-mcp--content text))
-                   (aob-mcp--error conn id -32000
-                                   (format "the editing Emacs did not answer: %s"
-                                           text))))))))
+                 (funcall reply ok
+                          (if ok text
+                            (format "the editing Emacs did not answer: %s"
+                                    text))))))))
     ;; an editor sitting on a prompt never returns, and the child would
     ;; wait on it as long as the agent was willing to
     (setq timer
@@ -240,9 +259,9 @@ other one thinks."
                (setq settled t)
                (when (process-live-p proc) (delete-process proc))
                (when (buffer-live-p out) (kill-buffer out))
-               (aob-mcp--error conn id -32000
-                               (format "the editing Emacs did not answer within %ss"
-                                       aob-mcp-relay-timeout))))))
+               (funcall reply nil
+                        (format "the editing Emacs did not answer within %ss"
+                                aob-mcp-relay-timeout))))))
     aob-mcp-deferred))
 
 ;;; Dispatch

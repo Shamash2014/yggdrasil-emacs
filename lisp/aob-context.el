@@ -10,6 +10,7 @@
 
 (require 'seq)
 (require 'subr-x)
+(require 'aob)
 
 (defgroup aob-context nil
   "What the agent is handed to read."
@@ -68,24 +69,31 @@
 
 ;;;###autoload
 (defun aob-context-clear ()
-  "Empty the context."
+  "Empty the context, asking first when called as a command."
   (interactive)
-  (setq aob-context--items nil)
-  (message "aob context: empty"))
+  (when (or (not (called-interactively-p 'any))
+            (null aob-context--items)
+            (y-or-n-p (format "Drop all %d context entries? " (length aob-context--items))))
+    (setq aob-context--items nil)
+    (when-let* ((buf (get-buffer "*aob-context*")))
+      (with-current-buffer buf (aob-context--render)))
+    (message "aob context: empty")))
 
 (defun aob-context--render ()
   (let ((inhibit-read-only t))
-    (erase-buffer)
-    (insert (format "Context — %d entries, %d chars\n\n"
-                    (length aob-context--items) (aob-context-size)))
-    (if (null aob-context--items)
-        (insert "  nothing yet: add a region with SPC a c x\n")
-      (dolist (item (reverse aob-context--items))
-        (insert (propertize (concat "  " (aob-context--label item))
-                            'font-lock-face 'aob-context-path
-                            'aob-context item)
-                (propertize (format "  %d chars\n" (length (plist-get item :text)))
-                            'font-lock-face 'shadow))))))
+    (aob--redraw-keeping-lines
+     (lambda ()
+       (erase-buffer)
+       (insert (format "Context — %d entries, %d chars\n\n"
+                       (length aob-context--items) (aob-context-size)))
+       (if (null aob-context--items)
+           (insert "  nothing yet: add a region with SPC a c x\n")
+         (dolist (item (reverse aob-context--items))
+           (insert (propertize (concat "  " (aob-context--label item))
+                               'font-lock-face 'aob-context-path
+                               'aob-context item)
+                   (propertize (format "  %d chars\n" (length (plist-get item :text)))
+                               'font-lock-face 'shadow))))))))
 
 (defun aob-context-drop ()
   "Drop the entry under point."
@@ -111,7 +119,7 @@
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "d") #'aob-context-drop)
     (define-key map (kbd "RET") #'aob-context-visit)
-    (define-key map (kbd "g") #'aob-context-list)
+    (define-key map (kbd "g r") #'aob-context-list)
     (define-key map (kbd "D") #'aob-context-clear)
     map)
   "Keymap of the context list.")

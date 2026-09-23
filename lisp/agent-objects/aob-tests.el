@@ -9,8 +9,37 @@
 (require 'aob-acp)
 (require 'aob-trace)
 (require 'aob-workflow)
+(require 'aob-subagent)
+(require 'ygg-todo)
 (require 'ygg-diagram nil t)
+
+;; -Q resolves to the real config: a suite run must never rewrite the owner's sessions
+(setq aob-acp-persist-file (make-temp-file "aob-tests-sessions-" nil ".eld"))
 (require 'aob-transcript nil t)
+
+(defconst aob-tests--file (or load-file-name buffer-file-name))
+
+(defun aob-tests--modal (form)
+  "Run FORM in a fresh Emacs with the modal layer and layer-aob loaded.
+A child process, so the glue's advice and keys never reach the other tests."
+  (unless (and (locate-library "yggdrasil") (locate-library "layer-aob"))
+    (ert-skip "no modal layer on the load path"))
+  (let ((code (format "%S"
+                      `(progn
+                         (setq load-prefer-newer t)
+                         (defvar ygg-space-state-functions nil)
+                         (defvar ygg-space-detail-functions nil)
+                         (require 'yggdrasil)
+                         (require 'layer-aob)
+                         (load ,aob-tests--file nil t)
+                         ,form))))
+    (with-temp-buffer
+      (unless (eq 0 (call-process (expand-file-name invocation-name invocation-directory)
+                                  nil t nil "-Q" "--batch"
+                                  "-L" (file-name-directory (locate-library "layer-aob"))
+                                  "-L" (file-name-directory (locate-library "aob"))
+                                  "--eval" code))
+        (ert-fail (buffer-string))))))
 
 (defmacro aob-tests--with-session (var &rest body)
   "Bind VAR to a wired-up fake ACP session over a `cat' connection."
@@ -214,7 +243,7 @@
       (should (eq (plist-get ev :type) 'prompt))
       (should (equal (plist-get ev :status) "queued"))
       (aob--modeline-refresh)
-      (should (string-match-p "»1" aob-modeline-string))
+      (should (string-match-p "»\\s-*1" aob-modeline-string))
       (with-current-buffer (aob-trace-buffer s)
         ;; words carry a speaker line rather than a glyph behind a clock —
         ;; under the plain style, where the name is the only thing saying
@@ -804,11 +833,14 @@
                      (list "compare with" "claude"
                            (list "/tmp/b.png")))))))
 
-(ert-deftest aob-model-owns-the-M-verb ()
+(ert-deftest aob-model-owns-the-model-verb ()
   ;; a later define-key once re-pointed M at the codex-only picker and
   ;; claude sessions "advertised no models" for a whole day — the verb
-  ;; belongs to the both-wires command
-  (should (eq (lookup-key aob-object-map "M") #'aob-acp-model)))
+  ;; belongs to the both-wires command, now on the localleader
+  (should-not (lookup-key aob-object-map "M"))
+  (aob-tests--modal
+   '(should (eq (lookup-key (ygg-localleader--get-map 'aob-trace-mode) "l")
+                #'aob-acp-model))))
 
 (ert-deftest aob-model-wait-unhooks-on-failure ()
   ;; M deferred through the handshake must not fire the picker — or
@@ -1219,16 +1251,295 @@ it cannot hold never blocks the queue, and steering falls back to cancel."
                    '("Count files" "Read the schema")))
     (unwind-protect
         (with-current-buffer (aob-subagents-buffer s)
-          (should (string-match-p "1/2 *Count files" (buffer-string)))
-          (should (string-match-p "Read the schema" (buffer-string)))
-          ;; a child's own step belongs to the subagent's trace, not here
+          (should (string-match-p "running .* 2 Count files" (buffer-string)))
+          (should (string-match-p "done .* 0 Read the schema" (buffer-string)))
           (should-not (string-match-p "find | wc" (buffer-string)))
           (goto-char (point-min))
           (with-current-buffer (progn (aob-subagents-open) (current-buffer))
             (should (string-match-p "find | wc" (buffer-string)))))
       (dolist (b (buffer-list))
-        (when (string-match-p "\\`\\(subs\\|subtrace\\|trace\\):" (buffer-name b))
+        (when (string-match-p "\\`\\(subs\\|trace\\):" (buffer-name b))
           (kill-buffer b))))))
+
+(defconst aob-tests--agent-call
+  "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"toolu_A\",\"title\":\"Count files\",\"kind\":\"think\",\"status\":\"in_progress\",\"rawInput\":{\"description\":\"Count files\",\"prompt\":\"Count the files under src\",\"subagent_type\":\"general-purpose\"},\"_meta\":{\"claudeCode\":{\"toolName\":\"Agent\",\"subagent\":true}}}}}"
+  "An Agent call as claude-agent-acp sends it: titled by its description.")
+
+(defun aob-tests--agent-child (s id title status)
+  (aob-tests--feed
+   s (format "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"%s\",\"title\":\"%s\",\"kind\":\"execute\",\"status\":\"%s\",\"_meta\":{\"claudeCode\":{\"toolName\":\"Bash\",\"parentToolUseId\":\"toolu_A\"}}}}}"
+             id title status)))
+
+(defun aob-tests--agent-done (s status)
+  (aob-tests--feed
+   s (format "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"toolu_A\",\"status\":\"%s\",\"_meta\":{\"claudeCode\":{\"toolName\":\"Agent\"}}}}}"
+             status)))
+
+(defun aob-tests--kill-views ()
+  (dolist (b (buffer-list))
+    (when (string-match-p "\\`\\(subs\\|trace\\):" (buffer-name b))
+      (kill-buffer b))))
+
+(ert-deftest aob-native-subagent-is-a-session-with-its-own-trace ()
+  "A claude Agent call becomes a read-only session under its sender; its
+steps are its own trace, one row in the list, and folded in the parent."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-tests--feed s aob-tests--agent-call)
+          (aob-tests--agent-child s "k1" "find src | wc -l" "completed")
+          (aob-tests--agent-child s "k2" "rg TODO src" "in_progress")
+          (let* ((call (car (aob-session-subagents s)))
+                 (kid (aob-session-native-child s call)))
+            (should (= 1 (length (aob-session-subagents s))))
+            (should kid)
+            (should (equal "Count files" (aob-session-name kid)))
+            (should (equal (aob-session-id s) (aob-session-ref kid :parent-session)))
+            (should (memq kid (aob-subagent-children s)))
+            (should (eq 'working (aob-session-state kid)))
+            (with-current-buffer (aob-subagents-buffer s)
+              (should (string-match-p "^running .* 2 Count files" (buffer-string))))
+            (aob-tests--agent-done s "completed")
+            (should (eq 'done (aob-session-state kid)))
+            (with-current-buffer (aob-subagents-buffer s)
+              (aob-subagents--render t)
+              (should (string-match-p "^done .* 2 Count files" (buffer-string))))
+            (with-current-buffer (aob-trace-buffer kid)
+              (aob-trace--render t)
+              (should (string-match-p "Count the files under src" (buffer-string)))
+              (should (string-match-p "find src | wc -l" (buffer-string)))
+              (should (string-match-p "rg TODO src" (buffer-string)))
+              (should-not (string-match-p "└" (buffer-string)))
+              (should (string-match-p "read-only" (format "%s" header-line-format))))
+            (with-current-buffer (aob-trace-buffer s)
+              (aob-trace--render t)
+              (should (string-match-p "Count files" (buffer-string)))
+              (should-not (string-match-p "rg TODO src" (buffer-string))))
+            (should-error (aob-prompt kid "hello" nil) :type 'user-error)))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-native-subagent-failed-call-fails-its-session ()
+  "A failed Agent call leaves its session failed, not working forever."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-tests--feed s aob-tests--agent-call)
+          (aob-tests--agent-done s "failed")
+          (let ((kid (aob-session-native-child s (car (aob-session-subagents s)))))
+            (should (eq 'failed (aob-session-state kid)))
+            (with-current-buffer (aob-subagents-buffer s)
+              (should (string-match-p "^failed .* 0 Count files" (buffer-string))))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-native-codex-subagent-is-a-session-with-its-own-trace ()
+  "A codex thread becomes a session named for the agent, holding its activities."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-tests--codex-activity s "a1" "started" "researcher" "completed")
+          (aob-tests--codex-activity s "a2" "interacted" "researcher" "in_progress")
+          (let* ((call (car (aob-session-subagents s)))
+                 (kid (aob-session-native-child s call)))
+            (should kid)
+            (should (equal "researcher" (aob-session-name kid)))
+            (should (eq 'working (aob-session-state kid)))
+            (should (equal (aob-session-id s) (aob-session-ref kid :parent-session)))
+            (with-current-buffer (aob-trace-buffer kid)
+              (aob-trace--render t)
+              (should (string-match-p "Interact with subagent researcher" (buffer-string))))
+            (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call_update\",\"toolCallId\":\"a2\",\"status\":\"completed\"}}}")
+            (should (eq 'done (aob-session-state kid)))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-native-subagent-rows-open-the-call ()
+  "RET on a row goes to the Agent call in the trace; o opens the subagent's
+own trace; RET on the call in the trace opens it too."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-tests--feed s aob-tests--agent-call)
+          (aob-tests--agent-child s "k1" "find src | wc -l" "completed")
+          (let* ((call (car (aob-session-subagents s)))
+                 (kid (aob-session-native-child s call)))
+            (with-current-buffer (aob-subagents-buffer s)
+              (goto-char (point-min))
+              (let ((buf (aob-subagents-visit)))
+                (should (eq buf (get-buffer (aob-trace--name s))))
+                (with-current-buffer buf
+                  (should (eql (plist-get call :seq)
+                               (get-text-property (point) 'aob-event)))
+                  (aob-trace-answer))
+                (should (equal (aob-trace--name kid) (buffer-name (window-buffer))))))
+            (with-current-buffer (aob-subagents-buffer s)
+              (goto-char (point-min))
+              (with-current-buffer (progn (aob-subagents-open) (current-buffer))
+                (should (equal (aob-trace--name kid) (buffer-name)))))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-native-subagent-start-splits-no-window ()
+  "A subagent starting and working shows nothing new: no split, no panel."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (delete-other-windows)
+          (set-window-buffer (selected-window) (aob-trace-buffer s))
+          (let ((before (length (window-list))))
+            (aob-tests--feed s aob-tests--agent-call)
+            (aob-tests--agent-child s "k1" "find src | wc -l" "in_progress")
+            (with-current-buffer (aob-trace-buffer s) (aob-trace--render t))
+            (aob--render-all)
+            (should (= before (length (window-list))))
+            (should-not (get-buffer-window (aob-subagents--name s)))
+            (aob-subagents s)
+            (should (get-buffer-window (aob-subagents--name s)))
+            (aob-subagents s)
+            (should-not (get-buffer-window (aob-subagents--name s)))
+            (should (= before (length (window-list))))))
+      (aob-tests--kill-views))))
+
+(defmacro aob-tests--with-list (var file &rest body)
+  "Run BODY with VAR a fake session whose project is a fresh folder; FILE
+is bound to a function returning the session's list file."
+  (declare (indent 2))
+  `(let ((dir (file-name-as-directory (make-temp-file "aob-todo-" t))))
+     (advice-add 'aob-acp--plan :after #'ygg-todo-mirror-plan)
+     (unwind-protect
+         (aob-tests--with-session ,var
+           (setf (aob-session-project ,var) dir
+                 (aob-session-dir ,var) dir)
+           (let ((,file (lambda () (ygg-todo-session-file ,var))))
+             ,@body))
+       (advice-remove 'aob-acp--plan #'ygg-todo-mirror-plan)
+       (delete-directory dir t))))
+
+(defun aob-tests--list-items (file)
+  (mapcar (lambda (it) (cons (plist-get it :text) (and (plist-get it :done) t)))
+          (plist-get (ygg-todo-read file) :items)))
+
+(ert-deftest aob-todo-plan-snapshot-makes-and-binds-the-list ()
+  "The first plan starts the session's tasks.md under .aob/tasks and fills it."
+  (aob-tests--with-list s file
+    (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "in_progress"))
+                                               ((content . "Write the fix") (status . "pending")))))
+    (should (funcall file))
+    (should (string-prefix-p (expand-file-name ".aob/tasks/" (aob-session-project s))
+                             (funcall file)))
+    (should (equal '(("Read the code") ("Write the fix"))
+                   (aob-tests--list-items (funcall file))))))
+
+(ert-deftest aob-todo-plan-snapshot-updates-the-agents-items ()
+  "A later snapshot ticks, unticks, rewords and drops the agent's own items."
+  (aob-tests--with-list s file
+    (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "in_progress"))
+                                               ((content . "Write the fix") (status . "pending"))
+                                               ((content . "Ship it") (status . "pending")))))
+    (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "completed"))
+                                               ((content . "Write the fix") (status . "in_progress"))
+                                               ((content . "Ship it") (status . "pending")))))
+    (should (equal '(("Read the code" . t) ("Write the fix") ("Ship it"))
+                   (aob-tests--list-items (funcall file))))
+    (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "pending"))
+                                               ((content . "Write the fix and a test") (status . "completed")))))
+    (should (equal '(("Read the code") ("Write the fix and a test" . t))
+                   (aob-tests--list-items (funcall file))))
+    (aob-tests--feed s (aob-tests--plan-json nil))
+    (should (null (aob-tests--list-items (funcall file))))))
+
+(ert-deftest aob-todo-user-items-survive-and-reach-the-agent ()
+  "What the user adds stays through a snapshot and goes out as a note."
+  (aob-tests--with-list s file
+    (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "pending")))))
+    (let ((ygg-todo-by 'user)) (ygg-todo-add (funcall file) "Ask about the API"))
+    (with-temp-buffer
+      (insert "- [ ] Check the logs\n")
+      (append-to-file (point-min) (point-max) (funcall file)))
+    (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "completed"))
+                                               ((content . "Write the fix") (status . "pending")))))
+    (let ((items (aob-tests--list-items (funcall file))))
+      (should (assoc "Ask about the API" items))
+      (should (assoc "Check the logs" items))
+      (should (equal '("Read the code" . t) (assoc "Read the code" items)))
+      (should (assoc "Write the fix" items)))
+    (let ((note (ygg-todo-session-note s)))
+      (should (string-match-p "added: Ask about the API" note))
+      (should (string-match-p "added: Check the logs" note)))
+    (should-not (ygg-todo-session-note s))))
+
+(ert-deftest aob-todo-user-removed-item-stays-removed ()
+  "An item the user took out is not put back by a plan that still names it."
+  (aob-tests--with-list s file
+    (let ((plan (aob-tests--plan-json '(((content . "Read the code") (status . "pending"))
+                                        ((content . "Write the fix") (status . "pending"))))))
+      (aob-tests--feed s plan)
+      (let ((ygg-todo-by 'user))
+        (ygg-todo-remove (funcall file) "Write the fix"))
+      (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "completed"))
+                                                 ((content . "Write the fix") (status . "pending")))))
+      (should (equal '(("Read the code" . t)) (aob-tests--list-items (funcall file))))
+      (should (string-match-p "removed: Write the fix" (ygg-todo-session-note s))))))
+
+(declare-function aob-todo-buffer "aob-todo-view" (s))
+
+(ert-deftest aob-todo-view-shows-the-step-in-hand-over-the-list ()
+  "The list view draws tasks.md, with the plan's current step as one muted
+line above it and no second copy of the plan."
+  (require 'aob-todo-view)
+  (aob-tests--with-list s file
+    (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "completed"))
+                                               ((content . "Write the fix") (status . "in_progress"))
+                                               ((content . "Ship it") (status . "pending")))))
+    (should (funcall file))
+    (unwind-protect
+        (with-current-buffer (aob-todo-buffer s)
+          (goto-char (point-min))
+          (should (looking-at "◐ now: Write the fix\n"))
+          (should (eq 'shadow (get-text-property (point) 'font-lock-face)))
+          (should (= 2 (how-many "Write the fix" (point-min) (point-max))))
+          (should (= 1 (how-many "Ship it" (point-min) (point-max))))
+          (should (string-match-p "\\[x\\] [0-9.]+ Read the code" (buffer-string)))
+          (should (string-match-p "\\[ \\] [0-9.]+ Ship it" (buffer-string)))
+          (should-not (string-match-p "agent plan" (buffer-string))))
+      (kill-buffer (aob-todo-buffer s)))))
+
+(ert-deftest aob-acp-repeated-tool-call-updates-the-call ()
+  "A tool_call re-sent with an id already known is that call changing,
+not a second one: the parent's child count stays true."
+  (aob-tests--with-session s
+    (aob-tests--feed s aob-tests--agent-call)
+    (aob-tests--agent-child s "k1" "find src | wc -l" "in_progress")
+    (aob-tests--agent-child s "k1" "find src | wc -l" "completed")
+    (let ((call (car (aob-session-subagents s))))
+      (should (= 1 (seq-count (lambda (e) (equal (plist-get e :tool-id) "k1"))
+                              (aob-session-events s))))
+      (should (equal 1 (plist-get call :children)))
+      (should (equal 0 (plist-get call :child-live)))
+      (should (equal "completed"
+                     (plist-get (seq-find (lambda (e) (equal (plist-get e :tool-id) "k1"))
+                                          (aob-session-events s))
+                                :status))))))
+
+(ert-deftest aob-acp-a-withdrawn-question-stops-waiting ()
+  "Codex takes a question back with $/cancel_request when it resolves it on
+its own: the decision closes, the trace says so, and a late answer is not sent."
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"elicitation/create\",\"params\":{\"sessionId\":\"sess-test\",\"mode\":\"form\",\"toolCallId\":\"item-1\",\"message\":\"Which branch?\",\"requestedSchema\":{\"type\":\"object\",\"properties\":{\"branch\":{\"type\":\"string\",\"title\":\"Which branch?\"}},\"required\":[\"branch\"]},\"_meta\":{\"codex\":{\"autoResolutionMs\":30000}}}}")
+    (let ((d (car (aob-session-decisions s))))
+      (should d)
+      (should (eq 'blocked (aob-session-state s)))
+      (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"$/cancel_request\",\"params\":{\"requestId\":7}}")
+      (should-not (aob-session-decisions s))
+      (should (eq 'working (aob-session-state s)))
+      (should (eq 'withdrawn (plist-get (aob-acp--decision-event s d) :answer)))
+      (let ((sent nil))
+        (cl-letf (((symbol-function 'aob-acp--respond) (lambda (&rest _) (setq sent t))))
+          (should-error (aob-acp--resolve s d '(("branch" . "main"))) :type 'user-error))
+        (should-not sent))
+      (unwind-protect
+          (with-current-buffer (aob-trace-buffer s)
+            (aob-trace--render t)
+            (should (string-match-p "withdrawn by the agent" (buffer-string))))
+        (aob-tests--kill-views)))))
 
 (ert-deftest aob-plan-view-and-todo-edits ()
   "Plan updates carry the current task; the view splits doing/queued/done."
@@ -1348,9 +1659,15 @@ an unadvertised id is refused without a request."
         (should (= end 4))
         (should (member "debug" table))
         (should (member "deploy" table)))
-      ;; /command not at start never completes
+      ;; /command after a space completes too, where a skill is named
+      ;; mid-sentence; a slash inside a path never does
       (erase-buffer)
       (insert "run /de")
+      (pcase-let ((`(,beg ,_end ,table . ,_) (aob-compose-capf)))
+        (should (= beg 6))
+        (should (member "debug" table)))
+      (erase-buffer)
+      (insert "see src/ma")
       (should-not (aob-compose-capf))
       ;; @file anywhere
       (erase-buffer)
@@ -1549,10 +1866,12 @@ worktree ends up spawning in the main checkout."
           (make-directory (expand-file-name "sub" dir) t)
           (let ((aob-acp-start-dir (expand-file-name "sub" dir)))
             (should (equal (aob-acp--project)
-                           (file-name-as-directory (expand-file-name "sub" dir)))))
+                           (file-name-as-directory
+                            (file-truename (expand-file-name "sub" dir))))))
           (let ((aob-acp-start-dir nil)
                 (aob-acp-start-dir-function (lambda () (expand-file-name "sub" dir))))
-            (should (equal (aob-acp--project) dir))))
+            (should (equal (aob-acp--project)
+                           (file-name-as-directory (file-truename dir))))))
       (delete-directory dir t))))
 
 (ert-deftest aob-acp-open-normalizes-project-and-dir ()
@@ -1624,7 +1943,8 @@ same way, so a freeform session keeps the folder it was started in."
                 (s nil))
             (unwind-protect
                 (progn (setq s (aob-acp-spawn "claude"))
-                       (should (equal captured (list dir dir))))
+                       (let ((real (file-name-as-directory (file-truename dir))))
+                         (should (equal captured (list real real)))))
               (when (and s (aob-session-get (aob-session-id s)))
                 (aob-remove-session s)))))
       (delete-directory dir t))))
@@ -2294,3 +2614,638 @@ the host weighs it at, and no keys."
                                           :object-type 'alist))
                            4400))))
       (delete-file file))))
+
+(defun aob-tests--aob-command-p (def)
+  (and (symbolp def) (string-match-p "\\`\\(?:ygg-\\)?aob-" (symbol-name def))))
+
+(ert-deftest aob-modal-trace-insert-state-types ()
+  "In insert state no key of the trace's own reaches a printing key, DEL or RET."
+  (aob-tests--modal
+   '(progn
+     (with-temp-buffer
+       (aob-trace-mode)
+       (ygg-insert-state)
+       (dolist (c (number-sequence 32 126))
+         (unless (eq c ?j)
+           (should (eq (key-binding (string c)) #'self-insert-command))))
+       (dolist (k (list (kbd "DEL") (kbd "RET")))
+         (let ((def (key-binding k)))
+           (should-not (aob-tests--aob-command-p def))
+           (should-not (eq def #'scroll-down-command))))))))
+
+(ert-deftest aob-modal-trace-normal-state-keys ()
+  "Normal state: vim motions, the kept verbs, and nothing that shadows an operator."
+  (aob-tests--modal
+   '(progn
+     (with-temp-buffer
+       (aob-trace-mode)
+       (ygg-normal-state)
+       (should (eq (key-binding "j") #'ygg-j))
+       (should (eq (key-binding "k") #'ygg-k))
+       (should (eq (key-binding (kbd "RET")) #'aob-trace-answer))
+       (should (eq (key-binding "a") #'aob-compose))
+       (should (eq (key-binding "C") #'aob-trace-comment))
+       (should (eq (key-binding "i") #'aob-compose))
+       (should (eq (key-binding "c") #'aob-steer))
+       (should (eq (key-binding "ZZ") #'aob-trace-send))
+       (dolist (k '("K" "x" "t" "T" "M" "E" "X" "S" "p" "r" "R" "d" "y" "w" "b"
+                    "e" "u" "v" "s" "n" "f" "h" "l" "0" "$" "G"))
+         (should-not (aob-tests--aob-command-p (key-binding k))))))))
+
+(ert-deftest aob-modal-agent-verbs-on-localleader ()
+  (aob-tests--modal
+   '(progn
+     (let ((trace (ygg-localleader--get-map 'aob-trace-mode))
+           (plan (ygg-localleader--get-map 'aob-plan-mode)))
+       (pcase-dolist (`(,k . ,def) '(("C" . aob-cancel) ("k" . aob-kill-session)
+                                      ("x" . aob-acp-command) ("d" . aob-todo)
+                                      ("a" . ygg-aob-activity) ("M" . aob-acp-cycle-mode)
+                                      ("e" . aob-trace-queue-edit) ("X" . aob-trace-queue-drop)
+                                      ("s" . aob-trace-queue-steer)))
+         (should (eq (lookup-key trace k) def)))
+       (should (eq (lookup-key plan "C") #'aob-cancel))
+       (should (eq (lookup-key plan "c") #'aob-acp-mcp))))))
+
+(ert-deftest aob-modal-zz-sends-only-in-the-trace ()
+  (aob-tests--modal
+   '(progn
+     (with-temp-buffer
+       (aob-plan-mode)
+       (ygg-normal-state)
+       (should-not (eq (key-binding "ZZ") #'aob-trace-send))))))
+
+(ert-deftest aob-modal-todo-keys-in-normal-state ()
+  (aob-tests--modal
+   '(progn
+     (with-temp-buffer
+       (aob-todo-mode)
+       (should ygg--normal-p)
+       (pcase-dolist (`(,k . ,def) '(("o" . aob-todo-add) ("a" . aob-todo-add)
+                                      ("c" . aob-todo-edit) ("x" . aob-todo-toggle-done)
+                                      ("dd" . aob-todo-remove-item) ("gr" . aob-todo-refresh)
+                                      ("C" . aob-todo-comment) ("\r" . aob-todo-open-at-line)
+                                      ("q" . quit-window) ("j" . ygg-j) ("k" . ygg-k)
+                                      ("gg" . ygg-goto-first) ("G" . ygg-goto-last-line)))
+         (should (eq (key-binding k) def)))
+       (should-not (eq (key-binding " ") #'scroll-up-command))))))
+
+(ert-deftest aob-modal-lists-refresh-on-g-r ()
+  (aob-tests--modal
+   '(progn
+     (with-temp-buffer
+       (aob-context-mode)
+       (should (eq (key-binding "gr") #'aob-context-list))
+       (should (eq (key-binding "gg") #'ygg-goto-first))
+       (should (eq (key-binding "d") #'aob-context-drop)))
+     (with-temp-buffer
+       (aob-acp-mcp-mode)
+       (should (eq (key-binding "gr") #'aob-acp-mcp-refresh))
+       (should (eq (key-binding "j") #'ygg-j))))))
+
+(ert-deftest aob-comment-leaves-a-plain-buffer-stateless ()
+  "Holding a comment from a buffer without the modal layer gives it no state."
+  (aob-tests--modal
+   '(progn
+     (aob-tests--with-session s
+       (with-temp-buffer
+         (aob-trace--add-comment s 1 "quoted" "a comment")
+         (should-not ygg--state)
+         (should-not ygg--normal-p))))))
+
+(ert-deftest aob-context-drop-keeps-the-line ()
+  (let ((aob-context--items (list (list :file "/c" :text "c")
+                                  (list :file "/b" :text "b")
+                                  (list :file "/a" :text "a"))))
+    (with-temp-buffer
+      (aob-context--render)
+      (goto-char (point-min))
+      (forward-line 3)
+      (should (equal (plist-get (get-text-property (point) 'aob-context) :file) "/b"))
+      (aob-context-drop)
+      (should (= (line-number-at-pos) 4))
+      (should (equal (plist-get (get-text-property (point) 'aob-context) :file) "/c")))))
+
+(ert-deftest aob-plan-render-keeps-the-line ()
+  (aob-tests--with-session s
+    (aob-session-put s :plan-ev (list :entries (vector (list :content "one" :status "pending")
+                                                       (list :content "two" :status "pending")
+                                                       (list :content "three" :status "pending"))))
+    (with-temp-buffer
+      (aob-plan-mode)
+      (setq aob-plan--session-id (aob-session-id s))
+      (aob-plan--render t)
+      (goto-char (point-min))
+      (forward-line 1)
+      (aob-plan--render t)
+      (should (= (line-number-at-pos) 2)))))
+
+(ert-deftest aob-queue-rewrite-refuses-a-sent-message ()
+  (aob-tests--with-session s
+    (let* ((ev (list :type 'user :seq 7 :text "old"))
+           (entry (list "old" nil ev)))
+      (aob-session-put s :queued (list entry))
+      (aob-trace--queue-rewrite s entry "new")
+      (should (equal (car entry) "new"))
+      (should (equal (plist-get ev :text) "new"))
+      (aob-session-put s :queued nil)
+      (should-error (aob-trace--queue-rewrite s entry "newer") :type 'user-error))))
+
+(defconst aob-tests--usage-update
+  "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"sess-test\",\"update\":{\"sessionUpdate\":\"usage_update\",\"used\":434308,\"size\":1000000,\"cost\":{\"amount\":%s,\"currency\":\"USD\"}%s}}}"
+  "A usage_update as claude-agent-acp sends it once a turn's result is in.")
+
+(defconst aob-tests--prompt-response
+  "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"stopReason\":\"end_turn\",\"usage\":{\"inputTokens\":%d,\"outputTokens\":%d,\"cachedReadTokens\":7348000,\"cachedWriteTokens\":22125,\"totalTokens\":%d},\"_meta\":{\"quota\":{\"token_count\":{\"totalTokens\":%d},\"model_usage\":[]}}}}"
+  "A session/prompt response as claude-agent-acp answers a finished turn.")
+
+(defun aob-tests--stop (s)
+  (seq-find (lambda (e) (eq (plist-get e :type) 'stop)) (aob-session-events s)))
+
+(ert-deftest aob-usage-captured-from-adapter-payloads ()
+  (aob-tests--with-session s
+    (aob-set-state s 'idle)
+    (aob-acp--prompt-1 s "one")
+    (aob-tests--feed s (format aob-tests--usage-update "1.25" ""))
+    (should (= (aob-session-ref s :ctx-used) 434308))
+    (aob-tests--feed s (format aob-tests--prompt-response 1 50 17464 7387639 7387639))
+    (let ((stop (aob-tests--stop s)))
+      (should (= (plist-get stop :cost) 1.25))
+      (should (= (plist-get (plist-get stop :usage) :outputTokens) 17464))
+      (should (numberp (plist-get stop :secs))))
+    (should (equal (aob-session-spend s) "$1.25"))
+    (aob-acp--prompt-1 s "two")
+    (aob-tests--feed s (format aob-tests--usage-update "3.0" ""))
+    (aob-tests--feed s (format aob-tests--prompt-response 2 72 27641 16811843 16811843))
+    (should (= (plist-get (aob-tests--stop s) :cost) 1.75))
+    (should (= (aob-session-cost s) 3.0))
+    (should (= (aob-session-ref s :turns) 2))
+    (let ((tk (aob-session-ref s :tokens)))
+      (should (= (plist-get tk :outputTokens) (+ 17464 27641)))
+      (should (= (plist-get tk :inputTokens) 122))
+      (should (= (plist-get tk :totalTokens) (+ 7387639 16811843))))
+    (should (string-match-p "2 turns" (aob-usage-describe s)))
+    (should (string-match-p "45.1k out" (aob-usage-describe s)))))
+
+(ert-deftest aob-usage-cost-resets-and-autonomous-spend ()
+  (aob-tests--with-session s
+    (aob-set-state s 'idle)
+    (aob-acp--prompt-1 s "one")
+    (aob-tests--feed s (format aob-tests--usage-update "2.0" ""))
+    (aob-tests--feed s (format aob-tests--prompt-response 1 1 1 1 1))
+    (aob-tests--feed s (format aob-tests--usage-update "2.5"
+                               ",\"_meta\":{\"_claude/origin\":{\"kind\":\"task\"}}"))
+    (should (= (aob-session-cost s) 2.5))
+    (aob-acp--prompt-1 s "after a reset")
+    (aob-tests--feed s (format aob-tests--usage-update "0.4" ""))
+    (aob-tests--feed s (format aob-tests--prompt-response 2 1 1 1 1))
+    (should (= (plist-get (aob-tests--stop s) :cost) 0.4))
+    (should (< (abs (- (aob-session-cost s) 2.9)) 1e-9))))
+
+(ert-deftest aob-usage-zero-reading-is-no-reset ()
+  (aob-tests--with-session s
+    (dolist (amount '(2.0 0 2.5))
+      (aob-usage-note-cost s amount "USD"))
+    (should (= (aob-session-cost s) 2.5))))
+
+(ert-deftest aob-usage-first-reading-of-a-resumed-session-is-no-turns ()
+  (aob-tests--with-session s
+    (aob-session-put s :restored-by "load")
+    (aob-set-state s 'idle)
+    (aob-acp--prompt-1 s "again")
+    (aob-tests--feed s (format aob-tests--usage-update "46.32" ""))
+    (aob-tests--feed s (format aob-tests--prompt-response 1 1 1 1 1))
+    (should-not (plist-get (aob-tests--stop s) :cost))
+    (should (equal (aob-session-spend s) "$46.32"))))
+
+(ert-deftest aob-duration-and-cost-format ()
+  (should (equal (aob-duration-short 0) "0s"))
+  (should (equal (aob-duration-short 42.7) "42s"))
+  (should (equal (aob-duration-short 130) "2m"))
+  (should (equal (aob-duration-short 130 t) "2m 10s"))
+  (should (equal (aob-duration-short 120 t) "2m"))
+  (should (equal (aob-duration-short 3900) "1h05m"))
+  (should (equal (aob-cost-short 0.4237) "$0.43"))
+  (should (equal (aob-cost-short 0.07) "$0.07"))
+  (should (equal (aob-cost-short 0.000597) "$0.01"))
+  (should (equal (aob-cost-short 1.5 "EUR") "EUR 1.50"))
+  (should (equal (aob-turn-meter (list :secs 130 :cost 4.69 :usage '(:outputTokens 27641)))
+                 "2m 10s · 27.6k out · $4.69")))
+
+(ert-deftest aob-turn-clock-totals-and-supersession ()
+  (aob-tests--with-session s
+    (let ((now 100.0))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now)))
+        (let ((first (aob-turn-begin s)))
+          (setq now 130.0)
+          (should (equal (aob-session-clock s) "30s…"))
+          (should (equal (aob-session-clock s t) "30s… / 30s"))
+          (should (= (aob-turn-end s first) 30.0))
+          (should-not (aob-session-ref s :turn-start))
+          (should (equal (aob-session-clock s) "30s")))
+        (setq now 200.0)
+        (let ((old (aob-turn-begin s)))
+          (setq now 210.0)
+          (let ((new (aob-turn-begin s)))
+            (setq now 400.0)
+            (aob-turn-end s old)
+            (should (eql (aob-session-ref s :turn-start) new))
+            (should (= (aob-session-work-secs s) (+ 30 10 190)))
+            (aob-turn-end s new)
+            (should (= (aob-session-work-secs s) (+ 30 10 190)))))
+        (aob-turn-begin s)
+        (setq now 460.0)
+        (aob-set-state s 'dead)
+        (should-not (aob-session-ref s :turn-start))
+        (should (equal (aob-session-clock s) "4m"))))
+    (when (timerp aob--clock-timer)
+      (cancel-timer aob--clock-timer)
+      (setq aob--clock-timer nil))))
+
+(ert-deftest aob-queue-reorder-footer-and-flush-order ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (dolist (text '("alpha" "beta" "gamma"))
+      (aob-acp--prompt s text))
+    (aob-event s 'message :text "still answering")
+    (let ((q (aob-session-ref s :queued)))
+      (aob-queue-move s (nth 2 q) -2)
+      (should (equal (mapcar #'car (aob-session-ref s :queued)) '("gamma" "alpha" "beta")))
+      (aob-queue-move s (nth 0 (aob-session-ref s :queued)) 5)
+      (should (equal (mapcar #'car (aob-session-ref s :queued)) '("alpha" "beta" "gamma"))))
+    (with-current-buffer (aob-trace-buffer s)
+      (aob-trace--render t)
+      (let ((text (buffer-string)))
+        (should (< (string-match "still answering" text) (string-match "alpha" text)))
+        (should (< (string-match "alpha" text) (string-match "beta" text)))
+        (should (string-match-p "» 3 queued · sent as one" text)))
+      (goto-char (point-min))
+      (search-forward "alpha")
+      (aob-trace-queue-later)
+      (should (equal (mapcar #'car (aob-session-ref s :queued)) '("beta" "alpha" "gamma")))
+      (should (aob-trace--queued-at-point))
+      (should (equal (car (aob-trace--queued-at-point)) "alpha")))
+    (aob-set-state s 'idle)
+    (with-current-buffer (aob-trace-buffer s)
+      (aob-trace--render t)
+      (should (string-match-p "» 3 held · \\\\ s sends now" (buffer-string))))
+    (let (sent)
+      (cl-letf (((symbol-function 'aob-acp--request)
+                 (lambda (_s _m params &rest _) (setq sent params))))
+        (with-current-buffer (aob-trace-buffer s)
+          (aob-trace-queue-steer)))
+      (should (equal (plist-get (aref (plist-get sent :prompt) 0) :text)
+                     "beta\n\nalpha\n\ngamma"))
+      (should (equal (mapcar (lambda (e) (plist-get e :text))
+                             (seq-filter (lambda (e) (eq (plist-get e :type) 'prompt))
+                                         (reverse (aob-session-events s))))
+                     '("beta" "alpha" "gamma"))))
+    (with-current-buffer (aob-trace-buffer s)
+      (aob-trace--render t)
+      (should-not (string-match-p "queued\\|held" (buffer-string))))
+    (aob-turn-end s)))
+
+(ert-deftest aob-trace-shows-turn-meter-and-session-totals ()
+  (aob-tests--with-session s
+    (aob-set-state s 'idle)
+    (aob-acp--prompt-1 s "one")
+    (aob-tests--feed s (format aob-tests--usage-update "1.25" ""))
+    (aob-tests--feed s (format aob-tests--prompt-response 1 50 17464 7387639 7387639))
+    (with-current-buffer (aob-trace-buffer s)
+      (aob-trace--render t)
+      (should (string-match-p "done (end_turn) · 7.4M ctx · [0-9]+s · 17.5k out · \\$1.25"
+                              (buffer-string)))
+      (should (string-match-p "· [0-9]+s · 17.5k out · \\$1.25\\'" header-line-format))
+      (should (eq (get-text-property (1- (length header-line-format)) 'face header-line-format)
+                  'shadow)))))
+
+(defmacro aob-tests--with-trace-session (var &rest body)
+  "Bind VAR to a wired session and run BODY in its rendered trace."
+  (declare (indent 1))
+  `(aob-tests--with-session ,var
+     (let ((aob-trace-icons nil)
+           (buf (aob-trace-buffer ,var)))
+       (unwind-protect
+           (with-current-buffer buf
+             (aob-set-state ,var 'working)
+             ,@body)
+         (kill-buffer buf)))))
+
+(defun aob-tests--request (s id method params)
+  "Feed S a request frame, serialised and parsed as the wire does."
+  (aob-tests--feed s (json-serialize (list :jsonrpc "2.0" :id id
+                                           :method method :params params))))
+
+(defun aob-tests--goto (text)
+  "Redraw the trace and put point on the line that shows TEXT."
+  (aob-trace--render t)
+  (goto-char (point-min))
+  (search-forward text)
+  (beginning-of-line))
+
+(defun aob-tests--replies (sent)
+  "The replies in SENT, oldest first, as the JSON that went out."
+  (mapcar #'json-serialize
+          (reverse (seq-filter (lambda (m) (plist-member m :result)) sent))))
+
+(defconst aob-tests--claude-plan-options
+  [(:optionId "exit-plan-clear-accept-edits"
+    :name "Yes, clear context (12% used) and auto-accept edits" :kind "allow_always")
+   (:optionId "exit-plan-accept-edits" :name "Yes, auto-accept edits" :kind "allow_always")
+   (:optionId "exit-plan-default" :name "Yes, manually approve edits" :kind "allow_once")
+   (:optionId "reject" :name "No, keep planning" :kind "reject_once")]
+  "The options claude-agent-acp offers on ExitPlanMode with a plan, in its order.")
+
+(defun aob-tests--claude-plan (s id)
+  "Feed S the permission request claude-agent-acp sends for ExitPlanMode."
+  (let ((plan "# Plan\n\n1. Add the flag\n2. Test it"))
+    (aob-tests--request
+     s id "session/request_permission"
+     (list :sessionId "sess-test"
+           :toolCall (list :toolCallId "toolu_plan" :name "ExitPlanMode"
+                           :status "pending" :rawInput (list :plan plan)
+                           :title "Approve Plan" :kind "switch_mode"
+                           :content (vector (list :type "content"
+                                                  :content (list :type "text" :text plan)))
+                           :locations [])
+           :_meta (list :permission (list :version 1 :title "Ready to code?"))
+           :options aob-tests--claude-plan-options))))
+
+(ert-deftest aob-initialize-declares-form-elicitation-as-an-object ()
+  (let ((json (json-serialize (aob-acp--client-capabilities))))
+    (should (string-match-p "\"elicitation\":{\"form\":{}}" json))
+    (should (equal json (concat "{\"fs\":{\"readTextFile\":false,\"writeTextFile\":false},"
+                                "\"elicitation\":{\"form\":{}},"
+                                "\"_meta\":{\"subagent-transcript\":true}}")))))
+
+(ert-deftest aob-trace-answers-claude-ask-user-question ()
+  (aob-tests--with-trace-session s
+    (aob-tests--request
+     s 21 "elicitation/create"
+     '(:mode "form" :sessionId "sess-test" :toolCallId "toolu_q"
+       :message "Which auth method?"
+       :requestedSchema
+       (:type "object"
+        :properties
+        (:question_0 (:type "string" :title "Auth"
+                      :oneOf [(:const "OAuth" :title "OAuth" :description "Browser flow")
+                              (:const "API key" :title "API key")])
+         :question_0_custom (:type "string" :title "Other"
+                             :description "Type your own answer, or add a note to the option you chose above (optional)."
+                             :_meta (:_askUserQuestionCustomAnswer
+                                     (:questionId "question_0" :isCustomAnswer t)))))))
+    (let ((d (car (aob-session-decisions s))))
+      (should (equal (mapcar (lambda (q) (plist-get q :custom)) (plist-get d :questions))
+                     '("question_0_custom")))
+      (aob-tests--goto "Auth · Which auth method?")
+      (should (get-text-property (point) 'aob-question))
+      (should-not (string-match-p "Other" (buffer-string)))
+      (aob-tests--goto "◦ API key")
+      (aob-trace-answer)
+      (aob-tests--goto "◦ OAuth")
+      (aob-trace-answer)
+      (should (string-match-p "◦ OAuth  ✓" (buffer-string)))
+      (should-not (string-match-p "◦ API key  ✓" (buffer-string)))
+      (aob-trace--add-comment s (plist-get d :seq) "Which auth method?" "keep the refresh token")
+      (aob-tests--capturing sent
+        (aob-trace-send)
+        (should (equal (aob-tests--replies sent)
+                       (list (concat "{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{\"action\":\"accept\","
+                                     "\"content\":{\"question_0\":\"OAuth\","
+                                     "\"question_0_custom\":\"keep the refresh token\"}}}")))))
+      (should-not (aob-session-decisions s))
+      (should (eq (aob-session-state s) 'working))
+      (should-not (aob-session-ref s :comments))
+      (aob-trace--render t)
+      (should (string-match-p "→ OAuth, keep the refresh token" (buffer-string))))))
+
+(ert-deftest aob-trace-answers-claude-multi-select-questions ()
+  (aob-tests--with-trace-session s
+    (aob-tests--request
+     s 22 "elicitation/create"
+     '(:mode "form" :sessionId "sess-test"
+       :message "Please answer the following questions."
+       :requestedSchema
+       (:type "object"
+        :properties
+        (:question_0 (:type "array" :title "Parts" :description "Which parts change?"
+                      :items (:anyOf [(:const "api" :title "api")
+                                      (:const "ui" :title "ui")]))
+         :question_0_custom (:type "string" :title "Other"
+                             :_meta (:_askUserQuestionCustomAnswer (:questionId "question_0")))
+         :question_1 (:type "string" :title "When" :description "Ship when?"
+                      :oneOf [(:const "now" :title "now") (:const "later" :title "later")])
+         :question_1_custom (:type "string" :title "Other"
+                             :_meta (:_askUserQuestionCustomAnswer (:questionId "question_1")))))))
+    (aob-tests--goto "◦ api")
+    (aob-trace-answer)
+    (aob-tests--goto "◦ ui")
+    (aob-trace-answer)
+    (aob-tests--goto "◦ api")
+    (aob-trace-answer)
+    (aob-tests--goto "◦ later")
+    (aob-trace-answer)
+    (aob-tests--capturing sent
+      (aob-trace-send)
+      (should (equal (aob-tests--replies sent)
+                     (list (concat "{\"jsonrpc\":\"2.0\",\"id\":22,\"result\":{\"action\":\"accept\","
+                                   "\"content\":{\"question_0\":[\"ui\"],\"question_1\":\"later\"}}}")))))))
+
+(ert-deftest aob-trace-answers-codex-user-input-and-declines ()
+  (aob-tests--with-trace-session s
+    (let ((params
+           '(:sessionId "sess-test" :toolCallId "item_7" :mode "form"
+             :message "Input requested"
+             :requestedSchema
+             (:type "object"
+              :properties
+              (:env (:title "Env" :description "Which environment?"
+                     :_meta (:codex (:isOther t :isSecret :false))
+                     :type "string"
+                     :oneOf [(:const "prod" :title "prod" :description "live")
+                             (:const "staging" :title "staging")])
+               :env__other (:type "string" :title "Other"
+                            :description "Type your own answer instead of choosing an option above."
+                            :_meta (:codex (:questionId "env" :isOtherAnswer t :isSecret :false)))
+               :name (:title "Name" :description "What should it be called?"
+                      :_meta (:codex (:isOther :false :isSecret :false))
+                      :type "string"))
+              :required ["name"])
+             :_meta (:codex (:autoResolutionMs :null)))))
+      (aob-tests--request s 41 "elicitation/create" params)
+      (let* ((d (car (aob-session-decisions s)))
+             (qs (plist-get d :questions)))
+        (should (equal (mapcar (lambda (q) (plist-get q :key)) qs) '("env" "name")))
+        (should (equal (plist-get (car qs) :custom) "env__other"))
+        (should-not (plist-get (cadr qs) :custom))
+        (aob-trace--add-comment s (plist-get d :seq) "Which environment?" "qa")
+        (aob-trace--add-comment s (plist-get d :seq) "What should it be called?" "widget"))
+      (aob-tests--capturing sent
+        (aob-trace-send)
+        (should (equal (aob-tests--replies sent)
+                       (list (concat "{\"jsonrpc\":\"2.0\",\"id\":41,\"result\":{\"action\":\"accept\","
+                                     "\"content\":{\"env__other\":\"qa\",\"name\":\"widget\"}}}")))))
+      (aob-tests--request s 42 "elicitation/create" params)
+      (aob-tests--capturing sent
+        (aob-trace-decline)
+        (should (equal (aob-tests--replies sent)
+                       '("{\"jsonrpc\":\"2.0\",\"id\":42,\"result\":{\"action\":\"decline\"}}"))))
+      (should-not (aob-session-decisions s))
+      (aob-trace--render t)
+      (should (string-match-p "→ declined" (buffer-string))))))
+
+(ert-deftest aob-trace-approves-claude-plan-the-least-lasting-way ()
+  (aob-tests--with-trace-session s
+    (aob-tests--claude-plan s 31)
+    (let ((d (car (aob-session-decisions s))))
+      (should (eq (plist-get d :kind) 'plan))
+      (should (equal (plist-get d :plan) "# Plan\n\n1. Add the flag\n2. Test it")))
+    (aob-tests--goto "Add the flag")
+    (should (get-text-property (point) 'aob-event))
+    (should (string-match-p "▸ Yes, auto-accept edits" (buffer-string)))
+    (should (string-match-p "ZZ Yes, manually approve edits" (buffer-string)))
+    (aob-tests--capturing sent
+      (aob-trace-send)
+      (should (equal (aob-tests--replies sent)
+                     '("{\"jsonrpc\":\"2.0\",\"id\":31,\"result\":{\"outcome\":{\"outcome\":\"selected\",\"optionId\":\"exit-plan-default\"}}}"))))
+    (should (eq (aob-session-state s) 'working))
+    (aob-trace--render t)
+    (should (string-match-p "→ Yes, manually approve edits" (buffer-string)))
+    (aob-tests--claude-plan s 32)
+    (aob-tests--goto "▸ Yes, auto-accept edits")
+    (aob-tests--capturing sent
+      (aob-trace-answer)
+      (should (equal (aob-tests--replies sent)
+                     '("{\"jsonrpc\":\"2.0\",\"id\":32,\"result\":{\"outcome\":{\"outcome\":\"selected\",\"optionId\":\"exit-plan-accept-edits\"}}}"))))))
+
+(ert-deftest aob-trace-sends-plan-comments-back-as-a-revision ()
+  (aob-tests--with-trace-session s
+    (aob-tests--claude-plan s 33)
+    (let ((seq (plist-get (car (aob-session-decisions s)) :seq)))
+      (aob-trace--add-comment s seq "Test it" "cover the error path too"))
+    (aob-tests--capturing sent
+      (aob-trace-send)
+      (should (equal (aob-tests--replies sent)
+                     '("{\"jsonrpc\":\"2.0\",\"id\":33,\"result\":{\"outcome\":{\"outcome\":\"selected\",\"optionId\":\"reject\"}}}"))))
+    (should-not (aob-session-ref s :comments))
+    (should (string-match-p "cover the error path too" (car (car (aob-session-ref s :queued)))))
+    (should (string-match-p "Test it" (car (car (aob-session-ref s :queued)))))
+    (aob-tests--claude-plan s 34)
+    (aob-tests--capturing sent
+      (aob-trace-decline)
+      (should (equal (aob-tests--replies sent)
+                     '("{\"jsonrpc\":\"2.0\",\"id\":34,\"result\":{\"outcome\":{\"outcome\":\"selected\",\"optionId\":\"reject\"}}}"))))))
+
+(ert-deftest aob-trace-approves-codex-plan ()
+  (aob-tests--with-trace-session s
+    (aob-tests--request
+     s 51 "session/request_permission"
+     '(:sessionId "sess-test"
+       :toolCall (:toolCallId "plan-review:item_1" :title "Implement this plan?"
+                  :kind "switch_mode" :status "pending"
+                  :rawInput (:plan "- step one\n- step two"))
+       :options [(:optionId "implement_plan" :name "Yes, implement this plan" :kind "allow_once")
+                 (:optionId "revise_plan" :name "No, and tell Codex what to do differently"
+                  :kind "reject_once")]
+       :_meta (:codex (:kind "plan_review" :planItemId "item_1"))))
+    (aob-tests--goto "step two")
+    (aob-tests--capturing sent
+      (aob-trace-send)
+      (should (equal (aob-tests--replies sent)
+                     '("{\"jsonrpc\":\"2.0\",\"id\":51,\"result\":{\"outcome\":{\"outcome\":\"selected\",\"optionId\":\"implement_plan\"}}}"))))))
+
+(defun aob-tests--update (s u)
+  "Feed S the session update U, serialised as the wire does."
+  (aob-tests--feed s (json-serialize (list :jsonrpc "2.0" :method "session/update"
+                                           :params (list :sessionId "sess-test" :update u)))))
+
+(defun aob-tests--tool-seq (s id)
+  "The seq of S's tool call ID."
+  (plist-get (seq-find (lambda (e) (equal (plist-get e :tool-id) id))
+                       (aob-session-events s))
+             :seq))
+
+(defun aob-tests--block-text (needle)
+  "The text of the event drawn where NEEDLE is."
+  (save-excursion
+    (goto-char (point-min))
+    (search-forward needle)
+    (let ((seq (get-text-property (point) 'aob-event)))
+      (buffer-substring-no-properties
+       (text-property-any (point-min) (point-max) 'aob-event seq)
+       (text-property-not-all (point) (point-max) 'aob-event seq)))))
+
+(defun aob-tests--top (win)
+  "The text WIN starts with, and the text its cursor stands on."
+  (with-current-buffer (window-buffer win)
+    (list (buffer-substring-no-properties (window-start win) (+ (window-start win) 30))
+          (buffer-substring-no-properties (window-point win) (+ (window-point win) 30)))))
+
+(ert-deftest aob-trace-held-window-keeps-its-top ()
+  "A window read higher up starts on the same text however the trace moves.
+Blocks shed off the top, a task above whose rollup ticks with every
+subagent step, output with a table and a picture landing above, and
+every table drawn again for a new width: none of it moves the page."
+  (aob-tests--with-trace-session s
+    (let ((aob-trace-limit 55)
+          (win (selected-window))
+          (table (concat "| name | value | note |\n|---|---|---|\n"
+                         "| alpha | 1 | a note long enough to be squeezed by a narrower window |\n"
+                         "| beta | 2 | short |")))
+      (delete-other-windows)
+      (set-window-buffer win (current-buffer))
+      (dotimes (i 14)
+        (when (= i 4)
+          (aob-tests--update s '(:sessionUpdate "tool_call" :toolCallId "build" :title "make all"
+                                                :kind "execute" :status "in_progress")))
+        (when (= i 6)
+          (aob-tests--update s '(:sessionUpdate "tool_call" :toolCallId "task" :title "Task"
+                                                :kind "think" :status "in_progress")))
+        (aob-tests--update s (list :sessionUpdate "agent_message_chunk"
+                                   :content (list :type "text"
+                                                  :text (format "Step %d reads:\n\n%s\n" i table))))
+        (aob-tests--update s (list :sessionUpdate "tool_call" :toolCallId (format "r%d" i)
+                                   :title (format "read file%d.el" i) :kind "execute"
+                                   :status "completed")))
+      (aob-trace--render-1 s)
+      (push (aob-tests--tool-seq s "build") aob-trace--expanded)
+      (aob-trace--render-1 s)
+      (goto-char (point-min))
+      (search-forward "Step 9 reads")
+      (beginning-of-line)
+      (set-window-start win (point))
+      (set-window-point win (point))
+      (let ((top (aob-tests--top win))
+            (first (get-text-property (point-min) 'aob-event))
+            (drawn nil))
+        (dotimes (i 24)
+          (aob-tests--update s (list :sessionUpdate "agent_message_chunk"
+                                     :content (list :type "text" :text (format "more %d " i))))
+          (when (cl-oddp i)
+            (aob-tests--update s (list :sessionUpdate "tool_call" :toolCallId (format "c%d" i)
+                                       :title (format "child %d" i) :kind "read" :status "completed"
+                                       :_meta '(:claudeCode (:parentToolUseId "task")))))
+          (aob-tests--update s (list :sessionUpdate "usage_update" :used (* 1000 i) :size 200000))
+          (when (= i 8)
+            (aob-tests--update
+             s (list :sessionUpdate "tool_call_update" :toolCallId "build" :status "completed"
+                     :content (vector (list :type "content"
+                                            :content (list :type "text"
+                                                           :text (concat table "\n![shot](/tmp/shot.png)")))))))
+          (when (zerop (% i 6))
+            (aob-tests--update s (list :sessionUpdate "tool_call" :toolCallId (format "n%d" i)
+                                       :title (format "grep %d" i) :kind "execute"
+                                       :status "completed")))
+          (when (= i 16)
+            (setq drawn (aob-tests--block-text "Step 8 reads"))
+            (split-window-right)
+            (aob-trace--fit-margins))
+          (aob-trace--render-1 s)
+          (when (= i 16)
+            (should-not (equal (aob-tests--block-text "Step 8 reads") drawn)))
+          (should (equal (aob-tests--top win) top)))
+        (should-not (eql (get-text-property (point-min) 'aob-event) first))
+        (should (< (save-excursion (goto-char (point-min)) (search-forward "shot.png"))
+                   (window-start win)))
+        (should (< (text-property-any (point-min) (point-max) 'aob-event
+                                      (aob-tests--tool-seq s "task"))
+                   (window-start win)))))))

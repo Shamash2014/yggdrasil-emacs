@@ -396,7 +396,9 @@ Asleep: it carries the id its agent answers to, and no process."
           (aob-session-put s :asleep entry)
           (dolist (turn (aob-transcript-turns file))
             (aob-event s (if (equal (car turn) "user") 'prompt 'message)
-                       :text (cdr turn)))
+                       :text (cdr turn)
+                       ;; the user turns of a written conversation are yours
+                       :typed (equal (car turn) "user")))
           s))))
 
 ;;;###autoload

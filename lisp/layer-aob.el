@@ -15,6 +15,8 @@
 (require 'aob)
 (require 'aob-acp)
 (require 'aob-trace)
+(require 'ygg-todo)
+(require 'aob-todo-view)
 (require 'aob-workflow)
 (require 'ygg-ui)
 
@@ -55,7 +57,8 @@
 (define-key aob-object-map "z" ygg-view-map)
 (define-key aob-object-map "G" #'ygg-goto-last-line)
 ;; vim finishes a write with ZZ; in a trace that means send what is typed
-(define-key aob-object-map (kbd "Z Z") #'aob-trace-send)
+(define-key aob-trace-mode-map [remap ygg-save-and-kill-buffer] #'aob-trace-send)
+(define-key aob-trace-mode-map [remap ygg-kill-buffer-no-save] #'aob-trace-decline)
 (define-key aob-object-map (kbd "C-d") #'ygg-scroll-half-down)
 (define-key aob-object-map (kbd "C-u") #'ygg-scroll-half-up)
 (define-key aob-object-map "/" #'ygg-search-forward)
@@ -64,19 +67,25 @@
 ;; special-mode-map (a parent) binds h to describe-mode; keep it vim left-motion
 (define-key aob-object-map "h" #'ygg-h)
 
-;; the full modal layer, not cherry-picked keys: yggdrasil normal state
-;; runs in agent buffers, with the object verbs emulation-mapped above it
-;; (this alist is consulted before ygg's, so p/i/c/t/x/y stay verbs and
-;; q/SPC keep their special-mode meanings; everything else — w b f } %
-;; visual state, marks, jumps — is yggdrasil's)
-(defvar-local ygg-aob--trace-modal nil)
-(defvar-local ygg-aob--plan-modal nil)
-(defvar-local ygg-aob--subs-modal nil)
-(defvar ygg-aob--emulation-alist
-  (list (cons 'ygg-aob--trace-modal aob-trace-mode-map)
-        (cons 'ygg-aob--plan-modal aob-plan-mode-map)
-        (cons 'ygg-aob--subs-modal aob-subagents-mode-map)))
-(add-to-list 'emulation-mode-map-alists 'ygg-aob--emulation-alist)
+;; the full modal layer, not cherry-picked keys: yggdrasil runs in agent
+;; buffers, and each buffer's own verbs sit above ygg's maps in normal and
+;; visual state only, so insert state types into the trace's input line
+(pcase-dolist (`(,mode . ,map)
+               `((aob-trace-mode . ,aob-trace-mode-map)
+                 (aob-plan-mode . ,aob-plan-mode-map)
+                 (aob-subagents-mode . ,aob-subagents-mode-map)
+                 (aob-todo-mode . ,aob-todo-mode-map)
+                 (aob-context-mode . ,aob-context-mode-map)
+                 (aob-acp-mcp-mode . ,aob-acp-mcp-mode-map)))
+  (yggdrasil-define-mode-keys mode '(normal visual) map))
+
+(defvar ygg-aob--trace-local-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "<tab>") #'aob-trace-tab)
+    (define-key m (kbd "<s-return>") #'aob-trace-send)
+    (define-key m (kbd "<C-return>") #'aob-trace-send)
+    m)
+  "The trace's local map: no printing key, so insert state self-inserts.")
 
 ;; the composed parent pulled in ALL of special-mode-map, leaking its nav keys
 ;; (h ? < > g digits) ahead of ygg; keep only read-scroll + quit so every
@@ -91,8 +100,11 @@
     m)
   "The only special-mode keys agent buffers keep; the rest is yggdrasil's.")
 
-(dolist (map (list aob-trace-mode-map aob-plan-mode-map aob-subagents-mode-map))
+(dolist (map (list aob-trace-mode-map aob-plan-mode-map aob-subagents-mode-map
+                  aob-todo-mode-map))
   (set-keymap-parent map (make-composed-keymap aob-object-map ygg-aob--special-keep)))
+(dolist (map (list aob-context-mode-map aob-acp-mcp-mode-map))
+  (set-keymap-parent map ygg-aob--special-keep))
 
 ;; read-only agent buffers: region in visual only.  normal collapses the mark
 ;; to point (verb bounds stay the cell) so no stale Helix span highlights.
@@ -102,24 +114,18 @@
     (deactivate-mark)))
 
 (defun ygg-aob--modalize ()
+  "Put this buffer in the modal layer; its mode keys are lifted above it."
   (yggdrasil-local-mode 1)
   (add-hook 'post-command-hook #'ygg-aob--visual-only-selection 90 t))
 
 (defun ygg-aob--modalize-trace ()
-  (setq ygg-aob--trace-modal t)
-  (ygg-aob--modalize))
-
-(defun ygg-aob--modalize-plan ()
-  (setq ygg-aob--plan-modal t)
-  (ygg-aob--modalize))
-
-(defun ygg-aob--modalize-subs ()
-  (setq ygg-aob--subs-modal t)
-  (ygg-aob--modalize))
+  (ygg-aob--modalize)
+  (use-local-map ygg-aob--trace-local-map))
 
 (add-hook 'aob-trace-mode-hook #'ygg-aob--modalize-trace)
-(add-hook 'aob-plan-mode-hook #'ygg-aob--modalize-plan)
-(add-hook 'aob-subagents-mode-hook #'ygg-aob--modalize-subs)
+(dolist (hook '(aob-plan-mode-hook aob-subagents-mode-hook aob-todo-mode-hook
+                aob-context-mode-hook aob-acp-mcp-mode-hook))
+  (add-hook hook #'ygg-aob--modalize))
 
 ;; agent mode/model under the localleader — moved off m/M so those keys stay
 ;; vim set-mark / middle-of-screen in trace and plan buffers
@@ -137,6 +143,15 @@
 ;; is set from its own buffer: the localleader already knows which
 ;; session that is, where the global leader has to ask
 (dolist (mode '(aob-trace-mode aob-plan-mode aob-subagents-mode))
+  (yggdrasil-localleader-def mode "C" #'aob-cancel "cancel turn (twice: drop queue)")
+  (yggdrasil-localleader-def mode "k" #'aob-kill-session "kill session")
+  (yggdrasil-localleader-def mode "x" #'aob-acp-command "command")
+  (yggdrasil-localleader-def mode "d" #'aob-todo "todo list")
+  (yggdrasil-localleader-def mode "a" #'ygg-aob-activity "activity → quickfix")
+  (yggdrasil-localleader-def mode "p" #'aob-compose "compose")
+  (yggdrasil-localleader-def mode "y" #'aob-resolve "answer the decision")
+  (yggdrasil-localleader-def mode "n" #'aob-rename-session "rename")
+  (yggdrasil-localleader-def mode "f" #'aob-dired "files (dired)")
   (yggdrasil-localleader-def mode "m" #'aob-acp-set-mode "mode")
   (yggdrasil-localleader-def mode "M" #'aob-acp-cycle-mode "next mode")
   (yggdrasil-localleader-def mode "l" #'aob-acp-model "model")
@@ -145,10 +160,20 @@
   (yggdrasil-localleader-def mode "g" #'aob-acp-goal "goal")
   (yggdrasil-localleader-def mode "w" #'aob-deliver-to "answer goes…")
   (yggdrasil-localleader-def mode "r" #'aob-transcript-wake "wake it (resume acp)")
-  (yggdrasil-localleader-def mode "t" #'aob-subagents "subagents"))
+  (yggdrasil-localleader-def mode "t" #'aob-subagents "subagents list (toggle)"))
+
+;; a queued message is still yours until it goes: change it or take it
+;; back, from the line it is drawn on
+(yggdrasil-localleader-def 'aob-trace-mode "e" #'aob-trace-queue-edit "queued: rewrite")
+(yggdrasil-localleader-def 'aob-trace-mode "X" #'aob-trace-queue-drop "queued: drop")
+(yggdrasil-localleader-def 'aob-trace-mode "s" #'aob-trace-queue-steer "queued: say it now (idle: send held)")
+(yggdrasil-localleader-def 'aob-trace-mode "K" #'aob-trace-queue-earlier "queued: move earlier")
+(yggdrasil-localleader-def 'aob-trace-mode "J" #'aob-trace-queue-later "queued: move later")
+(yggdrasil-localleader-def 'aob-trace-mode "u" #'aob-trace-usage "usage: time, tokens, cost")
 
 (declare-function ygg-ex--cmd-write "yggdrasil-ex" (range bang args))
 (declare-function aob-trace-send "aob-trace")
+(declare-function aob-trace-comment-box-send-now "aob-trace")
 
 (defun ygg-aob--write-sends (fn &rest args)
   "Make :w send, where the buffer is a prompt rather than a file.
@@ -156,12 +181,30 @@ A draft and the line at the foot of a trace are both things you finish
 and let go of; the key that means \"I am done with this text\" is
 already in the hand."
   (cond ((derived-mode-p 'aob-compose-mode) (aob-compose-send))
+        ((derived-mode-p 'aob-trace-comment-box-mode) (aob-trace-comment-box-send))
         ((derived-mode-p 'aob-trace-mode) (aob-trace-send))
         (t (apply fn args))))
 
+(defun ygg-aob--wq-sends (fn &rest args)
+  "Make :wq send a comment and every one held with it, as ZZ does."
+  (if (derived-mode-p 'aob-trace-comment-box-mode)
+      (aob-trace-comment-box-send-now)
+    (apply #'ygg-aob--write-sends fn args)))
+
 (with-eval-after-load 'yggdrasil-ex
   (advice-add 'ygg-ex--cmd-write :around #'ygg-aob--write-sends)
-  (advice-add 'ygg-ex--cmd-wq :around #'ygg-aob--write-sends))
+  (advice-add 'ygg-ex--cmd-wq :around #'ygg-aob--wq-sends)
+  (advice-add 'ygg-ex--cmd-quit :around #'ygg-aob--quit-cancels))
+
+(defun ygg-aob--quit-cancels (fn &rest args)
+  "Make :q drop a draft or comment box, or decline what a trace's agent
+waits on, as ZQ does."
+  (cond ((derived-mode-p 'aob-compose-mode) (aob-compose-abort))
+        ((derived-mode-p 'aob-trace-comment-box-mode) (aob-trace-comment-box-cancel))
+        ((and (derived-mode-p 'aob-trace-mode)
+              (aob-trace-waiting-decision (aob-session-get aob-trace--session-id)))
+         (aob-trace-decline))
+        (t (apply fn args))))
 
 (defvar ygg-quickscope-inhibit)
 
@@ -203,9 +246,10 @@ the servers it is handed are decided."
 
 (yggdrasil-localleader-def 'aob-compose-mode "m" #'ygg-compose-transient "modes")
 (yggdrasil-localleader-def 'aob-compose-mode "q" #'aob-compose-hide "hide the box")
+(yggdrasil-localleader-def 'aob-compose-mode "p" #'ygg-preset-edit "edit a preset")
 (setq aob-compose-panel-hint "\\ m modes")
 
-;; T on an agent → its file activity as a quickfix.  Built from ACP tool
+;; \ a on an agent → its file activity as a quickfix.  Built from ACP tool
 ;; `:locations' (the universal field every adapter populates), so it works
 ;; for claude, codex, and hermes alike — where claude-only subagent
 ;; nesting could not — and inherits clickable rows, ]l/[l nav, wgrep, and
@@ -222,7 +266,7 @@ actions keep their tool title.  The short path stays the clickable target."
         lines)
     ;; tool-id → subagent name: a Task event carries :children and :title
     (dolist (ev (aob-session-events s))
-      (when (plist-get ev :children)
+      (when (or (plist-get ev :subagent) (plist-get ev :children))
         (puthash (plist-get ev :tool-id) (plist-get ev :title) names)))
     (dolist (ev (reverse (aob-session-events s)))
       (dolist (loc (plist-get ev :locations))
@@ -253,7 +297,6 @@ actions keep their tool title.  The short path stays the clickable target."
 
 (defvar aob-buffer-session-id)
 
-(define-key aob-object-map "T" (cons "activity → quickfix" #'ygg-aob-activity))
 
 ;; same env treatment as the SPC a a terminals: per-project config home
 ;; (CLAUDE_CONFIG_DIR via marker file / ~/.agents-conf) and the mise tool
@@ -390,12 +433,7 @@ and the leader must not answer a space typed into it."
     map)
   "Keys lifted above normal state in the compose box: a space is a space.")
 
-(defun ygg-aob--compose-no-leader ()
-  "Keep the leader off the space bar in this compose buffer."
-  (setq ygg--special-lift-alist
-        (list (cons 'ygg--normal-p ygg-aob--compose-normal-map))))
-
-(add-hook 'aob-compose-mode-hook #'ygg-aob--compose-no-leader)
+(yggdrasil-define-mode-keys 'aob-compose-mode 'normal ygg-aob--compose-normal-map)
 
 ;;; corfu under the word, not over the box
 
@@ -512,6 +550,9 @@ swept, so an orphan heals the moment anything looks for it."
 (declare-function ygg-space-task-p "yggdrasil-spacetree" (tab))
 (declare-function ygg-space--spawn "yggdrasil-spacetree" (parent))
 (declare-function ygg-space--set "yggdrasil-spacetree" (tab key val))
+(declare-function ygg-space--tab-by-id "yggdrasil-spacetree" (id))
+(declare-function ygg-space--goto-id "yggdrasil-spacetree" (id))
+(declare-function ygg-space--current-id "yggdrasil-spacetree" ())
 
 (defun ygg-aob--project-space-id (dir)
   "The space standing for DIR\='s tree, if one does.
@@ -533,8 +574,89 @@ levels deep, each a child of the one before it."
                      (ygg-space--id-of tab)))
               (ygg-space--tabs))))
 
+(defvar ygg-aob--resuming-acp-id nil
+  "The conversation id a resume is bringing back, while its session opens.")
+
+(defun ygg-aob--bind-resumed-acp-id (fn entry &rest args)
+  "Let the session ENTRY resumes know its conversation id before it opens.
+The id reaches the session only once the agent answers, and by then its
+space has been chosen."
+  (let ((ygg-aob--resuming-acp-id (plist-get entry :acp-id)))
+    (apply fn entry args)))
+
+(advice-add 'aob-acp-resume-entry :around #'ygg-aob--bind-resumed-acp-id)
+
+(defun ygg-aob--acp-id (s)
+  (or (aob-session-ref s :acp-id) ygg-aob--resuming-acp-id))
+
+(defun ygg-aob--top-session (s)
+  "The session at the head of S's line of senders, or S itself."
+  (let ((seen (list s)) parent)
+    (while (and (setq parent (aob-session-get (aob-session-ref s :parent-session)))
+                (not (memq parent seen)))
+      (push parent seen)
+      (setq s parent))
+    s))
+
+(defun ygg-aob--agent-tab (s)
+  "The live space made for S, or nil.
+The one a saved session restored for S's conversation, else the one made
+for S in this Emacs.  Names are reused after a restart and conversation
+ids never are, so a restored space is matched by the id alone."
+  (when (fboundp 'ygg-space--tabs)
+    (let ((acp (ygg-aob--acp-id s))
+          (tabs (ygg-space--tabs)))
+      (or (and acp (seq-find (lambda (tab) (equal (alist-get 'ygg-agent-acp tab) acp))
+                             tabs))
+          (seq-find (lambda (tab)
+                      (and (eql (ygg-space--id-of tab) (aob-session-ref s :space))
+                           (equal (alist-get 'ygg-agent tab) (aob-session-id s))
+                           (null (alist-get 'ygg-agent-acp tab))))
+                    tabs)))))
+
+(defun ygg-aob--claim-tab (s tab)
+  "File S and the subagents it sent under TAB, tag TAB for S; return its id."
+  (let ((id (ygg-space--id-of tab)))
+    (ygg-space--set tab 'ygg-agent (aob-session-id s))
+    (when-let* ((acp (ygg-aob--acp-id s)))
+      (ygg-space--set tab 'ygg-agent-acp acp))
+    (dolist (each (aob-sessions))
+      (when (eq (ygg-aob--top-session each) s)
+        (aob-session-put each :space id)))
+    id))
+
+(defun ygg-aob--stamp-space (s &rest _)
+  "Write S's conversation id on the space made for it, once it has one."
+  (when-let* ((acp (aob-session-ref s :acp-id))
+              (id (aob-session-ref s :space))
+              ((fboundp 'ygg-space--set)))
+    (dolist (frame (frame-list))
+      (dolist (tab (funcall tab-bar-tabs-function frame))
+        (when (and (eql (ygg-space--id-of tab) id)
+                   (equal (alist-get 'ygg-agent tab) (aob-session-id s))
+                   (null (alist-get 'ygg-agent-acp tab)))
+          (ygg-space--set tab 'ygg-agent-acp acp))))))
+
+(add-hook 'aob-state-change-hook #'ygg-aob--stamp-space)
+
+(defun ygg-aob--spawn-space (s)
+  "Nest a fresh space for S under its project, land in it; return its id."
+  (let* ((default-directory (or (aob-session-dir s)
+                                (aob-session-project s)
+                                default-directory))
+         ;; the project's space, else the root: anything but the space
+         ;; the last agent made, which is where you are standing when its
+         ;; spawn has just finished
+         (parent (or (ygg-aob--project-space-id default-directory)
+                     (bound-and-true-p ygg-space--root-id)
+                     (ygg-space--current-id)))
+         (id (ygg-aob--claim-tab s (ygg-space--spawn parent))))
+    (ygg-space-rename (or (aob-session-name s) "agent"))
+    id))
+
 (defun ygg-aob--space-for-agent (s)
-  "Nest a space for S under its project, and name it after S.
+  "Give S its space: the one restored for its conversation, else a new one
+nested under its project and named after it.
 A conversation opened for reading gets none: it has no process, and a
 space is where a process works.  A subagent gets none either: it works
 in the space of the session that sent it, and opening it must not take
@@ -554,24 +676,28 @@ you out of that one."
              (not (aob-session-ref s :asleep))
              (not (memq (aob-session-state s) '(done dead failed))))
     (condition-case err
-        (let* ((default-directory (or (aob-session-dir s)
-                                      (aob-session-project s)
-                                      default-directory))
-               ;; the project's space, else the root: anything but the
-               ;; space the last agent made, which is where you are
-               ;; standing when its spawn has just finished
-               (parent (or (ygg-aob--project-space-id default-directory)
-                           (bound-and-true-p ygg-space--root-id)
-                           (ygg-space--current-id))))
-          (let ((tab (ygg-space--spawn parent)))
-            (when (and tab (fboundp 'ygg-space--set))
-              (ygg-space--set tab 'ygg-agent (aob-session-id s))))
-          (ygg-space-rename (or (aob-session-name s) "agent"))
-          (aob-session-put s :space (ygg-space--current-id)))
+        (if-let* ((tab (ygg-aob--agent-tab s)))
+            (progn (ygg-space--goto-id (ygg-space--id-of tab))
+                   (ygg-aob--claim-tab s tab))
+          (ygg-aob--spawn-space s))
       (error (message "aob: no space for %s (%s)"
                       (aob-session-name s) (error-message-string err))))))
 
 (add-hook 'aob-session-created-hook #'ygg-aob--space-for-agent 90)
+
+(defun ygg-aob-ensure-space (s)
+  "The space S works in, made now when S is top-level and its own is gone.
+A subagent answers with the space of the session that sent it.  Only
+opening a session asks this: a list heals an orphan into wherever you
+stand, and a list that made spaces would make one per agent per redraw."
+  (let ((top (ygg-aob--top-session s)))
+    (when (and ygg-aob-space-per-agent
+               (fboundp 'ygg-space--spawn)
+               (not (aob-session-ref top :asleep)))
+      (if-let* ((tab (ygg-aob--agent-tab top)))
+          (ygg-aob--claim-tab top tab)
+        (unless (memq (aob-session-state top) '(done dead failed))
+          (ygg-aob--spawn-space top))))))
 
 ;; a trace stands beside the work, not over it.  ygg-ui-show hands a
 ;; reader the main window, which is right for something you go and read
@@ -721,7 +847,12 @@ buffer-local that says where the words were going."
 
 (advice-add 'aob-compose-send :around #'ygg-aob--compose-opens-trace)
 
-(add-hook 'aob-session-created-hook #'ygg-aob--show-trace 95)
+(defun ygg-aob--show-new-trace (s)
+  "Show a new session's trace; a subagent its agent runs opens only when asked."
+  (unless (aob-session-ref s :native-tool-id)
+    (ygg-aob--show-trace s)))
+
+(add-hook 'aob-session-created-hook #'ygg-aob--show-new-trace 95)
 
 (defun ygg-aob--trace-of-subagent (fn s &rest args)
   "Open a subagent's trace beside the conversation, not over it."
@@ -882,6 +1013,7 @@ leaves the live frame unchanged with no redisplay in between."
                                  (cons f (with-selected-frame f
                                            (current-window-configuration)))))
                           (frame-list))))
+  (mapc #'ygg-aob--stamp-space (aob-live-sessions))
   (ygg-aob--prune-agent-windows))
 
 (defun ygg-aob--after-session-save ()
@@ -924,9 +1056,17 @@ leaves the live frame unchanged with no redisplay in between."
 
 (add-to-list 'ygg-space-state-functions #'ygg-aob--space-state-face)
 
+(defun ygg-aob-goto-space (s)
+  "Go to the space agent S works in, making one when its own is gone.
+A subagent's space is the one of the session that sent it."
+  (when-let* ((id (ygg-aob-ensure-space s))
+              ((not (eql id (ygg-space--current-id)))))
+    (ygg-space--goto-id id)))
+
 (defun ygg-aob--goto (s)
-  "Show agent S's trace — space-agnostic: no workspace switch, no sidebar.
+  "Go to agent S's space and show its trace there.
 An already-visible trace is refocused; otherwise it opens in place."
+  (ygg-aob-goto-space s)
   (let ((buf (aob-trace-buffer s)))
     (if-let* ((win (get-buffer-window buf)))
         (select-window win)
@@ -1239,9 +1379,13 @@ a name two projects share is told apart by where it is."
   (let* ((live (seq-sort-by #'ygg-aob--score #'>
                             (seq-remove #'ygg-aob--put-down-p (aob-live-sessions))))
          (cands (mapcar (lambda (s)
-                          (cons (format "%-28s %-8s %s"
+                          (cons (format "%-28s %-8s %s %s"
                                         (truncate-string-to-width (aob-session-name s) 28 nil nil "…")
                                         (aob-session-state s)
+                                        (propertize (format "%-12s %-8s"
+                                                            (or (aob-session-clock s t) "")
+                                                            (or (aob-session-spend s) ""))
+                                                    'face 'shadow)
                                         (abbreviate-file-name
                                          (directory-file-name
                                           (or (aob-session-project s) (aob-session-dir s) ""))))
@@ -1259,8 +1403,9 @@ a name two projects share is told apart by where it is."
 
 (defun ygg-aob-pick ()
   "Go to an agent IN THE CURRENT SPACE, flash-style: labeled hints in the
-echo area, one keypress jumps.  Only this space's agents are offered;
-worst attention sits on `a'; a sole agent needs no key."
+echo area, one keypress jumps to that agent's own space.  Only this
+space's agents are offered; worst attention sits on `a'; a sole agent
+needs no key."
   (interactive)
   (let* ((space (and (fboundp 'ygg-space--current-id) (ygg-space--current-id)))
          (live (seq-sort-by
@@ -1442,7 +1587,6 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   (yggdrasil-define-keys 'ygg-leader-buffer-map
     "D" #'ygg-aob-force-kill-or-delete :label "force kill · delete agent"))
 
-(declare-function ygg-daemon-oneshot "ygg-daemon" (&optional default-root))
 (declare-function ygg-daemon-inspect "ygg-daemon" (task))
 (declare-function ygg-qa-compose "ygg-qa" (task &optional note))
 (autoload 'ygg-qa-compose "ygg-qa" nil t)
@@ -1460,7 +1604,6 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "j" #'ygg-aob-switch :label "switch session, any project"
   "r" #'ygg-aob-resolve-next :label "resolve"
   "t" #'ygg-task-adopt :label "task from this chat"
-  "c" #'ygg-daemon-oneshot :label "compose: a draft, its mode on \\ m"
   "q" #'aob-kill-session :label "kill")
 
 (declare-function ygg-transient-acp "ygg-transient")
@@ -1487,6 +1630,8 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 (yggdrasil-define-keys 'ygg-leader-agent-map
   ;; works on the visual selection: region is what the answer replaces
   "e" #'aob-deliver-to :label "answer goes…"
+  "u" #'ygg-preset-edit :label "edit a preset"
+  "U" #'ygg-preset-new :label "new preset"
   "s" #'ygg-agent-skill-install :label "install skills"
   "S" #'ygg-agent-skill-uninstall :label "uninstall a skill")
 
@@ -1539,6 +1684,9 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 (declare-function ygg-preset-list "ygg-preset" (&optional root))
 (declare-function ygg-preset-name "ygg-preset" (d))
 (declare-function ygg-preset-body "ygg-preset" (d))
+(declare-function ygg-preset-field "ygg-preset" (d key))
+(autoload 'ygg-preset-edit "ygg-preset" nil t)
+(autoload 'ygg-preset-new "ygg-preset" nil t)
 (declare-function ygg-preset-skill-files "ygg-preset" (root))
 (declare-function ygg-preset--parse "ygg-preset" (file))
 (defvar aob-capf-command-functions)
@@ -1585,22 +1733,50 @@ on every keystroke of a popup.")
           (cdr (ygg-aob--presets-of dir))))
 
 (defun ygg-aob--expand-presets (text)
-  "TEXT with every @preset it names carried after it in the preset's own words.
-A mention the agent cannot open is a word; the body is what was meant.
-A file of the same name is the file, and is left to the agent."
+  "TEXT with every preset it names carried after it in the preset's own words.
+Named as @NAME, or as /NAME the way a skill is: the slash form is taken
+out of the words, since the agent would try to run it as a command.  A
+file or a skill of the same name is that, and is left to the agent."
   (let* ((dir (or (bound-and-true-p aob-compose--dir) default-directory))
+         (known (ygg-aob--presets-of dir))
+         (skills (mapcar (lambda (k) (plist-get k :name)) (car known)))
+         (end "\\(?:[^[:alnum:]_-]\\|\\'\\)")
          blocks)
-    (dolist (p (cdr (ygg-aob--presets-of dir)))
-      (let ((name (ygg-preset-name p)))
-        (when (and (string-match-p (concat "@" (regexp-quote name)
-                                           "\\(?:[^[:alnum:]_-]\\|\\'\\)")
-                                   text)
+    (dolist (p (cdr known))
+      (let* ((name (ygg-preset-name p))
+             (at (string-match-p (concat "@" (regexp-quote name) end) text))
+             (slash (and (not (member name skills))
+                         (string-match-p (concat "\\(?:^\\|[[:space:]]\\)/"
+                                                 (regexp-quote name) end)
+                                         text))))
+        (when (and (or at slash)
                    (not (file-exists-p (expand-file-name name dir))))
+          (when slash
+            (setq text (string-trim
+                        (replace-regexp-in-string
+                         (concat "\\(^\\|[[:space:]]\\)/" (regexp-quote name)
+                                 "\\([^[:alnum:]_-]\\|\\'\\)")
+                         "\\1\\2" text))))
           (push (format "<preset name=\"%s\">\n%s\n</preset>"
                         name (string-trim (or (ygg-preset-body p) "")))
                 blocks))))
     (when blocks
       (concat text "\n\n" (string-join (nreverse blocks) "\n\n")))))
+
+(defun ygg-aob--preset-commands (dir)
+  "DIR's presets for the popup a slash opens, marked as presets."
+  (mapcar (lambda (p)
+            (list :name (ygg-preset-name p)
+                  :description
+                  (concat "preset · "
+                          (or (ygg-preset-field p :description)
+                              (car (split-string
+                                    (string-trim
+                                     (replace-regexp-in-string
+                                      "^#+[ \t]*" "" (or (ygg-preset-body p) "")))
+                                    "\n" t))
+                              ""))))
+          (cdr (ygg-aob--presets-of dir))))
 
 (defcustom ygg-aob-diff-max-chars 60000
   "How much of a checkout's diff an @diff carries before it is cut."
@@ -1649,10 +1825,55 @@ A file of the same name is the file, and is left to the agent."
 
 (with-eval-after-load 'aob
   (add-hook 'aob-capf-command-functions #'ygg-aob--skill-commands)
+  (add-hook 'aob-capf-command-functions #'ygg-aob--preset-commands t)
   (add-hook 'aob-capf-mention-functions #'ygg-aob--preset-mentions)
   (add-hook 'aob-capf-mention-functions #'ygg-aob--diff-mention)
   (add-hook 'aob-compose-before-send-functions #'ygg-aob--expand-presets)
   (add-hook 'aob-compose-before-send-functions #'ygg-aob--expand-diff))
+
+;;; A session's todo list: its plan carried in, your edits told back
+
+(advice-add 'aob-acp--plan :after #'ygg-todo-mirror-plan)
+
+(defun ygg-aob--todo-redraw (file &rest _)
+  "Redraw the sessions whose list is FILE, so their counts follow it."
+  (let ((file (expand-file-name file)))
+    (dolist (s (aob-sessions))
+      (when (equal (aob-session-ref s :todo-file) file)
+        (aob--dirty s)))))
+
+(add-hook 'ygg-todo-changed-functions #'ygg-aob--todo-redraw)
+
+(defun ygg-aob--todo-note-compose (text)
+  "TEXT followed by the user changes to the target session's list, if any."
+  (when-let* ((id (and (stringp aob-compose--target) aob-compose--target))
+              (note (ygg-todo-session-note id)))
+    (concat text "\n\n" note)))
+
+(add-hook 'aob-compose-before-send-functions #'ygg-aob--todo-note-compose t)
+
+(declare-function aob-trace--comments-message "aob-trace" (s))
+
+(defun ygg-aob--comments-compose (text)
+  "TEXT with the comments held for the target session in front of it.
+They were held until the next message; a message from compose is one."
+  (when-let* ((id (and (stringp aob-compose--target) aob-compose--target))
+              (s (aob-session-get id))
+              ((fboundp 'aob-trace--comments-message))
+              (comments (aob-trace--comments-message s)))
+    (aob-session-put s :comments nil)
+    (concat comments "\n\n" text)))
+
+(add-hook 'aob-compose-before-send-functions #'ygg-aob--comments-compose)
+
+(defun ygg-aob--todo-note-say (args)
+  "ARGS of a message sent from a trace, the todo note after its text."
+  (pcase-let ((`(,s ,text) args))
+    (if-let* ((note (ygg-todo-session-note s)))
+        (list s (concat text "\n\n" note))
+      args)))
+
+(advice-add 'aob-trace--say :filter-args #'ygg-aob--todo-note-say)
 
 (provide 'layer-aob)
 ;;; layer-aob.el ends here

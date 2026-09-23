@@ -31,6 +31,13 @@
       (ignore-errors
         (ygg-agent--config-dir (car kind-spec) (cdr kind-spec) project)))))
 
+(define-derived-mode ygg-agent-skills-error-mode special-mode "skills-error"
+  "Read-only output of a failed skills run.")
+
+(defvar ygg-modal-special-modes)
+(with-eval-after-load 'yggdrasil-core
+  (add-to-list 'ygg-modal-special-modes 'ygg-agent-skills-error-mode))
+
 (defun ygg-agent--skills-error-buffer (name code out)
   (let ((buf (get-buffer-create (format "*skills:error:%s*" name))))
     (with-current-buffer buf
@@ -38,8 +45,7 @@
         (erase-buffer)
         (insert (format "skills: %s failed (exit %d)\n\n" name code) out))
       (goto-char (point-min))
-      (special-mode)
-      (local-set-key (kbd "q") #'quit-window))
+      (ygg-agent-skills-error-mode))
     (display-buffer buf '((display-buffer-at-bottom) (window-height . 15)))))
 
 (defun ygg-agent--skills-run (argv name)

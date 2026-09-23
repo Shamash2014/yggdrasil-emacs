@@ -48,8 +48,10 @@ the prefix above Emacs.app, not beside the executable."
   (expand-file-name "aob-mcp-key" (locate-user-emacs-file "var/")))
 
 (defun aob-mcp-host--write-key ()
-  "Make a secret for this run and leave it where only its owner reads it."
-  (setq aob-mcp-host--key (aob-mcp-host--token))
+  "Make a secret for this run and leave it where only its owner reads it.
+One secret for the life of this Emacs: every session was handed it when
+it opened, and a sidecar restarted on a new one answers them all 401."
+  (setq aob-mcp-host--key (or aob-mcp-host--key (aob-mcp-host--token)))
   (let ((file (aob-mcp-host--key-file)))
     (make-directory (file-name-directory file) t)
     (with-temp-file file (insert aob-mcp-host--key))
@@ -115,9 +117,11 @@ whatever Emacs happens to be first on PATH."
     (ignore-errors (delete-file (aob-mcp-host--key-file)))))
 
 (defun aob-mcp-host-restart ()
-  "Stop and start, to pick up edited tools."
+  "Stop and start, to pick up edited tools, keeping the run's secret."
   (interactive)
-  (aob-mcp-host-stop)
+  (when (process-live-p aob-mcp-host--process)
+    (delete-process aob-mcp-host--process))
+  (setq aob-mcp-host--process nil)
   (aob-mcp-host-start))
 
 (add-hook 'kill-emacs-hook #'aob-mcp-host-stop)
