@@ -18,7 +18,8 @@
 (defvar eglot-server-programs)
 
 (defcustom ygg-rass-modes
-  '(python-ts-mode python-mode elixir-ts-mode elixir-mode heex-ts-mode)
+  '(python-ts-mode python-mode elixir-ts-mode elixir-mode heex-ts-mode
+    dart-mode dart-ts-mode kotlin-mode kotlin-ts-mode swift-mode swift-ts-mode)
   "Major modes whose eglot server is multiplexed with harper-ls via rass."
   :type '(repeat symbol) :group 'eglot)
 

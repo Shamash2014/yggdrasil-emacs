@@ -27,9 +27,6 @@
     (push (cons "repomap" #'ygg-ex--cmd-repomap) ygg-ex--commands)))
 
 (declare-function ygg-qf-buffer-create "layer-quickfix" (&optional list))
-(declare-function treesit-auto-add-to-auto-mode-alist "treesit-auto")
-(declare-function global-treesit-auto-mode "treesit-auto")
-(defvar treesit-auto-install)
 
 (declare-function eglot-managed-p "eglot")
 (declare-function eglot-format "eglot")
@@ -118,11 +115,11 @@ by hand in a window keeps the one it had."
 ;;; 1. Tree-sitter modes & grammars
 
 (defun ygg-lsp--remode-fundamentals ()
-  "Re-detect modes for file buffers stuck in `fundamental-mode'.
-Session restore can run before deferred mode registration — treesit-auto
-below, or elpaca-provided modes like gfm-mode — leaving e.g. .ts or .md
-buffers modeless.  Runs both after session load and after elpaca finishes,
-so whichever completes last re-modes the stragglers."
+  "Re-detect modes for file buffers stuck in fundamental-mode.
+Session restore can run before deferred mode registration — elpaca-provided
+modes like gfm-mode or kotlin-ts-mode — leaving e.g. .ts or .md buffers
+modeless.  Runs both after session load and after elpaca finishes, so
+whichever completes last re-modes the stragglers."
   (dolist (b (buffer-list))
     (with-current-buffer b
       (when (and buffer-file-name (eq major-mode 'fundamental-mode))
@@ -131,38 +128,16 @@ so whichever completes last re-modes the stragglers."
 (add-hook 'easysession-after-load-hook #'ygg-lsp--remode-fundamentals)
 (add-hook 'elpaca-after-init-hook #'ygg-lsp--remode-fundamentals)
 
-(when (fboundp 'elpaca)
-  (elpaca treesit-auto
-    ;; register synchronously: an idle-timer deferral here loses the
-    ;; race against session restore and strands every restored ts-mode
-    ;; buffer (any language) in fundamental-mode
-    (require 'treesit-auto)
-    ;; a missing grammar leaves the ts-mode body erroring before its
-    ;; hooks run (half-dead buffer) — just build it on first contact
-    (setq treesit-auto-install t)
-    (treesit-auto-add-to-auto-mode-alist 'all)
-    (global-treesit-auto-mode)
-    ;; anything restored before this point sat modeless — heal it now
+;;; Enable all built-in tree-sitter modes; never prompt per-buffer for grammars
+(when (fboundp 'treesit-available-p)
+  (when (treesit-available-p)
+    ;; Enable all available ts-modes: no per-buffer grammar probing like treesit-auto
+    (setopt treesit-enabled-modes t)
+    ;; Never auto-install grammars: they're already prebuilt for common languages,
+    ;; and 'ask would prompt once per buffer during session restore
+    (setopt treesit-auto-install-grammar 'never)
+    ;; anything restored before elpaca finishes sits modeless — heal it now
     (ygg-lsp--remode-fundamentals)))
-
-;; treesit-auto rebuilds major-mode-remap-alist on every set-auto-mode-0,
-;; re-probing ~60 grammars (dlopen) each time — 13s to restore a 244-file
-;; session.  Availability is fixed per session; memoize, clear on real install.
-(defvar ygg-lsp--treesit-ready-cache (make-hash-table :test 'eq))
-
-(defun ygg-lsp--treesit-ready-cached (orig lang &rest args)
-  (let ((hit (gethash lang ygg-lsp--treesit-ready-cache 'miss)))
-    (if (eq hit 'miss)
-        (puthash lang (apply orig lang args) ygg-lsp--treesit-ready-cache)
-      hit)))
-
-(defun ygg-lsp--treesit-ready-cache-clear (&rest _)
-  (clrhash ygg-lsp--treesit-ready-cache))
-
-(when (fboundp 'treesit-ready-p)
-  (advice-add 'treesit-ready-p :around #'ygg-lsp--treesit-ready-cached)
-  (advice-add 'treesit-install-language-grammar :after
-              #'ygg-lsp--treesit-ready-cache-clear))
 
 ;; Emacs 30 ships elixir-ts-mode built in; only fetch it where absent.
 (unless (fboundp 'elixir-ts-mode)
@@ -182,8 +157,8 @@ so whichever completes last re-modes the stragglers."
       (unless (treesit-ready-p 'kotlin t)
         (ignore-errors (treesit-install-language-grammar 'kotlin))))))
 
-;; Emacs ships no dart mode and treesit-auto has no dart-ts-mode to add, so
-;; .dart would open in fundamental-mode and the dart eglot hook never fires.
+;; Emacs ships no dart mode; .dart must use the non-ts dart-mode so the dart
+;; eglot hook fires and the dape debugger can find the language.
 (when (fboundp 'elpaca)
   (elpaca dart-mode
     (add-to-list 'auto-mode-alist '("\\.dart\\'" . dart-mode))))
@@ -204,8 +179,8 @@ so whichever completes last re-modes the stragglers."
   (elpaca spinner)
   (elpaca (swift-development :host github :repo "konrad1977/swift-development")))
 
-;; dockerfile-ts-mode ships in Emacs 30, but treesit-auto maps no filename to
-;; it (Dockerfile has no extension) and the grammar is unbuilt — wire both.
+;; dockerfile-ts-mode ships in Emacs 31, but no default filename pattern exists
+;; (Dockerfile has no extension), and the grammar is unbuilt — wire both.
 (add-to-list 'auto-mode-alist
              '("\\(?:Dockerfile\\|Containerfile\\)\\(?:\\.[^/]*\\)?\\'"
                . dockerfile-ts-mode))
@@ -473,7 +448,7 @@ so whichever completes last re-modes the stragglers."
              (cons (treesit-node-start node) (treesit-node-end node))))
       (bounds-of-thing-at-point 'defun)))
 
-(defun ygg-lsp--type-bounds ()
+(defun ygg-lsp--type-bounds (which)
   "Bounds of the nearest enclosing class/struct/impl/interface/module node."
   (when (treesit-parser-list)
     (let ((node (treesit-node-at (point))))
@@ -481,17 +456,116 @@ so whichever completes last re-modes the stragglers."
                   (not (string-match-p "class\\|struct\\|impl\\|interface\\|module"
                                        (treesit-node-type node))))
         (setq node (treesit-node-parent node)))
-      (and node (cons (treesit-node-start node) (treesit-node-end node))))))
+      (when node
+        (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
+          (if (eq which 'around) b (ygg-lsp--inner-node-bounds node)))))))
+
+(defun ygg-lsp--inner-node-bounds (node)
+  "Body/content of a node, excluding brackets/keywords/headers."
+  (when node
+    (let ((body (and (fboundp 'treesit-node-child-by-field-name)
+                     (treesit-node-child-by-field-name node "body")))
+          (consequence (and (fboundp 'treesit-node-child-by-field-name)
+                            (treesit-node-child-by-field-name node "consequence"))))
+      (cond
+       (body (cons (treesit-node-start body) (treesit-node-end body)))
+       (consequence (cons (treesit-node-start consequence) (treesit-node-end consequence)))
+       (t (cons (treesit-node-start node) (treesit-node-end node)))))))
+
+(defun ygg-lsp--loop-bounds (which)
+  "Bounds of the enclosing loop (for/while/repeat/do-while)."
+  (when (treesit-parser-list)
+    (let ((node (treesit-node-at (point))))
+      (while (and node
+                  (not (string-match-p "for\\|while\\|do\\|repeat" (treesit-node-type node))))
+        (setq node (treesit-node-parent node)))
+      (when node
+        (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
+          (if (eq which 'around) b (ygg-lsp--inner-node-bounds node)))))))
+
+(defun ygg-lsp--conditional-bounds (which)
+  "Bounds of the enclosing if/else/case statement."
+  (when (treesit-parser-list)
+    (let ((node (treesit-node-at (point))))
+      (while (and node
+                  (not (string-match-p "if_statement" (treesit-node-type node))))
+        (setq node (treesit-node-parent node)))
+      (when node
+        (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
+          (if (eq which 'around) b (ygg-lsp--inner-node-bounds node)))))))
+
+(defun ygg-lsp--parameter-bounds (which)
+  "Bounds of the enclosing parameter/argument via treesit or match.el."
+  (let ((node (and (treesit-parser-list) (treesit-node-at (point)))))
+    (when node
+      (let ((re "\\(?:parameter\\|argument\\)"))
+        (while (and node (not (string-match-p re (treesit-node-type node))))
+          (setq node (treesit-node-parent node)))
+        (when node
+          (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
+            (if (eq which 'around) b (ygg-lsp--inner-node-bounds node))))))))
+
+(defun ygg-lsp--string-bounds (which)
+  "Bounds of the enclosing string literal."
+  (when (treesit-parser-list)
+    (let ((node (treesit-node-at (point))))
+      (while (and node (not (string-match-p "string" (treesit-node-type node))))
+        (setq node (treesit-node-parent node)))
+      (when node
+        (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
+          (if (eq which 'around) b
+            ;; String inner: contents without quotes
+            (cons (1+ (car b)) (1- (cdr b)))))))))
+
+(defun ygg-lsp--comment-bounds (which)
+  "Bounds of the enclosing comment."
+  (when (treesit-parser-list)
+    (let ((node (treesit-node-at (point))))
+      (while (and node (not (string-match-p "comment" (treesit-node-type node))))
+        (setq node (treesit-node-parent node)))
+      (when node
+        (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
+          (if (eq which 'around) b b))))))
+
+(defun ygg-lsp--block-bounds (which)
+  "Bounds of the enclosing block ({ } or similar)."
+  (when (treesit-parser-list)
+    (let ((node (treesit-node-at (point))))
+      (while (and node (not (string-match-p "block\\|statement_block\\|function_body" (treesit-node-type node))))
+        (setq node (treesit-node-parent node)))
+      (when node
+        (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
+          (if (eq which 'around) b (ygg-lsp--inner-node-bounds node)))))))
+
+(defun ygg-lsp--call-bounds (which)
+  "Bounds of the enclosing function call."
+  (when (treesit-parser-list)
+    (let ((node (treesit-node-at (point))))
+      (while (and node
+                  (not (string-match-p "call\\|invocation\\|subscript" (treesit-node-type node))))
+        (setq node (treesit-node-parent node)))
+      (when node
+        (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
+          (if (eq which 'around) b (ygg-lsp--inner-node-bounds node)))))))
 
 (defun ygg-lsp--textobject-bounds (c which)
-  "Resolve the `f' (function) and `t' (type) treesit textobjects.
+  "Resolve treesit textobjects: f (function), t (type), l (loop),
+C (conditional), P (parameter), k (call), S (string), M (comment), B (block).
 Installed as :before-until advice on `ygg-match--textobject-bounds';
-returning nil for any other char falls through to the original dispatcher.
-v1: `mi' and `ma' return identical bounds for f/t (no whitespace trim)."
-  (ignore which)
+returning nil for any other char falls through to the original dispatcher."
   (pcase c
-    (?f (ygg-lsp--defun-bounds))
-    (?t (ygg-lsp--type-bounds))))
+    (?f (let ((b (ygg-lsp--defun-bounds)))
+          (if (eq which 'around) b
+            (or (ygg-lsp--inner-node-bounds (treesit-defun-at-point))
+                b))))
+    (?t (ygg-lsp--type-bounds which))
+    (?l (ygg-lsp--loop-bounds which))
+    (?C (ygg-lsp--conditional-bounds which))
+    (?P (ygg-lsp--parameter-bounds which))
+    (?k (ygg-lsp--call-bounds which))
+    (?S (ygg-lsp--string-bounds which))
+    (?M (ygg-lsp--comment-bounds which))
+    (?B (ygg-lsp--block-bounds which))))
 
 (with-eval-after-load 'yggdrasil-match
   (advice-add 'ygg-match--textobject-bounds :before-until #'ygg-lsp--textobject-bounds))
@@ -509,10 +583,12 @@ v1: `mi' and `ma' return identical bounds for f/t (no whitespace trim)."
 
 (defun ygg-next-defun ()
   (interactive)
+  (ygg--record-bracket-motion 1 "f")
   (ygg--bracketed-goto (lambda () (ygg-lsp--defun-edge 1))))
 
 (defun ygg-prev-defun ()
   (interactive)
+  (ygg--record-bracket-motion -1 "f")
   (ygg--bracketed-goto (lambda () (ygg-lsp--defun-edge -1))))
 
 (declare-function treesit-search-forward "treesit")
@@ -546,16 +622,43 @@ TYPE-RE (and whose text matches TEXT-RE when given)."
      (interactive)
      (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge ,n ,re ,text-re)))))
 
-(ygg-lsp--def-ts-motion ygg-next-class 1 ygg-lsp--class-re)
-(ygg-lsp--def-ts-motion ygg-prev-class -1 ygg-lsp--class-re)
-(ygg-lsp--def-ts-motion ygg-next-arg 1 ygg-lsp--arg-re)
-(ygg-lsp--def-ts-motion ygg-prev-arg -1 ygg-lsp--arg-re)
-(ygg-lsp--def-ts-motion ygg-next-test 1 "function\\|call\\|declaration\\|definition" ygg-lsp--test-re)
-(ygg-lsp--def-ts-motion ygg-prev-test -1 "function\\|call\\|declaration\\|definition" ygg-lsp--test-re)
+(defun ygg-next-class ()
+  (interactive)
+  (ygg--record-bracket-motion 1 "C")
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge 1 ygg-lsp--class-re))))
+(defun ygg-prev-class ()
+  (interactive)
+  (ygg--record-bracket-motion -1 "C")
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge -1 ygg-lsp--class-re))))
+(defun ygg-next-arg ()
+  (interactive)
+  (ygg--record-bracket-motion 1 "a")
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge 1 ygg-lsp--arg-re))))
+(defun ygg-prev-arg ()
+  (interactive)
+  (ygg--record-bracket-motion -1 "a")
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge -1 ygg-lsp--arg-re))))
+(defun ygg-next-test ()
+  (interactive)
+  (ygg--record-bracket-motion 1 "T")
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge 1 "function\\|call\\|declaration\\|definition" ygg-lsp--test-re))))
+(defun ygg-prev-test ()
+  (interactive)
+  (ygg--record-bracket-motion -1 "T")
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge -1 "function\\|call\\|declaration\\|definition" ygg-lsp--test-re))))
+(defun ygg-next-loop ()
+  (interactive)
+  (ygg--record-bracket-motion 1 "l")
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge 1 "for\\|while\\|do\\|repeat"))))
+(defun ygg-prev-loop ()
+  (interactive)
+  (ygg--record-bracket-motion -1 "l")
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge -1 "for\\|while\\|do\\|repeat"))))
 
 (defun ygg-next-entry ()
   "Move to the next entry (field, element, variant)."
   (interactive)
+  (ygg--record-bracket-motion 1 "e")
   (unless (and (fboundp 'treesit-parser-list) (treesit-parser-list))
     (user-error "No entry textobject for this mode"))
   (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge 1 ygg-lsp--entry-re))))
@@ -563,9 +666,28 @@ TYPE-RE (and whose text matches TEXT-RE when given)."
 (defun ygg-prev-entry ()
   "Move to the previous entry (field, element, variant)."
   (interactive)
+  (ygg--record-bracket-motion -1 "e")
   (unless (and (fboundp 'treesit-parser-list) (treesit-parser-list))
     (user-error "No entry textobject for this mode"))
   (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge -1 ygg-lsp--entry-re))))
+
+(defconst ygg-lsp--element-re "element\\|tag\\|component")
+
+(defun ygg-next-xml-element ()
+  "Move to the next XML/JSX element."
+  (interactive)
+  (ygg--record-bracket-motion 1 "X")
+  (unless (and (fboundp 'treesit-parser-list) (treesit-parser-list))
+    (user-error "No element textobject for this mode"))
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge 1 ygg-lsp--element-re))))
+
+(defun ygg-prev-xml-element ()
+  "Move to the previous XML/JSX element."
+  (interactive)
+  (ygg--record-bracket-motion -1 "X")
+  (unless (and (fboundp 'treesit-parser-list) (treesit-parser-list))
+    (user-error "No element textobject for this mode"))
+  (ygg--bracketed-goto (lambda () (ygg-lsp--ts-edge -1 ygg-lsp--element-re))))
 
 (yggdrasil-define-keys 'normal
   "] F" #'ygg-next-file :label "next file"
@@ -579,7 +701,11 @@ TYPE-RE (and whose text matches TEXT-RE when given)."
   "] T" #'ygg-next-test :label "next test"
   "[ T" #'ygg-prev-test :label "prev test"
   "] e" #'ygg-next-entry :label "next entry"
-  "[ e" #'ygg-prev-entry :label "prev entry")
+  "[ e" #'ygg-prev-entry :label "prev entry"
+  "] l" #'ygg-next-loop :label "next loop"
+  "[ l" #'ygg-prev-loop :label "prev loop"
+  "] X" #'ygg-next-xml-element :label "next element"
+  "[ X" #'ygg-prev-xml-element :label "prev element")
 
 ;;; 6. Formatting — the = verb
 
@@ -736,6 +862,37 @@ A degenerate (zero-width) selection formats the whole buffer instead."
   (ygg-lsp--ensure)
   (eglot-code-actions (point-min) (point-max) "source.fixAll" t))
 
+(defun ygg-toggle-line-comment ()
+  "Toggle line comment on each selection."
+  (interactive)
+  (ygg-do-selections
+   (lambda (beg end _dir)
+     (if (fboundp 'comment-region)
+         (comment-region beg end nil)
+       (user-error "comment-region not available")))))
+
+(defun ygg-toggle-block-comment ()
+  "Toggle block comment on each selection."
+  (interactive)
+  (ygg-do-selections
+   (lambda (beg end _dir)
+     (let ((comment-style (if (eq comment-style 'multi-line) 'indent 'multi-line)))
+       (if (fboundp 'comment-region)
+           (comment-region beg end nil)
+         (user-error "comment-region not available"))))))
+
+(defun ygg-multi-cursor-references ()
+  "Create one cursor per reference of the symbol at point."
+  (interactive)
+  (if (and (fboundp 'eglot-managed-p) (eglot-managed-p))
+      (when-let* ((syms (eglot-findHierarchy-prepared)))
+        (let ((refs (save-excursion
+                      (xref-find-references (car (car syms))))))
+          (dolist (ref (xref-alist-to-xref-item-list refs))
+            (ygg-add-cursor
+             (xref-item-location ref)))))
+    (user-error "Symbol references require LSP")))
+
 ;; SPC c = coder: LSP actions/refactors as flat sub-suffixes, with the
 ;; combobulate structural edits nested under SPC c e
 (defvar ygg-leader-code-structural-map (make-sparse-keymap)
@@ -751,6 +908,9 @@ A degenerate (zero-width) selection formats the whole buffer instead."
 
 (yggdrasil-define-keys 'ygg-leader-code-map
   "a" #'ygg-lsp-code-actions :label "code actions"
+  "c" #'ygg-toggle-line-comment :label "toggle line comment"
+  "C" #'ygg-toggle-block-comment :label "toggle block comment"
+  "H" #'ygg-multi-cursor-references :label "cursors on references"
   "r" #'ygg-lsp-rename :label "rename"
   "o" #'ygg-lsp-organize-imports :label "organize imports"
   "x" #'ygg-lsp-fix-all :label "fix all"

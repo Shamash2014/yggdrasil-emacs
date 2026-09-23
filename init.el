@@ -73,6 +73,8 @@
   (setq undo-fu-session-incompatible-files
         '("/COMMIT_EDITMSG\\'" "/git-rebase-todo\\'"))
   (undo-fu-session-global-mode 1))
+(elpaca ultra-scroll
+  (ultra-scroll-mode 1))
 
 ;;; lisp/ — compile the engine only; layers stay source (they carry elpaca
 ;;; macro calls that poison the .elc when compiled outside a session)
@@ -98,6 +100,7 @@
 (require 'layer-lsp)
 ;; multi-LSP via rass: harper grammar alongside code servers — comment to disable
 (require 'layer-rass)
+(require 'layer-spell)
 (require 'layer-http)
 (require 'layer-sessions)
 (require 'layer-astgrep)
@@ -607,7 +610,7 @@ address space, which is not what a freed cache gives back."
 (setq use-short-answers t
       select-enable-clipboard t
       scroll-conservatively 101
-      scroll-margin 2
+      scroll-margin 0
       make-backup-files nil
       create-lockfiles nil
       auto-save-default nil
@@ -633,7 +636,6 @@ address space, which is not what a freed cache gives back."
       auto-save-visited-predicate
       (lambda () (and buffer-file-name (not (bound-and-true-p ygg--replaying)))))
 (auto-save-visited-mode 1)
-(pixel-scroll-precision-mode 1)
 (set-face-attribute 'default nil :family "JetBrains Mono" :height 130 :weight 'regular)
 (when (boundp 'ns-use-thin-smoothing) (setq ns-use-thin-smoothing t))
 (set-fontset-font t '(#xe000 . #xf8ff) "JetBrainsMono Nerd Font Mono")

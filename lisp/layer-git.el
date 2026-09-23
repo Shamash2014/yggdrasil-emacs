@@ -43,6 +43,14 @@
 (declare-function magit-file-relative-name "magit-git")
 (declare-function magit-stage-files "magit-apply")
 (declare-function magit-get-current-branch "magit-git")
+(declare-function forge-dispatch "forge-commands")
+(declare-function forge-list-pullreqs "forge-topics")
+(declare-function forge-list-issues "forge-topics")
+(declare-function lab-list-project-merge-requests "lab")
+(declare-function lab-act-on-last-project-pipeline "lab")
+(declare-function lab-approve-merge-request "lab")
+(autoload 'lab-approve-merge-request "lab" nil t)
+(autoload 'lab-act-on-last-project-pipeline "lab" nil t)
 
 (defvar magit-section-mode-map)
 (defvar magit-mode-map)
@@ -51,12 +59,15 @@
 (defvar magit-diff-mode-map)
 (defvar magit-revision-mode-map)
 (defvar with-editor-mode-map)
+(defvar forge-topics-mode-map)
+(defvar forge-topic-mode-map)
+(defvar forge-post-mode-map)
+(defvar lab-merge-request-diff-prefix-map)
 
 (defvar magit-status-sections-hook)
 (defvar magit-status-headers-hook)
 (declare-function magit-auto-revert-repository-buffer-p "magit-autorevert")
 
-(defvar magit-blame-mode-map)
 (declare-function magit-blame-next-chunk "magit-blame")
 (declare-function magit-blame-previous-chunk "magit-blame")
 (declare-function magit-blame-cycle-style "magit-blame")
@@ -98,7 +109,13 @@
     ;; macOS: file-notify uses kqueue, which watches a file by enumerating +
     ;; stat-ing its whole CONTAINING directory on every revert tick — bursty
     ;; CPU in big project roots. Poll the file's own mtime instead (O(1)).
-    (setq auto-revert-use-notify nil)))
+    (setq auto-revert-use-notify nil))
+  (elpaca forge
+    (setq forge-database-file (locate-user-emacs-file "var/forge-database.sqlite"))
+    (with-eval-after-load 'magit (require 'forge)))
+  (elpaca (lab :host github :repo "isamert/lab.el")
+    (with-eval-after-load 'lab
+      (setq lab-host (or (getenv "LAB_HOST") ygg-lab-host)))))
 
 ;;; Huge changes: the status buffer washes every hunk it inserts — ~1s per
 ;;; 1000 changed lines, paid again on every refresh.  Past a limit, insert
@@ -124,6 +141,10 @@
 (defcustom ygg-magit-diff-line-limit 2000
   "Changed lines above which the status buffer defers inserting a diff."
   :type 'natnum :group 'yggdrasil)
+
+(defcustom ygg-lab-host "https://gitlab.com"
+  "GitLab host URL for lab.el integration. Can be overridden by LAB_HOST env var."
+  :type 'string :group 'yggdrasil)
 
 (defun ygg-magit-discard-deferred ()
   "Insert the deferred diff, then discard it."
@@ -213,6 +234,15 @@
       (transient-append-suffix 'magit-diff '(-1 -1)
         [("D" "difftastic diff (dwim)" difftastic-magit-diff)
          ("S" "difftastic show" difftastic-magit-show)]))))
+
+(add-to-list 'ygg-modal-special-modes 'difftastic-mode)
+(add-to-list 'ygg-modal-special-mode-keep
+             '(difftastic-mode ("<tab>" . "TAB") ("] c" . "n") ("[ c" . "p")
+                               ("] f" . "N") ("[ f" . "P")))
+
+(add-to-list 'ygg-modal-special-modes 'forge-topics-mode)
+(add-to-list 'ygg-modal-special-modes 'forge-topic-mode)
+(add-to-list 'ygg-modal-special-modes 'forge-repository-list-mode)
 
 (when (fboundp 'elpaca)
   (elpaca diff-hl
@@ -417,7 +447,11 @@ so it rendered two lines for a mode with a hundred keys."
   (define-key magit-mode-map (kbd "g") ygg-magit-goto-map)
   ;; magit-mode-map is the child of magit-section-mode-map, so magit's own
   ;; G shadowed the buffer-end this config puts there
-  (define-key magit-mode-map (kbd "G") #'end-of-buffer))
+  (define-key magit-mode-map (kbd "G") #'end-of-buffer)
+  (define-key magit-mode-map (kbd "C-w") ygg-window-map))
+
+(declare-function magit-copy-section-value "magit-mode")
+(define-key ygg-magit-goto-map (kbd "y") (cons "copy section value" #'magit-copy-section-value))
 
 (with-eval-after-load 'magit-status
   (define-key magit-status-mode-map (kbd "j") #'magit-section-forward)
@@ -437,12 +471,20 @@ so it rendered two lines for a mode with a hundred keys."
 ;;; style (margin ↔ end-of-line heading), y copies the commit hash, q quits.
 ;;; SPC g a starts it (magit-blame-addition, already bound below).
 
-(with-eval-after-load 'magit-blame
-  (define-key magit-blame-mode-map (kbd "j") #'magit-blame-next-chunk)
-  (define-key magit-blame-mode-map (kbd "k") #'magit-blame-previous-chunk)
-  (define-key magit-blame-mode-map (kbd "b") #'magit-blame-cycle-style)
-  (define-key magit-blame-mode-map (kbd "y") #'magit-blame-copy-hash)
-  (define-key magit-blame-mode-map (kbd "q") #'magit-blame-quit))
+(declare-function magit-show-commit "magit-diff")
+
+(defvar ygg-magit-blame-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "j") #'magit-blame-next-chunk)
+    (define-key map (kbd "k") #'magit-blame-previous-chunk)
+    (define-key map (kbd "b") #'magit-blame-cycle-style)
+    (define-key map (kbd "y") #'magit-blame-copy-hash)
+    (define-key map (kbd "q") #'magit-blame-quit)
+    (define-key map (kbd "RET") #'magit-show-commit)
+    map)
+  "Blame keys lifted over normal state; blame is a minor mode in a modal buffer.")
+
+(yggdrasil-define-mode-keys 'magit-blame-mode 'normal ygg-magit-blame-map)
 
 ;; ZZ finishes the commit, ZQ cancels it; the minor-mode map remaps the
 ;; Z-map commands without touching the shared text-mode map.
@@ -556,11 +598,31 @@ so it rendered two lines for a mode with a hundred keys."
   (interactive)
   (ygg--bracketed-goto #'ygg-git--find-prev-hunk))
 
+(defun ygg-goto-first-git-hunk ()
+  "Go to first diff-hl hunk in buffer."
+  (interactive)
+  (ygg--record-bracket-motion -1 "G")
+  (let ((pos (save-excursion (goto-char (point-min))
+                              (ygg-git--find-next-hunk))))
+    (if pos (ygg--bracketed-goto (lambda () pos))
+      (message "no hunks"))))
+
+(defun ygg-goto-last-git-hunk ()
+  "Go to last diff-hl hunk in buffer."
+  (interactive)
+  (ygg--record-bracket-motion 1 "G")
+  (let ((pos (save-excursion (goto-char (point-max))
+                              (ygg-git--find-prev-hunk))))
+    (if pos (ygg--bracketed-goto (lambda () pos))
+      (message "no hunks"))))
+
 (yggdrasil-define-keys 'normal
   "] x" #'smerge-next :label "next conflict"
   "[ x" #'smerge-prev :label "prev conflict"
   "] g" #'ygg-next-hunk-change :label "next change"
-  "[ g" #'ygg-prev-hunk-change :label "prev change")
+  "[ g" #'ygg-prev-hunk-change :label "prev change"
+  "] G" #'ygg-goto-last-git-hunk :label "last hunk"
+  "[ G" #'ygg-goto-first-git-hunk :label "first hunk")
 
 (defvar ygg-git-conflict-map (make-sparse-keymap) "The g x prefix: merge conflicts.")
 
@@ -598,7 +660,13 @@ so it rendered two lines for a mode with a hundred keys."
   "B" #'magit-branch :label "branch menu"
   "w" #'magit-worktree :label "worktrees"
   "x" ygg-git-conflict-map :label "conflicts"
-  "y" #'ygg-git-yank-branch :label "yank branch")
+  "y" #'ygg-git-yank-branch :label "yank branch"
+  "F" #'forge-dispatch :label "forge menu"
+  "I" #'forge-list-issues :label "forge issues"
+  "P" #'forge-list-pullreqs :label "forge PRs"
+  "M" #'lab-list-project-merge-requests :label "lab MRs"
+  "R" #'lab-act-on-last-project-pipeline :label "lab last pipeline"
+  "A" #'lab-approve-merge-request :label "lab approve MR")
 
 (yggdrasil-leader-def "g" ygg-leader-git-map "git")
 
@@ -651,6 +719,11 @@ so it rendered two lines for a mode with a hundred keys."
   "Open worktree PATH in magit (falls back to dired)."
   (if (fboundp 'magit-status) (magit-status path) (dired path)))
 
+(define-derived-mode ygg-wt-output-mode special-mode "worktrunk"
+  "Read-only output of a worktrunk command.")
+
+(add-to-list 'ygg-modal-special-modes 'ygg-wt-output-mode)
+
 (defun ygg-wt--run (args &optional on-success)
   "Run `wt ARGS' async in the repo (-y skips prompts); ON-SUCCESS on exit 0."
   (require 'ansi-color)
@@ -666,7 +739,7 @@ so it rendered two lines for a mode with a hundred keys."
        (when (eq (process-status p) 'exit)
          (with-current-buffer buf
            (ansi-color-apply-on-region (point-min) (point-max))
-           (special-mode))
+           (ygg-wt-output-mode))
          (if (zerop (process-exit-status p))
              (progn (when on-success (funcall on-success))
                     (ygg-notify (format "worktrunk %s ✓" (car args))))
@@ -699,7 +772,7 @@ so it rendered two lines for a mode with a hundred keys."
         (call-process "wt" nil t nil "list")
         (ansi-color-apply-on-region (point-min) (point-max)))
       (goto-char (point-min))
-      (special-mode))
+      (ygg-wt-output-mode))
     (ygg-ui-show buf)))
 
 (defun ygg-wt-merge (&optional target)

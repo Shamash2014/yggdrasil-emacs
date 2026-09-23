@@ -558,16 +558,18 @@ task tree, spent the whole CPU on one trackpad flick.")
   "Scroll this buffer by lines under the wheel."
   (setq ygg-ui-line-scroll t))
 
-(defun ygg-ui--pixel-scroll-or-lines (orig event)
+(defun ygg-ui--pixel-scroll-or-lines (orig event &rest args)
   "Scroll EVENT's window by lines when its buffer asks, else through ORIG."
   (let ((window (and (consp event) (mwheel-event-window event))))
     (if (and (windowp window)
              (buffer-local-value 'ygg-ui-line-scroll (window-buffer window)))
         (mwheel-scroll event)
-      (funcall orig event))))
+      (apply orig event args))))
 
 (with-eval-after-load 'pixel-scroll
   (advice-add 'pixel-scroll-precision :around #'ygg-ui--pixel-scroll-or-lines))
+(with-eval-after-load 'ultra-scroll
+  (advice-add 'ultra-scroll :around #'ygg-ui--pixel-scroll-or-lines))
 
 (dolist (hook '(ygg-trace-mode-hook ygg-task-tree-mode-hook aob-trace-mode-hook
                 aob-subagents-mode-hook ygg-pending-mode-hook))
