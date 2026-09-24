@@ -16,6 +16,7 @@
 (declare-function corfu-previous "corfu")
 (declare-function corfu-insert "corfu")
 (declare-function corfu-complete "corfu")
+(declare-function corfu-quit "corfu")
 (declare-function cape-dabbrev "cape")
 (declare-function cape-file "cape")
 (declare-function cape-keyword "cape")
@@ -38,6 +39,7 @@
 (declare-function nerd-icons-completion-marginalia-setup "nerd-icons-completion")
 (declare-function nerd-icons-corfu-formatter "nerd-icons-corfu")
 (defvar corfu-margin-formatters)
+(defvar nerd-icons-corfu-mapping)
 
 (defvar vertico-prescient-enable-filtering)
 (defvar corfu-prescient-enable-filtering)
@@ -110,8 +112,8 @@
     (define-key corfu-map (kbd "C-d") #'corfu-scroll-up)
     (define-key corfu-map (kbd "C-u") #'corfu-scroll-down)
     (define-key corfu-map (kbd "RET") #'corfu-insert)
-    (define-key corfu-map (kbd "TAB") #'corfu-complete)
-    (define-key corfu-map [tab] #'corfu-complete)
+    (define-key corfu-map (kbd "TAB") #'ygg-corfu-complete-or-next-field)
+    (define-key corfu-map [tab] #'ygg-corfu-complete-or-next-field)
     (advice-add 'corfu--exhibit :before #'ygg-corfu--ghost-clear)
     (advice-add 'corfu--teardown :after #'ygg-corfu--ghost-clear)
     (advice-add 'corfu--preview-current :after #'ygg-corfu--ghost-show)))
@@ -153,7 +155,9 @@
 (when (fboundp 'elpaca)
   (elpaca nerd-icons-corfu
     (with-eval-after-load 'corfu
-      (add-to-list 'corfu-margin-formatters #'nerd-icons-corfu-formatter))))
+      (add-to-list 'corfu-margin-formatters #'nerd-icons-corfu-formatter))
+    (with-eval-after-load 'nerd-icons-corfu
+      (setf (plist-get (alist-get 'snippet nerd-icons-corfu-mapping) :face) nil))))
 
 (when (fboundp 'elpaca)
   (elpaca cape
@@ -165,24 +169,93 @@
     (add-to-list 'completion-at-point-functions #'cape-keyword t)))
 
 (declare-function tempel-complete "tempel")
+(declare-function tempel-insert "tempel")
 (declare-function tempel-next "tempel")
 (declare-function tempel-previous "tempel")
 (declare-function tempel-done "tempel")
+(declare-function cape-capf-super "cape")
+(declare-function cape-capf-sort "cape")
+(declare-function ygg-insert-state "yggdrasil-core")
 (defvar tempel-path)
 (defvar tempel-map)
+(defvar tempel--active)
+(defvar eglot--managed-mode)
+(defvar ygg-insert-exit-hook)
+
+(defvar-local ygg-tempel--merged-capfs nil)
+
+(defun ygg-tempel--in-member-order (capf)
+  "CAPF with its candidates shown in the order its table lists them."
+  (lambda ()
+    (pcase (funcall capf)
+      (`(,beg ,end ,table . ,plist)
+       ;; corfu's first popup reads the sort from table metadata, never from the capf's properties
+       `(,beg ,end
+         ,(lambda (str pred action)
+            (if (eq action 'metadata)
+                '(metadata (display-sort-function . identity) (cycle-sort-function . identity))
+              (complete-with-action action table str pred)))
+         ,@plist)))))
+
+(defun ygg-tempel--merge-capf ()
+  "Offer snippets beside a code buffer's own first capf instead of behind it."
+  (let ((main (car completion-at-point-functions)))
+    (when (and (fboundp 'cape-capf-super)
+               (derived-mode-p 'prog-mode)
+               (local-variable-p 'completion-at-point-functions)
+               (functionp main)
+               (not (eq main #'tempel-complete))
+               (not (memq main ygg-tempel--merged-capfs)))
+      (let ((merged (cape-capf-super main #'tempel-complete)))
+        (push (if (bound-and-true-p eglot--managed-mode)
+                  (ygg-tempel--in-member-order merged)
+                (cape-capf-sort merged))
+              ygg-tempel--merged-capfs)
+        (setq-local completion-at-point-functions
+                    (cons (car ygg-tempel--merged-capfs) (cdr completion-at-point-functions)))))))
+
+(defun ygg-tempel--finish-on-exit ()
+  (when (and (bound-and-true-p tempel--active) (not (eq this-command 'ygg-insert-one-command)))
+    (tempel-done t)))
+
+(defun ygg-corfu-complete-or-next-field ()
+  "Jump to the next template field while one is being filled, else complete."
+  (interactive)
+  (if (bound-and-true-p tempel--active)
+      (progn (corfu-quit) (tempel-next 1))
+    (corfu-complete)))
+
+(defun ygg-tempel-insert ()
+  "Pick a snippet by name, expand it at point and type into its first field."
+  (interactive)
+  (call-interactively #'tempel-insert)
+  (ygg-insert-state))
 
 ;; snippet expansion via tempel, surfaced through corfu as a capf
 (when (fboundp 'elpaca)
   (elpaca tempel
     (setq tempel-path (expand-file-name "templates" user-emacs-directory))
     (add-to-list 'completion-at-point-functions #'tempel-complete)
+    (add-hook 'after-change-major-mode-hook #'ygg-tempel--merge-capf)
+    (add-hook 'eglot-managed-mode-hook #'ygg-tempel--merge-capf 90)
+    (add-hook 'ygg-insert-exit-hook #'ygg-tempel--finish-on-exit)
+    (yggdrasil-leader-def "i" #'ygg-tempel-insert "insert snippet")
     (with-eval-after-load 'tempel
       ;; field navigation while a template is being filled
       (define-key tempel-map (kbd "TAB") #'tempel-next)
       (define-key tempel-map (kbd "<backtab>") #'tempel-previous)
       (define-key tempel-map (kbd "C-j") #'tempel-next)
-      (define-key tempel-map (kbd "C-k") #'tempel-previous)
-      (define-key tempel-map (kbd "<escape>") #'tempel-done))))
+      (define-key tempel-map (kbd "C-k") #'tempel-previous))))
+
+(when (fboundp 'elpaca)
+  (elpaca tempel-collection))
+
+(declare-function eglot-tempel-mode "eglot-tempel")
+
+(when (fboundp 'elpaca)
+  (elpaca (eglot-tempel :host github :repo "fejfighter/eglot-tempel")
+    (with-eval-after-load 'eglot
+      (eglot-tempel-mode 1))))
 
 (declare-function embark-collect "embark")
 (declare-function embark-become "embark")

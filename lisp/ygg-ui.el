@@ -229,6 +229,8 @@ goes wrong."
               (let ((inhibit-read-only t))
                 (erase-buffer)
                 (insert text))
+              ;; hooks are off here: nothing else says the old text is gone
+              (syntax-ppss-flush-cache (point-min))
               (let ((markdown-hide-markup ygg-ui-markdown-hide-markup)
                     (markdown-fontify-code-blocks-natively t))
                 (syntax-propertize (point-max))

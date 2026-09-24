@@ -493,6 +493,19 @@ is the launch's question, not the reader's."
       (let ((name (string-trim raw)))
         (unless (string-empty-p name) name)))))
 
+(defun ygg-preset-tools (d)
+  "The tools D lets its agent use, by name, or nil when it names none."
+  (ygg-preset-names (ygg-preset-setting d :tools)))
+
+(defconst ygg-preset-thinking-levels '("off" "low" "medium" "high")
+  "What a thinking field may say, least first.")
+
+(defun ygg-preset-thinking (d)
+  "How hard D's agent thinks, one of ygg-preset-thinking-levels, or nil."
+  (let ((raw (ygg-preset-setting d :thinking)))
+    (and (stringp raw)
+         (car (member (downcase (string-trim raw)) ygg-preset-thinking-levels)))))
+
 (defun ygg-preset-modes (&optional root)
   "Every preset available in ROOT that names a mode, as the reader folds it.
 These are what a launch is offered first, since a mode is how the harness

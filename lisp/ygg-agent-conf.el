@@ -162,7 +162,8 @@ Use the aob MCP server only for what your own tools cannot do:
   imenu_symbols for a file's shape, treesit_info for the parse,
   diagnostics for what a checker says about an open file.
 - Other conversations: session_list gives every conversation open here
-  with its id; session_say puts words into one. Address it by its id.
+  with its id; session_say puts words into one; session_read shows the
+  tail of one when you need to diagnose it. Address it by its id.
 - tool_names lists everything the server offers."
   "What every session started from here is told about this editor.
 It goes out in the request that opens the session, appended to the

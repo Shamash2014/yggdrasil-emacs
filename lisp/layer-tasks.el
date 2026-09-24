@@ -413,6 +413,59 @@ since Emacs started is invisible until this runs."
   (clrhash ygg-mise--configs)
   (clrhash ygg-mise--ensured))
 
+(declare-function mise--detect-dir "mise")
+(declare-function mise--cache-key "mise")
+(defvar mise--cache)
+(defvar mise-mode)
+
+(defvar-local ygg-env--direnv-pairs nil
+  "What direnv last exported in this buffer, kept to layer over mise's.")
+
+(defun ygg-env--layer (env pairs)
+  "ENV with PAIRS, as mise or direnv export them, laid over it."
+  (append (mapcar (pcase-lambda (`(,key . ,value)) (if value (concat key "=" value) key))
+                  pairs)
+          env))
+
+(defconst ygg-env--mise-shims (expand-file-name "~/.local/share/mise/shims")
+  "mise's shims, which ~/.zshenv puts first on any PATH that lacks them.")
+
+(defun ygg-env--path-dirs (path)
+  (and path (split-string path path-separator t)))
+
+(defun ygg-env--compose (&optional buffer)
+  "Give BUFFER the global environment, then mise's variables, then direnv's.
+mise.el and envrc each set a buffer's whole environment from the global
+one, so whichever ran last dropped what the other gave, such as a JDK.
+PATH is direnv's own additions, then mise's, then the shims last: with
+the shims absent, every shell a command runs in would put them first,
+and a shim answers with mise's JDK over direnv's."
+  (with-current-buffer (or buffer (current-buffer))
+    (when (and (bound-and-true-p mise-mode) (bound-and-true-p envrc-mode))
+      (let* ((dir (mise--detect-dir))
+             (mise (and dir (gethash (mise--cache-key dir) mise--cache)))
+             (base (default-value 'process-environment))
+             (with-mise (ygg-env--layer base (and (listp mise) mise)))
+             (direnv-path (ygg-env--path-dirs (cdr (assoc "PATH" ygg-env--direnv-pairs))))
+             (path (delete-dups
+                    (append (seq-difference direnv-path
+                                            (ygg-env--path-dirs (getenv-internal "PATH" base)))
+                            (ygg-env--path-dirs (getenv-internal "PATH" with-mise))
+                            (list ygg-env--mise-shims))))
+             (env (ygg-env--layer with-mise
+                                  (cons (cons "PATH" (string-join path path-separator))
+                                        (assoc-delete-all "PATH" (copy-sequence
+                                                                  ygg-env--direnv-pairs))))))
+        (setq-local process-environment env
+                    exec-path (mapcar #'directory-file-name path))))))
+
+(defun ygg-env--keep-direnv (buf result)
+  "Keep the direnv RESULT applied to BUF, then layer it over mise's."
+  (when (and (buffer-live-p buf) (not (eq result 'running)))
+    (with-current-buffer buf
+      (setq-local ygg-env--direnv-pairs (and (listp result) result))
+      (ygg-env--compose))))
+
 (when (and (fboundp 'elpaca) (executable-find "mise"))
   (elpaca mise
     (run-with-idle-timer
@@ -425,10 +478,12 @@ since Emacs started is invisible until this runs."
        (advice-add 'mise--detect-configs :around #'ygg-mise--configs-memo)
        (advice-add 'mise--ensure :around #'ygg-mise--ensure-memo)
        (advice-add 'mise-update-dir :before #'ygg-mise-forget)
+       (advice-add 'mise--update :after #'ygg-env--compose)
        (global-mise-mode 1)))))
 
 (declare-function envrc-global-mode "envrc")
 (defvar envrc-show-summary-in-minibuffer)
+(defvar envrc-mode)
 
 (defun ygg-envrc--status-quietly (orig &rest args)
   "Set the direnv status without saying so, where the summary is silent.
@@ -457,6 +512,7 @@ owner was reading.  The log keeps it either way."
        ;; line is said again for every buffer that enters an env
        (advice-add 'envrc--direnv-set-status :around
                    #'ygg-envrc--status-quietly)
+       (advice-add 'envrc--apply :after #'ygg-env--keep-direnv)
        (envrc-global-mode 1)))))
 
 (provide 'layer-tasks)

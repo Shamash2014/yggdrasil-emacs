@@ -67,9 +67,8 @@
 ;;; Adapter roster — warn, never fail
 
 (defconst ygg-dape-adapters
-  '((:name "node" :serves "Node (js-debug, ships with dape)")
+  '((:name "node" :serves "Node (js-debug adapter via mise)")
     (:name "debug_adapter.sh" :serves "Elixir (ElixirLS debugger)")
-    (:name "python" :serves "Python (debugpy, ships with dape)")
     (:name "codelldb" :serves "Rust (codelldb)")
     (:name "dlv" :serves "Go (delve, ships with dape)")
     (:name "flutter" :serves "Flutter (ships with dape)")
@@ -86,7 +85,7 @@
 (add-hook 'elpaca-after-init-hook #'ygg-dape--probe)
 
 (with-eval-after-load 'dape
-  ;; dlv/debugpy/js-debug already ship in `dape-configs'; only the two
+  ;; dlv/debugpy/js-debug ship in `dape-configs' (ygg-debugpy extends debugpy); only the two
   ;; adapters dape doesn't bundle need registering, and only when present.
   (when (executable-find "debug_adapter.sh")
     (add-to-list 'dape-configs
@@ -120,7 +119,8 @@
   ;; Dart uses dart-mode (non-ts); flutter configuration supports both
   ;; dart-mode and dart-ts-mode for extensibility
   (when-let* ((cfg (assq 'flutter dape-configs)))
-    (setf (plist-get (cdr cfg) 'modes) '(dart-mode dart-ts-mode)))
+    (setf (plist-get (cdr cfg) 'modes) '(dart-mode dart-ts-mode))
+    (when (fboundp 'ygg-device-dape-flutter) (ygg-device-dape-flutter cfg)))
   ;; React .tsx is `tsx-ts-mode', missing from the chrome config's modes
   (when-let* ((cfg (assq 'js-debug-chrome dape-configs))
               (m (plist-get (cdr cfg) 'modes)))
@@ -460,20 +460,32 @@ ARGS takes the whole config line dape reads, overrides included."
     (pcase-let ((`(,key ,config) (dape--config-from-string args)))
       (dape (dape--config-eval key config)))))
 
+(defconst ygg-dape--ex-local-attach
+  '((js-debug-node-attach host port)
+    (debugpy-attach host port)
+    (lldb-dap host port)
+    (kotlin-attach nil :port)
+    (jdtls-attach :hostName :port))
+  "Per language, the attach entry that goes where it is told, and its keys.
+The typed host and port fill those keys: host and port name the adapter
+itself, the others the program's debug port behind an adapter the entry
+starts.  A nil host key means loopback only.")
+
+(defun ygg-dape--ex-bound-p (cell)
+  "Whether dape config CELL names a mode this buffer's derives from."
+  (when-let* ((modes (plist-get (cdr cell) 'modes)))
+    (apply #'provided-mode-derived-p major-mode (append modes nil))))
+
 (defun ygg-dape--ex-language-config ()
-  "The dape config key bound to this buffer's language, an attach first.
+  "The dape config key bound to this buffer's language, a local attach first.
 Configs that name no mode at all are not this buffer's and are skipped."
-  (let* ((bound (seq-filter
-                 (lambda (cell)
-                   (when-let* ((modes (plist-get (cdr cell) 'modes)))
-                     (apply #'provided-mode-derived-p
-                            major-mode (append modes nil))))
-                 dape-configs))
-         (cell (or (seq-find (lambda (c)
-                               (equal (plist-get (cdr c) :request) "attach"))
-                             bound)
-                   (car bound))))
-    (car cell)))
+  (or (seq-find (lambda (key) (ygg-dape--ex-bound-p (assq key dape-configs)))
+                (mapcar #'car ygg-dape--ex-local-attach))
+      (let ((bound (seq-filter #'ygg-dape--ex-bound-p dape-configs)))
+        (car (or (seq-find (lambda (c)
+                             (equal (plist-get (cdr c) :request) "attach"))
+                           bound)
+                 (car bound))))))
 
 (defconst ygg-dape--ex-spawn-keys
   '(command command-args command-cwd command-env command-insert-stderr ensure)
@@ -497,9 +509,12 @@ Configs that name no mode at all are not this buffer's and are skipped."
       (user-error "no dape config for %s; dape has: %s" major-mode
                   (mapconcat (lambda (c) (symbol-name (car c)))
                              dape-configs ", ")))
-    (dape (ygg-dape--ex-connect-only
-           (dape--config-eval key (list 'host host 'port port
-                                        :request "attach"))))))
+    (pcase-let ((`(,host-key ,port-key) (alist-get key ygg-dape--ex-local-attach '(host port))))
+      (unless (or host-key (member host '("localhost" "127.0.0.1" "::1")))
+        (user-error "%s attaches on loopback only; forward %s:%d to a local port" key host port))
+      (let ((config (dape--config-eval key `(,@(and host-key (list host-key host))
+                                              ,port-key ,port :request "attach"))))
+        (dape (if (eq port-key 'port) (ygg-dape--ex-connect-only config) config))))))
 
 (defconst ygg-dape--ex-subcommands
   (list (cons "launch" #'ygg-dape--ex-launch)
@@ -568,6 +583,12 @@ Configs that name no mode at all are not this buffer's and are skipped."
 ;; layer-lsp bound "d" to consult-flymake; this must load after layer-lsp
 ;; so the debug map wins, with diagnostics demoted to "SPC d x".
 (yggdrasil-leader-def "d" ygg-leader-dape-map "debug")
+
+(require 'ygg-debugpy)
+(require 'ygg-dap-kotlin)
+(require 'ygg-dap-js)
+(require 'ygg-dap-java)
+(require 'ygg-dap-lldb)
 
 (provide 'layer-dap)
 ;;; layer-dap.el ends here

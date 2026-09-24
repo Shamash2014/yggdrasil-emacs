@@ -36,6 +36,7 @@
 (declare-function aob-session-events "aob" (s))
 (declare-function aob-session-started "aob" (s))
 (declare-function aob-session-clock "aob" (s))
+(declare-function aob-session-quiet "aob" (s))
 (declare-function aob-session-spend "aob" (s))
 (defvar aob-trace--session-id)
 
@@ -129,17 +130,15 @@ you are on." :group 'ygg-projects)
 
 (defface ygg-projects-current
   '((((background dark)) :background "#1c1c1c" :extend t)
-    (t :background "#e4e4e4" :extend t))
+    (t :background "#e4dfd3" :extend t))
   "Face behind the line point is on: the only fill in the sidebar.
-Untinted, and a full step off the ground — a grey nudged by less than
-#0a reads as a rendering artefact rather than a choice."
+The paper's own hue, and a full step off the ground — a shade nudged by
+less than #0a reads as a rendering artefact rather than a choice."
   :group 'ygg-projects)
 
-(defface ygg-projects-on-screen
-  '((((background dark)) :foreground "#7E9CD8" :weight bold)
-    (t :foreground "#4C6FA6" :weight bold))
+(defface ygg-projects-on-screen '((t :inherit default :weight bold))
   "Face for the conversation whose trace is on screen.
-Colour, not fill: the one filled line is the line point is on, and a
+Weight, not fill: the one filled line is the line point is on, and a
 second fill beside it reads as the cursor having moved."
   :group 'ygg-projects)
 
@@ -149,13 +148,14 @@ second fill beside it reads as the cursor having moved."
 (defface ygg-projects-entry '((t :inherit shadow :slant italic))
   "Face for one thing a row stands for." :group 'ygg-projects)
 
-(defface ygg-projects-accent '((t :inherit success))
+(defface ygg-projects-accent '((t :inherit default))
   "Face of the bar marking the open project." :group 'ygg-projects)
 
 (defface ygg-projects-gutter
   '((((background dark)) :background "#000000")
-    (t :background "#dcdee3"))
-  "Face of the dark run between the sidebar and its neighbour."
+    (t :inherit default))
+  "Face of the run between the sidebar and its neighbour.
+On paper it is paper, and the window divider draws the rule."
   :group 'ygg-projects)
 
 (defvar ygg-projects--open nil
@@ -678,13 +678,9 @@ A running conversation says what it is doing; one that ended says how
 long ago, since a list of six conversations from today is told apart
 by when, not by that they were all today."
   (cond ((and (fboundp 'aob-session-p) (aob-session-p payload))
-         (if-let* (((not (memq (aob-session-state payload) '(dead failed))))
-                   ((fboundp 'ygg-todo-session-file))
-                   (file (ygg-todo-session-file payload))
-                   (progress (ygg-todo-progress file)))
-             (format "%d/%d %s" (car progress) (cdr progress)
-                     (aob-session-state payload))
-           (format "%s" (aob-session-state payload))))
+         (let ((progress (ygg-projects--session-progress payload)))
+           (format "%s%s" (if progress (concat progress " ") "")
+                   (aob-session-state payload))))
         ((and (consp payload) (proper-list-p payload) (plist-get payload :archived))
          "archived")
         ((and (consp payload) (eq (car payload) 'docker))
@@ -700,28 +696,45 @@ by when, not by that they were all today."
              "ended"))
         (t "")))
 
-(defun ygg-projects--session-meter (s)
-  "S's clock and spend, or nil before it has either."
-  (when (fboundp 'aob-session-clock)
-    (let ((parts (delq nil (list (aob-session-clock s) (aob-session-spend s)))))
-      (and parts (mapconcat #'identity parts " ")))))
+(defun ygg-projects--session-progress (s)
+  "S's todo list as done/total, or nil when it keeps none or has stopped."
+  (when-let* (((not (memq (aob-session-state s) '(dead failed))))
+              ((fboundp 'ygg-todo-session-file))
+              (file (ygg-todo-session-file s))
+              (progress (ygg-todo-progress file)))
+    (format "%d/%d" (car progress) (cdr progress))))
 
-(defun ygg-projects--badge (payload)
+(defun ygg-projects--badge (payload &optional room)
   "PAYLOAD's badge, drawn: a session's meter muted beside its state.
 The state is the colour of the state: green at work, orange waiting on
 you, grey once there is nothing to wait for.  Working and idle are said
-by the dot and the running clock already, so a meter stands in for them."
-  (let ((state (ygg-projects--entry-badge payload)))
-    (if (not (and (fboundp 'aob-session-p) (aob-session-p payload)))
-        (propertize state 'font-lock-face 'ygg-projects-count)
-      (let ((meter (ygg-projects--session-meter payload))
-            (said (propertize state 'font-lock-face
-                              (ygg-projects--session-dot payload))))
-        (cond ((null meter) said)
-              ((member state '("working" "idle"))
-               (propertize meter 'font-lock-face 'ygg-projects-count))
-              (t (concat (propertize meter 'font-lock-face 'ygg-projects-count)
-                         " " said)))))))
+by the dot and the running clock already, so a meter stands in for them.
+Given ROOM columns, a session's badge sheds parts until it fits: its
+spend first, then its clock, then its progress, and its state last,
+since a session waiting on you is the one thing a glance must catch."
+  (if (not (and (fboundp 'aob-session-p) (aob-session-p payload)))
+      (propertize (ygg-projects--entry-badge payload) 'font-lock-face 'ygg-projects-count)
+    (let* ((state (format "%s" (aob-session-state payload)))
+           (clock (and (fboundp 'aob-session-clock) (aob-session-clock payload)))
+           (spend (and (fboundp 'aob-session-spend) (aob-session-spend payload)))
+           (quiet (and (or clock spend) (member state '("working" "idle"))))
+           (parts (seq-filter
+                   #'car
+                   (list (list (and (fboundp 'aob-session-quiet)
+                                    (aob-session-quiet payload))
+                               'shadow 3.5)
+                         (list clock 'ygg-projects-count 2)
+                         (list spend 'ygg-projects-count 1)
+                         (list (ygg-projects--session-progress payload)
+                               'ygg-projects-count 3)
+                         (list (unless quiet state)
+                               (ygg-projects--session-dot payload) 4))))
+           (width (lambda () (string-width (mapconcat #'car parts " ")))))
+      (while (and room (cdr parts) (> (funcall width) room))
+        (setq parts (delq (car (seq-sort-by (lambda (p) (nth 2 p)) #'< parts))
+                          parts)))
+      (mapconcat (lambda (p) (propertize (car p) 'font-lock-face (nth 1 p)))
+                 parts " "))))
 
 (defcustom ygg-projects-entry-indent 4
   "Columns an entry is set in from the left.
@@ -729,12 +742,19 @@ A panel is narrow: every column spent on indentation is a column the
 name does not get."
   :type 'natnum :group 'ygg-projects)
 
+(defcustom ygg-projects-entry-min-name 10
+  "Columns of an entry's name kept before its badge gives up a part."
+  :type 'natnum :group 'ygg-projects)
+
 (defun ygg-projects--entry-text (label root kind payload)
-  "LABEL as a row, and a second line where it does not fit.
-The badge is the width the name cannot have, so the name is measured
-against what is left and carries on underneath rather than being cut
-where nothing can be read."
-  (let* ((badge (ygg-projects--badge payload))
+  "LABEL as one row, its badge at the right edge.
+A row never wraps: the badge sheds its least parts until the name has
+the columns ygg-projects-entry-min-name asks for, and the name is cut
+to what is left after that; a path loses its head, not its name."
+  (let* ((indent (+ ygg-projects-entry-indent 2))
+         (line (- (ygg-projects--width) indent 1))
+         (badge (ygg-projects--badge
+                 payload (- line (min (string-width label) ygg-projects-entry-min-name))))
          ;; a rail down the indent, the way a tree says depth without
          ;; spending a column on saying nothing
          (head (concat (make-string (max 0 (- ygg-projects-entry-indent 2)) ?\s)
@@ -743,43 +763,19 @@ where nothing can be read."
                        (propertize "·" 'font-lock-face
                                    (ygg-projects--session-dot payload))
                        " "))
-         (indent (+ ygg-projects-entry-indent 2))
-         (room (max 4 (- (ygg-projects--width) indent (string-width badge) 1)))
-         (fits (<= (string-width label) room))
-         (cut (unless fits
-                (let* ((head (truncate-string-to-width label room))
-                       (space (string-match "[ /:_-][^ /:_-]*\\'" head)))
-                  ;; break where the words break, unless that throws most
-                  ;; of the line away
-                  (if (and space (> space (* 0.5 (length head))))
-                      (1+ space)
-                    (length head)))))
-         (first (if fits label (string-trim-right (substring label 0 cut))))
-         (rest (unless fits (string-trim-left (substring label cut))))
-         (wrap (- (ygg-projects--width) indent)))
-    (concat
-     (propertize (concat head
-                         (propertize first 'font-lock-face 'ygg-projects-entry)
-                         (ygg-projects--right
-                          badge
-                          ;; the row is as tall as it needs, unless its
-                          ;; name carries on below, where the air belongs
-                          (unless (and rest (not (string-empty-p rest)))
-                            (+ 1.0 ygg-projects-entry-spacing))))
-                 'ygg-project root 'ygg-row kind 'ygg-entry payload)
-     (when (and rest (not (string-empty-p rest)))
-       (concat
-        "\n"
-        (propertize
-         (concat (make-string (max 0 (- ygg-projects-entry-indent 2)) ?\s)
-                 (propertize "│" 'font-lock-face 'ygg-projects-idle)
-                 (make-string (max 0 (- indent (- ygg-projects-entry-indent 1))) ?\s)
-                 ;; clipped, not elided: an ellipsis is a column spent
-                 ;; saying there was another column
-                 (propertize (truncate-string-to-width rest wrap)
-                             'font-lock-face 'ygg-projects-entry)
-                 (ygg-projects--right "" (+ 1.0 ygg-projects-entry-spacing)))
-         'ygg-project root 'ygg-row kind 'ygg-entry payload 'ygg-cont t))))))
+         (room (max 1 (- line (string-width badge))))
+         (name (cond ((<= (string-width label) room) label)
+                     ((string-search "/" label)
+                      (let ((tail label))
+                        (while (> (string-width tail) (1- room))
+                          (setq tail (substring tail 1)))
+                        (concat "…" tail)))
+                     (t (truncate-string-to-width label room nil nil "…")))))
+    (propertize (concat head
+                        (propertize name 'font-lock-face 'ygg-projects-entry)
+                        (ygg-projects--right
+                         badge (+ 1.0 ygg-projects-entry-spacing)))
+                'ygg-project root 'ygg-row kind 'ygg-entry payload)))
 
 (defun ygg-projects--on-screen-p (payload)
   "Non-nil when PAYLOAD is a session a window is showing."

@@ -1,0 +1,11 @@
+import visidata.themes.asciimono
+
+# set directly, not as options.theme: set_theme would reset the user's disp_ options
+for _key in vd.options.keys():
+    if _key.startswith('color_'):
+        options[_key] = vd.themes['asciimono'].get(_key, '')
+options.plot_colors = 'bold 8'
+options.motd_url = ''
+
+if vd.config_file.exists():
+    vd.loadConfigFile(str(vd.config_file))

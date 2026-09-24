@@ -23,34 +23,22 @@
 (defvar ygg--macro-tag)
 (defvar diff-hl-mode)
 
-(defface ygg-modeline-pill
-  '((((background dark)) :background "#e0e0e0" :foreground "#0f0f0f" :weight bold)
-    (t :background "#1f1f1f" :foreground "#ffffff" :weight bold))
-  "Inverted block carrying the state word at the head of the line.")
+(defface ygg-modeline-pill '((t :weight bold))
+  "The state word at the head of the line, in the bar's own ink.")
 
-(defface ygg-modeline-pill-fade
-  '((((background dark)) :background "#202020" :foreground "#202020")
-    (t :background "#e6e6e6" :foreground "#e6e6e6"))
-  "One step of grey between the state block and the bar.")
+(defface ygg-modeline-pill-fade '((t))
+  "The gap between the state word and the rest of the bar.")
 
-(defface ygg-modeline-lang
-  '((((background dark)) :background "#e0e0e0" :foreground "#0f0f0f" :weight bold)
-    (t :background "#1f1f1f" :foreground "#ffffff" :weight bold))
-  "Inverted block carrying the language name at the tail of the line.")
+(defface ygg-modeline-lang '((t :weight bold))
+  "The language name at the tail of the line, in the bar's own ink.")
 
-(defface ygg-modeline-added
-  '((((background dark)) :foreground "#98BB6C")
-    (t :foreground "#3f6f2a"))
+(defface ygg-modeline-added '((t))
   "Count of lines this buffer adds over the committed file.")
 
-(defface ygg-modeline-removed
-  '((((background dark)) :foreground "#D4484B")
-    (t :foreground "#9a2020"))
+(defface ygg-modeline-removed '((t))
   "Count of lines this buffer removes from the committed file.")
 
-(defface ygg-modeline-path
-  '((((background dark)) :foreground "#969696")
-    (t :foreground "#4f4f4f"))
+(defface ygg-modeline-path '((t :inherit shadow))
   "The file's name under its project root.")
 
 (defcustom ygg-modeline-branch-glyph "⎇"

@@ -311,6 +311,53 @@ WITH-TOTAL puts the total after a running turn where there is room."
 
 (add-hook 'aob-state-change-hook #'aob--clock-on-state)
 
+(defcustom aob-quiet-minutes 10
+  "Minutes a working session may go without progress before it reads quiet.
+Progress is a new message, or a tool call starting or ending; words
+streaming into one message are not."
+  :type 'natnum :group 'aob)
+
+(defvar aob--quiet-timer nil)
+
+(defun aob-session-quiet (s)
+  "\"quiet 12m\" while working S has shown no progress for a while, else nil."
+  (when-let* (((eq (aob-session-state s) 'working))
+              (at (aob-session-ref s :progress-at))
+              (secs (- (float-time) at))
+              ((>= secs (* 60 aob-quiet-minutes))))
+    (concat "quiet " (aob-duration-short secs))))
+
+(defun aob--quiet-show (s label)
+  (aob-session-put s :quiet-shown label)
+  (run-hook-with-args 'aob-meter-change-hook s)
+  (when (bound-and-true-p aob-modeline-mode) (aob--modeline-refresh)))
+
+(defun aob-note-progress (s)
+  "Say S moved just now, which lifts a quiet mark."
+  (aob-session-put s :progress-at (float-time))
+  (when (aob-session-ref s :quiet-shown)
+    (aob--quiet-show s nil)))
+
+(defun aob--quiet-tick ()
+  (let ((working nil))
+    (dolist (s (aob-sessions))
+      (when (eq (aob-session-state s) 'working)
+        (setq working t))
+      (let ((label (aob-session-quiet s)))
+        (unless (equal label (aob-session-ref s :quiet-shown))
+          (aob--quiet-show s label))))
+    (unless working
+      (cancel-timer aob--quiet-timer)
+      (setq aob--quiet-timer nil))))
+
+(defun aob--quiet-on-state (s _old new)
+  (when (eq new 'working)
+    (aob-note-progress s)
+    (unless (timerp aob--quiet-timer)
+      (setq aob--quiet-timer (run-with-timer 30 30 #'aob--quiet-tick)))))
+
+(add-hook 'aob-state-change-hook #'aob--quiet-on-state)
+
 (defun aob-usage-note-cost (s amount &optional currency autonomous)
   "Take AMOUNT, S's running cost as the agent reports it, in CURRENCY.
 The figure is cumulative and falls back when the agent's own count
@@ -812,6 +859,15 @@ ATTACHMENTS are image file paths riding along with the first prompt.")
 
 (defvar-local aob-compose--target nil)
 
+(defvar-local aob-compose--anchor nil
+  "(WINDOW POS HOLD) for a draft anchored to a line, else nil.
+It floats small under the line POS is on in WINDOW, and its send hands
+the words and attachments to HOLD instead of sending them.")
+
+(defcustom aob-compose-anchored-max-height 12
+  "How many lines an anchored draft may grow to."
+  :type 'natnum :group 'aob)
+
 (defvar-local aob-compose--dir nil
   "The folder the caller named for this draft, or nil when it named none.
 A spawn on send belongs where the caller said; where nobody said, the
@@ -823,32 +879,36 @@ resolves one for itself needs to tell the two apart.")
 Where a host turns what was written into what it means, a mention of a
 path into a file the turn carries, while the words are still on screen.
 A function that returns a string hands back the text the turn sends
-instead; any other return leaves the text as it was.")
+instead; one that returns (TEXT . FILES) also hands the turn FILES to
+carry; any other return leaves the text as it was.")
 
 (defun aob-compose--rewritten (text)
-  "TEXT once every before-send function has had its say."
-  (run-hook-wrapped 'aob-compose-before-send-functions
-                    (lambda (fn)
-                      (let ((out (funcall fn text)))
-                        (when (stringp out) (setq text out)))
-                      nil))
-  text)
+  "(TEXT . FILES) once every before-send function has had its say."
+  (let (files)
+    (run-hook-wrapped 'aob-compose-before-send-functions
+                      (lambda (fn)
+                        (let ((out (funcall fn text)))
+                          (cond ((stringp out) (setq text out))
+                                ((stringp (car-safe out))
+                                 (setq text (car out)
+                                       files (append files (cdr out))))))
+                        nil))
+    (cons text files)))
 
 (defface aob-compose-title
-  '((t :foreground "#0091FF" :weight bold))
+  '((t :inherit default :weight bold))
   "The one loud thing on the box: what the draft is for.
-The palette's accent, spent on the target and on nothing else here."
+Loud by weight alone: the ink is the text's own."
   :group 'aob)
 
 (defface aob-compose-tag
-  '((((background dark)) :foreground "#626262")
-    (t :foreground "#a3a3a3"))
-  "The small tags beside the title, the keys and the weight: tertiary grey."
+  '((t :inherit shadow))
+  "The small tags beside the title, the keys and the weight: the quiet grey."
   :group 'aob)
 
 (defface aob-compose-rule
   '((((background dark)) :underline "#333333")
-    (t :underline "#d9d9d9"))
+    (t :underline "#c9c3b6"))
   "The thin line under the title row, which is the top edge of the box."
   :group 'aob)
 
@@ -931,6 +991,39 @@ never off the float."
 (defun aob-compose-show (buffer &optional no-focus)
   "Show BUFFER as the compose box, floating when it can, and give it
 focus unless NO-FOCUS.  Returns the window it stands in."
+  (if-let* ((anchor (buffer-local-value 'aob-compose--anchor buffer))
+            ((window-live-p (car anchor)))
+            ((display-graphic-p))
+            ((fboundp 'posframe-show)))
+      (aob-compose--show-anchored buffer anchor no-focus)
+    (aob-compose--show-box buffer no-focus)))
+
+(defun aob-compose--show-anchored (buffer anchor no-focus)
+  "Float BUFFER under the line ANCHOR's position is on, as wide as its window.
+It leaves the trace where it is: it stands under what it is about."
+  (let* ((win (car anchor))
+         (lines (buffer-local-value 'aob-compose-float-height buffer))
+         (frame (with-selected-window win
+                  (posframe-show buffer
+                                 :position (cadr anchor)
+                                 :parent-window win
+                                 :width (max 30 (- (window-body-width win) 4))
+                                 :height lines
+                                 :min-height lines
+                                 :border-width 1
+                                 :border-color (face-attribute 'vertical-border
+                                                               :foreground nil t)
+                                 :respect-header-line t
+                                 :respect-mode-line t
+                                 :accept-focus t))))
+    (unless no-focus
+      (select-frame-set-input-focus frame)
+      (select-window (frame-root-window frame)))
+    (with-current-buffer buffer (aob-compose--autogrow))
+    (frame-root-window frame)))
+
+(defun aob-compose--show-box (buffer no-focus)
+  "Show BUFFER as the compose box, floating when it can; see aob-compose-show."
   (if (aob-compose--float-p)
       (let* ((parent (aob-compose--top-frame (selected-frame)))
              (frame (with-selected-frame parent
@@ -976,7 +1069,8 @@ spare."
     (if (and frame (frame-live-p frame))
         (let ((wanted (aob-compose--wanted-height)))
           (unless (= wanted (frame-height frame))
-            (set-frame-height frame wanted)))
+            (set-frame-height frame wanted))
+          (when aob-compose--anchor (aob-compose--keep-inside frame)))
       (when-let* ((window (get-buffer-window (current-buffer)))
                   ((window-live-p window))
                   ((not (window-full-height-p window))))
@@ -984,6 +1078,15 @@ spare."
           (unless (= wanted (window-height window))
             (ignore-errors
               (window-resize window (- wanted (window-height window))))))))))
+
+(defun aob-compose--keep-inside (frame)
+  "Lift FRAME, grown under a line, so its foot stays inside its parent."
+  (when-let* ((parent (frame-parent frame))
+              (pos (frame-position frame))
+              (over (- (+ (cdr pos) (frame-pixel-height frame))
+                       (frame-pixel-height parent)))
+              ((> over 0)))
+    (set-frame-position frame (car pos) (max 0 (- (cdr pos) over)))))
 
 (defun aob-compose--keep-float-clean (frame)
   "Move any buffer but the draft out of a compose float FRAME.
@@ -1198,13 +1301,15 @@ tokens, then what the host weighs the whole turn at."
   (aob-compose--placeholder-refresh)
   (add-hook 'after-change-functions #'aob-compose--placeholder-refresh nil t))
 
-(defun aob-compose (&optional target initial name dir)
+(defun aob-compose (&optional target initial name dir anchor)
   "Compose a multi-line prompt.
 TARGET is a session, (new . AGENT) to spawn AGENT on send, a function
 called with the text and attachments on send, or nil for the default
 agent.  INITIAL seeds the buffer — selections, refs — with point after
 it, ready for your words.  NAME, when given, is what the buffer is
 called: a function target has no name of its own to take one from.
+ANCHOR, (WINDOW POS HOLD), makes it a small draft under a line whose
+send holds rather than sends; see aob-compose--anchor.
 
 The buffer stands where the prompt is going: DIR when the caller names
 one, else a session target's own folder, else the folder of whatever
@@ -1242,6 +1347,10 @@ completes `@file' and `/skill' against the wrong tree."
                           (t "new agent"))))
       (setq aob-compose--tags nil)
       (setq header-line-format '((:eval (aob-compose--header))))
+      (when anchor
+        (setq aob-compose--anchor anchor)
+        (setq-local aob-compose-float-height 3
+                    aob-compose-float-max-height aob-compose-anchored-max-height))
       (when initial (insert initial) (goto-char (point-max))))
     (aob-compose-show buf)
     buf))
@@ -1250,7 +1359,10 @@ completes `@file' and `/skill' against the wrong tree."
   "Sent prompts, newest first.")
 
 (defvar-local aob-compose--attachments nil
-  "Alist of (N . FILE); [[ImageN]] in the text is what keeps FILE aboard.")
+  "Alist of (N . FILE); [[ImageN]] in the text is what keeps FILE aboard.
+It outlives the mode being set again, as a draft reopened for its
+target is, so a kept draft keeps its images.")
+(put 'aob-compose--attachments 'permanent-local t)
 
 (defvar-local aob-compose-allow-empty nil
   "Whether this draft may be sent with nothing written.
@@ -1327,9 +1439,12 @@ attachments whose [[ImageN]] survived the user's editing ride along."
 (defun aob-compose-send ()
   (interactive)
   (pcase-let* ((draft (current-buffer))
+               (hold (nth 2 aob-compose--anchor))
                (raw (buffer-substring-no-properties (point-min) (point-max)))
-               (raw (aob-compose--rewritten raw))
-               (`(,text . ,atts) (aob-compose--harvest raw))
+               ;; a held comment is not a turn: what rides a turn joins it later
+               (rewritten (if hold (list raw) (aob-compose--rewritten raw)))
+               (`(,text . ,atts) (aob-compose--harvest (car rewritten)))
+               (atts (append atts (cdr rewritten)))
                (tgt aob-compose--target)
                (session (and (stringp tgt) (aob-session-get tgt))))
     (when (and (string-empty-p text) (null atts)
@@ -1342,7 +1457,8 @@ attachments whose [[ImageN]] survived the user's editing ride along."
     ;; whatever the draft goes to — a session, a spawn, a caller — it is
     ;; words the owner typed, and a spawn queues its first turn right here
     (let ((aob-prompt-typed t))
-      (cond ((and session (null atts)
+      (cond (hold (funcall hold text atts))
+            ((and session (null atts)
                   (or aob-compose--steer
                       ;; a turn that takes words mid-way gets them now: a
                       ;; subagent can keep a turn open for an hour, and a
@@ -1695,11 +1811,13 @@ Proceed based on it."
 (defvar aob-modeline-string "")
 (put 'aob-modeline-string 'risky-local-variable t)
 
-(defface aob-modeline-blocked '((t :inherit error :weight bold))
+(defface aob-modeline-blocked
+  '((((background dark)) :foreground "#E05A5D" :weight bold)
+    (t :inherit error :weight bold))
   "Agents waiting on you." :group 'aob)
-(defface aob-modeline-working '((t :foreground "#C0A36E"))
+(defface aob-modeline-working '((t :weight bold))
   "Agents at work." :group 'aob)
-(defface aob-modeline-sub '((t :foreground "#8A9A7B"))
+(defface aob-modeline-sub '((t :inherit shadow))
   "Delegated agents at work." :group 'aob)
 (defface aob-modeline-queued '((t :inherit shadow))
   "Messages waiting for a turn." :group 'aob)
@@ -1727,9 +1845,13 @@ Proceed based on it."
    'local-map aob-modeline--map))
 
 (defun aob--modeline-refresh (&rest _)
-  (let ((blocked 0) (working 0) (queued 0) (subs 0))
+  (let ((blocked 0) (working 0) (queued 0) (subs 0) (quietest nil))
     (dolist (s (aob-sessions))
       (cl-incf queued (length (aob-session-ref s :queued)))
+      (when-let* ((label (aob-session-quiet s))
+                  ((or (null quietest)
+                       (< (aob-session-ref s :progress-at) (car quietest)))))
+        (setq quietest (cons (aob-session-ref s :progress-at) label)))
       (let ((sub (and (aob-session-ref s :parent-session) t)))
         (pcase (aob-session-state s)
           ('blocked (cl-incf blocked))
@@ -1748,6 +1870,8 @@ Proceed based on it."
            (when (> subs 0)
              (aob--modeline-pill "nf-md-source_branch" "└" subs
                                  'aob-modeline-sub "subagents working"))
+           (when quietest
+             (propertize (concat " " (cdr quietest)) 'face 'shadow))
            (when (> queued 0)
              (aob--modeline-pill "nf-md-tray_full" "»" queued
                                  'aob-modeline-queued "messages queued"))

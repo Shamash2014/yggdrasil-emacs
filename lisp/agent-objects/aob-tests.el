@@ -238,7 +238,8 @@ A child process, so the glue's advice and keys never reach the other tests."
 (ert-deftest aob-queued-prompts-visible ()
   (aob-tests--with-session s
     (aob-set-state s 'working)
-    (aob-acp--prompt s "later")
+    (let ((aob-prompt-typed t))
+      (aob-acp--prompt s "later"))
     (let ((ev (car (aob-session-events s))))
       (should (eq (plist-get ev :type) 'prompt))
       (should (equal (plist-get ev :status) "queued"))
@@ -2914,7 +2915,13 @@ the host weighs it at, and no keys."
       (aob-trace--render t)
       (should (string-match-p "done (end_turn) · 7.4M ctx · [0-9]+s · 17.5k out · \\$1.25"
                               (buffer-string)))
-      (should (string-match-p "· [0-9]+s · 17.5k out · \\$1.25\\'" header-line-format))
+      (should (string-match-p "\\` test:1 · idle · [0-9]+s · \\$1.25 · 434k ctx\\'"
+                              header-line-format))
+      (should-not (string-match-p "out\\|/proj\\|%" header-line-format))
+      (should-not (get-text-property 1 'face header-line-format))
+      (should (eq (get-text-property (string-search "434k" header-line-format) 'face
+                                     header-line-format)
+                  'warning))
       (should (eq (get-text-property (1- (length header-line-format)) 'face header-line-format)
                   'shadow)))))
 
@@ -3249,3 +3256,1180 @@ every table drawn again for a new width: none of it moves the page."
         (should (< (text-property-any (point-min) (point-max) 'aob-event
                                       (aob-tests--tool-seq s "task"))
                    (window-start win)))))))
+
+(defun aob-tests--tool (s id kind title status &rest more)
+  "Feed S a tool call ID of KIND titled TITLE in STATUS, with MORE fields."
+  (aob-tests--update s (append (list :sessionUpdate "tool_call" :toolCallId id
+                                     :title title :kind kind :status status)
+                               more)))
+
+(defun aob-tests--say (s text)
+  "Feed S an answer chunk of TEXT."
+  (aob-tests--update s (list :sessionUpdate "agent_message_chunk"
+                             :content (list :type "text" :text text))))
+
+(defun aob-tests--think (s text)
+  "Feed S a thought chunk of TEXT."
+  (aob-tests--update s (list :sessionUpdate "agent_thought_chunk"
+                             :content (list :type "text" :text text))))
+
+(defun aob-tests--output (text)
+  "TEXT as the content of a tool update."
+  (vector (list :type "content" :content (list :type "text" :text text))))
+
+(defun aob-tests--at (needle prop)
+  "PROP where NEEDLE first appears in the buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (search-forward needle)
+    (get-text-property (match-beginning 0) prop)))
+
+(defun aob-tests--seven-tools (s)
+  "Feed S seven finished tool calls in a row: three reads, two edits, two runs."
+  (dolist (f '("a" "b" "c"))
+    (aob-tests--tool s (concat "r" f) "read" (format "Read /tmp/proj/%s.el" f) "completed"))
+  (aob-tests--tool s "e1" "edit" "Edit /tmp/proj/a.el" "completed")
+  (aob-tests--tool s "e2" "edit" "Edit /tmp/proj/b.el" "completed")
+  (aob-tests--tool s "x1" "execute" "`make`" "completed")
+  (aob-tests--tool s "x2" "execute" "`make test`" "completed"))
+
+(ert-deftest aob-trace-folds-a-run-of-tool-calls ()
+  "Seven calls with no words between them are one step of work: one row
+that counts them by kind, TAB opening it back into the calls."
+  (aob-tests--with-trace-session s
+    (aob-tests--say s "Looking.")
+    (aob-tests--seven-tools s)
+    (aob-trace--render t)
+    (should (string-match-p "▸ 7 tools · 3 read, 2 edit, 2 shell" (buffer-string)))
+    (should-not (string-match-p "make test" (buffer-string)))
+    (aob-tests--goto "7 tools")
+    (aob-trace-toggle)
+    (should (string-match-p "▾ 7 tools" (buffer-string)))
+    (should (string-match-p "\\$ make test" (buffer-string)))
+    (should (eql (aob-tests--at "make test" 'aob-item) (aob-tests--tool-seq s "x2")))
+    (aob-tests--goto "7 tools")
+    (aob-trace-toggle)
+    (should-not (string-match-p "make test" (buffer-string)))
+    (let ((aob-trace-run-min 0))
+      (aob-trace--render t)
+      (should-not (string-match-p "7 tools" (buffer-string))))))
+
+(ert-deftest aob-trace-a-run-shows-its-live-call-and-its-failures ()
+  "Shut, a run still shows the call it is waiting on and every call that
+failed, and its row says it failed."
+  (aob-tests--with-trace-session s
+    (aob-tests--seven-tools s)
+    (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "x1" :status "failed"))
+    (aob-tests--tool s "live" "execute" "`sleep 9`" "in_progress")
+    (aob-trace--render t)
+    (should (string-match-p "▸ 8 tools .* · 1 failed" (buffer-string)))
+    (should (string-match-p "\\$ make failed" (buffer-string)))
+    (should (string-match-p "\\$ sleep 9" (buffer-string)))
+    (should-not (string-match-p "make test" (buffer-string)))
+    (let ((mark (text-property-any (point-min) (point-max) 'aob-status 'failed)))
+      (should (eql (get-text-property mark 'aob-run) (aob-tests--tool-seq s "ra"))))
+    (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "live" :status "completed"))
+    (aob-trace--render t)
+    (should-not (string-match-p "sleep 9" (buffer-string)))))
+
+(ert-deftest aob-trace-marks-each-block-in-the-fringe ()
+  "The fringe says running, done, failed or waiting, and the character
+carrying the mark changes with it, so a state change redraws the block."
+  (aob-tests--with-trace-session s
+    (aob-tests--tool s "t1" "read" "Read /tmp/proj/a.el" "in_progress")
+    (aob-trace--render t)
+    (let ((at (text-property-any (point-min) (point-max) 'aob-status 'running)))
+      (should at)
+      (should (equal (get-text-property at 'display)
+                     '(left-fringe aob-trace-running aob-trace-status)))
+      (should (eql (get-text-property at 'aob-event) (aob-tests--tool-seq s "t1"))))
+    (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "t1" :status "failed"))
+    (aob-trace--render t)
+    (let ((at (text-property-any (point-min) (point-max) 'aob-status 'failed)))
+      (should (equal (get-text-property at 'display)
+                     '(left-fringe aob-trace-failed aob-trace-status-failed)))
+      (should (equal (buffer-substring-no-properties at (1+ at)) "!")))
+    (aob-tests--request s 60 "session/request_permission"
+                        '(:sessionId "sess-test"
+                          :toolCall (:toolCallId "t2" :title "rm -rf build" :kind "execute")
+                          :options [(:optionId "ok" :name "Allow" :kind "allow_once")]))
+    (aob-trace--render t)
+    (should (text-property-any (point-min) (point-max) 'aob-status 'waiting))
+    (aob-tests--claude-plan s 61)
+    (aob-trace--render t)
+    (let* ((seq (plist-get (car (aob-session-decisions s)) :seq))
+           (at (text-property-any (point-min) (point-max) 'aob-event seq)))
+      (should (eq (get-text-property at 'aob-status) 'waiting)))
+    (let ((aob-trace-status-gutter nil))
+      (dolist (ev (aob-session-events s)) (plist-put ev :line nil))
+      (aob-trace--render t)
+      (should-not (text-property-not-all (point-min) (point-max) 'aob-status nil)))))
+
+(ert-deftest aob-trace-folds-thinking-to-one-line ()
+  "A thought is one muted line saying how long it is, even while it is
+being had; TAB opens it, and it stays open through every redraw."
+  (aob-tests--with-trace-session s
+    (aob-tests--think s "first I look\n\nthen I")
+    (aob-tests--think s " decide\nand act")
+    (aob-trace--render t)
+    (should (string-match-p "thinking · 3 lines" (buffer-string)))
+    (should-not (string-match-p "then I decide" (buffer-string)))
+    (should (memq 'aob-trace-thinking
+                  (ensure-list (aob-tests--at "thinking ·" 'font-lock-face))))
+    (aob-tests--say s "Done.")
+    (aob-tests--goto "thinking ·")
+    (aob-trace-toggle)
+    (should (string-match-p "then I decide" (buffer-string)))
+    (aob-tests--say s " More.")
+    (aob-trace--render t)
+    (aob-trace--render t)
+    (should (string-match-p "then I decide" (buffer-string)))
+    (aob-tests--goto "thinking ·")
+    (aob-trace-toggle)
+    (should-not (string-match-p "then I decide" (buffer-string)))))
+
+(ert-deftest aob-trace-draws-an-edit-as-a-diff ()
+  "An edit is its file, what it added and removed, and the change with
+the words that moved marked, cut short until TAB; RET on the file line
+opens it where the change is."
+  (let ((file (make-temp-file "aob-diff" nil ".el"
+                              "(defun a ()\n  (one)\n  (new thing here))\n")))
+    (unwind-protect
+        (aob-tests--with-trace-session s
+          (aob-tests--tool s "e1" "edit" (concat "Edit " file) "completed"
+                           :content (vector (list :type "diff" :path file
+                                                  :oldText "(defun a ()\n  (one)\n  (old thing))"
+                                                  :newText "(defun a ()\n  (one)\n  (new thing here))")))
+          (aob-trace--render t)
+          (let ((name (file-name-nondirectory file)))
+            (should (string-match-p (concat (regexp-quote name) "  \\+1 −1") (buffer-string))))
+          (should (string-match-p "^− +(old thing))" (buffer-string)))
+          (should (string-match-p "^\\+ +(new thing here))" (buffer-string)))
+          (should (memq 'aob-trace-diff-refine-removed
+                        (ensure-list (aob-tests--at "old" 'font-lock-face))))
+          (should (memq 'aob-trace-diff-refine-added
+                        (ensure-list (aob-tests--at "here" 'font-lock-face))))
+          (should-not (memq 'aob-trace-diff-refine-added
+                            (ensure-list (aob-tests--at "thing here" 'font-lock-face))))
+          (aob-tests--goto "+1 −1")
+          (save-window-excursion
+            (aob-trace-answer)
+            (should (equal (buffer-file-name) file))
+            (should (= (line-number-at-pos) 3)))
+          (let ((aob-trace-diff-lines 2))
+            (dolist (ev (aob-session-events s)) (plist-put ev :line nil))
+            (aob-trace--render t)
+            (should (string-match-p "… 2 more lines" (buffer-string)))
+            (aob-tests--goto "+1 −1")
+            (aob-trace-toggle)
+            (should-not (string-match-p "more lines" (buffer-string)))
+            (should (string-match-p "new thing here" (buffer-string)))))
+      (when-let* ((b (get-file-buffer file))) (kill-buffer b))
+      (delete-file file))))
+
+(ert-deftest aob-trace-draws-a-command-as-a-card ()
+  "A command run is its command, its output cut to a few lines, how it
+ended on the right, and a file:line in the output RET opens."
+  (let ((file (make-temp-file "aob-card" nil ".el" "one\ntwo\nthree\n")))
+    (unwind-protect
+        (aob-tests--with-trace-session s
+          (aob-tests--tool s "x1" "execute" "`make test`" "in_progress")
+          (aob-trace--render t)
+          (should (string-match-p "\\$ make test running" (buffer-string)))
+          (aob-tests--update
+           s (list :sessionUpdate "tool_call_update" :toolCallId "x1" :status "failed"
+                   :rawOutput '(:exit_code 2)
+                   :content (aob-tests--output
+                             (concat "```console\n" file ":2: error: boom\n"
+                                     (mapconcat (lambda (i) (format "line %d" i))
+                                                (number-sequence 1 20) "\n")
+                                     "\n```"))))
+          (aob-trace--render t)
+          (should (string-match-p "\\$ make test exit 2 · [0-9]+ms" (buffer-string)))
+          (should-not (string-match-p "```" (buffer-string)))
+          (should (string-match-p "line 11\n  … 9 more lines" (buffer-string)))
+          (should-not (string-match-p "line 12" (buffer-string)))
+          (should (equal (aob-tests--at (concat file ":2") 'aob-file) (list file 2 nil)))
+          (goto-char (point-min))
+          (search-forward (concat file ":2"))
+          (goto-char (match-beginning 0))
+          (save-window-excursion
+            (aob-trace-answer)
+            (should (equal (buffer-file-name) file))
+            (should (= (line-number-at-pos) 2)))
+          (with-current-buffer (aob-trace-buffer s)
+            (aob-tests--goto "$ make test")
+            (aob-trace-toggle)
+            (should (string-match-p "line 20" (buffer-string)))
+            (should-not (string-match-p "more lines" (buffer-string)))))
+      (when-let* ((b (get-file-buffer file))) (kill-buffer b))
+      (delete-file file))))
+
+(ert-deftest aob-trace-shows-files-as-chips ()
+  "A path a tool acted on is its name, and its line; the whole path,
+relative to the project, is under the pointer, and RET opens it."
+  (let* ((dir (file-name-as-directory (make-temp-file "aob-proj" t)))
+         (file (expand-file-name "src/a.el" dir)))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file (insert "1\n2\n3\n4\n"))
+    (unwind-protect
+        (aob-tests--with-trace-session s
+          (setf (aob-session-project s) dir)
+          (aob-tests--tool s "r1" "read" (concat "Read File  " file) "completed"
+                           :locations (vector (list :path file :line 3)))
+          (aob-trace--render t)
+          (should (string-match-p "Read a.el:3" (buffer-string)))
+          (should-not (string-match-p (regexp-quote file) (buffer-string)))
+          (should (equal (aob-tests--at "a.el:3" 'help-echo) "src/a.el"))
+          (should (memq 'aob-trace-target (ensure-list (aob-tests--at "a.el:3" 'font-lock-face))))
+          (aob-tests--goto "a.el:3")
+          (save-window-excursion
+            (aob-trace-answer)
+            (should (equal (buffer-file-name) file))
+            (should (= (line-number-at-pos) 3))))
+      (when-let* ((b (get-file-buffer file))) (kill-buffer b))
+      (delete-directory dir t))))
+
+(defun aob-tests--breaks (beg end)
+  "Where between BEG and END a space is shown as a line break."
+  (let (out)
+    (dotimes (i (- end beg))
+      (when (equal (get-text-property (+ beg i) 'display) "\n")
+        (push (+ beg i) out)))
+    (nreverse out)))
+
+(ert-deftest aob-trace-wraps-prose-at-its-measure ()
+  "Prose breaks at the measure however wide the window, without a newline
+in the text; a table keeps its width, and a window too narrow for the
+measure wraps at its own edge."
+  (aob-tests--with-trace-session s
+    (let ((aob-trace-prose-width 30)
+          (aob-trace-card-width 120)
+          (words (mapconcat (lambda (i) (format "word%02d" i)) (number-sequence 1 30) " ")))
+      (aob-tests--say s (concat words "\n\n| a | b |\n|---|---|\n| "
+                                (make-string 50 ?x) " | y |"))
+      (aob-trace--render t)
+      (let* ((beg (save-excursion (goto-char (point-min)) (search-forward "word01")
+                                  (match-beginning 0)))
+             (end (save-excursion (goto-char beg) (line-end-position)))
+             (breaks (aob-tests--breaks beg end)))
+        (should (> (length breaks) 3))
+        (should (= (count-lines beg end) 1))
+        (let ((prev beg))
+          (dolist (b (append breaks (list end)))
+            (should (<= (- b prev) 31))
+            (setq prev (1+ b)))))
+      (should-not (aob-tests--breaks (save-excursion (goto-char (point-min))
+                                                     (search-forward "xxxx") (point))
+                                     (save-excursion (goto-char (point-min))
+                                                     (search-forward "xxxx") (line-end-position))))
+      (let ((aob-trace-card-width 32))
+        (aob-trace--fit-margins)
+        (aob-trace--render t)
+        (should-not (aob-tests--breaks (point-min) (point-max)))))))
+
+(ert-deftest aob-trace-spaces-words-apart-and-work-close ()
+  "Before words a line of air, between calls a little, inside a card none,
+in either style."
+  (dolist (style '(delta log))
+    (let ((aob-trace-style style))
+      (aob-tests--with-trace-session s
+        (aob-tests--say s "Plan.")
+        (aob-tests--tool s "x1" "execute" "`make`" "completed"
+                         :content (aob-tests--output "a\nb"))
+        (aob-tests--tool s "r1" "read" "Read /tmp/proj/a.el" "completed")
+        (aob-tests--say s "Now the words.")
+        (aob-trace--render t)
+        (let ((above-block (lambda (needle)
+                             (let ((seq (aob-tests--at needle 'aob-event)))
+                               (get-text-property
+                                (1- (text-property-any (point-min) (point-max) 'aob-event seq))
+                                'line-spacing))))
+              (above-line (lambda (needle)
+                            (save-excursion
+                              (goto-char (point-min))
+                              (search-forward needle)
+                              (goto-char (match-beginning 0))
+                              (forward-line 0)
+                              (get-text-property (1- (point)) 'line-spacing)))))
+          (should (equal (funcall above-block "Now the words") aob-trace-gap-words))
+          (should (equal (funcall above-block "a.el") aob-trace-gap-work))
+          (should (equal (funcall above-line "  a\n") 0))
+          (should (equal (funcall above-line "  b") 0)))
+        (should-not (string-match-p "\n\n" (buffer-substring-no-properties
+                                             (point-min) (aob-trace--tail-end))))))))
+
+(ert-deftest aob-trace-sets-its-type-scale ()
+  "Prose a little larger, tool rows a little smaller, headings bold at
+the size of the words around them; a table stays at the size it was laid
+out in."
+  (aob-tests--with-trace-session s
+    (should (member '(:height 1.05) (alist-get 'aob-trace-prose face-remapping-alist)))
+    (should (member '(:height 0.92) (alist-get 'aob-trace-small face-remapping-alist)))
+    (aob-tests--say s "Words here.\n\n| a | b |\n|---|---|\n| 1 | 2 |")
+    (aob-tests--tool s "r1" "read" "Read /tmp/proj/a.el" "completed")
+    (aob-trace--render t)
+    (should (memq 'aob-trace-prose (ensure-list (aob-tests--at "Words" 'font-lock-face))))
+    (should (string-match-p "│ a " (buffer-string)))
+    (should-not (memq 'aob-trace-prose (ensure-list (aob-tests--at "│ a " 'font-lock-face))))
+    (should (memq 'aob-trace-small (ensure-list (aob-tests--at "Read" 'font-lock-face))))
+    (should-not (memq 'aob-trace-prose (ensure-list (aob-tests--at "Read" 'font-lock-face))))))
+
+(ert-deftest aob-trace-header-says-only-what-is-looked-at ()
+  "Name, state, clock, cost, context and todo; a mode only when it is not
+the one a session runs in anyway; no folder, model or token count out."
+  (aob-tests--with-trace-session s
+    (aob-session-put s :mode-id "default")
+    (aob-session-put s :model-name "opus")
+    (aob-session-put s :ctx-used 213400)
+    (aob-trace--render t)
+    (should (string-match-p "\\` test:1 · working · .*213k ctx\\'" header-line-format))
+    (should-not (string-match-p "default\\|opus\\|/tmp/proj" header-line-format))
+    (should (eq 'warning (get-text-property (string-search "213k" header-line-format)
+                                            'face header-line-format)))
+    (aob-session-put s :mode-id "plan")
+    (aob-session-put s :ctx-used 1000)
+    (aob-trace--render t)
+    (should (string-match-p " · working · plan · " header-line-format))
+    (should (eq 'shadow (get-text-property (string-search "1k" header-line-format)
+                                           'face header-line-format)))))
+
+(ert-deftest aob-trace-a-shut-run-shows-every-call-still-running ()
+  "Parallel calls finish in any order: a run is running while any call
+is, and each still running is shown under its row."
+  (aob-tests--with-trace-session s
+    (dotimes (i 6)
+      (aob-tests--tool s (format "p%d" i) "execute" (format "`job %d`" i) "in_progress"))
+    (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "p5" :status "completed"))
+    (aob-trace--render t)
+    (should (string-match-p "▸ 6 tools" (buffer-string)))
+    (should (= 5 (how-many "\\$ job [0-4]" (point-min) (point-max))))
+    (should-not (string-match-p "job 5" (buffer-string)))
+    (should (eq 'running (get-text-property
+                          (text-property-any (point-min) (point-max) 'aob-run
+                                             (aob-tests--tool-seq s "p0"))
+                          'aob-status)))))
+
+(ert-deftest aob-trace-a-call-you-opened-stays-when-a-run-forms ()
+  "A card opened by TAB and read in a window stays shown and stays put
+when the calls around it fold into a run."
+  (aob-tests--with-trace-session s
+    (let ((win (selected-window)))
+      (delete-other-windows)
+      (set-window-buffer win (current-buffer))
+      (dotimes (i 4)
+        (aob-tests--tool s (format "q%d" i) "execute" (format "`step %d`" i) "completed"
+                         :content (aob-tests--output
+                                   (mapconcat (lambda (k) (format "out %d.%d" i k))
+                                              (number-sequence 1 30) "\n"))))
+      (push (aob-tests--tool-seq s "q2") aob-trace--expanded)
+      (aob-trace--render-1 s)
+      (goto-char (point-min))
+      (search-forward "out 2.20")
+      (beginning-of-line)
+      (set-window-start win (point))
+      (aob-tests--tool s "q4" "execute" "`step 4`" "completed")
+      (aob-trace--render-1 s)
+      (should (string-match-p "▸ 5 tools" (buffer-string)))
+      (should (string-match-p "out 2.30" (buffer-string)))
+      (should (string-match-p "\\`[ ]*out 2\\.20$"
+                              (save-excursion
+                                (goto-char (window-start win))
+                                (buffer-substring-no-properties
+                                 (line-beginning-position) (line-end-position))))))))
+
+(ert-deftest aob-trace-a-streamed-answer-breaks-where-it-was-drawn ()
+  "A chunk that pushes a line past the measure breaks it at a space drawn
+by an earlier chunk, not only in the words that just arrived."
+  (aob-tests--with-trace-session s
+    (let ((aob-trace-prose-width 30)
+          (aob-trace-card-width 120))
+      (aob-tests--say s "aaaa bbbb cccc dddd eeee ff")
+      (aob-trace--render t)
+      (should-not (aob-tests--breaks (point-min) (point-max)))
+      (aob-tests--say s "ffff gggg")
+      (aob-trace--render t)
+      (let ((breaks (aob-tests--breaks (point-min) (point-max))))
+        (should breaks)
+        (should (< (car breaks)
+                   (save-excursion (goto-char (point-min)) (search-forward "ff") (point))))))))
+
+(defconst aob-tests--limit
+  "You've hit your org's monthly spend limit · run /usage-credits to raise it"
+  "What a subagent that ran out of money reports.")
+
+(defun aob-tests--reports (s ids)
+  "S hears, from the editor, that each subagent in IDS finished out of money."
+  (dolist (n ids)
+    (aob-event s 'prompt :typed nil
+               :text (format "Subagent claude:%d (acp:claude:%d) finished:\n\n%s"
+                             n n aob-tests--limit))))
+
+(ert-deftest aob-trace-folds-what-the-editor-said-for-you ()
+  "What the editor sent for you is one quiet row each; notes that say the
+same thing are one row counting them; TAB opens them; what you typed is
+left as you wrote it."
+  (aob-tests--with-trace-session s
+    (aob-event s 'prompt :text "Fix the parser." :typed t)
+    (aob-tests--reports s '(10 8 11))
+    (aob-event s 'prompt :typed nil :text "Todo: 3 items pending.\n\nkeep going")
+    (aob-trace--render t)
+    (should (string-match-p "^Fix the parser\\.$" (buffer-string)))
+    (should (string-match-p "▸ 3 subagents finished · You've hit your org's monthly spend limit.* ×3"
+                            (buffer-string)))
+    (should (= 1 (how-many "spend limit" (point-min) (point-max))))
+    (should (string-match-p "▸ Todo: 3 items pending\\.$" (buffer-string)))
+    (should (memq 'aob-trace-note (ensure-list (aob-tests--at "3 subagents" 'font-lock-face))))
+    (aob-tests--goto "3 subagents")
+    (aob-trace-toggle)
+    (should (string-match-p "▾ 3 subagents" (buffer-string)))
+    (should (= 4 (how-many "spend limit" (point-min) (point-max))))
+    (aob-tests--goto "claude:8 (acp")
+    (aob-trace-toggle)
+    (should-not (string-match-p "claude:8 (acp" (buffer-string)))
+    (aob-tests--goto "Todo: 3")
+    (aob-trace-toggle)
+    (should (string-match-p "keep going" (buffer-string)))))
+
+(ert-deftest aob-trace-folds-queued-notes-and-keeps-them-movable ()
+  "Queued notes that say the same thing fold into one row that still says
+they wait; the queue under it counts each."
+  (aob-tests--with-trace-session s
+    (let ((aob-prompt-typed nil))
+      (dolist (n '(5 7))
+        (aob-acp--queue s (format "Subagent claude:%d (acp:claude:%d) finished:\n\n%s"
+                                  n n aob-tests--limit)
+                        nil)))
+    (aob-trace--render t)
+    (should (string-match-p "▸ 2 subagents finished · .* ×2 ⋯" (buffer-string)))
+    (should (string-match-p "» 2 queued" (buffer-string)))
+    (aob-tests--goto "2 subagents")
+    (should (equal (car (aob-trace--queued-at-point))
+                   (car (car (aob-session-ref s :queued)))))))
+
+(defmacro aob-tests--held (s win &rest body)
+  "With S's trace in WIN, read from the line holding Step 9, run BODY and
+check after every render in it that WIN starts on the same text."
+  (declare (indent 2))
+  `(progn
+     (delete-other-windows)
+     (set-window-buffer ,win (current-buffer))
+     (aob-trace--render-1 ,s)
+     (goto-char (point-min))
+     (search-forward "Step 9 reads")
+     (beginning-of-line)
+     (set-window-start ,win (point))
+     (set-window-point ,win (point))
+     (let ((top (aob-tests--top ,win)))
+       (cl-flet ((again () (aob-trace--render-1 ,s)
+                   (should (equal (aob-tests--top ,win) top))))
+         ,@body))))
+
+(defun aob-tests--steps (s from to)
+  "Feed S answers FROM to TO, each a few words long."
+  (dolist (i (number-sequence from to))
+    (aob-tests--say s (format "Step %d reads a few words.\n" i))
+    (aob-tests--tool s (format "k%d" i) "read" (format "Read /tmp/proj/k%d.el" i) "completed")))
+
+(ert-deftest aob-trace-held-window-keeps-its-top-through-folds ()
+  "Opening and shutting a run of calls and a thought above the page the
+window is on leaves the page where it is."
+  (aob-tests--with-trace-session s
+    (let ((win (selected-window)))
+      (aob-tests--think s "one\ntwo\nthree")
+      (aob-tests--seven-tools s)
+      (aob-tests--reports s '(1 2 3))
+      (aob-tests--steps s 1 14)
+      (aob-tests--held s win
+        (let ((run (aob-tests--tool-seq s "ra"))
+              (thought (plist-get (seq-find (lambda (e) (eq (plist-get e :type) 'thought))
+                                            (aob-session-events s))
+                                  :seq))
+              (notes (plist-get (car (last (seq-filter #'aob-trace--editor-p
+                                                       (aob-session-events s))))
+                                :seq)))
+          (should (< (text-property-any (point-min) (point-max) 'aob-run run)
+                     (window-start win)))
+          (dotimes (_ 2)
+            (push run aob-trace--open-runs)
+            (again)
+            (should (string-match-p "▾ 7 tools" (buffer-string)))
+            (setq aob-trace--open-runs (delq run aob-trace--open-runs))
+            (again)
+            (push thought aob-trace--expanded)
+            (again)
+            (should (string-match-p "three" (buffer-string)))
+            (setq aob-trace--expanded (delq thought aob-trace--expanded))
+            (again)
+            (push notes aob-trace--expanded)
+            (again)
+            (should (string-match-p "▾ 3 subagents" (buffer-string)))
+            (setq aob-trace--expanded (delq notes aob-trace--expanded))
+            (again)))))))
+
+(ert-deftest aob-trace-held-window-keeps-its-top-while-a-card-grows ()
+  "A command above the page printing as it runs grows its card, and the
+page stays where it is."
+  (aob-tests--with-trace-session s
+    (let ((win (selected-window)))
+      (aob-tests--say s "Building.\n")
+      (aob-tests--tool s "build" "execute" "`make all`" "in_progress")
+      (aob-tests--steps s 1 14)
+      (aob-tests--held s win
+        (dotimes (i 20)
+          (aob-tests--update
+           s (list :sessionUpdate "tool_call_update" :toolCallId "build"
+                   :status "in_progress"
+                   :content (aob-tests--output
+                             (mapconcat (lambda (k) (format "compiling unit %d" k))
+                                        (number-sequence 0 i) "\n"))))
+          (when (= i 10) (push (aob-tests--tool-seq s "build") aob-trace--expanded))
+          (again))
+        (should (string-match-p "compiling unit 19" (buffer-string)))))))
+
+(ert-deftest aob-trace-held-window-keeps-its-top-while-prose-reflows ()
+  "A window made narrower breaks the prose above it at other places, and
+the page it shows starts on the same words."
+  (aob-tests--with-trace-session s
+    (let ((win (selected-window))
+          (aob-trace-prose-width 24))
+      (aob-tests--say s (concat (mapconcat (lambda (i) (format "longword%02d" i))
+                                           (number-sequence 1 40) " ")
+                                "\n"))
+      (aob-tests--steps s 1 14)
+      (aob-tests--held s win
+        (let ((before (aob-tests--breaks (point-min) (window-start win))))
+          (should before)
+          (let ((aob-trace-prose-width 12))
+            (dolist (ev (aob-session-events s)) (plist-put ev :line nil))
+            (setq aob-trace--blocks nil)
+            (again)
+            (should-not (equal before (aob-tests--breaks (point-min) (window-start win)))))
+          (split-window-right)
+          (aob-trace--fit-margins)
+          (again))))))
+
+(ert-deftest aob-trace-held-cursor-stays-on-the-page ()
+  "A card growing above the cursor pushes it below the page; the render
+puts it on the page's last line, or redisplay would scroll the page after it."
+  (aob-tests--with-trace-session s
+    (let ((win (selected-window))
+          (rows 6))
+      (delete-other-windows)
+      (set-window-buffer win (current-buffer))
+      (aob-tests--say s "Building.\n")
+      (aob-tests--tool s "build" "execute" "`make all`" "in_progress")
+      (aob-tests--steps s 1 14)
+      (aob-trace--render-1 s)
+      (push (aob-tests--tool-seq s "build") aob-trace--expanded)
+      (aob-trace--render-1 s)
+      (aob-tests--goto "make all")
+      (set-window-start win (line-beginning-position 0))
+      (cl-letf (((symbol-function 'pos-visible-in-window-p)
+                 (lambda (&optional pos w _partially)
+                   (let ((start (window-start w)))
+                     (and (>= pos start)
+                          (< (count-lines start (save-excursion (goto-char pos) (line-beginning-position)))
+                             rows)))))
+                ((symbol-function 'move-to-window-line)
+                 (lambda (_arg)
+                   (goto-char (window-start))
+                   (forward-line (1- rows)))))
+        (set-window-point win (save-excursion (goto-char (window-start win))
+                                              (forward-line (1- rows))
+                                              (point)))
+        (should (pos-visible-in-window-p (window-point win) win))
+        (let ((top (aob-tests--top win)))
+          (aob-tests--update
+           s (list :sessionUpdate "tool_call_update" :toolCallId "build" :status "in_progress"
+                   :content (aob-tests--output
+                             (mapconcat (lambda (k) (format "compiling unit %d" k))
+                                        (number-sequence 0 20) "\n"))))
+          (aob-trace--render-1 s)
+          (should (equal (car (aob-tests--top win)) (car top)))
+          (should (pos-visible-in-window-p (window-point win) win)))))))
+
+(ert-deftest aob-trace-nudge-up-from-the-tail-stops-following ()
+  "A wheel step back from the live edge takes the cursor off it, so the
+next chunk does not pull the page back down."
+  (require 'mwheel)
+  (aob-tests--with-trace-session s
+    (let ((win (selected-window)))
+      (delete-other-windows)
+      (set-window-buffer win (current-buffer))
+      (aob-tests--steps s 1 14)
+      (aob-trace--render-1 s)
+      (goto-char (point-max))
+      (set-window-point win (point-max))
+      (set-window-start win (save-excursion (forward-line -5) (point)))
+      (should (>= (window-point win) (aob-trace--tail-start)))
+      (with-selected-window win
+        (funcall mwheel-scroll-down-function 1))
+      (should (< (window-point win) (aob-trace--tail-start)))
+      (let ((start (window-start win)))
+        (aob-tests--steps s 15 18)
+        (aob-trace--render-1 s)
+        (should (< (window-point win) (aob-trace--tail-start)))
+        (should (equal (window-start win) start))))))
+
+(defmacro aob-tests--with-comment-trace (var s &rest body)
+  "Bind VAR to a buffer shown in the selected window as S's trace."
+  (declare (indent 2))
+  `(let ((,var (generate-new-buffer "trace")))
+     (unwind-protect
+         (save-window-excursion
+           (with-current-buffer ,var
+             (setq default-directory "/tmp/elsewhere/")
+             (setq-local aob-trace--session-id (aob-session-id ,s)))
+           (set-window-buffer (selected-window) ,var)
+           ,@body)
+       (kill-buffer ,var)
+       (dolist (b (buffer-list))
+         (when (string-prefix-p "compose:comment:" (buffer-name b))
+           (kill-buffer b))))))
+
+(ert-deftest aob-trace-comment-box-completes-for-its-session ()
+  (aob-tests--with-session s
+    (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"available_commands_update\",\"availableCommands\":[{\"name\":\"debug\",\"description\":\"Debug it\"}]}}}")
+    (puthash "/tmp/proj/" '("src/auth.ts" "src/main.ts") aob--files-cache)
+    (aob-tests--with-comment-trace trace s
+      (with-current-buffer (aob-trace--comment-box trace 3 "why?" 1)
+        (should (derived-mode-p 'aob-compose-mode))
+        (should aob-trace-comment-mode)
+        (should aob-compose--anchor)
+        (should (equal aob-compose--target "acp:test:1"))
+        (should (equal default-directory "/tmp/proj/"))
+        (should (equal (seq-take completion-at-point-functions 2)
+                       '(aob-compose-capf aob-compose--dabbrev-capf)))
+        (should (memq #'aob-compose--autogrow post-command-hook))
+        (should (string-prefix-p "comment on: why?" aob-compose--label))
+        (insert "/de")
+        (pcase-let ((`(,_ ,_ ,table . ,_) (aob-compose-capf)))
+          (should (member "debug" table)))
+        (erase-buffer)
+        (insert "see @src")
+        (pcase-let ((`(,_ ,_ ,table . ,_) (aob-compose-capf)))
+          (should (member "src/auth.ts" (all-completions "src" table)))))
+      (with-current-buffer trace (setq-local aob-trace--session-id nil))
+      (with-current-buffer (aob-trace--comment-box trace nil "q" 1 s)
+        (should (equal aob-compose--target "acp:test:1"))
+        (should (equal default-directory "/tmp/proj/"))))))
+
+(ert-deftest aob-trace-comment-box-grows-within-bounds ()
+  (aob-tests--with-session s
+    (aob-tests--with-comment-trace trace s
+      (with-current-buffer (aob-trace--comment-box trace 1 "q" 1)
+        (set-window-buffer (selected-window) (current-buffer))
+        (insert "one line")
+        (should (= (aob-compose--wanted-height) 3))
+        (insert "\n2\n3\n4\n5")
+        (should (= (aob-compose--wanted-height) 7))
+        (insert (make-string 40 ?\n))
+        (should (= (aob-compose--wanted-height)
+                   aob-compose-anchored-max-height))
+        (erase-buffer)
+        (should (= (aob-compose--wanted-height) 3))))))
+
+(ert-deftest aob-trace-comment-box-holds-and-send-now-sends-all ()
+  (aob-tests--with-session s
+    (aob-tests--with-comment-trace trace s
+      (let ((said nil)
+            (aob-compose-before-send-functions
+             (list (lambda (_) "rewritten as a turn"))))
+        (cl-letf (((symbol-function 'aob-trace--say)
+                   (lambda (_s text &optional _files) (push text said))))
+          (let ((a (aob-trace--comment-box trace 3 "why?" 1)))
+            (with-current-buffer a
+              (insert "fix this")
+              (aob-compose-send))
+            (should-not (buffer-live-p a)))
+          (should-not said)
+          (should (equal (plist-get (car (aob-session-ref s :comments)) :text)
+                         "fix this"))
+          (with-current-buffer (aob-trace--comment-box trace 4 "and here" 1)
+            (insert "and this")
+            (aob-trace-comment-send-now))
+          (should (= (length said) 1))
+          (should (string-match-p "> why\\?\nfix this" (car said)))
+          (should (string-match-p "> and here\nand this" (car said)))
+          (should-not (aob-session-ref s :comments)))))))
+
+(ert-deftest aob-trace-comment-box-keeps-a-draft-per-anchor ()
+  (aob-tests--with-session s
+    (aob-tests--with-comment-trace trace s
+      (let ((a (aob-trace--comment-box trace 3 "why?" 1)))
+        (with-current-buffer a (insert "half a thought"))
+        (let ((b (aob-trace--comment-box trace 3 "other words" 1)))
+          (should-not (eq a b))
+          (should (equal (with-current-buffer b (buffer-string)) "")))
+        (should (eq (aob-trace--comment-box trace 3 "why?" 1) a))
+        (should (equal (with-current-buffer a (buffer-string))
+                       "half a thought"))))))
+
+(ert-deftest aob-trace-comment-box-leaves-the-tail-alone ()
+  (aob-tests--with-session s
+    (aob-tests--with-comment-trace trace s
+      (let ((lifted 0)
+            (aob-compose-float t))
+        (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                  ((symbol-function 'posframe-show)
+                   (lambda (&rest _) (selected-frame)))
+                  ((symbol-function 'select-frame-set-input-focus) #'ignore)
+                  ((symbol-function 'aob-trace-uncover-all)
+                   (lambda () (setq lifted (1+ lifted)))))
+          (let ((box (aob-trace--comment-box trace 3 "why?" 1)))
+            (should (= lifted 0))
+            (should-not (aob-trace--lifting-box-p box)))
+          (let ((draft (aob-compose s)))
+            (should (= lifted 1))
+            (should (aob-trace--lifting-box-p draft))
+            (kill-buffer draft)))))))
+
+(ert-deftest aob-trace-comment-box-send-now-answers-a-waiting-question ()
+  (aob-tests--with-trace-session s
+    (aob-tests--request
+     s 21 "elicitation/create"
+     '(:mode "form" :sessionId "sess-test" :toolCallId "toolu_q"
+       :message "Which auth method?"
+       :requestedSchema
+       (:type "object"
+        :properties
+        (:question_0 (:type "string" :title "Auth"
+                      :oneOf [(:const "OAuth" :title "OAuth")
+                              (:const "API key" :title "API key")])))))
+    (let ((said nil))
+      (cl-letf (((symbol-function 'aob-trace--say)
+                 (lambda (_s text &optional _files) (push text said))))
+        (aob-tests--goto "Auth · Which auth method?")
+        (let ((box (aob-trace-answer)))
+          (with-current-buffer box
+            (should aob-compose--anchor)
+            (insert "neither, a token")
+            (aob-tests--capturing sent
+              (aob-trace-comment-send-now)
+              (should (= (length (aob-tests--replies sent)) 1))
+              (should (string-match-p "neither, a token"
+                                      (car (aob-tests--replies sent)))))))
+        (should-not said)
+        (should-not (aob-session-decisions s))
+        (should-not (aob-session-ref s :comments))))))
+
+(ert-deftest aob-trace-comment-box-carries-images-to-send-now ()
+  (aob-tests--with-session s
+    (aob-tests--with-comment-trace trace s
+      (let ((prompted nil))
+        (cl-letf (((symbol-function 'aob-prompt)
+                   (lambda (_s text files) (push (cons text files) prompted))))
+          (with-current-buffer (aob-trace--comment-box trace 3 "why?" 1)
+            (setq aob-compose--attachments '((1 . "/tmp/x.png")))
+            (insert "look [[Image1]]")
+            (aob-compose-send))
+          (should (equal (plist-get (car (aob-session-ref s :comments)) :files)
+                         '("/tmp/x.png")))
+          (with-current-buffer (aob-trace--comment-box trace 4 "and" 1)
+            (insert "more")
+            (aob-trace-comment-send-now))
+          (should (equal (cdar prompted) '("/tmp/x.png")))
+          (should (string-match-p "> why\\?\nlook" (caar prompted))))))))
+
+(defun aob-tests--host-defun (name)
+  "Evaluate the host's own definition of NAME from layer-aob.el."
+  (with-temp-buffer
+    (insert-file-contents (locate-library "layer-aob.el"))
+    (goto-char (point-min))
+    (condition-case nil
+        (while t
+          (let ((form (read (current-buffer))))
+            (when (and (eq (car-safe form) 'defun) (eq (cadr form) name))
+              (eval form t))))
+      (end-of-file nil))))
+
+(defmacro aob-tests--prompts (var &rest body)
+  "Run BODY with every prompt collected newest-first into VAR as (TEXT . FILES)."
+  (declare (indent 1))
+  `(let ((,var nil))
+     (cl-letf (((symbol-function 'aob-prompt)
+                (lambda (_s text &optional files) (push (cons text files) ,var)))
+               ((symbol-function 'aob-interject)
+                (lambda (_s text) (push (list text) ,var))))
+       ,@body)))
+
+(ert-deftest aob-trace-send-carries-held-images ()
+  (aob-tests--with-trace-session s
+    (aob-trace--add-comment s 1 "why?" "see this" '("/tmp/held.png"))
+    (aob-tests--prompts sent
+      (aob-trace-send)
+      (should (= (length sent) 1))
+      (should (string-match-p "> why\\?\nsee this" (caar sent)))
+      (should (equal (cdar sent) '("/tmp/held.png"))))
+    (should-not (aob-session-ref s :comments))))
+
+(ert-deftest aob-compose-send-carries-held-images-through-the-host-hook ()
+  (aob-tests--host-defun 'ygg-aob--comments-compose)
+  (aob-tests--with-session s
+    (aob-trace--add-comment s 1 "why?" "see this" '("/tmp/held.png"))
+    (let ((aob-compose-before-send-functions '(ygg-aob--comments-compose)))
+      (aob-tests--prompts sent
+        (with-current-buffer (aob-compose s)
+          (aob-compose-attach "/tmp/own.png")
+          (insert " go")
+          (aob-compose-send))
+        (should (= (length sent) 1))
+        (should (string-match-p "\\`> why\\?\nsee this\n\n *go" (caar sent)))
+        (should (equal (cdar sent) '("/tmp/own.png" "/tmp/held.png")))))
+    (should-not (aob-session-ref s :comments))))
+
+(ert-deftest aob-compose-reopened-draft-keeps-its-images ()
+  (aob-tests--with-session s
+    (let ((draft (aob-compose s)))
+      (unwind-protect
+          (progn
+            (with-current-buffer draft
+              (aob-compose-attach "/tmp/kept.png")
+              (insert " look"))
+            (should (eq (aob-compose s) draft))
+            (with-current-buffer draft
+              (should (equal aob-compose--attachments '((1 . "/tmp/kept.png")))))
+            (let ((other (aob-compose (cons 'new "codex"))))
+              (should-not (buffer-local-value 'aob-compose--attachments other))
+              (kill-buffer other))
+            (aob-tests--prompts sent
+              (with-current-buffer draft (aob-compose-send))
+              (should (equal (cdar sent) '("/tmp/kept.png")))
+              (should (equal (caar sent) "look"))))
+        (when (buffer-live-p draft) (kill-buffer draft))))))
+
+(ert-deftest aob-trace-comment-box-reopened-keeps-its-images ()
+  (aob-tests--with-session s
+    (aob-tests--with-comment-trace trace s
+      (with-current-buffer (aob-trace--comment-box trace 3 "why?" 1)
+        (aob-compose-attach "/tmp/kept.png"))
+      (with-current-buffer (aob-trace--comment-box trace 3 "why?" 1)
+        (insert " this")
+        (aob-compose-send))
+      (should (equal (plist-get (car (aob-session-ref s :comments)) :files)
+                     '("/tmp/kept.png"))))))
+
+(ert-deftest aob-compose-deleted-image-token-drops-its-file ()
+  (aob-tests--with-session s
+    (aob-tests--prompts sent
+      (with-current-buffer (aob-compose s)
+        (aob-compose-attach "/tmp/gone.png")
+        (erase-buffer)
+        (insert "no picture after all")
+        (aob-compose-send))
+      (should (equal (car sent) '("no picture after all"))))))
+
+(defvar aob-mcp--tools)
+(defvar ygg-preset-config-directory)
+(defvar ygg-preset-user-directory)
+(defvar ygg-preset-read-old-homes)
+(declare-function ygg-aob--preset-limits "layer-aob" (text))
+(declare-function ygg-preset-list "ygg-preset" (&optional root))
+(declare-function ygg-preset-get "ygg-preset" (name &optional root))
+(declare-function ygg-preset-tools "ygg-preset" (d))
+(declare-function ygg-preset-thinking "ygg-preset" (d))
+
+(defmacro aob-tests--quietly (&rest body)
+  "Run BODY, then stop the quiet timer it may have started."
+  `(unwind-protect (progn ,@body)
+     (when (timerp aob--quiet-timer)
+       (cancel-timer aob--quiet-timer)
+       (setq aob--quiet-timer nil))))
+
+(ert-deftest aob-quiet-mark-follows-progress-not-chunks ()
+  (aob-tests--with-session s
+    (aob-tests--quietly
+     (let ((aob-quiet-minutes 10)
+           (stale (lambda () (aob-session-put s :progress-at (- (float-time) 720)))))
+       (aob-set-state s 'working)
+       (should-not (aob-session-quiet s))
+       (funcall stale)
+       (should (equal (aob-session-quiet s) "quiet 12m"))
+       (aob-tests--say s "first words")
+       (should-not (aob-session-quiet s))
+       (funcall stale)
+       (aob-tests--say s " more words")
+       (aob-tests--think s "weighing it")
+       (should (equal (aob-session-quiet s) "quiet 12m"))
+       (aob-tests--tool s "t1" "read" "Read a.el" "in_progress")
+       (should-not (aob-session-quiet s))
+       (funcall stale)
+       (aob-tests--update s (list :sessionUpdate "tool_call_update" :toolCallId "t1"
+                                  :status "in_progress"
+                                  :content (aob-tests--output "partial")))
+       (should (aob-session-quiet s))
+       (aob-tests--update s (list :sessionUpdate "tool_call_update" :toolCallId "t1"
+                                  :status "completed"))
+       (should-not (aob-session-quiet s))
+       (funcall stale)
+       (aob-set-state s 'idle)
+       (should-not (aob-session-quiet s))
+       (aob-set-state s 'working)
+       (should-not (aob-session-quiet s))))))
+
+(ert-deftest aob-quiet-tick-marks-header-and-modeline-and-progress-lifts-it ()
+  (aob-tests--with-session s
+    (aob-tests--quietly
+     (let* ((aob-quiet-minutes 10)
+            (seen nil)
+            (aob-meter-change-hook
+             (list (lambda (x) (when (eq x s) (push (aob-session-ref x :quiet-shown) seen))))))
+       (aob-set-state s 'working)
+       (should (timerp aob--quiet-timer))
+       (aob-session-put s :progress-at (- (float-time) 720))
+       (aob--quiet-tick)
+       (should (equal (aob-session-ref s :quiet-shown) "quiet 12m"))
+       (should (string-match-p "working · quiet 12m" (aob-trace--header s)))
+       (aob--modeline-refresh)
+       (let ((at (string-search "quiet 12m" aob-modeline-string)))
+         (should at)
+         (should (eq (get-text-property at 'face aob-modeline-string) 'shadow)))
+       (aob-note-progress s)
+       (should-not (aob-session-ref s :quiet-shown))
+       (should (equal seen '(nil "quiet 12m")))
+       (aob-set-state s 'idle)
+       (dolist (x (aob-sessions)) (unless (eq x s) (aob-set-state x 'idle)))
+       (aob--quiet-tick)
+       (should-not aob--quiet-timer)))))
+
+(defun aob-tests--big (label n)
+  "N characters opening with LABEL-HEAD and closing with LABEL-TAIL."
+  (let ((head (format "%s-HEAD" label)) (tail (format "%s-TAIL" label)))
+    (concat head (make-string (- n (length head) (length tail)) ?x) tail)))
+
+(ert-deftest aob-session-tail-trims-results-and-drops-thinking ()
+  (aob-tests--with-session s
+    (aob-tests--quietly
+     (aob-set-state s 'working)
+     (aob-event s 'prompt :text "find the leak")
+     (aob-tests--think s "SECRET-THOUGHT")
+     (aob-tests--tool s "t1" "execute" "Bash" "completed"
+                      :content (aob-tests--output (aob-tests--big "OUT" 10000)))
+     (aob-tests--say s "found it")
+     (let ((tail (aob-session-tail s)))
+       (should (string-prefix-p "test:1 (working)" tail))
+       (should (string-match-p "user: find the leak" tail))
+       (should (string-match-p "agent: found it\\'" tail))
+       (should-not (string-match-p "SECRET-THOUGHT" tail))
+       (should (string-match-p "OUT-HEAD" tail))
+       (should (string-match-p "OUT-TAIL" tail))
+       (should (string-match-p "\\[\\.\\.\\. 5904 characters cut \\.\\.\\.\\]" tail))
+       (should (< (length tail) 5000))))))
+
+(ert-deftest aob-session-tail-keeps-within-its-bound-newest-last ()
+  (aob-tests--with-session s
+    (dotimes (i 12)
+      (aob-tests--tool s (format "t%d" i) "execute" (format "Bash %d" i) "completed"
+                       :content (aob-tests--output (aob-tests--big (format "R%d" i) 3000))))
+    (let ((tail (aob-session-tail s)))
+      (should (<= (length tail) aob-session-tail-limit))
+      (should (string-match-p "\\[earlier events not shown\\]" tail))
+      (should (string-match-p "R11-TAIL\\'" tail))
+      (should-not (string-match-p "R0-HEAD" tail)))
+    (aob-tests--tool s "huge" "execute" "Bash huge" "completed"
+                     :content (aob-tests--output (make-string 40000 ?y)))
+    (should (<= (length (aob-session-tail s 1000)) 1000))))
+
+(ert-deftest aob-mcp-session-read-resolves-id-or-unique-name ()
+  (require 'aob-mcp-tools)
+  (let ((handler (plist-get (gethash "session_read" aob-mcp--tools) :handler)))
+    (cl-flet ((ask (who)
+                (let (form)
+                  (cl-letf (((symbol-function 'aob-mcp-relay)
+                             (lambda (_conn _id f &rest _) (setq form f))))
+                    (let ((direct (funcall handler (list :id who) nil 1)))
+                      (if form (eval form t) direct))))))
+      (aob-tests--with-session s
+        (aob-event s 'prompt :text "hello there")
+        (should (equal (car (ask "acp:test:1")) "test:1 (starting)"))
+        (should (member "user: hello there" (ask "test:1")))
+        (should (equal (ask "nobody") '("no session called nobody")))
+        (should (equal (ask " ") "which session? pass id"))
+        (let ((twin (aob-create-session :id "acp:test:twin" :backend 'acp
+                                        :name "test:1" :state 'idle)))
+          (unwind-protect
+              (should (string-match-p "2 conversations are called test:1"
+                                      (car (ask "test:1"))))
+            (aob-remove-session twin)))))))
+
+(ert-deftest aob-preset-tools-and-thinking-overlay ()
+  (require 'ygg-preset)
+  (let* ((base (make-temp-file "aob-presets-" t))
+         (config (expand-file-name "config/" base))
+         (user (expand-file-name "user/" base))
+         (root (expand-file-name "repo/" base))
+         (write (lambda (dir name text)
+                  (make-directory dir t)
+                  (with-temp-file (expand-file-name name dir) (insert text)))))
+    (unwind-protect
+        (let ((ygg-preset-config-directory config)
+              (ygg-preset-user-directory user)
+              (ygg-preset-read-old-homes nil))
+          (funcall write config "look.md"
+                   "---\nname: look\ntools: Read, Grep, Bash\nthinking: high\n---\nlook")
+          (funcall write config "peek.md" "---\nname: peek\npreset: look\n---\npeek")
+          (funcall write config "odd.md" "---\nname: odd\nthinking: extreme\n---\nodd")
+          (funcall write user "look.md" "---\nthinking: Off\n---\nmore")
+          (funcall write (expand-file-name ".aob/presets/" root) "look.md"
+                   "---\ntools: [Read, Grep]\n---\nhere")
+          (let ((look (ygg-preset-get "look" root))
+                (plain (ygg-preset-get "look")))
+            (should (equal (ygg-preset-tools look) '("Read" "Grep")))
+            (should (equal (ygg-preset-thinking look) "off"))
+            (should (equal (ygg-preset-tools plain) '("Read" "Grep" "Bash")))
+            (should (equal (ygg-preset-thinking plain) "off")))
+          (should (equal (ygg-preset-tools (ygg-preset-get "peek")) '("Read" "Grep" "Bash")))
+          (should-not (ygg-preset-thinking (ygg-preset-get "odd")))
+          (should-not (ygg-preset-tools (ygg-preset-get "odd"))))
+      (delete-directory base t))))
+
+(ert-deftest aob-inspect-preset-allows-no-editing-tools ()
+  (require 'ygg-preset)
+  (let ((tools (ygg-preset-tools (ygg-preset-get "inspect"))))
+    (should (member "Read" tools))
+    (should (member "Bash" tools))
+    (should (member "Agent" tools))
+    (dolist (edit '("Edit" "Write" "NotebookEdit"))
+      (should-not (member edit tools)))))
+
+(ert-deftest aob-compose-spawn-takes-limits-from-the-presets-it-carries ()
+  (require 'ygg-preset)
+  (aob-tests--host-defun 'ygg-aob--preset-limits)
+  (cl-letf (((symbol-function 'ygg-aob--presets-of)
+             (lambda (_dir) (cons nil (ygg-preset-list)))))
+    (let ((refs (ygg-aob--preset-limits
+                 "why does it hang\n\n<preset name=\"inspect\">\nbody\n</preset>")))
+      (should (equal (plist-get refs :want-tools)
+                     (ygg-preset-tools (ygg-preset-get "inspect"))))
+      (should-not (plist-member refs :want-thinking)))
+    (should-not (ygg-aob--preset-limits "no preset named here"))))
+
+(defun aob-tests--opened-with (init refs &optional method)
+  "What METHOD (session/new) under INIT with REFS sends, notes and leaves over."
+  (let* ((aob-acp-system-append "told")
+         (aob-acp-session-refs refs)
+         spec)
+    (cl-letf (((symbol-function 'aob-acp--connect)
+               (lambda (_s open _then) (setq spec (funcall open init)))))
+      (let ((s (aob-acp--open "claude" "limits:1" "/tmp/proj/" nil
+                              (lambda (_init)
+                                (list (or method "session/new")
+                                      (list :cwd "/tmp/proj" :mcpServers [])))
+                              #'ignore)))
+        (unwind-protect
+            (list (json-parse-string
+                   (json-serialize (list :method (car spec) :params (cadr spec)))
+                   :object-type 'plist :array-type 'list)
+                  (mapcar (lambda (e) (plist-get e :title)) (aob-session-events s))
+                  (aob-session-ref s :want-thinking))
+          (aob-remove-session s))))))
+
+(ert-deftest aob-session-new-carries-claude-tools-and-thinking ()
+  (pcase-let* ((claude '(:agentInfo (:name "@agentclientprotocol/claude-agent-acp")))
+               (`(,wire ,_ ,left)
+                (aob-tests--opened-with claude '(:want-tools ("Read" "Grep")
+                                                 :want-thinking "high")))
+               (meta (plist-get (plist-get wire :params) :_meta))
+               (opts (plist-get (plist-get meta :claudeCode) :options)))
+    (should (equal (plist-get (plist-get meta :systemPrompt) :append) "told"))
+    (should (equal (plist-get opts :tools) '("Read" "Grep")))
+    (should (equal (plist-get opts :effort) "high"))
+    (should-not left))
+  (pcase-let* ((claude '(:agentInfo (:name "@agentclientprotocol/claude-agent-acp")))
+               (`(,wire ,_ ,_) (aob-tests--opened-with claude '(:want-thinking "off")))
+               (opts (plist-get (plist-get (plist-get (plist-get wire :params) :_meta)
+                                           :claudeCode)
+                                :options)))
+    (should (equal (plist-get opts :thinking) '(:type "disabled")))
+    (should-not (plist-member opts :tools)))
+  (pcase-let ((`(,wire ,_ ,_) (aob-tests--opened-with
+                               '(:agentInfo (:name "@agentclientprotocol/claude-agent-acp"))
+                               nil)))
+    (should-not (plist-member (plist-get (plist-get wire :params) :_meta) :claudeCode))))
+
+(ert-deftest aob-session-new-elsewhere-notes-an-unenforced-tools-limit ()
+  (pcase-let ((`(,wire ,titles ,left)
+               (aob-tests--opened-with '(:agentInfo (:name "codex-acp"))
+                                       '(:want-tools ("Read") :want-thinking "low"))))
+    (should-not (plist-member (plist-get (plist-get wire :params) :_meta) :claudeCode))
+    (should (member "tools limit not enforced for claude" titles))
+    (should (equal left "low"))))
+
+(ert-deftest aob-session-resume-and-load-carry-claude-limits-and-fork-says-not ()
+  (let ((claude '(:agentInfo (:name "@agentclientprotocol/claude-agent-acp")))
+        (refs '(:want-tools ("Read") :want-thinking "high")))
+    (dolist (method '("session/resume" "session/load"))
+      (pcase-let* ((`(,wire ,titles ,left) (aob-tests--opened-with claude refs method))
+                   (opts (plist-get (plist-get (plist-get (plist-get wire :params) :_meta)
+                                               :claudeCode)
+                                    :options)))
+        (should (equal (plist-get wire :method) method))
+        (should (equal (plist-get opts :tools) '("Read")))
+        (should (equal (plist-get opts :effort) "high"))
+        (should-not (member "tools limit not enforced for claude" titles))
+        (should-not left)))
+    (pcase-let ((`(,wire ,titles ,left) (aob-tests--opened-with claude refs "session/fork")))
+      (should-not (plist-member (plist-get (plist-get wire :params) :_meta) :claudeCode))
+      (should (member "tools limit not enforced for claude" titles))
+      (should (equal left "high")))
+    (pcase-let ((`(,_ ,titles ,_) (aob-tests--opened-with '(:agentInfo (:name "codex-acp"))
+                                                          refs "session/resume")))
+      (should (member "tools limit not enforced for claude" titles)))))
+
+(ert-deftest aob-limits-survive-into-a-restore-and-a-fork ()
+  (let (seen)
+    (aob-tests--with-session s
+      (aob-session-put s :agent "claude")
+      (aob-session-put s :acp-id "sid-1")
+      (aob-session-put s :want-tools '("Read"))
+      (aob-session-put s :want-thinking "low")
+      (aob-acp--with-limits s '(:agentInfo (:name "claude-agent-acp")) "session/new" nil)
+      (should (equal (plist-get (aob-acp--entry s) :limits)
+                     '(:want-tools ("Read") :want-thinking "low")))
+      (cl-letf (((symbol-function 'aob-acp--open)
+                 (lambda (&rest _) (push aob-acp-session-refs seen) s))
+                ((symbol-function 'aob-acp--seed-history) #'ignore))
+        (aob-acp-fork s)
+        (aob-acp-resume-entry (aob-acp--entry s)))
+      (dolist (refs seen)
+        (should (equal (plist-get refs :want-tools) '("Read")))
+        (should (equal (plist-get refs :want-thinking) "low"))))
+    (should (= (length seen) 2))))
+
+(ert-deftest aob-trace-linkify-never-dials-a-remote-name ()
+  (let* ((dialled 0)
+         (dial (lambda (&rest _) (cl-incf dialled) (error "dialled out")))
+         (file-name-handler-alist (cons (cons "\\`/ssh:" dial) file-name-handler-alist))
+         (aob-trace--refs (make-hash-table :test 'equal)))
+    (cl-letf (((symbol-function 'tramp-file-name-handler) dial)
+              ((symbol-function 'tramp-autoload-file-name-handler) dial))
+      (dolist (line '("/ssh:evil.example:foo.c:12: error" "/sudo::/etc/passwd:3: x"))
+        (dotimes (_ 2)
+          (let ((out (aob-trace--linkify line "/tmp/")))
+            (should (equal out line))
+            (should-not (text-property-not-all 0 (length out) 'aob-file nil out))))))
+    (should (= dialled 0))
+    (cl-letf (((symbol-function 'file-exists-p) (lambda (_) (error "broken"))))
+      (should (equal (aob-trace--linkify "/tmp/a.c:1: x" "/tmp/") "/tmp/a.c:1: x")))
+    (should (gethash (cons "/tmp/" "/tmp/a.c:1: x") aob-trace--refs))))
+
+(ert-deftest aob-want-thinking-takes-the-thought-level-option ()
+  (aob-tests--with-session s
+    (aob-session-put s :agent "codex")
+    (aob-session-put s :config-options
+                     '((:id "model" :currentValue "gpt-5.2")
+                       (:id "reasoning_effort" :category "thought_level" :currentValue "medium"
+                        :options ((:value "minimal") (:value "low")
+                                  (:value "medium") (:value "high")))))
+    (let (wire)
+      (cl-letf (((symbol-function 'aob-acp--set-config)
+                 (lambda (_s id val) (push (list id val) wire))))
+        (aob-acp--want-thinking s "off")
+        (aob-acp--want-thinking s "high")
+        (should (equal wire '(("reasoning_effort" "high") ("reasoning_effort" "minimal"))))
+        (aob-session-put s :config-options nil)
+        (aob-acp--want-thinking s "low")
+        (should (= (length wire) 2))
+        (should (equal (plist-get (car (aob-session-events s)) :title)
+                       "thinking low not supported by codex"))))))

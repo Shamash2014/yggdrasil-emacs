@@ -178,7 +178,7 @@ the mark holds the gap after the anchor cell."
   "If non-nil, pulse the buffer region a verb or yank just touched."
   :type 'boolean :group 'yggdrasil)
 
-(defface ygg-flash-face '((t :inherit pulse-highlight-start-face))
+(defface ygg-flash-face '((t :inherit region))
   "Face used to flash the region touched by a verb or yank.")
 
 (declare-function pulse-momentary-highlight-region "pulse")

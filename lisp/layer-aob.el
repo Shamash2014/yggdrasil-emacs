@@ -173,7 +173,7 @@
 
 (declare-function ygg-ex--cmd-write "yggdrasil-ex" (range bang args))
 (declare-function aob-trace-send "aob-trace")
-(declare-function aob-trace-comment-box-send-now "aob-trace")
+(declare-function aob-trace-comment-send-now "aob-trace")
 
 (defun ygg-aob--write-sends (fn &rest args)
   "Make :w send, where the buffer is a prompt rather than a file.
@@ -181,14 +181,13 @@ A draft and the line at the foot of a trace are both things you finish
 and let go of; the key that means \"I am done with this text\" is
 already in the hand."
   (cond ((derived-mode-p 'aob-compose-mode) (aob-compose-send))
-        ((derived-mode-p 'aob-trace-comment-box-mode) (aob-trace-comment-box-send))
         ((derived-mode-p 'aob-trace-mode) (aob-trace-send))
         (t (apply fn args))))
 
 (defun ygg-aob--wq-sends (fn &rest args)
-  "Make :wq send a comment and every one held with it, as ZZ does."
-  (if (derived-mode-p 'aob-trace-comment-box-mode)
-      (aob-trace-comment-box-send-now)
+  "Make :wq in a comment hold it and send every one held, as C-return does."
+  (if (bound-and-true-p aob-trace-comment-mode)
+      (aob-trace-comment-send-now)
     (apply #'ygg-aob--write-sends fn args)))
 
 (with-eval-after-load 'yggdrasil-ex
@@ -200,7 +199,6 @@ already in the hand."
   "Make :q drop a draft or comment box, or decline what a trace's agent
 waits on, as ZQ does."
   (cond ((derived-mode-p 'aob-compose-mode) (aob-compose-abort))
-        ((derived-mode-p 'aob-trace-comment-box-mode) (aob-trace-comment-box-cancel))
         ((and (derived-mode-p 'aob-trace-mode)
               (aob-trace-waiting-decision (aob-session-get aob-trace--session-id)))
          (aob-trace-decline))
@@ -322,7 +320,9 @@ actions keep their tool title.  The short path stays the clickable target."
 ;; resolver rather than freezing whatever buffer it was opened from
 (setq aob-compose-spawn-function
       (lambda (text &optional agent atts)
-        (let ((aob-acp-start-dir aob-compose--dir))
+        (let ((aob-acp-start-dir aob-compose--dir)
+              (aob-acp-session-refs (append (ygg-aob--preset-limits text)
+                                            (bound-and-true-p aob-acp-session-refs))))
           (aob-acp-spawn (or agent aob-acp-default-agent) text atts))))
 
 ;; an agent belongs to the work it was started on: the task in front of the
@@ -456,19 +456,23 @@ added so the popup lands where the word is on the screen."
     (cons (+ cx x) ny)))
 
 (defun ygg-aob--corfu-make-frame (orig frame x y width height)
-  "Make corfu's popup a child of the top frame when it stands in the box.
+  "Make corfu's popup a child of the top frame when it stands in a box.
 ORIG is corfu's own maker; FRAME, X, Y, WIDTH and HEIGHT are its
 arguments, X and Y relative to the frame the window is on."
-  (let ((child (window-frame)))
+  ;; corfu calls this from its own popup buffer, so the box is the window's
+  (let ((child (window-frame))
+        (box (window-buffer)))
     (if (or (not (frame-parent child))
-            (not (derived-mode-p 'aob-compose-mode)))
+            (not (with-current-buffer box
+                   (derived-mode-p 'aob-compose-mode))))
         (funcall orig frame x y width height)
       (let* ((top (ygg-ui-main-frame child))
-             (lh (default-line-height))
-             (yb (+ (cadr (window-inside-pixel-edges))
-                    (or (cdr (posn-x-y (posn-at-point))) 0) lh))
-             (at (ygg-aob--corfu-lift x y height lh yb child
-                                      (frame-pixel-height top))))
+             (at (with-current-buffer box
+                   (let* ((lh (default-line-height))
+                          (yb (+ (cadr (window-inside-pixel-edges))
+                                 (or (cdr (posn-x-y (posn-at-point))) 0) lh)))
+                     (ygg-aob--corfu-lift x y height lh yb child
+                                          (frame-pixel-height top))))))
         (cl-letf (((symbol-function 'window-frame) (lambda (&optional _w) top)))
           (funcall orig frame (car at) (cdr at) width height))))))
 
@@ -839,7 +843,9 @@ window would hide the one you were reading."
   "Put the conversation a draft went to on screen, and stand in it.
 The target is read first: sending kills the draft, and with it the
 buffer-local that says where the words were going."
-  (let* ((tgt (and (boundp 'aob-compose--target) aob-compose--target))
+  (let* ((tgt (and (boundp 'aob-compose--target)
+                   (not (bound-and-true-p aob-compose--anchor))
+                   aob-compose--target))
          (ygg-aob--compose-sending t))
     (prog1 (apply fn args)
       (when-let* ((s (and (stringp tgt) (aob-session-get tgt))))
@@ -1124,7 +1130,9 @@ work is filed somewhere, and the sidebar should say so at a glance."
        (propertize
         (truncate-string-to-width
          (format "   %s %s%s %s"
-                 (ygg-aob--tree-glyph s)
+                 (concat (ygg-aob--tree-glyph s)
+                         (when-let* ((quiet (aob-session-quiet s)))
+                           (propertize (concat " " quiet) 'face 'shadow)))
                  (ygg-aob--tree-name s)
                  (let ((q (length (aob-session-ref s :queued))))
                    (if (> q 0)
@@ -1685,6 +1693,8 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 (declare-function ygg-preset-name "ygg-preset" (d))
 (declare-function ygg-preset-body "ygg-preset" (d))
 (declare-function ygg-preset-field "ygg-preset" (d key))
+(declare-function ygg-preset-tools "ygg-preset" (d))
+(declare-function ygg-preset-thinking "ygg-preset" (d))
 (autoload 'ygg-preset-edit "ygg-preset" nil t)
 (autoload 'ygg-preset-new "ygg-preset" nil t)
 (declare-function ygg-preset-skill-files "ygg-preset" (root))
@@ -1762,6 +1772,26 @@ file or a skill of the same name is that, and is left to the agent."
                 blocks))))
     (when blocks
       (concat text "\n\n" (string-join (nreverse blocks) "\n\n")))))
+
+(defun ygg-aob--preset-limits (text)
+  "What the presets TEXT carries ask of a new session's tools and thinking.
+As session refs; the first preset settling each one decides it."
+  (when (featurep 'ygg-preset)
+    (let* ((known (cdr (ygg-aob--presets-of
+                        (or (bound-and-true-p aob-compose--dir) default-directory))))
+           (named (let ((start 0) out)
+                    (while (string-match "<preset name=\"\\([^\"]+\\)\">" text start)
+                      (push (match-string 1 text) out)
+                      (setq start (match-end 0)))
+                    (nreverse out)))
+           (presets (delq nil (mapcar (lambda (name)
+                                        (seq-find (lambda (p) (equal (ygg-preset-name p) name))
+                                                  known))
+                                      named)))
+           (tools (seq-some #'ygg-preset-tools presets))
+           (thinking (seq-some #'ygg-preset-thinking presets)))
+      (append (and tools (list :want-tools tools))
+              (and thinking (list :want-thinking thinking))))))
 
 (defun ygg-aob--preset-commands (dir)
   "DIR's presets for the popup a slash opens, marked as presets."
@@ -1852,25 +1882,26 @@ file or a skill of the same name is that, and is left to the agent."
 
 (add-hook 'aob-compose-before-send-functions #'ygg-aob--todo-note-compose t)
 
-(declare-function aob-trace--comments-message "aob-trace" (s))
+(declare-function aob-trace--held "aob-trace" (s))
 
 (defun ygg-aob--comments-compose (text)
-  "TEXT with the comments held for the target session in front of it.
-They were held until the next message; a message from compose is one."
+  "TEXT with the comments held for the target session in front of it,
+and their images to carry.  They were held until the next message; a
+message from compose is one."
   (when-let* ((id (and (stringp aob-compose--target) aob-compose--target))
               (s (aob-session-get id))
-              ((fboundp 'aob-trace--comments-message))
-              (comments (aob-trace--comments-message s)))
+              ((fboundp 'aob-trace--held))
+              (held (aob-trace--held s)))
     (aob-session-put s :comments nil)
-    (concat comments "\n\n" text)))
+    (cons (concat (car held) "\n\n" text) (cdr held))))
 
 (add-hook 'aob-compose-before-send-functions #'ygg-aob--comments-compose)
 
 (defun ygg-aob--todo-note-say (args)
   "ARGS of a message sent from a trace, the todo note after its text."
-  (pcase-let ((`(,s ,text) args))
+  (pcase-let ((`(,s ,text . ,files) args))
     (if-let* ((note (ygg-todo-session-note s)))
-        (list s (concat text "\n\n" note))
+        (cons s (cons (concat text "\n\n" note) files))
       args)))
 
 (advice-add 'aob-trace--say :filter-args #'ygg-aob--todo-note-say)

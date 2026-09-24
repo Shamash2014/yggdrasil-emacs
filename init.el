@@ -98,6 +98,10 @@
 (require 'layer-ui)
 (require 'layer-editing)
 (require 'layer-lsp)
+(require 'ygg-device)
+(require 'layer-swift)
+(require 'ygg-eglot-x)
+(require 'ygg-r-mode)
 ;; multi-LSP via rass: harper grammar alongside code servers — comment to disable
 (require 'layer-rass)
 (require 'layer-spell)
@@ -108,11 +112,22 @@
 (require 'layer-tasks)
 (require 'layer-format)
 (require 'layer-markdown)
+(require 'layer-notebook)
+(require 'ygg-kernel-picker)
 (require 'layer-aob)
 (require 'layer-quickfix)
 (require 'layer-pcre)
 (require 'layer-dap)
+(require 'ygg-dap-ios)
 (require 'layer-tramp)
+(require 'ygg-ark)
+(require 'ygg-kernel-vars)
+(require 'ygg-visidata)
+(require 'ygg-compose-preview)
+(require 'ygg-db)
+(require 'ygg-code-verbs)
+(require 'ygg-json-lsp)
+(require 'layer-react-native)
 
 ;;; which-key, styled like Helix's hint panel
 (setq which-key-idle-delay 0.05
@@ -124,32 +139,35 @@
       which-key-prefix-prefix "+"
       which-key-add-column-padding 1)
 (which-key-mode 1)
-(add-hook 'emacs-startup-hook
-          (lambda ()
-            ;; after load-theme, or the theme clobbers these
-            ;; Helix: the key is the thing you are looking for, so it
-            ;; carries the colour; what it does is plain text, not a
-            ;; comment; a submenu is marked by being another colour again
-            ;; the colour has to be set, not inherited: a theme that
-            ;; already gave the face a foreground keeps it, and the
-            ;; inherit is never consulted
-            (let ((key (face-attribute 'warning :foreground nil t))
-                  (group (face-attribute 'success :foreground nil t))
-                  (text (face-attribute 'default :foreground nil t)))
-              (set-face-attribute 'which-key-key-face nil
-                                  :foreground key :weight 'bold)
-              (set-face-attribute 'which-key-command-description-face nil
-                                  :foreground text :weight 'normal)
-              (set-face-attribute 'which-key-group-description-face nil
-                                  :foreground group :underline nil
-                                  :weight 'normal))
-            (set-face-attribute 'which-key-separator-face nil
-                                :inherit 'shadow)
-            (when (facep 'which-key-posframe-border)
-              (set-face-attribute 'which-key-posframe-border nil
-                                  :background (face-attribute 'vertical-border
-                                                              :foreground nil t))))
-          95)
+(defun ygg--which-key-faces (&rest _)
+  "Helix's hint colours, read from the theme that is on now."
+  ;; after load-theme, or the theme clobbers these
+  ;; Helix: the key is the thing you are looking for, so it
+  ;; carries the colour; what it does is plain text, not a
+  ;; comment; a submenu is marked by being another colour again
+  ;; the colour has to be set, not inherited: a theme that
+  ;; already gave the face a foreground keeps it, and the
+  ;; inherit is never consulted
+  (when (facep 'which-key-key-face)
+    (let ((key (face-attribute 'warning :foreground nil t))
+          (group (face-attribute 'success :foreground nil t))
+          (text (face-attribute 'default :foreground nil t)))
+      (set-face-attribute 'which-key-key-face nil
+                          :foreground key :weight 'bold)
+      (set-face-attribute 'which-key-command-description-face nil
+                          :foreground text :weight 'normal)
+      (set-face-attribute 'which-key-group-description-face nil
+                          :foreground group :underline nil
+                          :weight 'normal))
+    (set-face-attribute 'which-key-separator-face nil
+                        :inherit 'shadow))
+  (when (facep 'which-key-posframe-border)
+    (set-face-attribute 'which-key-posframe-border nil
+                        :background (face-attribute 'vertical-border
+                                                    :foreground nil t))))
+
+(add-hook 'emacs-startup-hook #'ygg--which-key-faces 95)
+(add-hook 'enable-theme-functions #'ygg--which-key-faces 95)
 (defun ygg--posframe-size (info)
   "Measure the posframe buffer's own content size in pixels.
 The :posframe-width/-height in INFO can be stale (previous show) and
@@ -299,19 +317,20 @@ render above the top edge on macOS child frames."
         (bg-tab-current "#080808")
         (bg-tab-other "#171717")))
 (setq modus-operandi-palette-overrides
-      '((bg-main "#ffffff")
-        (fg-main "#1f1f1f")
+      '((bg-main "#f3f0e8")
+        (fg-main "#141414")
         (cursor "#c00000")
-        (comment "#9a1a2a")
-        (docstring "#9a1a2a")
-        (docmarkup "#9a1a2a")
+        (comment "#525252")
+        (docstring "#3f3f3f")
+        (docmarkup "#3f3f3f")
         (builtin fg-main)
         (constant fg-main)
         (fnname "#000000")
-        (keyword "#8a5a10")
+        (keyword "#141414")
         (preprocessor fg-main)
-        (string "#4f4f4f")
-        (fg-alt "#4f4f4f")
+        (string "#3f3f3f")
+        (fg-alt "#3f3f3f")
+        (fg-dim "#474747")
         (fg-prose-code "#4f4f4f")
         (fg-prose-verbatim "#4f4f4f")
         (fg-prose-macro "#4f4f4f")
@@ -324,20 +343,20 @@ render above the top edge on macOS child frames."
         (bg-prose-block unspecified)
         (type fg-main)
         (variable fg-main)
-        (bg-region "#e6e6e6")
+        (bg-region "#dcd7cb")
         (fg-region unspecified)
-        (bg-hl-line "#f0f0f0")
+        (bg-hl-line "#ebe7dd")
         (fg-line-number-active "#1f1f1f")
-        (fg-line-number-inactive "#6f6f6f")
-        (bg-line-number-active "#e6e6e6")
+        (fg-line-number-inactive "#5c5a55")
+        (bg-line-number-active "#e4dfd3")
         (bg-line-number-inactive unspecified)
         (fringe unspecified)
-        (border "#d8d8d8")
-        (bg-paren-match "#e6e6e6")
-        (fg-mode-line-active "#1f1f1f")
-        (bg-mode-line-active "#f0f0f0")
-        (fg-mode-line-inactive "#747474")
-        (bg-mode-line-inactive "#fafafa")
+        (border "#c9c3b6")
+        (bg-paren-match "#dcd7cb")
+        (fg-mode-line-active "#0f0f0f")
+        (bg-mode-line-active "#e2ddd1")
+        (fg-mode-line-inactive "#3f3f3f")
+        (bg-mode-line-inactive "#ebe7dd")
         (fg-link "#4f4f4f")
         (bg-link unspecified)
         (fg-prompt "#0f0f0f")
@@ -373,12 +392,12 @@ render above the top edge on macOS child frames."
   (when (facep 'magit-section-heading)
     (let* ((strong  (if dark "#e0e0e0" "#000000"))
            (mid     (if dark "#969696" "#4f4f4f"))
-           (muted   (if dark "#5f5f5f" "#747474"))
+           (muted   (if dark "#5f5f5f" "#5c5a55"))
            (text    (if dark "#bcbcbc" "#1f1f1f"))
            (salient (if dark "#7E9CD8" "#2d5f8a"))
-           (bg1     (if dark "#0f0f0f" "#fafafa"))
-           (bg2     (if dark "#171717" "#f0f0f0"))
-           (bg3     (if dark "#202020" "#e6e6e6"))
+           (bg1     (if dark "#0f0f0f" "#ebe7dd"))
+           (bg2     (if dark "#171717" "#e4dfd3"))
+           (bg3     (if dark "#202020" "#dcd7cb"))
            (add-fg  (if dark "#98BB6C" "#3f6f2a")) (add-bg  (if dark "#1A2618" "#e7f2e4"))
            (add-bg2 (if dark "#26381f" "#d6ead0"))
            (chg-fg  (if dark "#E8B468" "#805000"))
@@ -422,21 +441,23 @@ render above the top edge on macOS child frames."
 (defun ygg--theme-tweaks (&rest _)
   "Face details the modus palette can't express (matches nvim theme.lua)."
   (let* ((dark (memq 'modus-vivendi custom-enabled-themes))
-         (float-bg (if dark "#121212" "#f5f5f5")))
+         (float-bg (if dark "#121212" "#ebe7dd")))
+    ;; paper reads thin; its greys live in the palette, out of new dark frames
+    (set-face-attribute 'default nil :weight (if dark 'regular 'medium))
     (set-face-attribute 'font-lock-comment-face nil :slant 'italic)
     (set-face-attribute 'font-lock-function-name-face nil :weight 'bold)
     (when (facep 'font-lock-operator-face)
       (set-face-attribute 'font-lock-operator-face nil
-                          :foreground (if dark "#5f5f5f" "#747474")))
+                          :foreground (if dark "#5f5f5f" "#5a5a5a")))
     (when (facep 'font-lock-punctuation-face)
       (set-face-attribute 'font-lock-punctuation-face nil
-                          :foreground (if dark "#5f5f5f" "#747474")))
+                          :foreground (if dark "#5f5f5f" "#5a5a5a")))
     (set-face-attribute 'isearch nil
                         :background (if dark "#d0d0d0" "#4f4f4f")
                         :foreground (if dark "#080808" "#ffffff"))
     (set-face-attribute 'lazy-highlight nil
-                        :background (if dark "#969696" "#d8d8d8")
-                        :foreground (if dark "#080808" "#1f1f1f"))
+                        :background (if dark "#969696" "#dcd7cb")
+                        :foreground (if dark "#080808" "#141414"))
     (set-face-attribute 'ygg-float nil :background float-bg)
     (ygg--face 'ygg-task-tree--row-highlight
                :inherit 'unspecified :extend t
@@ -450,14 +471,15 @@ render above the top edge on macOS child frames."
       (ygg--face 'ygg-task-tree--accent :foreground "#0091FF"))
     (when (facep 'ygg-focus-dim)
       (set-face-attribute 'ygg-focus-dim nil
-                          :foreground (if dark "#7a7a7a" "#8a8a8a"))
+                          :foreground (if dark "#7a7a7a" "#595959"))
       (set-face-attribute 'ygg-focus-border nil :background float-bg))
-    (let ((divider (if dark "#080808" "#ffffff")))
+    (let ((divider (if dark "#080808" "#c9c3b6")))
       (set-face-attribute 'window-divider nil :foreground divider)
       (dolist (face '(window-divider-first-pixel window-divider-last-pixel))
         (when (facep face)
           (set-face-attribute face nil :foreground divider)))
-      (set-face-attribute 'internal-border nil :background divider)
+      (set-face-attribute 'internal-border nil
+                          :background (face-attribute 'default :background nil t))
       (set-face-attribute 'child-frame-border nil :background float-bg))
     (setq window-divider-default-places t
           window-divider-default-bottom-width 1
@@ -479,53 +501,28 @@ render above the top edge on macOS child frames."
       (set-face-attribute 'corfu-default nil :background float-bg))
     (when (facep 'corfu-current)
       (set-face-attribute 'corfu-current nil
-                          :background (if dark "#171717" "#e6e6e6")
+                          :background (if dark "#171717" "#dcd7cb")
                           :weight 'bold))
     (when (facep 'corfu-border)
       (set-face-attribute 'corfu-border nil :background float-bg))
     (when (facep 'doom-modeline-bar)
       (set-face-attribute 'doom-modeline-bar nil
-                          :background (if dark "#333333" "#d8d8d8")))
+                          :background (if dark "#333333" "#c9c3b6")))
     (set-face-attribute 'mode-line nil
-                        :background (if dark "#121212" "#e8e8e8")
-                        :foreground (if dark "#bcbcbc" "#1f1f1f")
+                        :background (if dark "#121212" "#e2ddd1")
+                        :foreground (if dark "#bcbcbc" "#0f0f0f")
                         :box nil :overline nil :underline nil)
     (when (facep 'mode-line-active)
       (set-face-attribute 'mode-line-active nil :inherit 'mode-line
                           :background 'unspecified :foreground 'unspecified
                           :box nil :overline nil :underline nil))
     (set-face-attribute 'mode-line-inactive nil
-                        :background (if dark "#080808" "#f4f4f4")
-                        :foreground (if dark "#5f5f5f" "#9c9c9c")
+                        :background (if dark "#080808" "#ebe7dd")
+                        :foreground (if dark "#5f5f5f" "#3f3f3f")
                         :box nil :overline nil :underline nil)
-    (let ((block-bg "#a80000")
-          (block-fg "#ffffff")
-          (pill-bg (if dark "#202020" "#e6e6e6"))
-          (fade (if dark "#202020" "#e6e6e6"))
-          (chg-fg (if dark "#E8B468" "#805000"))
-          (add-fg (if dark "#98BB6C" "#3f6f2a"))
-          (del-fg (if dark "#D4484B" "#9a2020")))
-      (ygg--face 'ygg-modeline-pill
-                 :background pill-bg :foreground del-fg :weight 'bold)
-      (ygg--face 'ygg-modeline-lang
-                 :background block-bg :foreground block-fg :weight 'bold)
-      (ygg--face 'ygg-modeline-pill-fade :background fade :foreground fade)
-      (ygg--face 'ygg-modeline-added :foreground add-fg)
-      (ygg--face 'ygg-modeline-removed :foreground del-fg)
-      (ygg--face 'ygg-modeline-path :foreground (if dark "#969696" "#4f4f4f"))
-      (when (facep 'ygg-state-normal)
-        (set-face-attribute 'ygg-state-normal nil :inherit 'ygg-modeline-pill
-                            :background pill-bg :foreground del-fg
-                            :weight 'bold)
-        (set-face-attribute 'ygg-state-visual nil :inherit 'ygg-modeline-pill
-                            :background pill-bg :foreground chg-fg
-                            :weight 'bold)
-        (set-face-attribute 'ygg-state-insert nil :inherit 'ygg-modeline-pill
-                            :background pill-bg :foreground add-fg
-                            :weight 'bold)))
     (when (facep 'doom-modeline-bar-inactive)
       (set-face-attribute 'doom-modeline-bar-inactive nil
-                          :background (if dark "#080808" "#f4f4f4")))
+                          :background (if dark "#080808" "#ebe7dd")))
     (when (facep 'doom-modeline-buffer-modified)
       (set-face-attribute 'doom-modeline-buffer-modified nil
                           :foreground (if dark "#FFA066" "#b35a00")))
@@ -534,14 +531,46 @@ render above the top edge on macOS child frames."
                           :foreground (if dark "#e0e0e0" "#101010") :weight 'bold))
     (when (facep 'doom-modeline-minor-mode)
       (set-face-attribute 'doom-modeline-minor-mode nil
-                          :foreground (if dark "#707070" "#9c9c9c")))
+                          :foreground (if dark "#707070" "#3f3f3f")))
+    (dolist (face '(doom-modeline-emphasis doom-modeline-vcs-default doom-modeline-info))
+      (ygg--face face :foreground 'unspecified :inherit 'unspecified
+                 :slant 'normal :weight 'bold))
     (ygg--magit-theme-tweaks dark)))
 
 (add-hook 'enable-theme-functions #'ygg--theme-tweaks)
 ;; packages that define faces after the theme loads need a re-run
 (dolist (pkg '(corfu doom-modeline vertico-posframe which-key-posframe magit diff-hl))
   (with-eval-after-load pkg (ygg--theme-tweaks)))
-(load-theme 'modus-vivendi t)
+(defvar ygg-theme-file (locate-user-emacs-file "var/theme")
+  "Where the chosen theme is kept; read before custom.el loads.")
+
+(defun ygg-theme-saved ()
+  "The theme chosen last time, light when none was."
+  (or (ignore-errors
+        (with-temp-buffer
+          (insert-file-contents ygg-theme-file)
+          (car (memq (intern (string-trim (buffer-string)))
+                     '(modus-operandi modus-vivendi)))))
+      'modus-operandi))
+
+(defun ygg-theme-set (theme)
+  "Switch to THEME alone and remember it for the next start."
+  (mapc #'disable-theme custom-enabled-themes)
+  (load-theme theme t)
+  (make-directory (file-name-directory ygg-theme-file) t)
+  (write-region (symbol-name theme) nil ygg-theme-file nil 'silent))
+
+(defun ygg-theme-toggle ()
+  "Flip between the light and the dark theme."
+  (interactive)
+  (ygg-theme-set (if (memq 'modus-vivendi custom-enabled-themes)
+                     'modus-operandi
+                   'modus-vivendi)))
+
+(load-theme (ygg-theme-saved) t)
+(with-eval-after-load 'layer-terminal
+  (yggdrasil-define-keys 'ygg-leader-open-map
+    "T" #'ygg-theme-toggle :label "theme light ⇄ dark"))
 (setq display-line-numbers-type 'relative)
 (defvar ygg-line-numbers t
   "Set to nil in early custom code to disable line numbers.")

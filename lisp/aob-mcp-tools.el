@@ -353,7 +353,8 @@ and never reaches the user's Emacs."
 (aob-mcp-deftool
  :name "session_list"
  :description "Every conversation open in this editor, yours and everyone
-else's: id, state, name and folder. The ids are what session_say takes."
+else's: id, state, name and folder. The ids are what session_say and
+session_read take."
  :args nil
  :handler
  (lambda (_args conn id)
@@ -369,6 +370,31 @@ else's: id, state, name and folder. The ids are what session_say takes."
                              (or (aob-session-dir s) (aob-session-project s) "")))
                    (aob-sessions))
            (list "none open"))))))
+
+(defun aob-mcp-tools--session-form (who found)
+  "A form finding the session WHO names, by id or by a name only one carries.
+FOUND is the form answering once it is found, with it bound to s."
+  `(let* ((who ,who)
+          (by-id (and (fboundp 'aob-session-get) (aob-session-get who)))
+          ;; a name is what a person reads off a list, and what an
+          ;; agent will send back — but two conversations can carry
+          ;; one name, and guessing which is how a message goes to
+          ;; the wrong agent
+          (by-name (unless by-id
+                     (and (fboundp 'aob-sessions)
+                          (seq-filter (lambda (x)
+                                        (equal (aob-session-name x) who))
+                                      (aob-sessions)))))
+          (s (or by-id (and (= (length by-name) 1) (car by-name)))))
+     (cond
+      ((and (null s) (cdr by-name))
+       (cons (format "%d conversations are called %s — say which, by id:"
+                     (length by-name) who)
+             (mapcar (lambda (x) (format "  %s  %s" (aob-session-id x)
+                                         (or (aob-session-dir x) "")))
+                     by-name)))
+      ((null s) (list (format "no session called %s" who)))
+      (t ,found))))
 
 (aob-mcp-deftool
  :name "session_say"
@@ -393,47 +419,53 @@ for the id."
       (t
        (aob-mcp-relay
         conn id
-        `(let* ((who ,who)
-                (by-id (and (fboundp 'aob-session-get) (aob-session-get who)))
-                ;; a name is what a person reads off a list, and what an
-                ;; agent will send back — but two conversations can carry
-                ;; one name, and guessing which is how a message goes to
-                ;; the wrong agent
-                (by-name (unless by-id
-                           (and (fboundp 'aob-sessions)
-                                (seq-filter (lambda (x)
-                                              (equal (aob-session-name x) who))
-                                            (aob-sessions)))))
-                (s (or by-id (and (= (length by-name) 1) (car by-name)))))
-           (cond
-            ((and (null s) (cdr by-name))
-             (cons (format "%d conversations are called %s — say which, by id:"
-                           (length by-name) who)
-                   (mapcar (lambda (x) (format "  %s  %s" (aob-session-id x)
-                                               (or (aob-session-dir x) "")))
-                           by-name)))
-            ((null s) (list (format "no session called %s" who)))
-            ((not (fboundp 'aob-prompt)) (list "no way to talk to it here"))
-            ((and (eq (aob-session-state s) 'working)
-                  (fboundp 'aob-acp--steers-p)
-                  (ignore-errors (aob-acp--steers-p s))
-                  (fboundp 'aob-interject))
-             (condition-case err (progn (aob-interject s ,text)
-                                        (list (format "said to %s, into the turn it is running"
-                                                      (aob-session-name s))))
-               (error (list (format "%s would not take it: %s"
-                                    (aob-session-name s)
-                                    (error-message-string err))))))
-            (t
-             ;; a conversation with no process behind it cannot be told
-             ;; anything, and saying so beats saying nothing
-             (condition-case err (progn (aob-prompt s ,text nil)
-                                        (list (format "said to %s (%s)"
-                                                      (aob-session-name s)
-                                                      (aob-session-state s))))
-               (error (list (format "%s would not take it: %s"
-                                    (aob-session-name s)
-                                    (error-message-string err))))))))))))))
+        (aob-mcp-tools--session-form
+         who
+         `(cond
+           ((not (fboundp 'aob-prompt)) (list "no way to talk to it here"))
+           ((and (eq (aob-session-state s) 'working)
+                 (fboundp 'aob-acp--steers-p)
+                 (ignore-errors (aob-acp--steers-p s))
+                 (fboundp 'aob-interject))
+            (condition-case err (progn (aob-interject s ,text)
+                                       (list (format "said to %s, into the turn it is running"
+                                                     (aob-session-name s))))
+              (error (list (format "%s would not take it: %s"
+                                   (aob-session-name s)
+                                   (error-message-string err))))))
+           (t
+            ;; a conversation with no process behind it cannot be told
+            ;; anything, and saying so beats saying nothing
+            (condition-case err (progn (aob-prompt s ,text nil)
+                                       (list (format "said to %s (%s)"
+                                                     (aob-session-name s)
+                                                     (aob-session-state s))))
+              (error (list (format "%s would not take it: %s"
+                                   (aob-session-name s)
+                                   (error-message-string err))))))))))))))
+
+(aob-mcp-deftool
+ :name "session_read"
+ :description "The latest of another conversation's events as text: what it
+was told, said and ran, newest last, at most 16384 characters, each tool
+result cut to its first and last 2048, reasoning left out.  For diagnosing a conversation
+that seems stuck or wrong, not for polling one: to wait on it, end your turn
+instead of reading it again.  Takes the id or a name only one conversation
+carries, as session_list prints them."
+ :args '((:name "id" :type string
+          :description "the session id or name, as session_list prints it"))
+ :handler
+ (lambda (args conn id)
+   (let ((who (plist-get args :id)))
+     (if (or (null who) (string-empty-p (string-trim who)))
+         "which session? pass id"
+       (aob-mcp-relay
+        conn id
+        (aob-mcp-tools--session-form
+         who
+         '(if (fboundp 'aob-session-tail)
+              (split-string (aob-session-tail s) "\n")
+            (list "no way to read it here"))))))))
 
 ;;; todo list
 

@@ -787,7 +787,7 @@ full PATH stays in the buffer for clicking."
 ;; reload would keep whatever colours the last version handed out; forget
 ;; them first, the way the leader maps take their keys back.
 (dolist (f '(ygg-qf-header ygg-qf-title ygg-qf-count ygg-qf-bullet
-             ygg-qf-dir ygg-qf-loc ygg-qf-lnum))
+             ygg-qf-dir ygg-qf-loc ygg-qf-lnum ygg-qf-context))
   (put f 'face-defface-spec nil))
 
 ;; Inheriting the stock faces put the panel's chrome ABOVE its content on
@@ -796,38 +796,36 @@ full PATH stays in the buffer for clicking."
 ;; and the near-monochrome overrides flatten `font-lock-constant-face' and
 ;; `shadow' to within a shade of body text — a line number with no colour
 ;; and a path as loud as the match.  These name the palette directly so
-;; the hierarchy holds: text brightest, path quiet, number the one accent.
+;; the hierarchy holds: text strongest, path quiet, number in bold.
 (defface ygg-qf-header
   '((((background dark)) :background "#121212" :extend t)
-    (t :background "#f0f0f0" :extend t))
+    (t :background "#efebe3" :extend t))
   "The strip the quickfix title sits on, a shade under `hl-line' so the
-row you are on stays the brightest thing in the panel." :group 'yggdrasil)
+row you are on stays the strongest thing in the panel." :group 'yggdrasil)
 (defface ygg-qf-title
   '((((background dark)) :inherit ygg-qf-header :foreground "#e0e0e0" :weight bold)
     (t :inherit ygg-qf-header :foreground "#000000" :weight bold))
   "What the list is: the question that filled it, else `quickfix'."
   :group 'yggdrasil)
 (defface ygg-qf-count
-  '((((background dark)) :inherit ygg-qf-header :foreground "#707070")
-    (t :inherit ygg-qf-header :foreground "#6f6f6f"))
+  '((((background dark)) :inherit ygg-qf-header :foreground "#8a8a8a")
+    (t :inherit ygg-qf-header :foreground "#474747"))
   "How many entries the list holds, off in its corner." :group 'yggdrasil)
-(defface ygg-qf-bullet
-  '((((background dark)) :inherit ygg-qf-header :foreground "#7E9CD8")
-    (t :inherit ygg-qf-header :foreground "#2d5f8a"))
-  "The accent bar opening the title line." :group 'yggdrasil)
+(defface ygg-qf-bullet '((t :inherit ygg-qf-title))
+  "The bar opening the title line, in the title's ink." :group 'yggdrasil)
 (defface ygg-qf-dir
-  '((((background dark)) :foreground "#5f5f5f" :underline nil)
-    (t :foreground "#949494" :underline nil))
+  '((((background dark)) :foreground "#7a7a7a" :underline nil)
+    (t :foreground "#5c5a55" :underline nil))
   "Directories in a quickfix row — context, not the answer."
   :group 'yggdrasil)
 (defface ygg-qf-loc
   '((((background dark)) :foreground "#969696" :underline nil)
-    (t :foreground "#4f4f4f" :underline nil))
+    (t :foreground "#3f3f3f" :underline nil))
   "The file name in a quickfix row." :group 'yggdrasil)
 (defface ygg-qf-lnum
-  '((((background dark)) :foreground "#7E9CD8" :underline nil)
-    (t :foreground "#2d5f8a" :underline nil))
-  "The line number: the one accent in a grey panel, so the eye drops
+  '((((background dark)) :foreground "#e0e0e0" :weight bold :underline nil)
+    (t :foreground "#141414" :weight bold :underline nil))
+  "The line number: the one bold thing in a grey panel, so the eye drops
 down that column instead of reading the gutter." :group 'yggdrasil)
 
 (defcustom ygg-qf-loc-width 26
@@ -864,8 +862,8 @@ is drawn without reading thousands of files."
   "How many rows of this list carry their source line.")
 
 (defface ygg-qf-context
-  '((((background dark)) :foreground "#626262")
-    (t :foreground "#8a8a8a"))
+  '((((background dark)) :foreground "#7a7a7a")
+    (t :foreground "#5c5a55"))
   "The source line drawn after a row, the context the row sits in."
   :group 'yggdrasil)
 

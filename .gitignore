@@ -19,3 +19,5 @@ request/
 recentf.eld
 places.eld
 projects.eld
+/dape-breakpoints
+__pycache__/

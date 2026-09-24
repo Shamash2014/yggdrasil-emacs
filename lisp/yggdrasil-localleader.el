@@ -61,7 +61,6 @@
 (yggdrasil-localleader-def 'emacs-lisp-mode "E" #'eval-buffer "eval buffer")
 (yggdrasil-localleader-def 'emacs-lisp-mode "d" #'eval-defun "eval defun")
 (yggdrasil-localleader-def 'emacs-lisp-mode "m" #'pp-macroexpand-last-sexp "macroexpand")
-(yggdrasil-localleader-def 'emacs-lisp-mode "t" #'ygg-localleader-elisp-run-tests "ert run tests")
 
 ;;; elixir-ts-mode / elixir-mode
 
@@ -78,12 +77,6 @@
    (format "MIX_ENV=test mix test %s:%d"
            (shell-quote-argument (ygg-localleader--require-file))
            (line-number-at-pos))))
-
-(defun ygg-localleader-elixir-format ()
-  "Run `mix format' on the current file."
-  (interactive)
-  (ygg-localleader--compile
-   (format "mix format %s" (shell-quote-argument (ygg-localleader--require-file)))))
 
 (declare-function eat "eat" (&optional program arg))
 (declare-function eat-semi-char-mode "eat")
@@ -102,9 +95,6 @@
     (eat-semi-char-mode)))
 
 (dolist (mode '(elixir-mode elixir-ts-mode))
-  (yggdrasil-localleader-def mode "t" #'ygg-localleader-elixir-test "mix test file")
-  (yggdrasil-localleader-def mode "T" #'ygg-localleader-elixir-test-line "mix test line")
-  (yggdrasil-localleader-def mode "f" #'ygg-localleader-elixir-format "mix format")
   (yggdrasil-localleader-def mode "i" #'ygg-localleader-elixir-iex "iex -S mix"))
 
 ;;; python-ts-mode / python-mode
@@ -121,11 +111,12 @@
   (ygg-localleader--compile
    (format "pytest %s" (shell-quote-argument (ygg-localleader--require-file)))))
 
-(dolist (mode '(python-mode python-ts-mode))
-  (yggdrasil-localleader-def mode "r" #'ygg-localleader-python-run "run file")
-  (yggdrasil-localleader-def mode "t" #'ygg-localleader-python-test "pytest file"))
-
 ;;; rust-ts-mode
+
+(defun ygg-localleader-rust-build ()
+  "Run cargo build from the project root."
+  (interactive)
+  (ygg-localleader--compile "cargo build"))
 
 (defun ygg-localleader-rust-run ()
   "Run `cargo run' from the project root."
@@ -142,17 +133,24 @@
   (interactive)
   (ygg-localleader--compile "cargo check"))
 
-(yggdrasil-localleader-def 'rust-ts-mode "r" #'ygg-localleader-rust-run "cargo run")
-(yggdrasil-localleader-def 'rust-ts-mode "t" #'ygg-localleader-rust-test "cargo test")
 (yggdrasil-localleader-def 'rust-ts-mode "c" #'ygg-localleader-rust-check "cargo check")
 
 ;;; dart-mode / dart-ts-mode (Flutter)
 
+(declare-function ygg-device-flutter-id "ygg-device")
+(declare-function ygg-device-android-serial "ygg-device")
+
+(defun ygg-localleader--flutter-run-command ()
+  "flutter run on the selected device, asking for one when there is none."
+  (if (fboundp 'ygg-device-flutter-id)
+      (concat "flutter run -d " (shell-quote-argument (ygg-device-flutter-id)))
+    "flutter run"))
+
 (defun ygg-localleader-flutter-run ()
-  "Run the Flutter app (flutter run) from the project root."
+  "Run the Flutter app (flutter run) from the project root on the selected device."
   (interactive)
   (let ((default-directory (ygg-localleader--root)))
-    (compile "flutter run" t)))
+    (compile (ygg-localleader--flutter-run-command) t)))
 
 (defun ygg-localleader-flutter-test ()
   "Run `flutter test' on the current file."
@@ -177,43 +175,22 @@ long-lived `flutter widget-preview start' server in a comint buffer."
     (compile "flutter widget-preview clean")))
 
 (dolist (mode '(dart-mode dart-ts-mode))
-  (yggdrasil-localleader-def mode "r" #'ygg-localleader-flutter-run "flutter run")
-  (yggdrasil-localleader-def mode "t" #'ygg-localleader-flutter-test "flutter test file")
-  (yggdrasil-localleader-def mode "p" #'ygg-localleader-flutter-widget-preview "widget previewer")
   (yggdrasil-localleader-def mode "P" #'ygg-localleader-flutter-widget-preview-clean "widget preview clean"))
-
-;;; swift-mode / swift-ts-mode (konrad1977/swift-development)
-
-(declare-function swift-development-compile-and-run "swift-development")
-(declare-function swift-development-compile-app "swift-development")
-(declare-function swift-development-run "swift-development")
-(declare-function swift-development-reset "swift-development")
-(declare-function swift-development-test-at-point "swift-development")
-(declare-function swift-development-test-transient "swift-development")
-(declare-function swift-development-transient "swift-development")
-(declare-function swift-development-settings-transient "swift-development")
-(declare-function swiftui-preview-generate "swiftui-preview")
-(declare-function swiftui-preview-generate-with-hot-reload "swiftui-preview")
-
-(dolist (mode '(swift-mode swift-ts-mode))
-  (yggdrasil-localleader-def mode "r" #'swift-development-compile-and-run "build & run")
-  (yggdrasil-localleader-def mode "b" #'swift-development-compile-app "build")
-  (yggdrasil-localleader-def mode "R" #'swift-development-run "run (no build)")
-  (yggdrasil-localleader-def mode "t" #'swift-development-test-at-point "test at point")
-  (yggdrasil-localleader-def mode "T" #'swift-development-test-transient "tests…")
-  (yggdrasil-localleader-def mode "x" #'swift-development-reset "reset build")
-  (yggdrasil-localleader-def mode "p" #'swiftui-preview-generate "SwiftUI preview")
-  (yggdrasil-localleader-def mode "P" #'swiftui-preview-generate-with-hot-reload "preview hot-reload")
-  (yggdrasil-localleader-def mode "s" #'swift-development-transient "swift menu")
-  (yggdrasil-localleader-def mode "S" #'swift-development-settings-transient "settings"))
 
 ;;; kotlin-mode / kotlin-ts-mode (Gradle / Android)
 
 (defun ygg-localleader--gradle (task)
-  "Run gradle TASK from the project root, preferring the ./gradlew wrapper."
+  "Run gradle TASK from the project root, preferring the ./gradlew wrapper.
+Install, run and connected tasks go to the selected Android device."
   (let* ((root (ygg-localleader--root))
          (default-directory root)
-         (gradle (if (file-exists-p (expand-file-name "gradlew" root)) "./gradlew" "gradle")))
+         (gradle (if (file-exists-p (expand-file-name "gradlew" root)) "./gradlew" "gradle"))
+         (serial (and (string-match-p "\\`\\(install\\|run\\|connected\\)" task)
+                      (fboundp 'ygg-device-android-serial)
+                      (ygg-device-android-serial)))
+         (process-environment (if serial
+                                  (cons (concat "ANDROID_SERIAL=" serial) process-environment)
+                                process-environment)))
     (ygg-localleader--compile (format "%s %s" gradle task))))
 
 (defun ygg-localleader-kotlin-build () (interactive) (ygg-localleader--gradle "build"))
@@ -224,10 +201,6 @@ long-lived `flutter widget-preview start' server in a comint buffer."
 (defun ygg-localleader-kotlin-install () (interactive) (ygg-localleader--gradle "installDebug"))
 
 (dolist (mode '(kotlin-mode kotlin-ts-mode))
-  (yggdrasil-localleader-def mode "b" #'ygg-localleader-kotlin-build "gradle build")
-  (yggdrasil-localleader-def mode "r" #'ygg-localleader-kotlin-run "gradle run")
-  (yggdrasil-localleader-def mode "t" #'ygg-localleader-kotlin-test "gradle test")
-  (yggdrasil-localleader-def mode "c" #'ygg-localleader-kotlin-clean "gradle clean")
   (yggdrasil-localleader-def mode "a" #'ygg-localleader-kotlin-assemble "assemble debug")
   (yggdrasil-localleader-def mode "i" #'ygg-localleader-kotlin-install "install debug"))
 
@@ -239,9 +212,6 @@ long-lived `flutter widget-preview start' server in a comint buffer."
   (if (fboundp 'markdown-preview)
       (call-interactively #'markdown-preview)
     (user-error "markdown-preview: markdown-mode is not installed")))
-
-(dolist (mode '(markdown-mode gfm-mode))
-  (yggdrasil-localleader-def mode "p" #'ygg-localleader-markdown-preview "preview"))
 
 (provide 'yggdrasil-localleader)
 ;;; yggdrasil-localleader.el ends here

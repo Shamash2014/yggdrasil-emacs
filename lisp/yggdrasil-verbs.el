@@ -864,7 +864,7 @@ the paragraph at point instead (vim gq)."
 
 ;;; g X — exchange (evil-exchange)
 
-(defface ygg-exchange-highlight '((t :inherit highlight))
+(defface ygg-exchange-highlight '((t :inherit region :underline t))
   "Region marked by a pending `g X' exchange.")
 
 (defvar-local ygg--exchange-pending nil
@@ -1102,7 +1102,8 @@ windows (sidebar, quickfix, agent trace) too."
                    (when-let* ((buffer (aob-compose-frame-buffer frame)))
                      (and (buffer-live-p buffer)
                           (with-current-buffer buffer
-                            (derived-mode-p 'aob-compose-mode))))))
+                            (and (derived-mode-p 'aob-compose-mode)
+                                 (not (bound-and-true-p aob-compose--anchor))))))))
             (frame-list)))
 
 (defun ygg--windmove (dir)

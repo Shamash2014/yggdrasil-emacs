@@ -79,17 +79,23 @@ nothing is to be framed or dimmed."
 
 (defun ygg-focus-refresh (&rest _)
   "Frame the selected window's buffer and dim every other shown buffer.
-A buffer shown in several windows follows the selected one when it is
-among them.  A lone window is framed and nothing is dimmed.  While a
-picker holds the minibuffer the window it was opened from stays the
-framed one, and inside a child frame nothing moves."
+A side window is never dimmed.  A buffer shown in several windows
+follows the selected one when it is among them.  A lone window is
+framed and nothing is dimmed.  While a picker holds the minibuffer the
+window it was opened from stays the framed one, and inside a child
+frame nothing moves."
   (when-let* ((ygg-focus-mode)
               ((not (active-minibuffer-window)))
               (window (ygg-focus--window)))
     (let* ((selected (window-buffer window))
            (windows (window-list (window-frame window) 'no-minibuf))
+           ;; a side window is chrome, read at a glance from anywhere
            (others (seq-remove (lambda (b) (eq b selected))
-                               (delete-dups (mapcar #'window-buffer windows)))))
+                               (delete-dups
+                                (mapcar #'window-buffer
+                                        (seq-remove
+                                         (lambda (w) (window-parameter w 'window-side))
+                                         windows))))))
       (let ((moved (ygg-focus--frame selected))
             (fn (if (cdr windows) #'ygg-focus--dim #'ygg-focus--clear)))
         (dolist (buffer others)

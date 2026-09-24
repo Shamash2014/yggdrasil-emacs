@@ -5,6 +5,7 @@ mode: interactive
 place: before
 subagents: 2
 skills: how, why, debug-mantra, create-verification-skill, maintain-verification-skill, decision-memo
+tools: Read, Grep, Glob, Bash, WebFetch, WebSearch, Agent, Skill, TodoWrite, TaskCreate, TaskGet, TaskUpdate, TaskList, AskUserQuestion
 ---
 
 # Inspect

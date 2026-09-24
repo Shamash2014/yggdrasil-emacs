@@ -521,10 +521,14 @@ before it is dispatched.")
     ("session/update"
      (let ((u (plist-get params :update)))
        (pcase (plist-get u :sessionUpdate)
-         ("tool_call" (if (gethash (plist-get u :toolCallId) (aob-acp--tools s))
-                          (aob-acp--tool-update s u)
-                        (aob-acp--tool-call s u)))
-         ("tool_call_update" (aob-acp--tool-update s u))
+         ("tool_call" (aob-note-progress s)
+          (if (gethash (plist-get u :toolCallId) (aob-acp--tools s))
+              (aob-acp--tool-update s u)
+            (aob-acp--tool-call s u)))
+         ("tool_call_update"
+          (when (member (plist-get u :status) '("completed" "failed"))
+            (aob-note-progress s))
+          (aob-acp--tool-update s u))
          ("agent_message_chunk" (aob-acp--chunk s :msg-ev 'message u))
          ("agent_thought_chunk" (aob-acp--chunk s :thought-ev 'thought u))
          ("available_commands_update"
@@ -763,6 +767,7 @@ in one paragraph, and the trace would show them as the main agent's."
         (progn (aob-event-push-text ev text)
                (aob-refresh-summary s ev))
       (let ((ev (aob-event s type :parent parent)))
+        (when (eq type 'message) (aob-note-progress s))
         (aob-event-push-text ev text)
         (aob-refresh-summary s ev)
         (aob-session-put s slot ev)
@@ -1695,6 +1700,60 @@ session on another."
             (message "aob: %s does not offer %s" (aob-session-name s) id)
           (aob-acp--set-config s id value))))))
 
+(defun aob-acp--claude-p (init)
+  "Whether INIT came from Claude's adapter, which reads _meta.claudeCode.options."
+  (and (string-match-p "claude-\\(?:agent\\|code\\)-acp"
+                       (or (plist-get (plist-get init :agentInfo) :name) ""))
+       t))
+
+(defun aob-acp--claude-options (tools thinking)
+  "The options Claude's adapter takes for a TOOLS allowlist and THINKING level."
+  (append (when tools (list :tools (vconcat tools)))
+          (pcase thinking
+            ("off" (list :thinking (list :type "disabled")))
+            ((or "low" "medium" "high") (list :effort thinking)))))
+
+(defun aob-acp--with-limits (s init method params)
+  "PARAMS for the opening METHOD carrying S's :want-tools and :want-thinking.
+Claude's adapter takes both in _meta on session/new, resume and load, and
+S keeps them as :limits so a restore or fork asks for them again.  A fork,
+or any other agent, gets its thinking after it opens, and the trace says a
+tools limit went unenforced."
+  (let ((tools (aob-session-ref s :want-tools))
+        (thinking (aob-session-ref s :want-thinking)))
+    (when (or tools thinking)
+      (aob-session-put s :limits (append (and tools (list :want-tools tools))
+                                         (and thinking (list :want-thinking thinking)))))
+    (cond
+     ((not (or tools thinking)) params)
+     ((and (aob-acp--claude-p init)
+           (member method '("session/new" "session/resume" "session/load")))
+      (aob-session-put s :want-thinking nil)
+      (let* ((meta (copy-sequence (plist-get params :_meta)))
+             (cc (copy-sequence (plist-get meta :claudeCode)))
+             (opts (append (plist-get cc :options)
+                           (aob-acp--claude-options tools thinking))))
+        (plist-put (copy-sequence params) :_meta
+                   (plist-put meta :claudeCode (plist-put cc :options opts)))))
+     (t
+      (when tools
+        (aob-event s 'state :title (format "tools limit not enforced for %s"
+                                           (aob-session-ref s :agent))))
+      params))))
+
+(defun aob-acp--want-thinking (s level)
+  "Set S's thought_level option to LEVEL, or say in the trace it has none.
+Off is the lowest the agent offers by the name none or minimal."
+  (let* ((opt (seq-find (lambda (o) (equal (plist-get o :category) "thought_level"))
+                        (aob-session-ref s :config-options)))
+         (offered (mapcar (lambda (v) (plist-get v :value)) (plist-get opt :options)))
+         (value (seq-find (lambda (v) (member v offered))
+                          (if (equal level "off") '("none" "minimal") (list level)))))
+    (if value
+        (aob-acp--set-config s (plist-get opt :id) value)
+      (aob-event s 'state :title (format "thinking %s not supported by %s"
+                                         level (aob-session-ref s :agent))))))
+
 (defun aob-acp--session-opened (s res &optional fallback-id title)
   "Ingest the result of any session-opening method (new/load/fork).
 Every path stores modes/models identically — a resumed or forked
@@ -1727,6 +1786,9 @@ session must not be poorer than a fresh one."
   (when-let* ((want (aob-session-ref s :want-config)))
     (aob-session-put s :want-config nil)
     (aob-acp--want-config s want))
+  (when-let* ((want (aob-session-ref s :want-thinking)))
+    (aob-session-put s :want-thinking nil)
+    (aob-acp--want-thinking s want))
   (aob-set-state s 'idle)
   (aob-event s 'state :title (or title "session ready"))
   (aob-acp--persist)
@@ -2177,7 +2239,9 @@ the adapters store their sessions under."
                          (setcar (cdr spec)
                                  (plist-put params :_meta
                                             (plist-put (copy-sequence (plist-get params :_meta))
-                                                       :systemPrompt (list :append told))))))
+                                                       :systemPrompt (list :append told)))))
+                       (setcar (cdr spec)
+                               (aob-acp--with-limits s init (car spec) (cadr spec))))
                      spec))))
     (if prepare
         (funcall prepare s
@@ -2416,7 +2480,8 @@ alternative without losing the original, compare with range-diff later."
                   (when-let* ((dirs (aob-session-ref s :extra-dirs)))
                     (list :extra-dirs dirs))
                   (when-let* ((step (aob-session-ref s :task-step)))
-                    (list :task-step step))))
+                    (list :task-step step))
+                  (aob-session-ref s :limits)))
          (new (aob-acp--open
                agent (aob-acp--gen-name agent)
                (aob-session-project s) (aob-session-dir s)
@@ -2504,7 +2569,8 @@ afterwards what it was given."
           :model (aob-session-ref s :model-id)
           :mode (aob-session-ref s :mode-id)
           :extra-dirs (aob-session-ref s :extra-dirs)
-          :todo-file (aob-session-ref s :todo-file))))
+          :todo-file (aob-session-ref s :todo-file)
+          :limits (aob-session-ref s :limits))))
 
 (defun aob-acp--persist (&optional removed &rest _)
   "Write every conversation this Emacs can still resume, REMOVED included.
@@ -2716,6 +2782,7 @@ Prompts sent while it opens queue and fire on readiness."
                     (list :task-step step))
                   (when-let* ((todo (plist-get e :todo-file)))
                     (list :todo-file todo))
+                  (plist-get e :limits)
                   ;; a conversation reloaded onto another model is a
                   ;; different conversation from the second turn on
                   (when-let* ((model (plist-get e :model)))
