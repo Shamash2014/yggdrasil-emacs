@@ -382,8 +382,10 @@ Asleep: it carries the id its agent answers to, and no process."
     (or existing
         (let ((s (aob-create-session
                   :id id :backend 'acp
-                  :name (if (plist-get entry :found)
-                            ;; already named for its day when it was found
+                  :name (if (or (plist-get entry :found)
+                                ;; already named for its day when it was
+                                ;; found, or named by you: no day added
+                                (plist-get entry :named-by-user))
                             (plist-get entry :name)
                           (aob-transcript--name entry file))
                   :project (or (plist-get entry :project) (plist-get entry :dir))
@@ -394,6 +396,8 @@ Asleep: it carries the id its agent answers to, and no process."
           (aob-session-put s :model-id (plist-get entry :model))
           (aob-session-put s :mode-id (plist-get entry :mode))
           (aob-session-put s :asleep entry)
+          (aob-session-put s :named-by-user (plist-get entry :named-by-user))
+          (aob-session-put s :auto-named (plist-get entry :auto-named))
           (dolist (turn (aob-transcript-turns file))
             (aob-event s (if (equal (car turn) "user") 'prompt 'message)
                        :text (cdr turn)

@@ -40,7 +40,11 @@
   (delq nil (mapcar (lambda (id) (gethash id aob--sessions)) aob--order)))
 
 (defun aob-live-sessions ()
-  (seq-remove (lambda (s) (memq (aob-session-state s) '(dead failed)))
+  "Every session still to be reached for; a subagent only while it runs."
+  (seq-remove (lambda (s) (memq (aob-session-state s)
+                                (if (aob-session-ref s :parent-session)
+                                    '(dead failed done)
+                                  '(dead failed))))
               (aob-sessions)))
 
 (defun aob-session-get (id)
@@ -753,8 +757,30 @@ keeps writing into the trace it was already writing into."
      (list s (read-string "aob: name " nil nil (aob-session-name s)))))
   (setq name (string-trim name))
   (when (string-empty-p name) (user-error "aob: a session needs a name"))
-  (setf (aob-session-name s) name)
-  (when (fboundp 'ygg-cockpit-rename-buffers) (ygg-cockpit-rename-buffers s))
+  (aob-session-put s :named-by-user t)
+  (aob--set-name s name)
+  (when-let* ((renamed (aob-backend-fn s :rename)))
+    (funcall renamed s)))
+
+(declare-function aob--buffer-name "aob-trace" (kind s &optional suffix))
+
+(defun aob--set-name (s name)
+  (let ((id (aob-session-id s))
+        (was (format "\\`\\([^:]+\\):%s\\(?:/\\(.*\\)\\)?\\'"
+                     (regexp-quote (aob-session-name s)))))
+    (setf (aob-session-name s) name)
+    (dolist (buf (buffer-list))
+      (let ((old (buffer-name buf)))
+        (when (and old
+                   (equal (buffer-local-value 'aob-buffer-session-id buf) id)
+                   (string-match was old)
+                   (fboundp 'aob--buffer-name))
+          (let* ((new (aob--buffer-name (match-string 1 old) s (match-string 2 old)))
+                 (stray (get-buffer new)))
+            (when (and stray (not (eq stray buf))
+                       (equal (buffer-local-value 'aob-buffer-session-id stray) id))
+              (kill-buffer stray))
+            (with-current-buffer buf (rename-buffer new t)))))))
   (aob--dirty s)
   name)
 
@@ -794,8 +820,85 @@ keeps writing into the trace it was already writing into."
                     (mapcar #'car opts) nil t)))
         (aob--call s :resolve d (cdr (assoc pick opts)))))))
 
+(defconst aob-other-choice "Other…"
+  "The last of every question's choices: it reads an answer of your own.")
+
+(defun aob--choice-table (labels)
+  "LABELS then aob-other-choice, kept in the order the agent gave them."
+  (let ((all (append labels (list aob-other-choice))))
+    (lambda (str pred action)
+      (if (eq action 'metadata)
+          '(metadata (display-sort-function . identity)
+                     (cycle-sort-function . identity))
+        (complete-with-action action all str pred)))))
+
+(defun aob--read-choices (prompt labels multi)
+  "Read an answer to PROMPT from LABELS, as (PICKS . TYPED).
+Picking aob-other-choice reads TYPED, and so does typing past LABELS."
+  (let* ((table (aob--choice-table labels))
+         (said (if multi
+                   (completing-read-multiple prompt table)
+                 (list (completing-read prompt table))))
+         (typed (seq-remove (lambda (x) (or (member x labels)
+                                            (equal x aob-other-choice)
+                                            (string-empty-p x)))
+                            said)))
+    (when (member aob-other-choice said)
+      (let ((own (string-trim (read-string (concat prompt aob-other-choice " ")))))
+        (unless (string-empty-p own)
+          (setq typed (append typed (list own))))))
+    (cons (seq-filter (lambda (x) (member x labels)) said)
+          (string-join typed "\n"))))
+
+(defun aob--question-content (q picks typed)
+  "Q's share of an answer, as ((FIELD . VALUE)...), from PICKS and TYPED.
+TYPED goes to the field Q keeps for words of its own; without one it
+joins a multi-select's PICKS, or stands in for a single pick."
+  (let* ((key (plist-get q :key))
+         (custom (plist-get q :custom))
+         (multi (plist-get q :multi))
+         (own (and typed (not (string-empty-p typed)) typed))
+         (value (cond ((or custom (not own)) picks)
+                      (multi (append picks (list own)))
+                      (t (list own)))))
+    (append (when value (list (cons key (if multi value (car (last value))))))
+            (when (and custom own) (list (cons custom own))))))
+
+(defun aob--loose-answer-p (d content)
+  "Non-nil when CONTENT answers a question of D outside the options it
+offers, and the question keeps no field for words of its own."
+  (seq-some (lambda (q)
+              (when-let* ((options (plist-get q :options))
+                          ((not (plist-get q :custom)))
+                          (given (assoc (plist-get q :key) content)))
+                (seq-some (lambda (v) (not (member v options)))
+                          (ensure-list (cdr given)))))
+            (plist-get d :questions)))
+
+(defun aob--answer-question (s d content)
+  "Send CONTENT, the ((FIELD . VALUE)...) answer to question D, to S.
+An answer the form cannot hold is declined, and every answer is said as
+the next message instead, so the words still reach the agent."
+  (if (not (aob--loose-answer-p d content))
+      (aob--call s :resolve d content)
+    (aob--call s :resolve d 'decline)
+    (let ((aob-prompt-typed t))
+      (aob-prompt
+       s (mapconcat
+          (lambda (q)
+            (format "%s: %s"
+                    (or (plist-get q :text) (plist-get d :title) (plist-get q :key))
+                    (mapconcat (lambda (v) (format "%s" v))
+                               (append (ensure-list (cdr (assoc (plist-get q :key) content)))
+                                       (ensure-list (cdr (assoc (plist-get q :custom) content))))
+                               ", ")))
+          (seq-filter (lambda (q) (or (assoc (plist-get q :key) content)
+                                      (assoc (plist-get q :custom) content)))
+                      (plist-get d :questions))
+          "\n")))))
+
 (defun aob--resolve-question (s d)
-  "Walk D's questions; typing beyond the options is a custom answer."
+  "Walk D's questions; each with options ends in aob-other-choice."
   (let (content)
     (dolist (q (plist-get d :questions))
       (let ((prompt (format "%s: " (aob--first-line
@@ -803,17 +906,16 @@ keeps writing into the trace it was already writing into."
                                         (plist-get d :title) "answer")
                                     72)))
             (labels (plist-get q :options)))
-        (if (plist-get q :multi)
-            (push (cons (plist-get q :key)
-                        (completing-read-multiple prompt labels))
-                  content)
-          (let ((ans (completing-read prompt labels)))
-            (push (cons (if (member ans labels)
-                            (plist-get q :key)
-                          (or (plist-get q :custom) (plist-get q :key)))
-                        ans)
-                  content)))))
-    (aob--call s :resolve d (nreverse content))))
+        (setq content
+              (append content
+                      (if labels
+                          (let ((said (aob--read-choices prompt labels (plist-get q :multi))))
+                            (aob--question-content q (car said) (cdr said)))
+                        (list (cons (plist-get q :key)
+                                    (if (plist-get q :multi)
+                                        (completing-read-multiple prompt nil)
+                                      (read-string prompt)))))))))
+    (aob--answer-question s d content)))
 
 (defconst aob--reject-kinds '("reject_once" "reject_always")
   "Permission option kinds that refuse a call, the least lasting first.")
@@ -940,7 +1042,7 @@ placed by aob-compose-display-action, a box at the bottom."
   "How wide the floating box is, as a share of the frame's columns."
   :type 'number :group 'aob)
 
-(defcustom aob-compose-float-height 12
+(defcustom aob-compose-float-height 6
   "How many lines the floating box shows when the draft is short."
   :type 'natnum :group 'aob)
 
@@ -1032,7 +1134,7 @@ It leaves the trace where it is: it stands under what it is about."
                        :poshandler aob-compose-float-poshandler
                      :width (max 40 (round (* aob-compose-float-width
                                               (frame-width parent))))
-                     :height aob-compose-float-height
+                     :height (with-current-buffer buffer (aob-compose--wanted-height))
                      :min-height aob-compose-float-height
                      :border-width 0
                      :border-color (face-attribute 'vertical-border
@@ -1320,11 +1422,21 @@ completes `@file' and `/skill' against the wrong tree."
                          (and (aob-live-sessions) (aob-read-session "To: ")))))
   ;; one compose buffer per target: drafts to different agents coexist,
   ;; and ZZ always sends to the agent named in this buffer's header
-  (let ((named dir)
-        (dir (or dir
-                 (and (aob-session-p target)
-                      (or (aob-session-dir target) (aob-session-project target)))
-                 default-directory))
+  (let* ((named dir)
+         (dir (or dir
+                  (and (aob-session-p target)
+                       (or (aob-session-dir target) (aob-session-project target)))
+                  default-directory))
+         ;; the new buffer inherits this; a removed worktree breaks every process it starts
+         (default-directory
+          (file-name-as-directory
+           (expand-file-name
+            (or (seq-find #'file-directory-p
+                          (delq nil (list dir
+                                          (and (aob-session-p target)
+                                               (aob-session-project target))
+                                          default-directory)))
+                "~/"))))
         (buf (get-buffer-create
               (cond (name (format "compose:%s" name))
                     ((aob-session-p target)

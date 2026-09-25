@@ -147,6 +147,8 @@ window as following and pulls the page back down."
     (setq-local fill-column aob-trace-measure))
   (setq-local word-wrap t)
   (setq-local mwheel-scroll-down-function #'aob-trace--wheel-back)
+  (add-function :filter-return (local 'filter-buffer-substring-function)
+                #'aob-trace--unmarked)
   (add-hook 'window-configuration-change-hook #'aob-trace--fit-margins nil t)
   (add-hook 'window-buffer-change-functions
             (lambda (_frame) (aob-trace--fit-margins)) nil t)
@@ -163,9 +165,9 @@ widened is not that window."
   (dolist (win (get-buffer-window-list (current-buffer) nil t))
     (let* ((total (window-total-width win))
            (delta (aob-trace--delta-p))
-           ;; the gutter costs four columns, which a narrow window does
-           ;; not have to spare: the mark goes inline there instead
-           (gutter (if (and delta (>= total 60)) 4 0))
+           ;; a narrow window gets a narrower gutter, not none: a mark put
+           ;; inline pushes its row's text off the column every other row keeps
+           (gutter (cond ((not delta) 0) ((>= total 60) 4) (t 3)))
            (slack (if (and delta (> aob-trace-measure 0))
                       (max 0 (- total aob-trace-measure gutter))
                     0)))
@@ -219,8 +221,10 @@ in a paragraph and worse in everything a paragraph here is made of —
 paths, diffs, names, and the grid the rest of the frame stands on."
   :group 'aob)
 
-(defface aob-trace-icon '((t :height 1.6))
-  "Face sizing the gutter and row glyphs under the delta style."
+(defface aob-trace-icon '((t))
+  "Face for the gutter and row glyphs under the delta style.
+No height of its own: a glyph taller than the text is a line taller
+than its neighbours, and a wider one pushes its row off the column."
   :group 'aob)
 
 (defface aob-trace-done '((t :inherit shadow :height 0.8))
@@ -322,21 +326,23 @@ Its height comes from `aob-trace-tool-height\='."
   "TIME as a dim prefix, or nothing at all under the delta style."
   (if (aob-trace--delta-p) "" (propertize time 'face 'shadow)))
 
+(defconst aob-trace--marks
+  '((running "·" aob-trace-running aob-trace-status [#x30 #x30])
+    (done "✓" aob-trace-done aob-trace-status [#x04 #x0c #x98 #xd0 #x70 #x20])
+    (failed "!" aob-trace-failed aob-trace-status-failed
+            [#x30 #x30 #x30 #x30 #x30 #x00 #x30])
+    (waiting "?" aob-trace-waiting aob-trace-status
+             [#x78 #xcc #x0c #x18 #x30 #x00 #x30]))
+  "State to (CHAR BITMAP FACE BITS): what stands for it in the fringe.
+The character differs per state so a block whose state moved is a block
+whose text moved, which is all the incremental render compares.  BITS
+draw the eight-pixel fringe and leave its two columns nearest the text
+blank, the one gap every mark keeps before the line it marks.")
+
 (when (fboundp 'define-fringe-bitmap)
   (ignore-errors
-    (define-fringe-bitmap 'aob-trace-running [#x18 #x18] nil nil 'center)
-    (define-fringe-bitmap 'aob-trace-done [#x01 #x03 #x06 #x8c #xd8 #x70 #x20] nil nil 'center)
-    (define-fringe-bitmap 'aob-trace-failed [#x18 #x18 #x18 #x18 #x18 #x00 #x18] nil nil 'center)
-    (define-fringe-bitmap 'aob-trace-waiting [#x3c #x66 #x06 #x0c #x18 #x00 #x18] nil nil 'center)))
-
-(defconst aob-trace--marks
-  '((running "·" aob-trace-running aob-trace-status)
-    (done "✓" aob-trace-done aob-trace-status)
-    (failed "!" aob-trace-failed aob-trace-status-failed)
-    (waiting "?" aob-trace-waiting aob-trace-status))
-  "State to (CHAR BITMAP FACE): what stands for it in the fringe.
-The character differs per state so a block whose state moved is a block
-whose text moved, which is all the incremental render compares.")
+    (dolist (m aob-trace--marks)
+      (define-fringe-bitmap (nth 2 m) (nth 4 m) nil nil 'center))))
 
 (defun aob-trace--mark (state str)
   "STR with STATE marked in the fringe beside its first line."
@@ -354,6 +360,17 @@ whose text moved, which is all the incremental render compares.")
                 (put-text-property 0 1 prop v carrier))))
           (concat (substring str 0 i) carrier (substring str i))))
     str))
+
+(defun aob-trace--unmarked (str)
+  "STR without the characters that carry fringe marks: copied text is
+what the line says, not what its gutter drew."
+  (let ((i 0) (parts nil))
+    (while (< i (length str))
+      (let ((next (next-single-property-change i 'aob-status str (length str))))
+        (unless (get-text-property i 'aob-status str)
+          (push (substring str i next) parts))
+        (setq i next)))
+    (apply #'concat (nreverse parts))))
 
 (defun aob-trace--state (ev)
   "Running, done or failed, for an event that has such a thing, else nil."
@@ -1097,7 +1114,8 @@ whoever reads why S is stuck reads what it did and said."
                          shown)
                  (and (> (length out) cap)
                       (list (aob-trace--more (- (length out) cap)))))))
-    (aob-trace--tight (aob-trace--small (string-join lines "\n")))))
+    (propertize (aob-trace--tight (aob-trace--small (string-join lines "\n")))
+                'wrap-prefix (propertize "  " 'face 'aob-trace-small))))
 
 (defun aob-trace--diff-items (ev)
   "The file changes EV carries, each a plist with a path and old and new text."
@@ -1288,6 +1306,17 @@ the change itself, cut to `aob-trace-diff-lines\=' unless opened."
 (defvar aob-trace--agent-image nil
   "Cached mark, as (HEIGHT COLOUR . IMAGE): both change under a theme.")
 
+(defun aob-trace--agent-size (lh cw)
+  "Width and height of the agent's mark beside a line LH pixels high:
+the whole animal inside the line, and no wider than CW, the one cell
+every other gutter glyph takes."
+  (let* ((gw (car aob-trace--agent-art-size))
+         (gh (cdr aob-trace--agent-art-size))
+         (w (max 1 (round (* gw (/ (float lh) gh))))))
+    (if (<= w cw)
+        (cons w lh)
+      (cons cw (max 1 (round (* gh (/ (float cw) gw))))))))
+
 (defun aob-trace--agent-icon ()
   "The agent's mark, drawn to fit one line, or nil without image support."
   (when (and aob-trace-icons (display-graphic-p)
@@ -1296,13 +1325,13 @@ the change itself, cut to `aob-trace-diff-lines\=' unless opened."
                                 (default-line-height)))))
            (colour (or (face-attribute 'aob-trace-speaker :foreground nil t)
                        "white"))
-           (key (cons lh colour)))
+           (key (list lh colour (default-font-width))))
       (unless (equal (car-safe aob-trace--agent-image) key)
         (let* ((gw (car aob-trace--agent-art-size))
                (gh (cdr aob-trace--agent-art-size))
-               ;; the whole animal, inside the line it stands beside
-               (h lh)
-               (w (max 1 (round (* gw (/ (float h) gh))))))
+               (size (aob-trace--agent-size lh (default-font-width)))
+               (w (car size))
+               (h (cdr size)))
           (setq aob-trace--agent-image
                 (cons key
                       (ignore-errors
@@ -1608,17 +1637,12 @@ whether or not they have been joined."
       (_ (let ((st (aob-trace--status ev)))
            (funcall
             (cond
-             ;; a thought is the agent speaking: Delta hangs its mark in
-             ;; the gutter and leaves the line itself clean
-             ((and (aob-trace--delta-p) (eq (plist-get ev :type) 'thought)
-                   (plist-get ev :turn-head))
-              (lambda (str) (aob-trace--gutter (aob-trace--avatar-glyph) str)))
-             ;; and the row that opens a turn carries the mark too, kind
-             ;; glyph and all: a turn that starts with a command run is a
-             ;; turn nobody appeared to take
-             ((and (aob-trace--delta-p) (plist-get ev :turn-head))
-              (lambda (str) (aob-trace--gutter (aob-trace--avatar-glyph)
-                                               (concat (aob-trace--glyph ev) " " str))))
+             ;; Delta hangs a row's one mark in the gutter, the speaker's
+             ;; beside the row that opens a turn, and leaves the line clean
+             ((aob-trace--delta-p)
+              (lambda (str) (if (plist-get ev :turn-head)
+                                (aob-trace--gutter (aob-trace--avatar-glyph) str)
+                              str)))
              (t (lambda (str) (concat (aob-trace--glyph ev) " " str))))
             (format "%s%s%s%s"
                    (let ((stamp (aob-trace--stamp time)))
@@ -1654,6 +1678,7 @@ whether or not they have been joined."
                                    (aob-event-summary ev)
                                  (concat (aob-event-summary ev) " · " meter)))
                              'font-lock-face 'aob-trace-done))
+                     ('permission (or (plist-get ev :title) "permission"))
                      (_ (aob-event-summary ev)))
                    (if (string-empty-p st) "" (concat " " st)))))))))
 
@@ -1804,19 +1829,21 @@ space in it is a phrase, not a path, and is left alone."
       (file-name-nondirectory (directory-file-name title)))))
 
 (defun aob-trace--explore-line (evs)
-  "The one row EVS fold into: when it happened, and what it read."
+  "The one row EVS fold into: what it read, and, in the log, when."
   (let* ((names (seq-uniq (mapcar #'aob-trace--explore-name evs)))
          (text (string-join names ", "))
          (text (if (<= (length text) aob-trace-explore-width)
                    text
                  (concat (substring text 0 (1- aob-trace-explore-width)) "⋯"))))
     (string-join
-     (list (propertize (format-time-string "%H:%M:%S" (plist-get (car evs) :ts))
-                       'face 'shadow)
-           (aob-trace--glyph (car evs))
-           aob-trace-explore-heading
-           (propertize (format "%d" (length evs)) 'face 'shadow)
-           (propertize text 'face 'shadow))
+     (append
+      (unless (aob-trace--delta-p)
+        (list (propertize (format-time-string "%H:%M:%S" (plist-get (car evs) :ts))
+                          'face 'shadow)
+              (aob-trace--glyph (car evs))))
+      (list aob-trace-explore-heading
+            (propertize (format "%d" (length evs)) 'face 'shadow)
+            (propertize text 'face 'shadow)))
      " ")))
 
 (defun aob-trace--stamp-eq (a b)
@@ -2815,12 +2842,14 @@ block stays the same string and the incremental pass skips it."
                                          'aob-multi (plist-get q :multi))
                                    l)
               (push l lines)))
+          (when options
+            (push (propertize (concat "    ◦ " aob-other-choice) 'aob-question text) lines))
           (dolist (c mine)
             (unless (member (plist-get c :text) options)
               (push (concat "    ✎ " (plist-get c :text)) lines))))))
     (when pending
       (push (aob-trace--hint
-             "RET picks an option · RET on a question types your own · ZZ sends · ZQ declines")
+             "RET picks an option · RET on Other… or a question types your own · ZZ sends · ZQ declines")
             lines))
     (mapconcat #'identity (nreverse lines) "\n")))
 
@@ -2867,23 +2896,17 @@ block stays the same string and the incremental pass skips it."
 (defun aob-trace--elicit-content (s d)
   "The answers held on D's questions, as ((FIELD . VALUE)...).
 A typed answer goes to the field the agent keeps for one, or to the
-question itself when it has none and nothing was picked."
+question itself when it has none."
   (let ((held (aob-trace--comments-for s (plist-get d :seq)))
         content)
     (dolist (q (plist-get d :questions) (nreverse content))
       (let* ((options (plist-get q :options))
-             (multi (plist-get q :multi))
              (texts (mapcar (lambda (c) (plist-get c :text))
                             (seq-filter (lambda (c) (equal (plist-get c :quote) (plist-get q :text)))
                                         held)))
              (picks (seq-filter (lambda (x) (member x options)) texts))
              (typed (string-join (seq-remove (lambda (x) (member x options)) texts) "\n")))
-        (when picks
-          (push (cons (plist-get q :key) (if multi picks (car (last picks)))) content))
-        (unless (string-empty-p typed)
-          (cond ((plist-get q :custom) (push (cons (plist-get q :custom) typed) content))
-                ((not picks) (push (cons (plist-get q :key) (if multi (list typed) typed))
-                                   content))))))))
+        (setq content (append (reverse (aob--question-content q picks typed)) content))))))
 
 (defun aob-trace--answer-decision (s d text)
   "Answer D, the question or plan S's agent waits on, from what is held.
@@ -2898,7 +2921,7 @@ no words of its own."
        (aob-session-put s :comments
                         (seq-remove (lambda (c) (eql (plist-get c :seq) seq))
                                     (aob-session-ref s :comments)))
-       (aob--call s :resolve d content)))
+       (aob--answer-question s d content)))
     ('plan
      (let ((feedback (string-join
                       (delq nil (list (aob-trace--comments-message s)
@@ -2997,7 +3020,8 @@ of comments together."
   (let* ((s (aob-session-get aob-trace--session-id))
          (seq (or (get-text-property start 'aob-item)
                   (get-text-property start 'aob-event)))
-         (quoted (string-trim (buffer-substring-no-properties start end))))
+         (quoted (string-trim (substring-no-properties
+                               (filter-buffer-substring start end)))))
     (unless s (user-error "aob: this trace has no session"))
     (unless seq (user-error "aob: nothing to comment on here"))
     (deactivate-mark)
@@ -3576,8 +3600,9 @@ LINE is where to land; without one, SEARCH is text to land on."
             (when-let* ((dir (or (aob-session-dir s) (aob-session-project s))))
               (propertize (format "  %s" (abbreviate-file-name dir))
                           'face 'shadow)))
-      (when-let* ((dir (or (aob-session-project s) (aob-session-dir s)))
-                  ((file-directory-p dir)))
+      (when-let* ((dir (seq-find #'file-directory-p
+                                 (delq nil (list (aob-session-project s)
+                                                 (aob-session-dir s))))))
         ;; a trace stands where its agent does: magit, a terminal, a
         ;; find-file started from here open on the agent\='s project and
         ;; not on whatever folder the buffer happened to be made in

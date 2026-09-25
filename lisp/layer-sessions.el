@@ -82,12 +82,65 @@ becomes the new active session."
 (declare-function project-root "project")
 (declare-function project-current "project")
 
-(defun ygg-session--project-name ()
-  "Derive a session name from the project root, nvim-style path encoding."
-  (let ((root (or (when-let* ((proj (project-current)))
-                    (project-root proj))
-                  default-directory)))
-    (string-replace "/" "%" (abbreviate-file-name (directory-file-name root)))))
+(defun ygg-session--root ()
+  (or (when-let* ((proj (project-current)))
+        (project-root proj))
+      default-directory))
+
+(defun ygg-session--branch (root)
+  "The branch checked out at ROOT, or nil when detached or not a repository."
+  (unless (file-remote-p root)
+    (let ((default-directory root))
+      (car (ignore-errors
+             (process-lines-ignore-status "git" "symbolic-ref" "--short" "-q" "HEAD"))))))
+
+(defun ygg-session--base-name (root)
+  (string-replace "/" "%" (abbreviate-file-name (directory-file-name root))))
+
+(defun ygg-session--project-name (&optional root branch)
+  "Session name for ROOT on BRANCH: the path, nvim-style, then %% and the branch.
+An abbreviated path never holds //, so %% can only be the branch seam."
+  (let* ((root (or root (ygg-session--root)))
+         (branch (or branch (ygg-session--branch root))))
+    (concat (ygg-session--base-name root)
+            (when branch (concat "%%" (string-replace "/" "%" branch))))))
+
+(defvar ygg-session--following nil)
+
+(defun ygg-session-follow-branch ()
+  "Move the current project session to the branch now checked out.
+Only when the current session is this project's on another branch: it is
+saved there, then the new branch's session loads, or, having none, the
+layout carries over under the new branch's name."
+  (when (and (not ygg-session--following)
+             (fboundp 'easysession-get-session-name))
+    (when-let* ((current (easysession-get-session-name))
+                (root (ygg-session--root))
+                (base (ygg-session--base-name root))
+                ((or (equal current base) (string-prefix-p (concat base "%%") current)))
+                ;; a rebase or bisect detaches HEAD; the session waits it out
+                (branch (ygg-session--branch root))
+                (name (ygg-session--project-name root branch))
+                ((not (equal name current))))
+      (let ((ygg-session--following t))
+        (if (file-exists-p (easysession-get-session-file-path name))
+            (easysession-switch-to name)
+          (easysession-save current)
+          (easysession-save name)
+          (easysession-set-current-session-name name))))))
+
+(defun ygg-session--follow-soon ()
+  ;; loading a frameset from inside magit's refresh or a focus event pulls windows from under them
+  (run-at-time 0 nil #'ygg-session-follow-branch))
+
+(defun ygg-session--follow-on-focus ()
+  ;; a checkout done in a terminal is noticed on the way back
+  (when (frame-focus-state) (ygg-session--follow-soon)))
+
+(with-eval-after-load 'magit
+  (add-hook 'magit-post-refresh-hook #'ygg-session--follow-soon))
+
+(add-function :after after-focus-change-function #'ygg-session--follow-on-focus)
 
 (defun ygg-session-save-project ()
   "Save the session under a name derived from the current project."
@@ -140,8 +193,10 @@ buffer costs, a tenth of a second each, and a session is many buffers."
   "Load this project's session if one was saved before."
   (interactive)
   (require 'easysession)
-  (let ((name (ygg-session--project-name)))
-    (if (file-exists-p (easysession-get-session-file-path name))
+  (let* ((root (ygg-session--root))
+         (name (seq-find (lambda (n) (file-exists-p (easysession-get-session-file-path n)))
+                         (list (ygg-session--project-name root) (ygg-session--base-name root)))))
+    (if name
         (easysession-switch-to name)
       (user-error "No session saved for this project (SPC p w to create)"))))
 
@@ -154,19 +209,24 @@ buffer costs, a tenth of a second each, and a session is many buffers."
 projects share one, since a session file spells the path with percent
 signs and nobody reads a path that way."
   (let* ((decode (lambda (name)
-                   (directory-file-name (string-replace "%" "/" name))))
+                   (directory-file-name
+                    (string-replace "%" "/" (car (split-string name "%%"))))))
+         (branch (lambda (name)
+                   (when-let* ((b (cadr (split-string name "%%"))))
+                     (concat " @ " (string-replace "%" "/" b)))))
          (base (lambda (name) (file-name-nondirectory (funcall decode name))))
          (counts (make-hash-table :test #'equal)))
-    (dolist (name sessions)
-      (cl-incf (gethash (funcall base name) counts 0)))
+    (dolist (path (delete-dups (mapcar decode sessions)))
+      (cl-incf (gethash (file-name-nondirectory path) counts 0)))
     (mapcar (lambda (name)
               (let ((short (funcall base name)))
-                (cons (if (> (gethash short counts) 1)
-                          (concat (file-name-nondirectory
-                                   (directory-file-name
-                                    (file-name-directory (funcall decode name))))
-                                  "/" short)
-                        short)
+                (cons (concat (if (> (gethash short counts) 1)
+                                  (concat (file-name-nondirectory
+                                           (directory-file-name
+                                            (file-name-directory (funcall decode name))))
+                                          "/" short)
+                                short)
+                              (funcall branch name))
                       name)))
             sessions)))
 
@@ -183,7 +243,7 @@ signs and nobody reads a path that way."
             (let* ((name (cdr (assoc label labels)))
                    (file (expand-file-name name easysession-directory)))
               (format "  %-40s %s"
-                      (propertize (string-replace "%" "/" name)
+                      (propertize (string-replace "%" "/" (string-replace "%%" " @ " name))
                                   'face 'font-lock-comment-face)
                       (propertize
                        (format-time-string

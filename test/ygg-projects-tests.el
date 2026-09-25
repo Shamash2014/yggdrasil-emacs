@@ -15,6 +15,7 @@ ygg-projects-tests--state as its state."
   `(cl-letf (((symbol-function 'aob-session-p) (lambda (s) (eq s 'session)))
              ((symbol-function 'aob-session-state) (lambda (_) ygg-projects-tests--state))
              ((symbol-function 'aob-session-clock) (lambda (_) ,clock))
+             ((symbol-function 'aob-session-quiet) #'ignore)
              ((symbol-function 'aob-session-spend) (lambda (_) ,spend))
              ((symbol-function 'ygg-todo-session-file) (lambda (_) "todo"))
              ((symbol-function 'ygg-todo-progress) (lambda (_) ,progress)))
@@ -85,6 +86,295 @@ ygg-projects-tests--state as its state."
     (should (string-search "…" row))
     (should (string-search "the-folder-name" row))
     (should (< (string-width (substring-no-properties row)) (+ 2 (ygg-projects--width))))))
+
+(defconst ygg-projects-tests--porcelain
+  (concat "worktree /r/main\nHEAD 1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbranch refs/heads/master\n\n"
+          "worktree /r/main/.trees/feat\nHEAD 2222222bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\nbranch refs/heads/feat/x\n\n"
+          "worktree /r/spike\nHEAD abcdef0123456789abcdef0123456789abcdef01\ndetached\n")
+  "What git worktree list --porcelain says of a main checkout, a linked
+worktree nested inside it, and a detached one beside it.")
+
+(ert-deftest ygg-projects-tree-note-leaves-the-main-checkout-bare ()
+  "A session in the main checkout, or in a repository of one worktree, gets no line."
+  (should-not (ygg-projects--tree-note ygg-projects-tests--porcelain "/r/main/lisp"))
+  (should-not (ygg-projects--tree-note
+               "worktree /r/main\nHEAD 1111111aaaa\nbranch refs/heads/master\n" "/r/main"))
+  (should-not (ygg-projects--tree-note ygg-projects-tests--porcelain "/elsewhere")))
+
+(ert-deftest ygg-projects-tree-note-names-a-linked-worktree-and-its-branch ()
+  "The deepest worktree holding the folder wins, named by folder and branch."
+  (should (equal (ygg-projects--tree-note ygg-projects-tests--porcelain "/r/main/.trees/feat/src")
+                 "⌥ feat · feat/x")))
+
+(ert-deftest ygg-projects-tree-note-gives-a-detached-worktree-its-short-sha ()
+  (should (equal (ygg-projects--tree-note ygg-projects-tests--porcelain "/r/spike")
+                 "⌥ spike · abcdef0")))
+
+(defmacro ygg-projects-tests--with-git (calls reply &rest body)
+  "Run BODY with the worktree cache empty and git a stand-in.
+Each lookup is counted in CALLS and its callback kept in REPLY."
+  (declare (indent 2))
+  `(let ((ygg-projects--tree-notes (make-hash-table :test #'equal))
+         (ygg-projects--tree-notes-pending (make-hash-table :test #'equal))
+         (,calls 0) (,reply nil))
+     (cl-letf (((symbol-function 'ygg-git-async)
+                (lambda (_root _args callback) (cl-incf ,calls) (setq ,reply callback) t))
+               ((symbol-function 'ygg-projects-refresh) #'ignore))
+       ,@body)))
+
+(ert-deftest ygg-projects-session-tree-asks-git-once-per-folder ()
+  "A redraw reads the cache; git is asked again only once the answer is old."
+  (let ((dir (file-name-as-directory (file-truename temporary-file-directory))))
+    (ygg-projects-tests--with-git calls reply
+      (should-not (ygg-projects--session-tree dir))
+      (should-not (ygg-projects--session-tree dir))
+      (should (= calls 1))
+      (funcall reply (concat "worktree /r/main\n\nworktree " dir "\nbranch refs/heads/wip\n") 0)
+      (should (equal (ygg-projects--session-tree dir)
+                     (format "⌥ %s · wip" (file-name-nondirectory (directory-file-name dir)))))
+      (should (= calls 1))
+      (setcar (gethash dir ygg-projects--tree-notes)
+              (- (float-time) ygg-projects--tree-note-ttl 1))
+      (ygg-projects--session-tree dir)
+      (should (= calls 2)))))
+
+(ert-deftest ygg-projects-session-tree-leaves-a-missing-folder-alone ()
+  (ygg-projects-tests--with-git calls _reply
+    (should-not (ygg-projects--session-tree "/no/such/folder/"))
+    (should-not (ygg-projects--session-tree nil))
+    (should (= calls 0))))
+
+(ert-deftest ygg-projects-tree-text-is-one-grey-line-point-passes-over ()
+  (let* ((ygg-projects-width 40)
+         (text (ygg-projects--tree-text "⌥ feat · feat/x" "/tmp/p/" 'agents 'session)))
+    (should-not (string-search "\n" text))
+    (should (string-search "⌥ feat · feat/x" text))
+    (should (eq (get-text-property (string-search "⌥" text) 'font-lock-face text)
+                'ygg-projects-count))
+    (should (get-text-property 0 'ygg-cont text))
+    (should (eq (get-text-property 0 'ygg-entry text) 'session))))
+
+(ert-deftest ygg-projects-subagent-row-lives-as-long-as-its-work ()
+  "A running subagent is a row under its sender and counted once; done,
+failed or killed it is neither."
+  (require 'aob-subagent)
+  (let ((ygg-projects-show-past nil)
+        (root (file-name-as-directory (file-truename temporary-file-directory))))
+    (dolist (end '(done failed killed))
+      (let* ((parent (aob-create-session :id "p" :backend 'acp :name "lead"
+                                         :project root :state 'working))
+             (kid (aob-create-session :id "p/k" :backend 'native-subagent :name "scout"
+                                      :project root :state 'working
+                                      :refs (list :parent-session "p"))))
+        (unwind-protect
+            (cl-letf (((symbol-function 'ygg-projects--roots) (lambda () (list root)))
+                      ((symbol-function 'ygg-projects--past) #'ignore))
+              (should (equal (mapcar #'car (ygg-projects--entries root 'agents))
+                             '("lead" "└ scout")))
+              (should (equal (ygg-projects--agents root) '(2 . 2)))
+              (if (eq end 'killed)
+                  (aob-remove-session kid)
+                (aob-set-state kid end))
+              (should (equal (mapcar #'car (ygg-projects--entries root 'agents))
+                             '("lead")))
+              (should (equal (ygg-projects--agents root) '(1 . 1))))
+          (ignore-errors (aob-remove-session kid))
+          (aob-remove-session parent))))))
+
+;;; Acting on a visual selection of rows
+
+(defvar ygg-projects-tests--calls nil
+  "What the stand-in backend was asked to do, newest first.")
+
+(defmacro ygg-projects-tests--with-rows (&rest body)
+  "Run BODY in a sidebar-like buffer over two sessions and a subagent.
+Lines: project head, Sessions title, alpha, alpha's worktree note, beta,
+beta's subagent scout.  a, b and kid are bound to the sessions."
+  (declare (indent 0))
+  `(progn
+     (require 'aob-acp)
+     (require 'aob-trace)
+     (require 'aob-subagent)
+     (aob-register-backend
+      'ygg-projects-test
+      (list :kill (lambda (s) (push (list :kill (aob-session-name s)) ygg-projects-tests--calls)
+                    (aob-remove-session s))
+            :cancel (lambda (s &rest _) (push (list :cancel (aob-session-name s))
+                                              ygg-projects-tests--calls))
+            :prompt (lambda (s text &rest _)
+                      (push (list :prompt (aob-session-name s) text aob-prompt-typed)
+                            ygg-projects-tests--calls))))
+     (let* ((ygg-projects-tests--calls nil)
+            (aob-acp-persist-file (make-temp-file "ygg-projects-tests-persist"))
+            (root "/tmp/p/")
+            (a (aob-create-session :id "t:alpha" :backend 'ygg-projects-test
+                                   :name "alpha" :state 'working))
+            (b (aob-create-session :id "t:beta" :backend 'ygg-projects-test
+                                   :name "beta" :state 'idle))
+            (kid (aob-create-session :id "t:beta/k" :backend 'ygg-projects-test
+                                     :name "scout" :state 'working
+                                     :refs (list :parent-session "t:beta"))))
+       (unwind-protect
+           (with-temp-buffer
+             (dolist (line (list (propertize " ● p" 'ygg-project root 'ygg-row 'project)
+                                 (propertize "  Sessions" 'ygg-project root 'ygg-row 'agents)
+                                 (propertize "  · alpha" 'ygg-project root 'ygg-row 'agents
+                                             'ygg-entry a)
+                                 (propertize "    ⌥ feat · feat/x" 'ygg-project root
+                                             'ygg-row 'agents 'ygg-entry a 'ygg-cont t)
+                                 (propertize "  · beta" 'ygg-project root 'ygg-row 'agents
+                                             'ygg-entry b)
+                                 (propertize "  · └ scout" 'ygg-project root 'ygg-row 'agents
+                                             'ygg-entry kid)))
+               (insert line "\n"))
+             (setq-local ygg--visual-p nil)
+             (cl-letf (((symbol-function 'ygg-normal-state)
+                        (lambda () (setq ygg--visual-p nil))))
+               ,@body))
+         (dolist (s (list kid a b))
+           (when (aob-session-get (aob-session-id s)) (aob-remove-session s)))
+         (delete-file aob-acp-persist-file)))))
+
+(defun ygg-projects-tests--select (from to)
+  "Visual state from line FROM to line TO, both counted from 1."
+  (goto-char (point-min))
+  (forward-line (1- from))
+  (set-mark (point))
+  (goto-char (point-min))
+  (forward-line (1- to))
+  (setq ygg--visual-p t))
+
+(ert-deftest ygg-projects-selection-keeps-only-session-rows ()
+  "Title, session, worktree note, session: the two sessions, once each."
+  (ygg-projects-tests--with-rows
+    (ygg-projects-tests--select 2 5)
+    (should (equal (ygg-projects--selected-entries) (list a b)))
+    (ygg-projects-tests--select 5 1)
+    (should (equal (ygg-projects--selected-entries) (list a b)))))
+
+(ert-deftest ygg-projects-kill-selection-asks-once-and-ends-both ()
+  (ygg-projects-tests--with-rows
+    (ygg-projects-tests--select 3 5)
+    (let ((asked nil))
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (prompt) (push prompt asked) t)))
+        (ygg-projects-archive-ask))
+      (should (= (length asked) 1))
+      (should (string-search "alpha, beta" (car asked))))
+    (should (equal (reverse ygg-projects-tests--calls)
+                   '((:kill "alpha") (:kill "beta"))))
+    (should-not (aob-session-get "t:alpha"))
+    (should-not (aob-session-get "t:beta"))
+    (should-not ygg--visual-p)
+    (should (= (line-number-at-pos) 3))))
+
+(ert-deftest ygg-projects-delete-selection-asks-once ()
+  (ygg-projects-tests--with-rows
+    (ygg-projects-tests--select 2 5)
+    (let ((asked 0))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) (cl-incf asked) t)))
+        (ygg-projects-delete))
+      (should (= asked 1)))
+    (should-not (aob-session-get "t:alpha"))
+    (should-not (aob-session-get "t:beta"))))
+
+(ert-deftest ygg-projects-say-sends-one-text-to-each ()
+  (ygg-projects-tests--with-rows
+    (ygg-projects-tests--select 3 5)
+    (let ((read 0))
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _) (cl-incf read) "carry on")))
+        (call-interactively #'ygg-projects-say))
+      (should (= read 1)))
+    (should (equal (reverse ygg-projects-tests--calls)
+                   '((:prompt "alpha" "carry on" t) (:prompt "beta" "carry on" t))))
+    (should-not ygg--visual-p)))
+
+(ert-deftest ygg-projects-selection-skips-a-subagent-for-writes ()
+  (ygg-projects-tests--with-rows
+    (ygg-projects-tests--select 5 6)
+    (let ((said nil))
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+        (ygg-projects-cancel))
+      (should (string-search "1 subagent skipped" said)))
+    (should (equal ygg-projects-tests--calls '((:cancel "beta"))))
+    (setq ygg-projects-tests--calls nil)
+    (ygg-projects-tests--select 6 6)
+    (should-error (ygg-projects-cancel) :type 'user-error)
+    (should-not ygg-projects-tests--calls)
+    (should (aob-session-get "t:beta/k"))))
+
+(ert-deftest ygg-projects-visit-in-visual-takes-the-row-at-point ()
+  "Opening a trace is one session's act: the row at point, never the range."
+  (ygg-projects-tests--with-rows
+    (ygg-projects-tests--select 3 5)
+    (let ((opened nil))
+      (cl-letf (((symbol-function 'ygg-aob-goto-space) (lambda (s) (push s opened)))
+                ((symbol-function 'aob-trace) (lambda (s) (push s opened))))
+        (ygg-projects-visit))
+      (should-not ygg--visual-p)
+      (should (memq b opened))
+      (should-not (memq a opened)))))
+
+;;; A session in a linked worktree
+
+(defmacro ygg-projects-tests--with-trees (roots sessions &rest body)
+  "Run BODY with ROOTS on show and SESSIONS as (ID DIR MAIN) each.
+MAIN is the main checkout git named for DIR, nil for a main checkout or
+a folder outside git; the lookup is seeded, so no git runs."
+  (declare (indent 2))
+  `(progn
+     (require 'aob-subagent)
+     (let ((ygg-projects-show-past nil)
+           (ygg-projects--tree-notes (make-hash-table :test #'equal))
+           (ygg-projects--tree-mains (make-hash-table :test #'equal))
+           (made nil))
+       (pcase-dolist (`(,id ,dir ,main) ,sessions)
+         (puthash dir (cons (float-time) (and main "⌥ wt · feat"))
+                  ygg-projects--tree-notes)
+         (when main (puthash dir main ygg-projects--tree-mains))
+         (push (aob-create-session :id id :backend 'acp :name id
+                                   :project dir :dir dir :state 'working)
+               made))
+       (unwind-protect
+           (cl-letf (((symbol-function 'ygg-projects--roots) (lambda () ,roots))
+                     ((symbol-function 'ygg-projects--past) #'ignore)
+                     ((symbol-function 'ygg-git-async)
+                      (lambda (&rest _) (error "git must not run"))))
+             ,@body)
+         (mapc #'aob-remove-session made)))))
+
+(defun ygg-projects-tests--names (root)
+  (mapcar #'car (ygg-projects--entries root 'agents)))
+
+(ert-deftest ygg-projects-linked-worktree-session-sits-under-its-main-project ()
+  (ygg-projects-tests--with-trees '("/ygg-t/repo/")
+      '(("feat" "/ygg-t/repo-feat/" "/ygg-t/repo/"))
+    (should (equal (ygg-projects-tests--names "/ygg-t/repo/") '("feat")))
+    (should (equal (ygg-projects--agents "/ygg-t/repo/") '(1 . 1)))
+    (should (equal (ygg-projects--entry-tree (aob-session-get "feat"))
+                   "⌥ wt · feat"))))
+
+(ert-deftest ygg-projects-linked-worktree-that-is-a-project-is-listed-once ()
+  "The main project has it; the worktree's own card does not repeat it."
+  (ygg-projects-tests--with-trees '("/ygg-t/repo/" "/ygg-t/repo-feat/")
+      '(("feat" "/ygg-t/repo-feat/" "/ygg-t/repo/"))
+    (should (equal (ygg-projects-tests--names "/ygg-t/repo/") '("feat")))
+    (should-not (ygg-projects--sessions "/ygg-t/repo-feat/"))
+    (should (equal (ygg-projects--agents "/ygg-t/repo-feat/") '(0 . 0)))))
+
+(ert-deftest ygg-projects-main-checkout-and-plain-folder-sessions-stay-put ()
+  (ygg-projects-tests--with-trees '("/ygg-t/repo/" "/ygg-t/plain/")
+      '(("main" "/ygg-t/repo/" nil) ("plain" "/ygg-t/plain/" nil))
+    (should (equal (ygg-projects-tests--names "/ygg-t/repo/") '("main")))
+    (should (equal (ygg-projects-tests--names "/ygg-t/plain/") '("plain")))
+    (should-not (ygg-projects--entry-tree (aob-session-get "main")))))
+
+(ert-deftest ygg-projects-main-worktree-is-the-first-listed ()
+  (should (equal (ygg-projects--main-worktree
+                  "worktree /r/repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /r/repo-feat\nHEAD def\nbranch refs/heads/feat\n")
+                 "/r/repo/")))
 
 (provide 'ygg-projects-tests)
 ;;; ygg-projects-tests.el ends here

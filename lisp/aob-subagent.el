@@ -30,6 +30,11 @@
                   (equal id (aob-session-ref other :parent-session)))
                 (aob-sessions))))
 
+(defun aob-subagent-of (s)
+  "What a picker says of S when another session sent it, else nil."
+  (when-let* ((p (aob-subagent-parent s)))
+    (format "subagent of %s" (aob-session-name p))))
+
 (defun aob-subagent-native-p (s)
   "Whether S is a subagent its agent runs inside its own turn."
   (and (aob-session-ref s :native-tool-id) t))
@@ -44,12 +49,16 @@
 (defun aob-subagent--native-name (ev)
   (aob--first-line (or (plist-get ev :title) "subagent") 60))
 
-(defun aob-subagent--native-state (ev)
-  "The state the subagent call EV puts its session in."
-  (let ((status (plist-get ev :status)))
+(defun aob-subagent--native-state (ev &optional sending)
+  "The state the subagent call EV puts its session in.
+SENDING is non-nil while the turn that made the call is still going."
+  (let ((status (plist-get ev :status))
+        (raw (plist-get ev :raw)))
     (cond ((equal status "failed") 'failed)
           ((or (member status '(nil "pending" "in_progress"))
-               (> (or (plist-get ev :child-live) 0) 0))
+               (> (or (plist-get ev :child-live) 0) 0)
+               ;; a background call completes when it launches, not when it ends
+               (and sending (listp raw) (eq (plist-get raw :run_in_background) t)))
            'working)
           (t 'done))))
 
@@ -90,7 +99,9 @@
     (unless (equal name (aob-session-name kid))
       (aob-rename-session kid name)))
   (aob-subagent--native-prompt kid ev)
-  (let ((new (aob-subagent--native-state ev)))
+  (let ((new (aob-subagent--native-state
+              ev (when-let* ((p (aob-subagent-parent kid)))
+                   (memq (aob-session-state p) '(working blocked))))))
     (unless (eq new (aob-session-state kid))
       (if (eq new 'working) (aob-turn-begin kid) (aob-turn-end kid))
       (aob-set-state kid new)))
@@ -124,12 +135,14 @@
 (add-hook 'aob-event-change-functions #'aob-subagent--native-note)
 
 (defun aob-subagent--native-settle (s _old new)
-  "Fail S's running subagents when S is gone: no update will close them."
-  (when (memq new '(dead failed))
+  "Settle S's running subagents when S's turn ends: no update will close them.
+Gone, they fail with it; idle, they are done, since the turn ending is
+the last the adapter says of a subagent sent in the background."
+  (when (memq new '(dead failed idle done))
     (dolist (c (aob-subagent-children s))
       (when (and (aob-subagent-native-p c) (eq (aob-session-state c) 'working))
         (aob-turn-end c)
-        (aob-set-state c 'failed)))))
+        (aob-set-state c (if (memq new '(dead failed)) 'failed 'done))))))
 
 (add-hook 'aob-state-change-hook #'aob-subagent--native-settle)
 

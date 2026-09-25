@@ -517,7 +517,7 @@ connection wait for each other."
   (let ((run (ygg-db--run-create :connection conn :statements statements
                                  :callback callback :owner owner))
         (key (ygg-db--key conn)))
-    (if (gethash key ygg-db--running)
+    (if (or (gethash key ygg-db--running) (gethash key ygg-db--queued))
         (puthash key (append (gethash key ygg-db--queued) (list run)) ygg-db--queued)
       (ygg-db--start run))
     run))
@@ -1400,6 +1400,8 @@ Any byte that is not printable ASCII is escaped."
 (defun ygg-db--redis-dangerous (statement)
   "The dangerous command STATEMENT starts with, else nil."
   (let ((words (mapcar #'upcase (or (ygg-db-redis-split statement) (split-string statement)))))
+    (when (and words (string-match-p "\\`[0-9]+\\'" (car words)))
+      (pop words))
     (cl-loop for danger in ygg-db-redis-dangerous-commands
              when (equal (seq-take words (length danger)) danger)
              return (string-join danger " "))))
@@ -1449,9 +1451,10 @@ LINE is one reply redis-cli --json printed."
   (let ((json (lambda (text) (json-parse-string text :object-type 'alist :array-type 'array
                                                :null-object nil :false-object :false))))
     (condition-case nil
-        (if (string-prefix-p "error:" line)
-            (cons 'error (funcall json (substring line 6)))
-          (cons 'ok (funcall json line)))
+        (let ((text (apply #'string (mapcar (lambda (char) (if (>= char #x3fff80) #xfffd char)) line))))
+          (if (string-prefix-p "error:" text)
+              (cons 'error (funcall json (substring text 6)))
+            (cons 'ok (funcall json text))))
       (error (cons 'raw line)))))
 
 (defun ygg-db--redis-map-p (value)
@@ -1547,7 +1550,9 @@ NONCE lines separate the replies; EXIT is the exit status."
 (defun ygg-db--redis-pattern (key)
   "KEY with its id-like segments turned into *."
   (mapconcat (lambda (part)
-               (if (string-match-p "\\`\\(?:[0-9]+\\|[0-9a-fA-F-]\\{8,\\}\\)\\'" part) "*" part))
+               (if (string-match-p "\\`\\(?:[0-9]+\\|[0-9a-fA-F-]\\{8,\\}\\)\\'" part)
+                   "*"
+                 (ygg-db--redis-glob-quote part)))
              (split-string key ":") ":"))
 
 (defun ygg-db--redis-entries (keys replies)
@@ -1581,7 +1586,9 @@ FINISH gets the schema entry."
            (let* ((set (car (plist-get result :sets)))
                   (problem (or (plist-get result :error) (plist-get set :error)))
                   (keys (and (not problem)
-                             (seq-take (append (aref (plist-get set :value) 1) nil)
+                             (seq-take (append (and (vectorp (plist-get set :value))
+                                                    (aref (plist-get set :value) 1))
+                                               nil)
                                        ygg-db-redis-sample-count))))
              (cond
               (problem (funcall fail problem))
@@ -1602,11 +1609,10 @@ FINISH gets the schema entry."
                       (error (funcall fail (error-message-string failure)))))))))
          (error (funcall fail (error-message-string failure))))))))
 
-(defun ygg-db--redis-helper (helper type pattern sample)
-  "Commands of HELPER for the keys matching PATTERN of TYPE, SAMPLE one of them."
+(defun ygg-db--redis-helper (helper type _pattern sample)
+  "Commands of HELPER for keys of TYPE, SAMPLE one of them."
   (let ((key (and sample (ygg-db--redis-quote sample))))
     (pcase helper
-      ('list (list (format "SCAN 0 MATCH %s COUNT 1000" (ygg-db--redis-quote pattern))))
       ('describe
        (and key
             (delq nil (list (concat "TYPE " key) (concat "TTL " key)
@@ -1618,52 +1624,77 @@ FINISH gets the schema entry."
                               ("zset" (concat "ZRANGE " key " 0 99 WITHSCORES"))
                               ("stream" (concat "XRANGE " key " - + COUNT 100"))))))))))
 
-(defun ygg-db--redis-await (process buffer lines deadline)
-  "The LINES-th line PROCESS wrote to BUFFER, waiting until DEADLINE."
+(defun ygg-db--redis-await (process buffer errors lines deadline)
+  "The LINES-th line PROCESS wrote to BUFFER, waiting until DEADLINE.
+Anything on the ERRORS buffer ends the wait at once."
   (let ((line nil))
     (while (and (not line) (< (float-time) deadline))
+      (when (> (buffer-size errors) 0)
+        (error "%s" (string-trim (with-current-buffer errors (buffer-string)))))
       (with-current-buffer buffer
         (goto-char (point-min))
-        (when (zerop (forward-line lines))
+        (when (and (zerop (forward-line lines)) (bolp))
           (forward-line -1)
           (setq line (buffer-substring-no-properties (point) (line-end-position)))))
       (unless (or line (accept-process-output process 0.05))
         (unless (process-live-p process) (setq deadline 0))))
     (or line (error "No reply from Redis"))))
 
-(defun ygg-db--redis-keys (conn prefix)
-  "Keys of CONN that start with PREFIX, by SCAN with MATCH and COUNT.
-Nil on any failure."
+(defun ygg-db--redis-scan (conn pattern limit)
+  "(KEYS . COMPLETE) of CONN matching the glob PATTERN, by SCAN.
+SCAN uses MATCH and COUNT, stops after LIMIT keys or
+ygg-db-redis-completion-rounds calls, and signals on failure."
   (let ((output (generate-new-buffer " *ygg-db redis keys*" t))
         (errors (generate-new-buffer " *ygg-db redis keys stderr*" t))
         (process nil))
     (unwind-protect
-        (condition-case nil
-            (pcase-let* ((`(,argv . ,preamble) (ygg-db--redis-command (plist-get conn :url)))
-                         (pattern (ygg-db--redis-quote (concat (ygg-db--redis-glob-quote prefix) "*")))
-                         (deadline (+ (float-time) ygg-db-redis-timeout))
-                         (seen (cl-count ?\n preamble))
-                         (cursor "0") (keys nil) (rounds 0))
-              (setq process (make-process :name "ygg-db-keys" :command argv :buffer output
-                                          :stderr errors :noquery t :connection-type 'pipe
-                                          :coding 'utf-8-unix))
-              (process-send-string process preamble)
-              (while (progn
-                       (process-send-string
-                        process (format "SCAN %s MATCH %s COUNT %d\n" cursor pattern ygg-db-redis-scan-count))
-                       (let ((reply (ygg-db--redis-parse
-                                     (ygg-db--redis-await process output (cl-incf seen) deadline))))
-                         (unless (eq (car reply) 'ok) (error "SCAN failed"))
-                         (setq cursor (aref (cdr reply) 0)
-                               keys (nconc keys (append (aref (cdr reply) 1) nil))))
-                       (and (not (equal cursor "0"))
-                            (< (cl-incf rounds) ygg-db-redis-completion-rounds)
-                            (< (length keys) ygg-db-redis-completion-limit))))
-              (delete-dups keys))
-          (error nil))
+        (pcase-let* ((`(,argv . ,preamble) (ygg-db--redis-command (plist-get conn :url)))
+                     (match (ygg-db--redis-quote pattern))
+                     (deadline (+ (float-time) ygg-db-redis-timeout))
+                     (seen (cl-count ?\n preamble))
+                     (cursor "0") (keys nil) (rounds 0))
+          (setq process (make-process :name "ygg-db-keys" :command argv :buffer output
+                                      :stderr errors :noquery t :connection-type 'pipe
+                                      :coding 'utf-8-unix))
+          (when-let* ((pipe (get-buffer-process errors))) (set-process-sentinel pipe #'ignore))
+          (process-send-string process preamble)
+          (while (progn
+                   (process-send-string
+                    process (format "SCAN %s MATCH %s COUNT %d\n" cursor match ygg-db-redis-scan-count))
+                   (let ((reply (ygg-db--redis-parse
+                                 (ygg-db--redis-await process output errors (cl-incf seen) deadline))))
+                     (unless (and (eq (car reply) 'ok) (vectorp (cdr reply)))
+                       (error "SCAN failed: %s" (cdr reply)))
+                     (setq cursor (aref (cdr reply) 0)
+                           keys (nconc keys (append (aref (cdr reply) 1) nil))))
+                   (and (not (equal cursor "0"))
+                        (< (cl-incf rounds) ygg-db-redis-completion-rounds)
+                        (< (length keys) limit))))
+          (cons (delete-dups keys) (equal cursor "0")))
       (when (process-live-p process) (delete-process process))
       (kill-buffer output)
       (kill-buffer errors))))
+
+(defun ygg-db--redis-keys (conn prefix)
+  "Keys of CONN that start with PREFIX; nil on any failure."
+  (ignore-errors
+    (car (ygg-db--redis-scan conn (concat (ygg-db--redis-glob-quote prefix) "*")
+                             ygg-db-redis-completion-limit))))
+
+(defun ygg-db--redis-list (conn pattern)
+  "Show the keys of CONN matching PATTERN in the result window."
+  (let* ((started (float-time))
+         (statement (format "SCAN MATCH %s" pattern))
+         (scan (condition-case failure
+                   (ygg-db--redis-scan conn pattern ygg-db-redis-completion-limit)
+                 (error (user-error "%s" (error-message-string failure)))))
+         (result (list :connection conn
+                       :sets (delq nil (list (ygg-db--redis-value-set statement (vconcat (car scan)))
+                                             (unless (cdr scan)
+                                               (list :statement statement
+                                                     :status "stopped early; more keys may match"))))
+                       :elapsed (- (float-time) started))))
+    (ygg-db--show conn (ygg-db-render-result result) result)))
 
 (defun ygg-db--redis-completion-at-point ()
   (let* ((conn ygg-db-connection)
@@ -1673,7 +1704,12 @@ Nil on any failure."
     (list start end
           (if first
               ygg-db--redis-commands
-            (completion-table-with-cache (lambda (prefix) (ygg-db--redis-keys conn prefix))))
+            (let ((prefix (buffer-substring-no-properties start end))
+                  (keys 'unread))
+              (lambda (string predicate action)
+                (unless (eq action 'metadata)
+                  (when (eq keys 'unread) (setq keys (ygg-db--redis-keys conn prefix)))
+                  (complete-with-action action keys string predicate)))))
           :exclusive 'no
           :annotation-function (lambda (_) (if first " command" " key")))))
 
@@ -1886,15 +1922,20 @@ Nil on any failure."
   (let* ((node (ygg-db--node))
          (conn (plist-get node :conn)))
     (unless (eq (plist-get node :kind) 'table) (user-error "Not on a table"))
-    (let* ((family (ygg-db--family (plist-get conn :url)))
-           (statements (or (if (ygg-db--redis-p conn)
-                               (ygg-db--redis-helper helper (plist-get node :schema)
-                                                     (plist-get node :table) (plist-get node :sample))
-                             (ygg-db--ensure-list
-                              (ygg-db-helper-query helper family (plist-get node :schema)
-                                                   (plist-get node :table))))
-                           (user-error "No %s query for %s" helper family))))
-      (ygg-db-query-connection conn statements (current-buffer)))))
+    (if (and (ygg-db--redis-p conn) (eq helper 'list))
+        (ygg-db--redis-list conn (plist-get node :table))
+      (ygg-db--drawer-run helper node conn))))
+
+(defun ygg-db--drawer-run (helper node conn)
+  (let* ((family (ygg-db--family (plist-get conn :url)))
+         (statements (or (if (ygg-db--redis-p conn)
+                             (ygg-db--redis-helper helper (plist-get node :schema)
+                                                   (plist-get node :table) (plist-get node :sample))
+                           (ygg-db--ensure-list
+                            (ygg-db-helper-query helper family (plist-get node :schema)
+                                                 (plist-get node :table))))
+                         (user-error "No %s query for %s" helper family))))
+    (ygg-db-query-connection conn statements (current-buffer))))
 
 (defun ygg-db--ensure-list (value)
   (and value (list value)))

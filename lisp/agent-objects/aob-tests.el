@@ -1332,6 +1332,61 @@ steps are its own trace, one row in the list, and folded in the parent."
               (should (string-match-p "^failed .* 0 Count files" (buffer-string))))))
       (aob-tests--kill-views))))
 
+(ert-deftest aob-native-background-subagent-runs-until-its-sender-settles ()
+  "A background Agent call completes as it launches; its subagent is still
+working, and ends only when the turn that sent it does."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-set-state s 'working)
+          (aob-tests--feed s (replace-regexp-in-string
+                              "\"subagent_type\"" "\"run_in_background\":true,\"subagent_type\""
+                              aob-tests--agent-call t t))
+          (aob-tests--agent-done s "completed")
+          (let ((kid (aob-session-native-child s (car (aob-session-subagents s)))))
+            (should (eq 'working (aob-session-state kid)))
+            (aob-tests--agent-child s "k1" "find src | wc -l" "in_progress")
+            (aob-tests--agent-child s "k1" "find src | wc -l" "completed")
+            (should (eq 'working (aob-session-state kid)))
+            (aob-set-state s 'idle)
+            (should (eq 'done (aob-session-state kid)))
+            (aob-tests--agent-child s "k2" "rg TODO src" "in_progress")
+            (should (eq 'working (aob-session-state kid)))
+            (aob-tests--agent-child s "k2" "rg TODO src" "completed")
+            (should (eq 'done (aob-session-state kid)))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-native-subagent-says-whose-it-is ()
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-tests--feed s aob-tests--agent-call)
+          (should (equal "subagent of test:1"
+                         (aob-subagent-of
+                          (aob-session-native-child s (car (aob-session-subagents s))))))
+          (should-not (aob-subagent-of s)))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-native-subagent-is-listed-only-while-it-runs ()
+  "A subagent is a live session while it works; done, failed or killed it
+leaves every list, and its sender's trace still holds the call."
+  (dolist (end '(done failed killed))
+    (aob-tests--with-session s
+      (unwind-protect
+          (progn
+            (aob-tests--feed s aob-tests--agent-call)
+            (let* ((call (car (aob-session-subagents s)))
+                   (kid (aob-session-native-child s call)))
+              (should (memq kid (aob-live-sessions)))
+              (pcase end
+                ('done (aob-tests--agent-done s "completed"))
+                ('failed (aob-tests--agent-done s "failed"))
+                ('killed (aob--call kid :kill)))
+              (should-not (memq kid (aob-live-sessions)))
+              (should (memq s (aob-live-sessions)))
+              (should (eq call (car (aob-session-subagents s))))))
+        (aob-tests--kill-views)))))
+
 (ert-deftest aob-native-codex-subagent-is-a-session-with-its-own-trace ()
   "A codex thread becomes a session named for the agent, holding its activities."
   (aob-tests--with-session s
@@ -1738,6 +1793,90 @@ session is writing into, so it moves the name and nothing else."
           (should (eq (aob-session-get "acp:rename:1") s))
           (should-error (aob-rename-session s "   ")))
       (aob-remove-session s))))
+
+(ert-deftest aob-a-session-is-told-its-worktree-and-branch-once-per-change ()
+  (let* ((root (file-name-as-directory (file-truename (make-temp-file "aob-place" t))))
+         (main (file-name-as-directory (expand-file-name "main" root)))
+         (tree (file-name-as-directory (expand-file-name "tree" root)))
+         (git (lambda (dir &rest args)
+                (let ((default-directory dir))
+                  (should (eq 0 (apply #'call-process "git" nil nil nil args))))))
+         (s (aob-create-session :id "acp:place:1" :backend 'acp :name "place"
+                                :project main :dir tree :state 'idle)))
+    (unwind-protect
+        (progn
+          (make-directory main)
+          (funcall git main "init" "-q" "-b" "trunk")
+          (funcall git main "-c" "user.email=t@t" "-c" "user.name=t"
+                   "commit" "-q" "--allow-empty" "-m" "0")
+          (funcall git main "worktree" "add" "-q" "-b" "feat" tree)
+          (should (equal (aob-acp--place-note main)
+                         (format "[workspace: %s · branch trunk]"
+                                 (directory-file-name main))))
+          (should (equal (plist-get (aob-acp--place-block s) :text)
+                         (format "[workspace: %s · branch feat · linked worktree of %s]"
+                                 (directory-file-name tree)
+                                 (directory-file-name main))))
+          (should-not (aob-acp--place-block s))
+          (funcall git tree "checkout" "-q" "-b" "feat2")
+          (should (string-match-p "branch feat2 " (plist-get (aob-acp--place-block s) :text)))
+          (make-directory (expand-file-name "sub" tree))
+          (should (string-match-p "branch feat2 " (aob-acp--place-note (expand-file-name "sub/" tree))))
+          (should-not (aob-acp--place-note temporary-file-directory)))
+      (aob-remove-session s)
+      (delete-directory root t))))
+
+(ert-deftest aob-a-renamed-session-renames-the-trace-it-already-has ()
+  (let* ((aob-acp-persist-file nil)
+         (s (aob-create-session :id "acp:rename:2" :backend 'acp
+                                :name "claude:5 · Sep 24" :state 'done))
+         (buf (aob-trace-buffer s)))
+    (unwind-protect
+        (with-current-buffer buf
+          (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "vbet auth fix")))
+            (call-interactively #'aob-rename-session))
+          (should (equal (buffer-name buf) "trace:vbet auth fix"))
+          (should (eq (aob-trace-buffer s) buf))
+          (should-not (get-buffer "trace:claude:5 · Sep 24")))
+      (aob-remove-session s)
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-a-renamed-conversation-keeps-its-name-asleep-awake-and-on-disk ()
+  (let* ((aob-acp-persist-file (make-temp-file "aob-rename-" nil ".eld"))
+         (aob-acp--opened-any nil)
+         (stored (list :agent "claude" :name "claude:5" :dir "/tmp/"
+                       :acp-id "rename-3"))
+         (s (aob-create-session :id "acp:rename-3" :backend 'acp
+                                :name "claude:5 · Sep 24" :state 'done
+                                :refs (list :agent "claude" :acp-id "rename-3"
+                                            :asleep stored)))
+         woken)
+    (unwind-protect
+        (progn
+          (with-temp-file aob-acp-persist-file (prin1 (list stored) (current-buffer)))
+          (should (equal (plist-get (aob-acp--entry s) :name) "claude:5"))
+          (aob-rename-session s "vbet auth fix")
+          (let ((e (aob-acp-persisted-entry "rename-3")))
+            (should (equal (plist-get e :name) "vbet auth fix"))
+            (should (plist-get e :named-by-user)))
+          (cl-letf (((symbol-function 'aob-acp-resume-entry)
+                     (lambda (e &rest _) (setq woken e) nil)))
+            (should-error (aob-transcript-wake s)))
+          (should (equal (plist-get woken :name) "vbet auth fix"))
+          (should (plist-get woken :named-by-user))
+          (aob-remove-session s)
+          (let* ((file (make-temp-file "aob-rename-" nil ".jsonl"))
+                 (back (aob-transcript--session
+                        (aob-acp-persisted-entry "rename-3") file)))
+            (unwind-protect
+                (progn
+                  (should (equal (aob-session-name back) "vbet auth fix"))
+                  (should (aob-session-ref back :named-by-user)))
+              (aob-remove-session back)
+              (delete-file file))))
+      (when (aob-session-get "acp:rename-3") (aob-remove-session s))
+      (aob-tests--kill-views)
+      (delete-file aob-acp-persist-file))))
 
 (ert-deftest aob-a-session-can-be-numbered-off-something-other-than-its-agent ()
   "A session started for a task is named for the task, and a second one on
@@ -2347,6 +2486,23 @@ not the ones the repository says its work needs."
                            (mapcar (lambda (e) (plist-get e :name))
                                    (append sent nil))))))
       (delete-directory root t))))
+
+(ert-deftest aob-compose-from-a-trace-whose-folder-is-gone ()
+  (let* ((live (make-temp-file "aob-live" t))
+         (gone (expand-file-name "removed-worktree/" temporary-file-directory))
+         (s (aob-create-session :id "acp:gone:1" :backend 'acp :name "gone"
+                                :project gone :dir live))
+         buf)
+    (unwind-protect
+        (with-temp-buffer
+          (setq default-directory gone)
+          (setq buf (aob-compose s))
+          (with-current-buffer buf
+            (should (file-directory-p default-directory))
+            (should (equal (file-name-as-directory live) default-directory))))
+      (when (buffer-live-p buf) (kill-buffer buf))
+      (aob-remove-session s)
+      (delete-directory live t))))
 
 (provide 'aob-tests)
 ;;; aob-tests.el ends here
@@ -3005,7 +3161,7 @@ the host weighs it at, and no keys."
                      '("question_0_custom")))
       (aob-tests--goto "Auth · Which auth method?")
       (should (get-text-property (point) 'aob-question))
-      (should-not (string-match-p "Other" (buffer-string)))
+      (should-not (string-match-p "◇ Other" (buffer-string)))
       (aob-tests--goto "◦ API key")
       (aob-trace-answer)
       (aob-tests--goto "◦ OAuth")
@@ -3056,6 +3212,143 @@ the host weighs it at, and no keys."
       (should (equal (aob-tests--replies sent)
                      (list (concat "{\"jsonrpc\":\"2.0\",\"id\":22,\"result\":{\"action\":\"accept\","
                                    "\"content\":{\"question_0\":[\"ui\"],\"question_1\":\"later\"}}}")))))))
+
+(defconst aob-tests--ask-one
+  '(:mode "form" :sessionId "sess-test" :toolCallId "toolu_o"
+    :message "Which cache?"
+    :requestedSchema
+    (:type "object"
+     :properties
+     (:question_0 (:type "string" :title "Cache"
+                   :oneOf [(:const "Redis" :title "Redis") (:const "None" :title "None")])
+      :question_0_custom (:type "string" :title "Other"
+                          :_meta (:_askUserQuestionCustomAnswer
+                                  (:questionId "question_0" :isCustomAnswer t)))))))
+
+(defmacro aob-tests--answering (choice typed &rest body)
+  "Run BODY with every choice read answering CHOICE and every text read TYPED.
+The tables offered are collected into `offered', each as its completions."
+  (declare (indent 2))
+  `(let ((offered nil))
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (_p table &rest _)
+                  (push (all-completions "" table) offered) ,choice))
+               ((symbol-function 'completing-read-multiple)
+                (lambda (_p table &rest _)
+                  (push (all-completions "" table) offered) ,choice))
+               ((symbol-function 'read-string) (lambda (&rest _) ,typed)))
+       ,@body)))
+
+(ert-deftest aob-choice-table-ends-in-other-and-keeps-the-agents-order ()
+  (let ((table (aob--choice-table '("b" "a"))))
+    (should (equal (all-completions "" table) '("b" "a" "Other…")))
+    (should (eq (cdr (assq 'display-sort-function
+                           (cdr (funcall table "" nil 'metadata))))
+                'identity))))
+
+(ert-deftest aob-resolve-other-sends-claude-its-custom-answer ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--request s 61 "elicitation/create" aob-tests--ask-one)
+    (aob-tests--answering "Other…" "Memcached"
+      (aob-tests--capturing sent
+        (aob-resolve s)
+        (should (equal (car offered) '("Redis" "None" "Other…")))
+        (should (equal (aob-tests--replies sent)
+                       (list (concat "{\"jsonrpc\":\"2.0\",\"id\":61,\"result\":{\"action\":\"accept\","
+                                     "\"content\":{\"question_0_custom\":\"Memcached\"}}}"))))))
+    (aob-tests--request s 62 "elicitation/create" aob-tests--ask-one)
+    (aob-tests--answering "Redis" "unused"
+      (aob-tests--capturing sent
+        (aob-resolve s)
+        (should (equal (aob-tests--replies sent)
+                       (list (concat "{\"jsonrpc\":\"2.0\",\"id\":62,\"result\":{\"action\":\"accept\","
+                                     "\"content\":{\"question_0\":\"Redis\"}}}"))))))))
+
+(ert-deftest aob-resolve-other-joins-a-multi-select ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--request
+     s 63 "elicitation/create"
+     '(:mode "form" :sessionId "sess-test" :message "Which parts?"
+       :requestedSchema
+       (:type "object"
+        :properties
+        (:question_0 (:type "array" :items (:anyOf [(:const "api" :title "api")
+                                                    (:const "ui" :title "ui")]))
+         :question_0_custom (:type "string" :title "Other"
+                             :_meta (:_askUserQuestionCustomAnswer (:questionId "question_0")))))))
+    (aob-tests--answering '("api" "Other…") "db"
+      (aob-tests--capturing sent
+        (aob-resolve s)
+        (should (equal (car offered) '("api" "ui" "Other…")))
+        (should (equal (aob-tests--replies sent)
+                       (list (concat "{\"jsonrpc\":\"2.0\",\"id\":63,\"result\":{\"action\":\"accept\","
+                                     "\"content\":{\"question_0\":[\"api\"],\"question_0_custom\":\"db\"}}}"))))))))
+
+(ert-deftest aob-resolve-string-field-reads-plain-text ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--request
+     s 64 "elicitation/create"
+     '(:mode "form" :sessionId "sess-test" :message "Name it"
+       :requestedSchema (:type "object" :properties (:name (:type "string" :title "Name")))))
+    (aob-tests--answering "never" "widget"
+      (aob-tests--capturing sent
+        (aob-resolve s)
+        (should-not offered)
+        (should (equal (aob-tests--replies sent)
+                       (list (concat "{\"jsonrpc\":\"2.0\",\"id\":64,\"result\":{\"action\":\"accept\","
+                                     "\"content\":{\"name\":\"widget\"}}}"))))))))
+
+(ert-deftest aob-resolve-other-on-an-enum-only-field-declines-and-says-it ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--request
+     s 65 "elicitation/create"
+     '(:mode "form" :sessionId "sess-test" :message "Pick a region"
+       :requestedSchema
+       (:type "object"
+        :properties (:region (:type "string" :title "Region" :enum ["eu" "us"]))
+        :required ["region"])))
+    (aob-tests--answering "Other…" "ap-south, if it is cheaper"
+      (aob-tests--capturing sent
+        (aob-resolve s)
+        (should (equal (car offered) '("eu" "us" "Other…")))
+        (should (equal (aob-tests--replies sent)
+                       '("{\"jsonrpc\":\"2.0\",\"id\":65,\"result\":{\"action\":\"decline\"}}")))))
+    (should (equal (caar (aob-session-ref s :queued))
+                   "Pick a region: ap-south, if it is cheaper"))))
+
+(ert-deftest aob-resolve-permission-offers-no-other ()
+  (aob-tests--with-session s
+    (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"id\":66,\"method\":\"session/request_permission\",\"params\":{\"toolCall\":{\"title\":\"x\"},\"options\":[{\"optionId\":\"a\",\"name\":\"Allow\",\"kind\":\"allow_once\"},{\"optionId\":\"r\",\"name\":\"Reject\",\"kind\":\"reject_once\"}]}}")
+    (aob-tests--answering "Allow" "unused"
+      (aob-tests--capturing sent
+        (aob-resolve s)
+        (should (equal (car offered) '("Allow" "Reject")))
+        (should (equal (aob-tests--replies sent)
+                       '("{\"jsonrpc\":\"2.0\",\"id\":66,\"result\":{\"outcome\":{\"outcome\":\"selected\",\"optionId\":\"a\"}}}")))))))
+
+(ert-deftest aob-trace-shows-other-last-and-reads-your-own-there ()
+  (aob-tests--with-trace-session s
+    (aob-tests--request s 67 "elicitation/create" aob-tests--ask-one)
+    (aob-tests--goto "◦ None")
+    (forward-line 1)
+    (should (looking-at "    ◦ Other…$"))
+    (should (equal (get-text-property (point) 'aob-question) "Which cache?"))
+    (let (boxed)
+      (cl-letf (((symbol-function 'aob-trace--comment-box)
+                 (lambda (_buf _seq question &rest _) (setq boxed question))))
+        (aob-trace-answer))
+      (should (equal boxed "Which cache?")))
+    (aob-trace--add-comment s (plist-get (car (aob-session-decisions s)) :seq)
+                            "Which cache?" "Memcached")
+    (aob-tests--capturing sent
+      (aob-trace-send)
+      (should (equal (aob-tests--replies sent)
+                     (list (concat "{\"jsonrpc\":\"2.0\",\"id\":67,\"result\":{\"action\":\"accept\","
+                                   "\"content\":{\"question_0_custom\":\"Memcached\"}}}")))))))
 
 (ert-deftest aob-trace-answers-codex-user-input-and-declines ()
   (aob-tests--with-trace-session s
@@ -4007,9 +4300,10 @@ next chunk does not pull the page back down."
             (insert "neither, a token")
             (aob-tests--capturing sent
               (aob-trace-comment-send-now)
-              (should (= (length (aob-tests--replies sent)) 1))
-              (should (string-match-p "neither, a token"
-                                      (car (aob-tests--replies sent)))))))
+              (should (equal (aob-tests--replies sent)
+                             '("{\"jsonrpc\":\"2.0\",\"id\":21,\"result\":{\"action\":\"decline\"}}"))))))
+        (should (equal (caar (aob-session-ref s :queued))
+                       "Which auth method?: neither, a token"))
         (should-not said)
         (should-not (aob-session-decisions s))
         (should-not (aob-session-ref s :comments))))))
@@ -4433,3 +4727,486 @@ next chunk does not pull the page back down."
         (should (= (length wire) 2))
         (should (equal (plist-get (car (aob-session-events s)) :title)
                        "thinking low not supported by codex"))))))
+
+(defmacro aob-tests--with-default-name (var &rest body)
+  "VAR is a fake ACP session on claude, still called claude:9."
+  (declare (indent 1))
+  `(aob-tests--with-session ,var
+     (setf (aob-session-name ,var) "claude:9")
+     (aob-session-put ,var :agent "claude")
+     (cl-letf (((symbol-function 'aob-acp--request) #'ignore))
+       ,@body)))
+
+(defun aob-tests--info-update (s update)
+  (aob-tests--feed s (json-encode
+                      `((jsonrpc . "2.0") (method . "session/update")
+                        (params (sessionId . "sess-test")
+                                (update . ,(cons '(sessionUpdate . "session_info_update")
+                                                 update)))))))
+
+(ert-deftest aob-auto-name-a-default-session-is-named-from-its-first-prompt ()
+  (aob-tests--with-default-name s
+    (aob-acp--prompt-1 s "Fix the JDT handler so it stops dropping diagnostics on save")
+    (should (equal (aob-session-name s) "claude: Fix the JDT handler so it stops"))
+    (should (equal (aob-session-id s) "acp:test:1"))
+    (aob-set-state s 'idle)
+    (aob-acp--prompt-1 s "and now something else")
+    (should (equal (aob-session-name s) "claude: Fix the JDT handler so it stops"))))
+
+(ert-deftest aob-auto-name-counts-a-dated-reading-name-as-default ()
+  (aob-tests--with-default-name s
+    (dolist (name '("claude:6 · Sep 23" "claude:6 · Sep 23 ac1e"))
+      (setf (aob-session-name s) name)
+      (should (aob-acp--default-name-p s)))
+    (setf (aob-session-name s) "vbet · Sep 23")
+    (should-not (aob-acp--default-name-p s))))
+
+(ert-deftest aob-auto-name-leaves-a-name-the-user-gave-alone ()
+  (aob-tests--with-default-name s
+    (aob-rename-session s "reconnect race")
+    (aob-acp--prompt-1 s "fix the jdt handler")
+    (aob-tests--info-update s '((title . "Agent title")))
+    (should (equal (aob-session-name s) "reconnect race")))
+  (aob-tests--with-default-name s
+    (aob-session-put s :named-by-user t)
+    (aob-acp--prompt-1 s "fix the jdt handler")
+    (should (equal (aob-session-name s) "claude:9"))))
+
+(ert-deftest aob-auto-name-leaves-a-name-that-is-not-a-default-alone ()
+  "A name from before the flag existed, or numbered off a task, says
+something already."
+  (aob-tests--with-default-name s
+    (setf (aob-session-name s) "fix-the-race:2")
+    (aob-acp--prompt-1 s "fix the jdt handler")
+    (should (equal (aob-session-name s) "fix-the-race:2"))))
+
+(ert-deftest aob-auto-name-an-agent-title-wins-over-the-prompt ()
+  (aob-tests--with-default-name s
+    (aob-acp--prompt-1 s "fix the jdt handler")
+    (should (equal (aob-session-name s) "claude: fix the jdt handler"))
+    (aob-tests--info-update s '((title . "JDT diagnostics on save")))
+    (should (equal (aob-session-name s) "claude: JDT diagnostics on save"))
+    (aob-tests--info-update s '((_meta (goal (objective . "ship the handler")))))
+    (should (equal (aob-session-name s) "claude: JDT diagnostics on save"))))
+
+(ert-deftest aob-auto-name-uses-the-goal-over-the-prompt ()
+  (aob-tests--with-default-name s
+    (aob-acp--prompt-1 s "fix the jdt handler")
+    (aob-tests--info-update s '((_meta (goal (objective . "Ship the JDT handler")))))
+    (should (equal (aob-session-name s) "claude: Ship the JDT handler"))
+    (aob-set-state s 'idle)
+    (aob-acp--prompt-1 s "something unrelated")
+    (should (equal (aob-session-name s) "claude: Ship the JDT handler"))))
+
+(ert-deftest aob-auto-name-is-unique-among-live-sessions ()
+  (let ((twin (aob-create-session :id "acp:twin:1" :backend 'acp
+                                  :name "claude: fix the jdt handler"
+                                  :state 'idle)))
+    (unwind-protect
+        (aob-tests--with-default-name s
+          (aob-acp--prompt-1 s "fix the jdt handler")
+          (should (equal (aob-session-name s) "claude: fix the jdt handler 2"))
+          (aob-tests--info-update s '((title . "fix the jdt handler")))
+          (should (equal (aob-session-name s) "claude: fix the jdt handler 2")))
+      (aob-remove-session twin))))
+
+(ert-deftest aob-auto-name-strips-what-is-not-words ()
+  (should (equal (aob-acp--name-from-text
+                  "/review @lisp/aob.el [[Image1]] \"**fix** the \x60jdt\x60 handler\"")
+                 "fix the jdt handler"))
+  (should (equal (aob-acp--name-from-text
+                  "<context region a.el>\n(defun x ())\n</context>\n\n/clear\n\n## Don't   drop [the](http://x) diagnostics!")
+                 "Don't drop the diagnostics"))
+  (should (equal (aob-acp--name-from-text "mail me at foo@bar.com please")
+                 "mail me at foo@bar.com please"))
+  (should (equal (aob-acp--name-from-text
+                  "make the sidebar remember which projects were folded open")
+                 "make the sidebar remember which"))
+  (should (equal (aob-acp--name-from-text "/Users/x/foo.el crashes on load")
+                 "Users/x/foo.el crashes on load"))
+  (should (equal (aob-acp--name-from-text
+                  (concat "<context a.el>\n" (make-string 200000 ?x)
+                          "\n</context>\nfix it"))
+                 "fix it"))
+  (should-not (aob-acp--name-from-text
+               "\n\n<preset name=\"review\">\nReview the diff.\n</preset>"))
+  (should-not (aob-acp--name-from-text "/compact"))
+  (should-not (aob-acp--name-from-text "[[Image2]] @a.png")))
+
+(ert-deftest aob-auto-name-an-explicit-spawn-name-counts-as-given ()
+  (let (s)
+    (unwind-protect
+        (cl-letf (((symbol-function 'aob-acp--project) (lambda () "/tmp/"))
+                  ((symbol-function 'aob-acp--open)
+                   (lambda (_agent name &rest _)
+                     (setq s (aob-create-session :id (concat "acp:" name)
+                                                 :backend 'acp :name name
+                                                 :state 'starting))))
+                  (aob-acp-show-trace nil))
+          (aob-acp-spawn "claude" nil nil "reviewer")
+          (should (aob-session-ref s :named-by-user)))
+      (when s (aob-remove-session s)))))
+
+(ert-deftest aob-auto-name-flags-survive-a-restore ()
+  (let ((s (aob-create-session :id "acp:persist:1" :backend 'acp
+                               :name "claude: fix the jdt handler" :state 'idle
+                               :refs (list :agent "claude" :acp-id "x"
+                                           :named-by-user t :auto-named 'prompt)))
+        refs)
+    (unwind-protect
+        (let ((e (aob-acp--entry s)))
+          (should (eq (plist-get e :named-by-user) t))
+          (should (eq (plist-get e :auto-named) 'prompt))
+          (setq e (plist-put e :dir "/tmp/"))
+          (setq e (read (prin1-to-string e)))
+          (aob-remove-session s)
+          (cl-letf (((symbol-function 'aob-acp--open)
+                     (lambda (&rest _) (setq refs aob-acp-session-refs) nil)))
+            (aob-acp-resume-entry e))
+          (should (eq (plist-get refs :named-by-user) t))
+          (should (eq (plist-get refs :auto-named) 'prompt)))
+      (when (aob-session-get "acp:persist:1") (aob-remove-session s)))))
+
+(ert-deftest aob-worktree-porcelain-names-each-checked-out-tree ()
+  (should (equal (aob-acp--parse-worktrees
+                  (concat "worktree /r/main\nHEAD 1\nbranch refs/heads/main\n\n"
+                          "worktree /r/feat\nHEAD 2\nbranch refs/heads/feat/x\n\n"
+                          "worktree /r/loose\nHEAD 3\ndetached\n\n"
+                          "worktree /r/bare\nbare\n\n"
+                          "worktree /r/gone\nHEAD 4\nbranch refs/heads/g\nprunable gitdir file points to non-existent location\n"))
+                 '(("/r/main/" . "main") ("/r/feat/" . "feat/x") ("/r/loose/")))))
+
+(defun aob-tests--git (dir &rest args)
+  (with-temp-buffer
+    (unless (eq 0 (apply #'call-process "git" nil t nil "-C" dir
+                         "-c" "user.email=t@t" "-c" "user.name=t" args))
+      (error "git %S: %s" args (buffer-string)))))
+
+(defmacro aob-tests--with-trees (repo second &rest body)
+  "REPO is a scratch repository; SECOND its linked worktree, or nil for none."
+  (declare (indent 2))
+  `(let* ((,repo (file-name-as-directory (file-truename (make-temp-file "aob-trees" t))))
+          (,second nil))
+     (unwind-protect
+         (progn
+           (aob-tests--git ,repo "init" "-q")
+           (aob-tests--git ,repo "commit" "--allow-empty" "-q" "-m" "x")
+           (ignore ,second)
+           ,@body)
+       (dolist (w (aob-acp--worktrees ,repo))
+         (unless (equal (file-truename (car w)) ,repo)
+           (ignore-errors (aob-tests--git ,repo "worktree" "remove" "--force" (car w)))
+           (ignore-errors (delete-directory (car w) t))
+           (let ((parent (file-name-directory (directory-file-name (car w)))))
+             (when (string-prefix-p "aob-tree-home"
+                                    (file-name-nondirectory (directory-file-name parent)))
+               (ignore-errors (delete-directory parent t))))))
+       (delete-directory ,repo t))))
+
+(defun aob-tests--add-tree (repo name)
+  (let ((dir (file-name-as-directory
+              (file-truename (expand-file-name name (make-temp-file "aob-tree-home" t))))))
+    (aob-tests--git repo "worktree" "add" "-q" "-b" name (directory-file-name dir))
+    dir))
+
+(defun aob-tests--no-asking (&rest args)
+  (error "asked: %S" (car args)))
+
+(ert-deftest aob-worktree-choice-only-when-there-is-one-to-make ()
+  (let ((plain (make-temp-file "aob-nogit" t)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'completing-read) #'aob-tests--no-asking)
+                  ((symbol-function 'read-string) #'aob-tests--no-asking))
+          (should-not (aob-acp-read-worktree plain))
+          (aob-tests--with-trees repo second
+            (should-not (aob-acp-read-worktree repo))
+            (should (equal (mapcar #'car (aob-acp--worktrees repo)) (list repo)))
+            (setq second (aob-tests--add-tree repo "second"))
+            (should (= (length (aob-acp--worktree-choices repo)) 2))
+            (should-error (aob-acp-read-worktree repo))))
+      (delete-directory plain t))))
+
+(defun aob-tests--spawn-cwd (start tree &optional agent)
+  "Spawn AGENT, else claude, from START in TREE; answer (CWD DIR PROJECT)."
+  (let ((aob-acp-start-dir start)
+        (aob-acp-show-trace nil)
+        spec s)
+    (cl-letf (((symbol-function 'aob-acp--connect)
+               (lambda (_s open _then) (setq spec (funcall open '(:agentInfo (:name "x")))))))
+      (setq s (aob-acp-spawn (or agent "claude") nil nil nil tree))
+      (let ((deadline (+ (float-time) 15)))
+        (while (and (not spec) (< (float-time) deadline))
+          (accept-process-output nil 0.05))))
+    (unwind-protect
+        (list (plist-get (cadr spec) :cwd) (aob-session-dir s) (aob-session-project s))
+      (aob-remove-session s))))
+
+(ert-deftest aob-a-picked-worktree-is-where-the-session-starts ()
+  (aob-tests--with-trees repo second
+    (setq second (aob-tests--add-tree repo "second"))
+    (should (equal (aob-tests--spawn-cwd repo second)
+                   (list (directory-file-name second) second repo)))
+    (should (equal (aob-tests--spawn-cwd repo nil)
+                   (list (directory-file-name repo) repo repo)))
+    (let* ((aob-acp-worktree-root (file-truename (make-temp-file "aob-wt-root" t)))
+           (fresh (file-name-as-directory (expand-file-name "made" aob-acp-worktree-root))))
+      (unwind-protect
+          (progn
+            (should (equal (car (aob-tests--spawn-cwd repo (cons fresh "topic/new")))
+                           (directory-file-name fresh)))
+            (should (file-directory-p fresh))
+            (should (equal (cdr (assoc fresh (aob-acp--worktrees repo))) "topic/new")))
+        (ignore-errors (aob-tests--git repo "worktree" "remove" "--force" fresh))
+        (delete-directory aob-acp-worktree-root t)))))
+
+(ert-deftest aob-spawn-prompt-asks-no-worktree-in-a-single-tree-repo ()
+  (aob-tests--with-trees repo second
+    (let ((aob-acp-start-dir repo)
+          (aob-acp-show-trace nil)
+          spec s)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt &rest _)
+                   (if (string-prefix-p "ACP agent" prompt) "claude"
+                     (error "asked: %s" prompt))))
+                ((symbol-function 'read-string) (lambda (&rest _) ""))
+                ((symbol-function 'aob-acp--connect)
+                 (lambda (_s open _then) (setq spec (funcall open nil)))))
+        (setq s (call-interactively #'aob-acp-spawn)))
+      (unwind-protect
+          (should (equal (plist-get (cadr spec) :cwd) (directory-file-name repo)))
+        (aob-remove-session s)))))
+
+(defmacro aob-tests--add-folder (var init &rest body)
+  "VAR is an idle claude session over INIT whose requests land in SENT."
+  (declare (indent 2))
+  `(let ((home (file-name-as-directory (file-truename (make-temp-file "aob-home" t))))
+         (extra (file-name-as-directory (file-truename (make-temp-file "aob-extra" t))))
+         (aob-acp-show-trace nil)
+         sent)
+     (aob-tests--with-session ,var
+       (setf (aob-session-dir ,var) home (aob-session-project ,var) home)
+       (aob-session-put ,var :agent "claude")
+       (aob-session-put ,var :acp-id "sess-test")
+       (aob-session-put ,var :want-tools '("Read"))
+       (aob-acp--with-limits ,var ,init "session/new" nil)
+       (aob-set-state ,var 'idle)
+       (process-put (aob-session-conn ,var) 'aob-init (list 'done ,init))
+       (let ((proc (aob-session-conn ,var)))
+         (unwind-protect
+             (cl-letf (((symbol-function 'aob-acp--request)
+                        (lambda (_s method params &rest _) (push (cons method params) sent)))
+                       ((symbol-function 'aob-acp--notify) #'ignore)
+                       ((symbol-function 'aob-acp--live-conn) (lambda (&rest _) proc))
+                       ((symbol-function 'aob-acp--conn-cleanup) #'ignore)
+                       ((symbol-function 'aob-acp--seed-history) #'ignore))
+               ,@body)
+           (when-let* ((again (aob-session-get "acp:test:1")))
+             (unless (eq again ,var) (aob-remove-session again)))
+           (delete-directory home t)
+           (delete-directory extra t))))))
+
+(ert-deftest aob-add-folder-resumes-with-it-and-keeps-limits ()
+  (let ((init '(:agentInfo (:name "@agentclientprotocol/claude-agent-acp")
+                :agentCapabilities (:loadSession t :sessionCapabilities
+                                    (:additionalDirectories nil :resume nil)))))
+    (aob-tests--add-folder s init
+      (aob-acp-add-folder s extra)
+      (let* ((resume (cdr (assoc "session/resume" sent)))
+             (wire (json-parse-string (json-serialize resume)
+                                      :object-type 'plist :array-type 'list)))
+        (should (assoc "session/close" sent))
+        (should (equal (plist-get wire :sessionId) "sess-test"))
+        (should (equal (plist-get wire :cwd) (directory-file-name home)))
+        (should (equal (plist-get wire :additionalDirectories)
+                       (list (directory-file-name extra))))
+        (should (equal (plist-get (plist-get (plist-get (plist-get wire :_meta) :claudeCode)
+                                             :options)
+                                  :tools)
+                       '("Read")))
+        (should (equal (aob-session-ref (aob-session-get "acp:test:1") :extra-dirs)
+                       (list extra)))))))
+
+(ert-deftest aob-add-folder-refuses-an-agent-without-additional-directories ()
+  (let ((init '(:agentInfo (:name "@agentclientprotocol/claude-agent-acp")
+                :agentCapabilities (:loadSession t :sessionCapabilities (:resume nil)))))
+    (aob-tests--add-folder s init
+      (should-error (aob-acp-add-folder s extra) :type 'user-error)
+      (should-not sent)
+      (should-not (aob-session-ref s :extra-dirs))
+      (should (eq (aob-session-get "acp:test:1") s)))))
+
+(ert-deftest aob-spawn-with-asks-a-worktree-only-when-there-are-two ()
+  (aob-tests--with-trees repo second
+    (let ((aob-acp-start-dir repo) asked trees)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (prompt &rest _) (push prompt asked) "claude"))
+                ((symbol-function 'aob-compose)
+                 (lambda (target &rest _) (funcall target "hi" nil) (current-buffer)))
+                ((symbol-function 'aob-acp--spawn-with-1)
+                 (lambda (&rest args) (push (nth 5 args) trees))))
+        (call-interactively #'aob-acp-spawn-with)
+        (should (equal asked '("Preset: ")))
+        (should (equal trees '(nil)))
+        (setq second (aob-tests--add-tree repo "second") asked nil)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (prompt coll &rest _)
+                     (push prompt asked)
+                     (if (equal prompt "Worktree: ")
+                         (seq-find (lambda (c) (string-search "second" c)) coll)
+                       "claude"))))
+          (call-interactively #'aob-acp-spawn-with)
+          (should (equal (car trees) second))
+          (should (equal (reverse asked) '("Preset: " "Worktree: "))))))))
+
+(ert-deftest aob-compose-offers-a-worktree-only-when-there-are-two ()
+  (aob-tests--modal
+   '(aob-tests--with-trees repo second
+      (let ((aob-acp-show-trace nil) asked)
+        (with-temp-buffer
+          (aob-compose-mode)
+          (setq default-directory repo aob-compose--dir repo)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt coll &rest _)
+                       (push (cons prompt (and (listp coll) coll)) asked)
+                       "claude")))
+            (ygg-compose-transient))
+          (unless (and (= (length asked) 1)
+                       (not (member "worktree" (cdar asked))))
+            (error "single tree asked %S" asked))
+          (setq second (aob-tests--add-tree repo "second") asked nil)
+          (cl-letf (((symbol-function 'completing-read)
+                     (lambda (prompt coll &rest _)
+                       (push prompt asked)
+                       (if (equal prompt "Worktree: ")
+                           (seq-find (lambda (c) (string-search "second" c)) coll)
+                         "worktree"))))
+            (ygg-compose-transient))
+          (unless (equal ygg-aob--draft-tree second)
+            (error "draft tree %S" ygg-aob--draft-tree))
+          (unless (member "⌥ second" aob-compose--tags)
+            (error "tags %S" aob-compose--tags))
+          (let (spec s)
+            (cl-letf (((symbol-function 'aob-acp--connect)
+                       (lambda (_s open _then) (setq spec (funcall open nil)))))
+              (setq s (funcall aob-compose-spawn-function "hi" "claude")))
+            (unwind-protect
+                (unless (and (equal (plist-get (cadr spec) :cwd) (directory-file-name second))
+                             (equal (aob-session-dir s) second)
+                             (equal (aob-session-project s) repo))
+                  (error "spawned %S in %S" (cadr spec) (aob-session-dir s)))
+              (aob-remove-session s))))))))
+
+(ert-deftest aob-picking-the-own-tree-is-no-choice-at-all ()
+  (aob-tests--with-trees repo second
+    (setq second (aob-tests--add-tree repo "second"))
+    (cl-letf (((symbol-function 'completing-read)
+               (lambda (_prompt coll &rest _)
+                 (seq-find (lambda (c) (string-search "master" c)) coll))))
+      (should-not (aob-acp-read-worktree repo))
+      (should (equal (aob-acp-read-worktree second) repo)))))
+
+(ert-deftest aob-an-isolated-preset-keeps-its-own-worktree ()
+  (aob-tests--with-trees repo second
+    (setq second (aob-tests--add-tree repo "second"))
+    (let ((aob-acp-worktree-root (file-truename (make-temp-file "aob-wt-root" t))))
+      (unwind-protect
+          (pcase-let ((`(,_ ,dir ,_) (aob-tests--spawn-cwd repo second "claude-isolated")))
+            (should (string-prefix-p aob-acp-worktree-root dir)))
+        (delete-directory aob-acp-worktree-root t)))))
+
+(ert-deftest aob-a-worktree-another-session-works-in-is-not-reaped ()
+  (let* ((root (file-name-as-directory (file-truename (make-temp-file "aob-wt-root" t))))
+         (aob-acp-worktree-root root)
+         (dir (file-name-as-directory (expand-file-name "shared" root)))
+         (a (aob-create-session :id "acp:reap-a" :backend 'acp :name "reap-a"
+                                :project "/tmp/" :dir dir :state 'idle))
+         (b (aob-create-session :id "acp:reap-b" :backend 'acp :name "reap-b"
+                                :project "/tmp/" :dir dir :state 'idle))
+         asked)
+    (make-directory dir t)
+    (unwind-protect
+        (cl-letf (((symbol-function 'ygg-git-async) (lambda (&rest _) (setq asked t))))
+          (aob-acp--reap-worktree a)
+          (should-not asked)
+          (aob-remove-session b)
+          (aob-acp--reap-worktree a)
+          (should asked))
+      (aob-remove-session a)
+      (when (aob-session-get "acp:reap-b") (aob-remove-session b))
+      (delete-directory root t))))
+
+(ert-deftest aob-add-folder-forgets-it-when-the-restart-fails ()
+  (let ((init '(:agentInfo (:name "@agentclientprotocol/claude-agent-acp")
+                :agentCapabilities (:loadSession t :sessionCapabilities
+                                    (:additionalDirectories nil :resume nil)))))
+    (aob-tests--add-folder s init
+      (cl-letf (((symbol-function 'aob-acp-restart)
+                 (lambda (&rest _) (user-error "gone"))))
+        (should-error (aob-acp-add-folder s extra) :type 'user-error))
+      (should-not (aob-session-ref s :extra-dirs)))))
+
+(ert-deftest aob-trace-gutter-cells-are-one-width ()
+  "Every mark in the gutter takes the same cell and keeps the same gap
+before the text: fringe marks draw inside one eight-pixel width and keep
+off its two columns nearest the text, row glyphs are no bigger than the
+text, a narrow window keeps a margin for the speaker's mark, a thought
+mid-turn carries no glyph of its own, nor does any other delta row or
+the folded reads, which show no clock either, the agent's mark is no
+wider than one cell, wrapped command output hangs under the command,
+and copying a line leaves its mark behind."
+  (dolist (m aob-trace--marks)
+    (should (vectorp (nth 4 m)))
+    (seq-doseq (row (nth 4 m))
+      (should (< row 256))
+      (should (zerop (logand row 3)))))
+  (should (eq 'unspecified (face-attribute 'aob-trace-icon :height nil t)))
+  (should (<= (car (aob-trace--agent-size 27 8)) 8))
+  (should (<= (cdr (aob-trace--agent-size 27 8)) 27))
+  (should (equal (aob-trace--agent-size 6 8) '(7 . 6)))
+  (dolist (style '(delta log))
+    (let ((aob-trace-style style) (aob-trace-icons nil))
+      (aob-tests--with-trace-session s
+        (dolist (ev (list (list :type 'error :text "boom" :seq 1)
+                          (list :type 'stop :stopReason "end_turn" :seq 2)
+                          (list :type 'permission :title "rm" :seq 3)
+                          (list :type 'plan :seq 4)
+                          (list :type 'error :text "boom" :seq 5 :turn-head t)))
+          (let ((line (aob-trace--plain-line ev "00:00:00")))
+            (should (eq (eq style 'log)
+                        (string-prefix-p (concat (aob-trace--glyph ev) " ") line)))
+            (should-not (string-search "■ rm" line)))))))
+  (let ((aob-trace-style 'delta))
+    (aob-tests--with-trace-session s
+      (aob-tests--say s "Looking.")
+      (aob-tests--think s "which file")
+      (aob-tests--tool s "x1" "execute" "`pwd`" "completed"
+                       :content (aob-tests--output "/tmp/proj"))
+      (dolist (file '("lib/a.dart" "lib/b.dart" "lib/c.dart"))
+        (aob-tests--read s file file "completed"))
+      (let ((win (selected-window)))
+        (delete-other-windows)
+        (set-window-buffer win (current-buffer))
+        (aob-trace--fit-margins)
+        (should (> (or (car (window-margins win)) 0) 0))
+        (select-window (split-window-right))
+        (set-window-buffer (selected-window) (current-buffer))
+        (aob-trace--fit-margins)
+        (should (< (window-total-width) 60))
+        (should (> (or (car (window-margins)) 0) 0))
+        (delete-other-windows))
+      (aob-trace--render t)
+      (goto-char (point-min))
+      (search-forward "thinking ·")
+      (should (= (match-beginning 0) (line-beginning-position)))
+      (goto-char (point-min))
+      (search-forward aob-trace-explore-heading)
+      (should (string-match-p (concat "\\`" aob-trace-explore-heading)
+                              (aob-trace--unmarked
+                               (buffer-substring (line-beginning-position) (line-end-position)))))
+      (let ((wrap (aob-tests--at "$ pwd" 'wrap-prefix)))
+        (should (= (string-width wrap) (string-width "$ ")))
+        (should (memq 'aob-trace-small (ensure-list (get-text-property 0 'face wrap)))))
+      (should (text-property-any (point-min) (point-max) 'aob-status 'done))
+      (let ((copied (filter-buffer-substring (point-min) (point-max))))
+        (should (string-search "$ pwd" copied))
+        (should-not (text-property-any 0 (length copied) 'aob-status 'done copied))))))

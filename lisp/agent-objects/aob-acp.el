@@ -551,9 +551,11 @@ before it is dispatched.")
           ;; the goal rides this update with no title of its own — writing
           ;; the absent title through would erase the session's
           (when-let* ((title (plist-get u :title)))
-            (aob-session-put s :info-title title))
+            (aob-session-put s :info-title title)
+            (aob-acp--auto-name s 'title title))
           (when-let* ((meta (plist-get u :_meta)))
             (aob-session-put s :goal (plist-get meta :goal))
+            (aob-acp--auto-name s 'goal (aob-acp--goal-text (plist-get meta :goal)))
             (aob--dirty s)))
          ("config_option_update"
           (aob-acp--config-apply s (plist-get u :configOptions)))
@@ -1184,6 +1186,7 @@ the turn it actually opens."
      (aob-session-ref s :prompt-meta))))
 
 (defun aob-acp--prompt-1 (s text &optional atts queued)
+  (aob-acp--auto-name s 'prompt text)
   (aob-acp--break-accum s)
   ;; an agent that never declared image support gets paths, not blocks
   ;; it can't parse — the reference survives, and the demotion is said
@@ -1210,9 +1213,12 @@ the turn it actually opens."
      s "session/prompt"
      (append
       (list :sessionId (aob-acp--acp-id s)
-            :prompt (aob-acp--content-blocks
-                     text atts (or (aob-session-dir s) (aob-session-project s))
-                     (aob-acp-embeds-p s)))
+            :prompt (let ((blocks (aob-acp--content-blocks
+                                   text atts (or (aob-session-dir s) (aob-session-project s))
+                                   (aob-acp-embeds-p s))))
+                      (if-let* ((place (aob-acp--place-block s)))
+                          (vconcat (list place) blocks)
+                        blocks)))
       (when-let* ((meta (aob-acp--prompt-meta s))) (list :_meta meta)))
      (lambda (res err)
        (aob-acp--break-accum s)
@@ -1480,6 +1486,10 @@ Runs entirely in the background — the kill that triggers it never waits."
          (branch (and dir (concat "aob/" (file-name-nondirectory
                                           (directory-file-name dir))))))
     (when (and dir project
+               (not (aob-session-ref s :restarting))
+               (not (seq-some (lambda (o) (and (not (eq o s))
+                                               (equal (aob-session-dir o) dir)))
+                              (aob-sessions)))
                (not (equal (file-truename dir) (file-truename project)))
                (string-prefix-p (file-truename aob-acp-worktree-root)
                                 (file-truename dir))
@@ -1543,7 +1553,8 @@ Runs entirely in the background — the kill that triggers it never waits."
             :flush #'aob-acp--flush-queue
             :resolve #'aob-acp--resolve
             :kill #'aob-acp--kill
-            :focus #'aob-acp--focus))
+            :focus #'aob-acp--focus
+            :rename #'aob-acp--renamed))
 
 ;;; Opening sessions — shared-connection core all entry points use
 
@@ -1566,6 +1577,9 @@ _meta.systemPrompt never sees it.")
 A task's root is not a guess to be improved on, so this beats both
 `aob-acp-start-dir-function' and the buffer, and is taken as given —
 climbing to a `.git' above it would undo the worktree it names.")
+
+(defvar aob-acp-start-worktree nil
+  "The worktree a spawn works in, as aob-acp-read-worktree answers, or nil.")
 
 (defun aob-acp--real-dir (dir)
   "DIR where it actually is, so a folder reached through a link is one folder.
@@ -1603,18 +1617,100 @@ still finds the tree."
                               (format-time-string "%m%d%H%M%S"))
                       aob-acp-worktree-root)))
 
-(defun aob-acp--worktree-make (project dir done)
+(defun aob-acp--worktree-make (project dir done &optional branch)
   "Create worktree DIR off PROJECT in the background; DONE gets nil or an
-error plist."
+error plist.  BRANCH names the new branch, else it is aob/ and DIR's name."
   (make-directory aob-acp-worktree-root t)
   (ygg-git-async
    project
    (list "worktree" "add" "-b"
-         (concat "aob/" (file-name-nondirectory dir)) dir)
+         (or branch (concat "aob/" (file-name-nondirectory dir))) dir)
    (lambda (out code)
      (funcall done (unless (zerop code)
                      (list :message (format "worktree add failed: %s"
                                             (string-trim out))))))))
+
+(defun aob-acp--parse-worktrees (text)
+  "The worktrees git worktree list --porcelain TEXT names, as (DIR . BRANCH).
+Bare and prunable entries are left out; a detached one has no BRANCH."
+  (let (found)
+    (dolist (block (split-string text "\n\n" t))
+      (let (dir branch skip)
+        (dolist (line (split-string block "\n" t))
+          (cond ((string-prefix-p "worktree " line)
+                 (setq dir (file-name-as-directory (substring line 9))))
+                ((string-prefix-p "branch " line)
+                 (setq branch (string-remove-prefix "refs/heads/" (substring line 7))))
+                ((or (equal line "bare") (string-prefix-p "prunable" line))
+                 (setq skip t))))
+        (when (and dir (not skip))
+          (push (cons dir branch) found))))
+    (nreverse found)))
+
+(defun aob-acp--worktrees (dir)
+  "The worktrees of the repository DIR is in, or nil outside one."
+  (unless (or (null dir) (file-remote-p dir) (not (file-directory-p dir)))
+    (with-temp-buffer
+      (let ((default-directory (file-name-as-directory dir)))
+        (when (eq 0 (ignore-errors
+                      (call-process "git" nil t nil "worktree" "list" "--porcelain")))
+          (seq-filter (lambda (w) (file-directory-p (car w)))
+                      (aob-acp--parse-worktrees (buffer-string))))))))
+
+(defun aob-acp--place-note (dir)
+  "One line naming DIR's worktree and branch, or nil outside a repository."
+  (when-let* ((wts (aob-acp--worktrees dir))
+              (here (car (sort (seq-filter (lambda (w) (file-in-directory-p dir (car w))) wts)
+                               :key (lambda (w) (- (length (car w))))))))
+    (format "[workspace: %s · branch %s%s]"
+            (directory-file-name (car here))
+            (or (cdr here) "detached HEAD")
+            (if (eq here (car wts)) ""
+              (format " · linked worktree of %s" (directory-file-name (caar wts)))))))
+
+(defun aob-acp--place-block (s)
+  "The place note S has not yet been told, as a prompt block, else nil.
+Sent in the prompt because only some adapters read _meta.systemPrompt,
+and again after a branch switch."
+  (let ((note (aob-acp--place-note (or (aob-session-dir s) (aob-session-project s)))))
+    (unless (or (null note) (equal note (aob-session-ref s :place-told)))
+      (aob-session-put s :place-told note)
+      (list :type "text" :text note))))
+
+(defun aob-acp--worktree-choices (dir)
+  "DIR's worktrees when there is a choice between them, else nil."
+  (let ((wts (aob-acp--worktrees dir)))
+    (and (cdr wts) wts)))
+
+(defconst aob-acp--new-worktree "new worktree…")
+
+(defun aob-acp-read-worktree (dir)
+  "Ask which worktree of DIR's repository a session works in.
+Nil without asking when the repository has one worktree or DIR is in
+none, and nil for DIR's own.  Answers a folder, or (FOLDER . BRANCH)
+for one still to be made."
+  (when-let* ((wts (aob-acp--worktree-choices dir)))
+    (let* ((here (file-truename (file-name-as-directory
+                                 (or (locate-dominating-file dir ".git") dir))))
+           (mine (seq-find (lambda (w) (equal (file-truename (car w)) here)) wts))
+           (rows (mapcar (lambda (w)
+                           (cons (format "%s  %s" (abbreviate-file-name (car w))
+                                         (or (cdr w) "detached"))
+                                 (car w)))
+                         (if mine (cons mine (remq mine wts)) wts)))
+           (pick (completing-read "Worktree: "
+                                  (append (mapcar #'car rows)
+                                          (list aob-acp--new-worktree))
+                                  nil t nil nil (caar rows))))
+      (if (equal pick aob-acp--new-worktree)
+          (let ((branch (string-trim (read-string "Branch for the new worktree: "))))
+            (when (string-empty-p branch)
+              (user-error "aob: a new worktree needs a branch"))
+            (cons (aob-acp--worktree-path
+                   (caar wts) (replace-regexp-in-string "[^[:alnum:]._-]+" "-" branch))
+                  branch))
+        (let ((picked (cdr (assoc pick rows))))
+          (unless (equal (file-truename picked) here) picked))))))
 
 (defun aob-acp--gen-name (base)
   "BASE numbered past whatever is already registered under it."
@@ -1622,6 +1718,91 @@ error plist."
     (while (aob-session-get (format "acp:%s:%d" base n))
       (setq n (1+ n)))
     (format "%s:%d" base n)))
+
+(defcustom aob-auto-name t
+  "Name a session for what it is about while it still has its default name.
+The agent's own title wins, then its goal, then the first prompt.  A
+name you gave it, by renaming or at spawn, is never touched."
+  :type 'boolean
+  :group 'aob)
+
+(defconst aob-acp--auto-name-ranks '((prompt . 1) (goal . 2) (title . 3)))
+
+(defun aob-acp--default-name-p (s)
+  "Non-nil when S is still called what it was numbered at birth."
+  (let ((name (aob-session-name s)))
+    ;; a conversation opened for reading is labelled with its day, which
+    ;; nobody chose, and the label outlives the reading into the file
+    (and (string-match "\\`\\(.+?\\):[0-9]+\\(?: · [[:alpha:]]+ [0-9]+\\(?: [[:alnum:]]\\{4\\}\\)?\\)?\\'" name)
+         (member (match-string 1 name)
+                 (append (list (aob-session-ref s :agent)
+                               (aob-session-ref s :preset))
+                         (aob-acp-names))))))
+
+(defun aob-acp--goal-text (goal)
+  (cond ((stringp goal) goal)
+        ((and (consp goal) (keywordp (car goal)))
+         (let ((objective (plist-get goal :objective)))
+           (and (stringp objective) objective)))))
+
+(defun aob-acp--name-line (line)
+  "LINE reduced to the words a name can carry, or nil when none are left."
+  (let ((case-fold-search nil))
+    (dolist (rule '(("\\`[[:space:]]*\\(?:#+\\|>+\\|[-*+]\\|[0-9]+[.)]\\)[[:space:]]+" . "")
+                    ("\\`[[:space:]]*\\(?:/[[:alnum:]:_-]+\\(?:[[:space:]]+\\|\\'\\)\\)+" . "")
+                    ("\\(\\`\\|[[:space:]]\\)@[^@[:space:]]+" . "\\1")
+                    ("\\[\\[Image[0-9]*\\]\\]" . " ")
+                    ("\\[\\([^]]*\\)\\]([^)]*)" . "\\1")
+                    ("[*~\x60\"“”«»]+\\|__+" . "")
+                    ("\\(\\`\\|[[:space:]]\\)['‘’]+" . "\\1")
+                    ("['‘’]+\\([[:space:]]\\|\\'\\)" . "\\1")
+                    ("[[:space:]]+" . " ")))
+      (setq line (replace-regexp-in-string (car rule) (cdr rule) line t)))
+    (setq line (string-trim line "[[:space:][:punct:]]+" "[[:space:][:punct:]]+"))
+    (and (string-match-p "[[:alnum:]]" line) line)))
+
+(defun aob-acp--name-from-text (text &optional max)
+  "A short name for what TEXT asks, at most MAX (default 32) characters."
+  (let* ((max (or max 32))
+         (text (replace-regexp-in-string
+                "<\\(context\\|preset\\)[ >]\\(?:.\\|\n\\)*?</\\1>" "" text t))
+         (text (replace-regexp-in-string
+                "^\x60\x60\x60\\(?:.\\|\n\\)*?^\x60\x60\x60.*$" "" text t t))
+         (words (seq-some #'aob-acp--name-line (split-string text "\n"))))
+    (when words
+      (if (<= (length words) max)
+          words
+        (let* ((head (substring words 0 (1+ max)))
+               (cut (string-match-p " [^ ]*\\'" head)))
+          (string-trim-right (substring words 0 (if (and cut (> cut 0)) cut max))
+                             "[[:space:][:punct:]]+"))))))
+
+(defun aob-acp--unique-name (s name)
+  "NAME, or NAME numbered past what another live session is already called."
+  (let ((taken (mapcar #'aob-session-name (remq s (aob-live-sessions))))
+        (try name)
+        (n 1))
+    (while (member try taken)
+      (setq n (1+ n) try (format "%s %d" name n)))
+    try))
+
+(defun aob-acp--auto-name (s source text)
+  "Name S from TEXT, which came from SOURCE: prompt, goal or title."
+  (let ((rank (alist-get source aob-acp--auto-name-ranks))
+        (had (alist-get (aob-session-ref s :auto-named) aob-acp--auto-name-ranks)))
+    (when-let* ((aob-auto-name)
+                ((not (aob-session-ref s :named-by-user)))
+                ((if had
+                     (or (> rank had) (and (= rank had) (not (eq source 'prompt))))
+                   (aob-acp--default-name-p s)))
+                ((stringp text))
+                (words (aob-acp--name-from-text text))
+                (name (aob-acp--unique-name
+                       s (format "%s: %s" (or (aob-session-ref s :agent) "agent")
+                                 words))))
+      (aob-session-put s :auto-named source)
+      (unless (equal name (aob-session-name s))
+        (aob--set-name s name)))))
 
 (defun aob-acp--want-mode (s want)
   "Switch S to the mode id WANT its definition pinned, if advertised."
@@ -2259,22 +2440,30 @@ the adapters store their sessions under."
   (aob-acp-spawn aob-acp-default-agent intent))
 
 ;;;###autoload
-(defun aob-acp-spawn (agent &optional intent atts name)
+(defun aob-acp-spawn (agent &optional intent atts name tree)
   "Spawn ACP AGENT and send INTENT as its first prompt turn.
 Whether the session gets an isolated worktree comes from the agent's
 definition in `aob-acp-agents'.  INTENT (with image ATTS) is queued
 through the handshake and fires the moment the session is ready.
 NAME stands in for the agent when the session is numbered, so a session
-started for something already named says so in every list it shows up in."
+started for something already named says so in every list it shows up in.
+TREE, else aob-acp-start-worktree, is a worktree picked to work in, as
+aob-acp-read-worktree answers; an isolated preset keeps its own instead."
   (interactive
-   (let ((agent (completing-read "ACP agent: " (aob-acp-names)
-                                 nil t nil nil aob-acp-default-agent)))
-     (list agent (read-string (format "%s » " agent)))))
+   (let* ((agent (completing-read "ACP agent: " (aob-acp-names)
+                                  nil t nil nil aob-acp-default-agent))
+          (tree (unless (plist-get (aob-acp-preset agent) :worktree)
+                  (aob-acp-read-worktree (aob-acp--project)))))
+     (list agent (read-string (format "%s » " agent)) nil nil tree)))
   (let* ((spec (aob-acp-preset agent))
          (base (or (plist-get spec :agent) agent))
          (project (aob-acp--project))
          (worktree (plist-get spec :worktree))
-         (dir (if worktree (aob-acp--worktree-path project agent) project))
+         (tree (and (not worktree) (or tree aob-acp-start-worktree)))
+         (dir (cond ((consp tree) (car tree))
+                    (tree (aob-acp--real-dir tree))
+                    (worktree (aob-acp--worktree-path project agent))
+                    (t project)))
          (cwd (directory-file-name (expand-file-name dir)))
          (s (aob-acp--open base (aob-acp--gen-name (or name agent)) project dir
                            (lambda (init)
@@ -2283,10 +2472,14 @@ started for something already named says so in every list it shows up in."
                                          :mcpServers
                                          (aob-acp--mcp-servers init project))))
                            (lambda (s res) (aob-acp--session-opened s res))
-                           (and worktree
-                                (lambda (_s done)
-                                  (aob-acp--worktree-make project dir done))))))
+                           (cond ((consp tree)
+                                  (lambda (_s done)
+                                    (aob-acp--worktree-make project dir done (cdr tree))))
+                                 (worktree
+                                  (lambda (_s done)
+                                    (aob-acp--worktree-make project dir done)))))))
     (aob-session-put s :preset agent)
+    (when name (aob-session-put s :named-by-user t))
     (when-let* ((want (plist-get spec :mode)))
       (aob-session-put s :want-mode want))
     (when-let* ((want (plist-get spec :model)))
@@ -2400,7 +2593,7 @@ a name that is not offered is reported rather than forced."
   :type '(alist :key-type string :value-type (repeat string))
   :group 'aob)
 
-(defun aob-acp-spawn-with (agent project model &optional intent)
+(defun aob-acp-spawn-with (agent project model &optional intent tree)
   "Spawn AGENT on PROJECT with MODEL, sending INTENT as its first turn.
 AGENT is a preset name: what it runs on, how it may act and what it
 answers with come from `aob-acp-presets', so the only thing still asked
@@ -2408,7 +2601,8 @@ is where.  MODEL overrides the preset\='s own, for a one-off.
 
 With no INTENT the first turn is written in a compose buffer rather than
 the minibuffer, and the session is spawned when that is sent: a first
-prompt is the longest one there is, and it can carry attachments."
+prompt is the longest one there is, and it can carry attachments.
+TREE is the worktree of PROJECT it works in, as aob-acp-read-worktree answers."
   (interactive
    (let* ((preset (completing-read "Preset: " (aob-acp-names)
                                    nil t nil nil aob-acp-default-agent))
@@ -2423,18 +2617,27 @@ prompt is the longest one there is, and it can carry attachments."
                         (abbreviate-file-name (or (aob-acp--project)
                                                   default-directory)))
                      (or (aob-acp--project) default-directory))))
-     (list preset (expand-file-name project) nil nil)))
+     (list preset (expand-file-name project) nil nil
+           (unless (plist-get (aob-acp-preset preset) :worktree)
+             (aob-acp-read-worktree (expand-file-name project))))))
   (let ((dir (file-name-as-directory project)))
     (if intent
-        (aob-acp--spawn-with-1 agent dir model intent nil)
-      (aob-compose (lambda (text atts)
-                     (aob-acp--spawn-with-1 agent dir model text atts))
-                   nil (format "new %s" agent) dir))))
+        (aob-acp--spawn-with-1 agent dir model intent nil tree)
+      (let ((buf (aob-compose (lambda (text atts)
+                                (aob-acp--spawn-with-1 agent dir model text atts tree))
+                              nil (format "new %s" agent) dir)))
+        (when tree
+          (with-current-buffer buf
+            (push (concat "⌥ " (file-name-nondirectory
+                                (directory-file-name (if (consp tree) (car tree) tree))))
+                  aob-compose--tags)))
+        buf))))
 
-(defun aob-acp--spawn-with-1 (agent dir model intent &optional atts)
-  "Spawn AGENT in DIR on MODEL with INTENT and ATTS."
+(defun aob-acp--spawn-with-1 (agent dir model intent &optional atts tree)
+  "Spawn AGENT in DIR on MODEL with INTENT and ATTS, in worktree TREE if given."
   (let* ((default-directory dir)
          (aob-acp-start-dir dir)
+         (aob-acp-start-worktree tree)
          (s (aob-acp-spawn agent intent atts)))
     (when (and s model) (aob-session-put s :want-model model))
     s))
@@ -2560,7 +2763,8 @@ afterwards what it was given."
   (when (and (eq (aob-session-backend s) 'acp)
              (aob-session-ref s :acp-id))
     (list :agent (aob-session-ref s :agent)
-          :name (aob-session-name s)
+          :name (or (plist-get (aob-session-ref s :asleep) :name)
+                    (aob-session-name s))
           :project (aob-session-project s)
           :dir (aob-session-dir s)
           :acp-id (aob-session-ref s :acp-id)
@@ -2570,7 +2774,9 @@ afterwards what it was given."
           :mode (aob-session-ref s :mode-id)
           :extra-dirs (aob-session-ref s :extra-dirs)
           :todo-file (aob-session-ref s :todo-file)
-          :limits (aob-session-ref s :limits))))
+          :limits (aob-session-ref s :limits)
+          :named-by-user (aob-session-ref s :named-by-user)
+          :auto-named (aob-session-ref s :auto-named))))
 
 (defun aob-acp--persist (&optional removed &rest _)
   "Write every conversation this Emacs can still resume, REMOVED included.
@@ -2670,6 +2876,23 @@ resumed, so it is rewritten whole rather than appended to."
       (with-temp-file aob-acp-persist-file
         (prin1 kept (current-buffer)))
       kept)))
+
+(defun aob-acp--renamed (s)
+  "Hold S to the name it was just given, asleep, awake and on disk."
+  (let ((named (lambda (e)
+                 (plist-put (plist-put (copy-sequence e) :name (aob-session-name s))
+                            :named-by-user t)))
+        (acp-id (aob-session-ref s :acp-id)))
+    (when-let* ((asleep (aob-session-ref s :asleep)))
+      (aob-session-put s :asleep (funcall named asleep)))
+    (cond
+     ((not (and acp-id aob-acp-persist-file)))
+     ((aob-acp-persisted-entry acp-id) (aob-acp--rewrite acp-id named))
+     ((when-let* ((entry (aob-acp--entry s)))
+        (let ((entries (cons entry (aob-acp--persisted-entries))))
+          (make-directory (file-name-directory aob-acp-persist-file) t)
+          (with-temp-file aob-acp-persist-file
+            (prin1 (seq-take entries aob-acp-history-limit) (current-buffer)))))))))
 
 (defun aob-acp--pick-entry (prompt entries)
   (let* ((rows (mapcar (lambda (e)
@@ -2782,6 +3005,10 @@ Prompts sent while it opens queue and fire on readiness."
                     (list :task-step step))
                   (when-let* ((todo (plist-get e :todo-file)))
                     (list :todo-file todo))
+                  (when (plist-get e :named-by-user)
+                    (list :named-by-user t))
+                  (when-let* ((auto (plist-get e :auto-named)))
+                    (list :auto-named auto))
                   (plist-get e :limits)
                   ;; a conversation reloaded onto another model is a
                   ;; different conversation from the second turn on
@@ -2842,7 +3069,7 @@ The verb for reading a transcript again; reconnecting costs less."
   (aob-acp-resume-entry e 'load))
 
 ;;;###autoload
-(defun aob-acp-restart (s)
+(defun aob-acp-restart (s &optional pref)
   "Restart the CLI behind S, reloading the same conversation into it.
 The process is what breaks — the session is not.  Its ACP id, the task
 it is on, the directories it may see, the model and mode it was on and
@@ -2861,9 +3088,78 @@ what frees the name for the new one to take."
     (unless (file-directory-p (or (plist-get entry :dir) ""))
       (user-error "aob: %s ran in %s, which is gone" (aob-session-name s)
                   (plist-get entry :dir)))
+    ;; the tree it ran in is where it comes back; reaping it here pulls that out from under it
+    (aob-session-put s :restarting t)
     (aob--call s :kill)
     (message "aob: restarting %s" (plist-get entry :name))
-    (aob-acp-resume-entry entry)))
+    (aob-acp-resume-entry entry pref)))
+
+(defun aob-acp--init-of (s)
+  "The initialize result of S's connection, or nil before it has one."
+  (when-let* ((proc (aob-session-conn s)))
+    (pcase (process-get proc 'aob-init)
+      (`(done ,res) res))))
+
+(defconst aob-acp--other-folder "other folder…")
+
+(defun aob-acp--read-folder (s)
+  "Ask for a folder S should see: its repository's other worktrees, else any."
+  (let* ((seen (mapcar (lambda (d) (file-truename (file-name-as-directory d)))
+                       (cons (aob-session-dir s) (aob-session-ref s :extra-dirs))))
+         (others (seq-remove (lambda (w) (member (file-truename (car w)) seen))
+                             (aob-acp--worktrees (or (aob-session-dir s)
+                                                     (aob-session-project s)))))
+         (rows (mapcar (lambda (w)
+                         (cons (format "%s  %s" (abbreviate-file-name (car w))
+                                       (or (cdr w) "detached"))
+                               (car w)))
+                       others))
+         (pick (and rows (completing-read
+                          "Add folder: "
+                          (append (mapcar #'car rows) (list aob-acp--other-folder))
+                          nil t nil nil (caar rows)))))
+    (or (cdr (assoc pick rows))
+        (read-directory-name "Add folder: " nil nil t))))
+
+(defun aob-acp--can-add-folder (s)
+  "Refuse, changing nothing, unless S can be reopened with more folders."
+  (let ((init (aob-acp--init-of s))
+        (name (aob-session-name s)))
+    (cond ((not init)
+           (user-error "aob: %s is not connected; wake it first" name))
+          ((not (aob-acp--session-cap init :additionalDirectories))
+           (user-error "aob: %s's agent takes no additional directories; nothing changed"
+                       name))
+          ((not (or (aob-acp--resumes-p init)
+                    (plist-get (plist-get init :agentCapabilities) :loadSession)))
+           (user-error "aob: %s's agent cannot reopen a session; nothing changed" name))
+          ((memq (aob-session-state s) '(working blocked))
+           (user-error "aob: %s is mid-turn; add the folder once it is idle" name)))))
+
+;;;###autoload
+(defun aob-acp-add-folder (s dir)
+  "Let S see DIR too, resuming its conversation with DIR among its folders.
+ACP takes additional directories only when a session opens, so S is
+resumed with them; an agent that does not take them is left as it was."
+  (interactive (let ((s (aob-target)))
+                 (aob-acp--can-add-folder s)
+                 (list s (aob-acp--read-folder s))))
+  (aob-acp--can-add-folder s)
+  (let ((name (aob-session-name s))
+        (dir (file-name-as-directory (expand-file-name dir)))
+        (dirs (aob-session-ref s :extra-dirs)))
+    (cond ((not (file-directory-p dir))
+           (user-error "aob: %s is not a folder" dir))
+          ((member (file-truename dir)
+                   (mapcar (lambda (d) (file-truename (file-name-as-directory d)))
+                           (cons (aob-session-dir s) dirs)))
+           (user-error "aob: %s already sees %s" name (abbreviate-file-name dir))))
+    (aob-session-put s :extra-dirs (append dirs (list dir)))
+    (condition-case err
+        (aob-acp-restart s 'resume)
+      (error (aob-session-put s :extra-dirs dirs)
+             (signal (car err) (cdr err))))
+    (message "aob: %s now sees %s" name (abbreviate-file-name dir))))
 
 ;;;###autoload
 (defun aob-acp-resume-persisted ()

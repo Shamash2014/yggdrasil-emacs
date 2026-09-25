@@ -1,4 +1,4 @@
-;;; ygg-eglot-x.el --- rust-analyzer extensions, and debugging the runnable at point -*- lexical-binding: t; -*-
+;;; ygg-eglot-x.el --- rust-analyzer extensions, and debugging the runnable at point -*- lexical-binding: t; no-byte-compile: t -*-
 
 ;; Built-ins wrapped: eglot, jsonrpc, call-process, json-parse-string.
 ;; Packages wrapped: eglot-x (nemethf), dape's lldb-dap entry.

@@ -156,6 +156,11 @@ The editor mirrors both. Your plan becomes this session's tasks.md, and
 each subagent gets a trace of its own. When the user changes that list,
 the changes reach you as a note with the next message.
 
+When you ask the user a question with choices (AskUserQuestion or a
+form), keep the set open: the user can always answer in their own words,
+so never phrase the options as exhaustive, and take a typed answer as
+the answer.
+
 Use the aob MCP server only for what your own tools cannot do:
 
 - Code questions: xref_references and xref_apropos for who calls what,

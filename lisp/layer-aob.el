@@ -160,7 +160,8 @@
   (yggdrasil-localleader-def mode "g" #'aob-acp-goal "goal")
   (yggdrasil-localleader-def mode "w" #'aob-deliver-to "answer goes…")
   (yggdrasil-localleader-def mode "r" #'aob-transcript-wake "wake it (resume acp)")
-  (yggdrasil-localleader-def mode "t" #'aob-subagents "subagents list (toggle)"))
+  (yggdrasil-localleader-def mode "t" #'aob-subagents "subagents list (toggle)")
+  (yggdrasil-localleader-def mode "F" #'aob-acp-add-folder "add a folder"))
 
 ;; a queued message is still yours until it goes: change it or take it
 ;; back, from the line it is drawn on
@@ -229,20 +230,60 @@ the servers it is handed are decided."
   (interactive)
   (if-let* ((s (ygg-aob--draft-target)))
       (pcase (completing-read (format "%s runs under: " (aob-session-name s))
-                              '("mode" "next mode" "model" "effort / options")
+                              '("mode" "next mode" "model" "effort / options"
+                                "add folder")
                               nil t)
         ("mode" (aob-acp-set-mode s))
         ("next mode" (aob-acp-cycle-mode s))
         ("model" (aob-acp-model s))
+        ("add folder" (ygg-aob--add-folder s))
         (_ (aob-acp-config s)))
-    (let ((preset (completing-read "Draft spawns under: " (aob-acp-names)
-                                   nil t nil nil aob-acp-default-agent)))
-      (setq aob-compose--target (cons 'new preset)
-            aob-compose--label (concat "→ new " preset))
-      (force-mode-line-update)
-      (message "aob: this draft spawns %s" preset))))
+    (let ((root (ygg-aob--draft-root)))
+      (if (and (aob-acp--worktree-choices root)
+               (equal (completing-read "Draft spawns under: " '("preset" "worktree")
+                                       nil t)
+                      "worktree"))
+          (ygg-aob--set-draft-tree (aob-acp-read-worktree root))
+        (let ((preset (completing-read "Draft spawns under: " (aob-acp-names)
+                                       nil t nil nil aob-acp-default-agent)))
+          (setq aob-compose--target (cons 'new preset)
+                aob-compose--label (concat "→ new " preset))
+          (force-mode-line-update)
+          (message "aob: this draft spawns %s" preset))))))
+
+(defvar-local ygg-aob--draft-tree nil
+  "The worktree this draft's spawn works in, as aob-acp-read-worktree answers.")
+
+(defun ygg-aob--draft-root ()
+  "The repository this draft's spawn would start in."
+  (let ((aob-acp-start-dir (bound-and-true-p aob-compose--dir)))
+    (aob-acp--project)))
+
+(defun ygg-aob--set-draft-tree (tree)
+  "Spawn this draft in TREE, nil for its own, and say so among the title's tags."
+  (setq ygg-aob--draft-tree tree
+        aob-compose--tags
+        (append (when tree
+                  (list (concat "⌥ " (file-name-nondirectory
+                                      (directory-file-name
+                                       (if (consp tree) (car tree) tree))))))
+                (seq-remove (lambda (tag) (string-prefix-p "⌥ " tag)) aob-compose--tags)))
+  (force-mode-line-update))
+
+(defun ygg-aob-draft-add-folder ()
+  "Let the session this draft goes to see one more folder."
+  (interactive)
+  (ygg-aob--add-folder
+   (or (ygg-aob--draft-target)
+       (user-error "aob: this draft spawns its session; pick its worktree under modes"))))
+
+(defun ygg-aob--add-folder (s)
+  "Ask for a folder and let S see it, refusing before asking when S cannot."
+  (aob-acp--can-add-folder s)
+  (aob-acp-add-folder s (aob-acp--read-folder s)))
 
 (yggdrasil-localleader-def 'aob-compose-mode "m" #'ygg-compose-transient "modes")
+(yggdrasil-localleader-def 'aob-compose-mode "F" #'ygg-aob-draft-add-folder "add a folder")
 (yggdrasil-localleader-def 'aob-compose-mode "q" #'aob-compose-hide "hide the box")
 (yggdrasil-localleader-def 'aob-compose-mode "p" #'ygg-preset-edit "edit a preset")
 (setq aob-compose-panel-hint "\\ m modes")
@@ -321,6 +362,7 @@ actions keep their tool title.  The short path stays the clickable target."
 (setq aob-compose-spawn-function
       (lambda (text &optional agent atts)
         (let ((aob-acp-start-dir aob-compose--dir)
+              (aob-acp-start-worktree ygg-aob--draft-tree)
               (aob-acp-session-refs (append (ygg-aob--preset-limits text)
                                             (bound-and-true-p aob-acp-session-refs))))
           (aob-acp-spawn (or agent aob-acp-default-agent) text atts))))
@@ -1175,7 +1217,8 @@ Returns a session, (resume . ENTRY), or (new . AGENT-NAME)."
   (let* ((aob--read-map
           (append
            (mapcar (lambda (s) (cons (aob-session-name s) s))
-                   (seq-sort-by #'ygg-aob--score #'> (aob-live-sessions)))
+                   (seq-sort-by #'ygg-aob--score #'>
+                                (seq-remove #'ygg-aob--subagent-p (aob-live-sessions))))
            (mapcar (lambda (e)
                      (cons (format "⟲ %s · %s" (plist-get e :name)
                                    (file-name-nondirectory
@@ -1198,7 +1241,8 @@ Returns a session, (resume . ENTRY), or (new . AGENT-NAME)."
 (defun ygg-aob--region-seed ()
   (when (use-region-p)
     (format "```\n%s\n```\n\n"
-            (buffer-substring-no-properties (region-beginning) (region-end)))))
+            (substring-no-properties
+             (filter-buffer-substring (region-beginning) (region-end))))))
 
 (defvar ygg-aob--home-map nil
   "Label to (KIND . VALUE) while the picker is open, for its affixation.")
@@ -1302,11 +1346,15 @@ selection is read before the space switch that would otherwise lose it."
                                (cons 'resume e)))
                        (aob-acp-resumable-entries))))
          (choice (completing-read "Agent: " (mapcar #'car map)
-                                  nil t nil nil aob-acp-default-agent)))
+                                  nil t nil nil aob-acp-default-agent))
+         (tree (and (eq (car-safe (cdr (assoc choice map))) 'new)
+                    (aob-acp-read-worktree dir))))
     (ygg-aob--enter-home home)
     ;; the spawn happens on send, from the folder the draft names —
     ;; `aob-compose' takes it from here, and a resumed row from its session
-    (aob-compose (ygg-aob--materialize (cdr (assoc choice map))) seed nil dir)))
+    (let ((buf (aob-compose (ygg-aob--materialize (cdr (assoc choice map))) seed nil dir)))
+      (when tree
+        (with-current-buffer buf (ygg-aob--set-draft-tree tree))))))
 
 (defun ygg-aob-resume-pick ()
   "Resume a stored session, in a new space on a folder you choose.
@@ -1335,7 +1383,7 @@ leave the new space behind."
   "Compose to an agent: at point, the sole live one, or pick — older
 persisted sessions appear as ⟲ rows and resume on selection."
   (interactive)
-  (let ((live (aob-live-sessions))
+  (let ((live (seq-remove #'ygg-aob--subagent-p (aob-live-sessions)))
         (resumable (aob-acp-resumable-entries)))
     (unless (or live resumable) (user-error "no agents — c starts one"))
     (aob-compose (or (aob-session-at-point)
@@ -1394,9 +1442,10 @@ a name two projects share is told apart by where it is."
                                                             (or (aob-session-clock s t) "")
                                                             (or (aob-session-spend s) ""))
                                                     'face 'shadow)
-                                        (abbreviate-file-name
-                                         (directory-file-name
-                                          (or (aob-session-project s) (aob-session-dir s) ""))))
+                                        (or (aob-subagent-of s)
+                                            (abbreviate-file-name
+                                             (directory-file-name
+                                              (or (aob-session-project s) (aob-session-dir s) "")))))
                                 s))
                         live)))
     (unless cands (user-error "no live sessions"))

@@ -472,7 +472,9 @@ render above the top edge on macOS child frames."
     (when (facep 'ygg-focus-dim)
       (set-face-attribute 'ygg-focus-dim nil
                           :foreground (if dark "#7a7a7a" "#595959"))
-      (set-face-attribute 'ygg-focus-border nil :background float-bg))
+      ;; margins take the default background, so on dark a fringe band floats mid-gutter
+      (set-face-attribute 'ygg-focus-border nil
+                          :background (if dark (face-background 'default nil t) float-bg)))
     (let ((divider (if dark "#080808" "#c9c3b6")))
       (set-face-attribute 'window-divider nil :foreground divider)
       (dolist (face '(window-divider-first-pixel window-divider-last-pixel))

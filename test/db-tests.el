@@ -465,6 +465,23 @@
                 (should-not (gethash key ygg-db--queued)))
             (db-test-settle key)))))))
 
+(ert-deftest ygg-db-a-run-started-from-a-callback-waits-behind-the-queue ()
+  (db-test-isolated
+    (let* ((ygg-db-usql-program (db-test-sleeper db-test-home))
+           (conn (ygg-db--make-connection "p" "pg://ann:pw@h.invalid/app" 'config))
+           (key (ygg-db--key conn))
+           (third nil)
+           (first (ygg-db-run conn '("select 1")
+                              (lambda (_) (setq third (ygg-db-run conn '("select 3") #'ignore)))))
+           (second (ygg-db-run conn '("select 2") #'ignore)))
+      (unwind-protect
+          (progn
+            (kill-process (ygg-db-run-process first))
+            (should (db-test-wait (lambda () (eq (gethash key ygg-db--running) second)) 10))
+            (should (equal (gethash key ygg-db--queued) (list third)))
+            (should-not (ygg-db-run-process third)))
+        (db-test-settle key)))))
+
 (ert-deftest ygg-db-a-file-local-connection-name-binds-without-connecting ()
   (db-test-isolated
     (let ((ygg-db-connections '(("prod" . "pg://ann@prod.invalid/app")))
@@ -574,6 +591,7 @@
   (should (equal (ygg-db--redis-dangerous "\"FLUSHDB\" async") "FLUSHDB"))
   (should (equal (ygg-db--redis-dangerous "'keys' *") "KEYS"))
   (should (equal (ygg-db--redis-dangerous "config set maxmemory 1") "CONFIG SET"))
+  (should (equal (ygg-db--redis-dangerous "2 FLUSHALL") "FLUSHALL"))
   (should-not (ygg-db--redis-dangerous "CONFIG GET maxmemory"))
   (should-not (ygg-db--redis-dangerous "GET keys")))
 
@@ -646,6 +664,7 @@
 
 (ert-deftest ygg-db-redis-key-patterns-group-ids-and-show-ttl ()
   (should (equal (ygg-db--redis-pattern "user:42:session:9f86d081884c") "user:*:session:*"))
+  (should (equal (ygg-db--redis-pattern "pick:*star") "pick:\\*star"))
   (should (equal (ygg-db--redis-entries '("user:1" "user:2" "q") '("hash" -1 "hash" 5000 "list" -1))
                  '(("hash" "user:*" ("user:1") "2 · ttl 5s") ("list" "q" ("q") "1")))))
 
@@ -656,7 +675,7 @@
 (defun db-test-redis-ready-p (port)
   (with-temp-buffer
     (call-process "redis-cli" nil t nil "-p" (number-to-string port) "PING")
-    (string-match-p "PONG\\|NOAUTH" (buffer-string))))
+    (string-search "NOAUTH" (buffer-string))))
 
 (defmacro db-test-with-redis (url-var &rest body)
   "BODY with URL-VAR a redis:// URL of a throwaway password-protected server."
@@ -675,6 +694,7 @@
          (unwind-protect
              (progn
                (should (db-test-wait (lambda () (db-test-redis-ready-p port)) 10))
+               (should (process-live-p server))
                ,@body)
            (delete-process server))))))
 
@@ -728,12 +748,56 @@
           (ygg-db-redis-mode)
           (setq ygg-db-connection conn)
           (insert "GET pick:")
-          (let ((capf (ygg-db-completion-at-point)))
-            (should (equal (sort (all-completions "pick:" (nth 2 capf)) #'string<)
+          (let ((capf (ygg-db-completion-at-point))
+                (ygg-db-redis-completion-limit 3))
+            (should (equal (sort (all-completions "" (nth 2 capf)) #'string<)
                            '("pick:*star" "pick:1" "pick:2"))))
           (erase-buffer)
           (insert "HGETA")
           (should (equal (all-completions "HGETA" (nth 2 (ygg-db-completion-at-point))) '("HGETALL"))))))))
+
+(ert-deftest ygg-db-redis-completion-gives-up-at-once-when-redis-is-down ()
+  (let ((conn (ygg-db--make-connection "r" "redis://127.0.0.1:1" 'config))
+        (started (float-time)))
+    (should-not (ygg-db--redis-keys conn "u"))
+    (should (< (- (float-time) started) 2))))
+
+(ert-deftest ygg-db-redis-a-key-that-is-not-utf-8-spoils-nothing ()
+  (db-test-isolated
+    (db-test-with-redis url
+      (let ((conn (ygg-db--make-connection "r" url 'config))
+            (schema nil))
+        (db-test-run-sync conn '("SET \"bad:\\xff\" x" "SET good:1 y"))
+        (should (member "good:1" (ygg-db--redis-keys conn "")))
+        (unwind-protect
+            (progn
+              (ygg-db-load-schema conn t (lambda (entry) (setq schema entry)))
+              (should (db-test-wait (lambda () schema) 10))
+              (should (eq (plist-get schema :state) 'ready)))
+          (remhash (ygg-db--key conn) ygg-db--schemas))))))
+
+(ert-deftest ygg-db-redis-drawer-list-follows-the-cursor ()
+  (db-test-isolated
+    (db-test-with-redis url
+      (let ((conn (ygg-db--make-connection "r" url 'config))
+            (ygg-db-redis-scan-count 10)
+            (ygg-db-redis-completion-rounds 1000))
+        (db-test-run-sync conn (append (cl-loop for i below 500 collect (format "SET other:%d x" i))
+                                       '("SET pick:*star a" "SET pick:xstar b")))
+        (ygg-db--redis-list conn (ygg-db--redis-pattern "pick:*star"))
+        (let ((shown (with-current-buffer ygg-db-result-buffer (buffer-string))))
+          (should (string-search "pick:*star" shown))
+          (should-not (string-search "pick:xstar" shown))
+          (should (string-search " 1 row" shown)))))))
+
+(ert-deftest ygg-db-redis-completion-reads-replies-longer-than-one-chunk ()
+  (db-test-isolated
+    (db-test-with-redis url
+      (let ((conn (ygg-db--make-connection "r" url 'config))
+            (ygg-db-redis-completion-limit 5000)
+            (padding (make-string 100 ?k)))
+        (db-test-run-sync conn (cl-loop for i below 1200 collect (format "SET long:%s:%d x" padding i)))
+        (should (= (length (ygg-db--redis-keys conn "long:")) 1200))))))
 
 (ert-deftest ygg-db-redis-schema-samples-types-and-ttls ()
   (db-test-isolated

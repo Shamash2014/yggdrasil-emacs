@@ -12,6 +12,7 @@
 ;;; Code:
 
 (require 'seq)
+(require 'cl-lib)
 (require 'subr-x)
 (require 'hl-line)
 (require 'project)
@@ -28,9 +29,10 @@
 (declare-function aob-session-project "aob" (s))
 (declare-function aob-session-state "aob" (s))
 (declare-function aob-session-p "aob" (x))
+(declare-function aob-session-dir "aob" (s))
+(declare-function aob-subagent-p "aob-subagent" (s))
 (declare-function ygg-todo-session-file "ygg-todo" (s))
 (declare-function ygg-todo-progress "ygg-todo" (file))
-(declare-function ygg-aob-session-subagents "layer-aob" (s))
 (declare-function ygg-aob-goto-space "layer-aob" (s))
 (declare-function aob-session-id "aob" (s))
 (declare-function aob-session-events "aob" (s))
@@ -194,9 +196,14 @@ you looked at another is a row you have to open twice.")
 
 (defun ygg-projects--session-root (s roots)
   "The one of ROOTS session S belongs under, or nil.
-Its own project first; an agent started in a folder that is no project
-goes under the one it has been working in, as its tools last said."
-  (or (ygg-projects--root-of (aob-session-project s) roots)
+A linked worktree's session goes under its repository's main checkout,
+there only even when the worktree is a project of its own: one
+conversation is one row.  Then its own project; an agent started in a
+folder that is no project goes under the one it has been working in,
+as its tools last said."
+  (or (when-let* ((main (ygg-projects--session-main s)))
+        (ygg-projects--root-of main roots))
+      (ygg-projects--root-of (aob-session-project s) roots)
       (when (fboundp 'aob-trace--work-root)
         (let ((newest (plist-get (seq-find (lambda (e) (eq (plist-get e :type) 'tool))
                                            (aob-session-events s))
@@ -208,12 +215,19 @@ goes under the one it has been working in, as its tools last said."
               (aob-session-put s :sidebar-root (cons newest root))
               root))))))
 
+(defun ygg-projects--ended-subagent-p (s)
+  "Non-nil when S is a subagent that has finished, failed or been stopped."
+  (and (fboundp 'aob-subagent-p) (aob-subagent-p s)
+       (memq (aob-session-state s) '(dead done failed))))
+
 (defun ygg-projects--sessions (root)
+  "ROOT's sessions, a subagent only while it runs."
   (when (fboundp 'aob-sessions)
     (let ((roots (mapcar (lambda (r) (file-name-as-directory
                                       (expand-file-name (if (consp r) (car r) r))))
                          (ygg-projects--roots))))
-      (seq-filter (lambda (s) (equal (ygg-projects--session-root s roots) root))
+      (seq-filter (lambda (s) (and (not (ygg-projects--ended-subagent-p s))
+                                   (equal (ygg-projects--session-root s roots) root)))
                   (aob-sessions)))))
 
 (defun ygg-projects--past (root)
@@ -274,15 +288,13 @@ or not this Emacs was there for it."
 
 (defun ygg-projects--agents (root)
   "What ROOT has going, and everything it could go back to.
-A subagent counts as work in flight; a conversation that ended still
-counts as one the project has, since it can be resumed."
+A running subagent counts as work in flight, once; a conversation that
+ended still counts as one the project has, since it can be resumed."
   (let ((all (ygg-projects--sessions root))
-        (subs (ygg-projects--subagents root))
         (past (length (ygg-projects--past root))))
-    (cons (+ (seq-count (lambda (s) (not (memq (aob-session-state s) '(dead done))))
-                        all)
-             (car subs))
-          (+ (length all) (cdr subs) past))))
+    (cons (seq-count (lambda (s) (not (memq (aob-session-state s) '(dead done))))
+                     all)
+          (+ (length all) past))))
 
 (defconst ygg-projects-busy-states '(working starting)
   "States in which a session is doing something of its own.")
@@ -334,13 +346,6 @@ nothing."
     (dolist (r pinned)
       (unless (member r picked) (setq picked (append picked (list r)))))
     picked))
-
-(defun ygg-projects--subagents (root)
-  (if (not (fboundp 'ygg-aob-session-subagents))
-      (cons 0 0)
-    (let ((n (apply #'+ (mapcar (lambda (s) (length (ygg-aob-session-subagents s)))
-                                (ygg-projects--sessions root)))))
-      (cons n n))))
 
 (defvar ygg-projects--buffers nil
   "Each root's buffers as (ROOT COMMANDS . TERMINALS), for one redraw.")
@@ -578,6 +583,89 @@ scan already learned not to do."
   (let ((n (length (ygg-projects--worktree-entries root))))
     (cons n n)))
 
+(defvar ygg-projects--tree-notes (make-hash-table :test #'equal)
+  "Each session folder's worktree line as (WHEN . NOTE), NOTE nil for none.")
+
+(defvar ygg-projects--tree-notes-pending (make-hash-table :test #'equal)
+  "Session folders with a worktree lookup already out.")
+
+(defvar ygg-projects--tree-mains (make-hash-table :test #'equal)
+  "Each linked-worktree session folder's main checkout, as git last named it.")
+
+(defconst ygg-projects--tree-note-ttl 300
+  "Seconds a session folder's worktree line is trusted before git is asked again.")
+
+(defun ygg-projects--tree-note (out dir)
+  "The line git worktree list --porcelain OUT earns DIR, a true name.
+Its worktree's folder and branch, a detached one its short sha; nil in
+the repository's first worktree, the main checkout, or outside them all."
+  (let ((dir (file-name-as-directory dir)) (i 0) best)
+    (dolist (block (split-string out "\n\n" t))
+      (when (string-match "^worktree \\(.*\\)$" block)
+        (let ((tree (file-name-as-directory (match-string 1 block))))
+          (when (and (string-prefix-p tree dir)
+                     (or (null best) (> (length tree) (length (nth 1 best)))))
+            (setq best (list i tree block)))))
+      (setq i (1+ i)))
+    (when (and best (> (car best) 0))
+      (let ((block (nth 2 best)))
+        (format "⌥ %s · %s"
+                (file-name-nondirectory (directory-file-name (nth 1 best)))
+                (cond ((string-match "^branch \\(?:refs/heads/\\)?\\(.*\\)$" block)
+                       (match-string 1 block))
+                      ((string-match "^HEAD \\([0-9a-f]\\{7\\}\\)" block)
+                       (match-string 1 block))
+                      (t "detached")))))))
+
+(defun ygg-projects--main-worktree (out)
+  "The main checkout: git worktree list --porcelain OUT lists it first."
+  (when (string-match "^worktree \\(.*\\)$" out)
+    (file-name-as-directory (match-string 1 out))))
+
+(defun ygg-projects--session-tree (dir)
+  "DIR's worktree line from the cache, asking git without waiting when
+it has none or an old one — safe on a drawing path."
+  (when (and dir (not (file-remote-p dir)))
+    (let* ((dir (file-name-as-directory (expand-file-name dir)))
+           (seen (gethash dir ygg-projects--tree-notes)))
+      (when (and (or (null seen)
+                     (> (- (float-time) (car seen)) ygg-projects--tree-note-ttl))
+                 (not (gethash dir ygg-projects--tree-notes-pending))
+                 (file-directory-p dir))
+        (if (ignore-errors
+              (ygg-git-async
+               dir '("worktree" "list" "--porcelain")
+               (lambda (out exit)
+                 (remhash dir ygg-projects--tree-notes-pending)
+                 (let ((note (and (zerop exit)
+                                  (ygg-projects--tree-note out (file-truename dir)))))
+                   (if note
+                       (puthash dir (ygg-projects--main-worktree out)
+                                ygg-projects--tree-mains)
+                     (remhash dir ygg-projects--tree-mains))
+                   (puthash dir (cons (float-time) note) ygg-projects--tree-notes)
+                   (unless (equal note (cdr seen)) (ygg-projects-refresh))))))
+            (puthash dir t ygg-projects--tree-notes-pending)
+          (puthash dir (cons (float-time) nil) ygg-projects--tree-notes)))
+      (cdr seen))))
+
+(defun ygg-projects--session-main (s)
+  "The main checkout of the linked worktree S works in, else nil.
+From the cache, asking git without waiting — safe on a drawing path."
+  (when-let* ((dir (or (aob-session-dir s) (aob-session-project s)))
+              ((not (file-remote-p dir))))
+    (ygg-projects--session-tree dir)
+    (gethash (file-name-as-directory (expand-file-name dir))
+             ygg-projects--tree-mains)))
+
+(defun ygg-projects--entry-tree (payload)
+  "The worktree line under PAYLOAD's row, when it is a session outside
+its repository's main checkout; its subagents stand where it does."
+  (when (and (fboundp 'aob-session-p) (aob-session-p payload)
+             (not (and (fboundp 'aob-subagent-p) (aob-subagent-p payload))))
+    (ygg-projects--session-tree (or (aob-session-dir payload)
+                                    (aob-session-project payload)))))
+
 
 ;;; What a row holds, when you open it
 
@@ -605,7 +693,8 @@ scan already learned not to do."
                        (mapcar (lambda (kid)
                                  (cons (format "└ %s" (aob-session-name kid)) kid))
                                (and (fboundp 'aob-subagent-children)
-                                    (aob-subagent-children s))))))
+                                    (seq-remove #'ygg-projects--ended-subagent-p
+                                                (aob-subagent-children s)))))))
               live))
             ;; ended, but the conversation is still there to pick up
             (past (and ygg-projects-show-past
@@ -801,14 +890,31 @@ it."
         (setq i end))))
   text)
 
+(defun ygg-projects--tree-text (note root kind payload)
+  "NOTE as the grey line under PAYLOAD's row, set in under its name.
+The same row to every command, but never a line point stops on."
+  (let ((line (- (ygg-projects--width) ygg-projects-entry-indent 3)))
+    (propertize (concat (make-string (max 0 (- ygg-projects-entry-indent 2)) ?\s)
+                        (propertize "│" 'font-lock-face 'ygg-projects-idle)
+                        "   "
+                        (propertize (truncate-string-to-width note line nil nil "…")
+                                    'font-lock-face 'ygg-projects-count)
+                        (ygg-projects--pad))
+                'ygg-project root 'ygg-row kind 'ygg-entry payload 'ygg-cont t)))
+
 (defun ygg-projects--entry-nodes (root kind)
-  (mapcar (lambda (cell)
+  (mapcan (lambda (cell)
             (if (eq (cdr cell) 'ygg-projects-gap)
-                (vui-text " ")
-            (let ((text (ygg-projects--entry-text (car cell) root kind (cdr cell))))
-              (when (ygg-projects--on-screen-p (cdr cell))
-                (ygg-projects--mark-row text 'ygg-projects-on-screen))
-              (vui-text text))))
+                (list (vui-text " "))
+              (let* ((payload (cdr cell))
+                     (note (and (eq kind 'agents) (ygg-projects--entry-tree payload)))
+                     (texts (cons (ygg-projects--entry-text (car cell) root kind payload)
+                                  (and note (list (ygg-projects--tree-text
+                                                   note root kind payload))))))
+                (when (ygg-projects--on-screen-p payload)
+                  (dolist (text texts)
+                    (ygg-projects--mark-row text 'ygg-projects-on-screen)))
+                (mapcar #'vui-text texts))))
           (or (ygg-projects--entries root kind)
               (list (cons "— none —" nil)))))
 
@@ -1091,31 +1197,148 @@ name; anything else, and the folder picker takes over."
 (defun ygg-projects--entry-at-point ()
   (get-text-property (line-beginning-position) 'ygg-entry))
 
+(declare-function ygg-normal-state "yggdrasil-core" ())
+(declare-function ygg-toggle-visual "yggdrasil-core" ())
+(declare-function aob-session-name "aob" (s))
+(declare-function aob-session-ref "aob" (s key))
+(declare-function aob-prompt "aob" (s text &optional attachments))
+(defvar ygg--visual-p)
+(defvar aob-prompt-typed)
+
+(defun ygg-projects--selecting-p ()
+  (and (bound-and-true-p ygg--visual-p) (mark t) t))
+
+(defun ygg-projects--selected-entries ()
+  "The session rows between mark and point, each once, top first.
+A name's second line and a worktree note carry their row's entry, and
+project heads, row titles and the other rows carry none of a session's."
+  (let ((last (save-excursion (goto-char (max (point) (mark t)))
+                              (line-beginning-position)))
+        (out nil))
+    (save-excursion
+      (goto-char (min (point) (mark t)))
+      (beginning-of-line)
+      (while (and (<= (point) last) (not (eobp)))
+        (when-let* (((eq (get-text-property (point) 'ygg-row) 'agents))
+                    ((not (get-text-property (point) 'ygg-cont)))
+                    (entry (get-text-property (point) 'ygg-entry))
+                    ((not (symbolp entry))))
+          (unless (memq entry out) (push entry out)))
+        (forward-line 1)))
+    (nreverse out)))
+
+(defun ygg-projects--session-p (entry)
+  (and (fboundp 'aob-session-p) (aob-session-p entry)))
+
+(defun ygg-projects--subagent-entry-p (entry)
+  (and (ygg-projects--session-p entry)
+       (fboundp 'aob-subagent-p) (aob-subagent-p entry)))
+
+(defun ygg-projects--conversation-p (entry)
+  "Non-nil when ENTRY is a session, running or ended."
+  (or (ygg-projects--session-p entry) (ygg-projects--ended-p entry)))
+
+(defun ygg-projects--running-p (entry)
+  (and (ygg-projects--session-p entry)
+       (not (aob-session-ref entry :asleep))
+       (not (memq (aob-session-state entry) ygg-projects-over-states))))
+
+(defun ygg-projects--entry-name (entry)
+  (if (ygg-projects--session-p entry)
+      (aob-session-name entry)
+    (or (plist-get entry :name) (plist-get entry :agent) "session")))
+
+(defun ygg-projects--leave-selection ()
+  "Back to normal state on the first line the selection held."
+  (when (ygg-projects--selecting-p)
+    (goto-char (min (point) (mark t)))
+    (beginning-of-line)
+    (when (fboundp 'ygg-normal-state) (ygg-normal-state))))
+
+(defun ygg-projects--act (verb targets act &optional ask)
+  "Call ACT on each of TARGETS, having asked once whether to VERB them.
+Without ASK nothing is asked.  In visual state the selection's session
+rows are the targets TARGETS keeps, subagents left out since they are
+their sender's to steer; otherwise it is the row at point."
+  (let* ((all (if (ygg-projects--selecting-p)
+                  (ygg-projects--selected-entries)
+                (delq nil (list (ygg-projects--entry-at-point)))))
+         (subs (seq-filter #'ygg-projects--subagent-entry-p all))
+         (picked (seq-filter targets (seq-difference all subs #'eq)))
+         (skipped (if subs (format "; %d subagent%s skipped (read-only)"
+                                   (length subs) (if (cdr subs) "s" ""))
+                    "")))
+    (unless picked
+      (ygg-projects--leave-selection)
+      (user-error "projects: nothing here to %s%s" verb skipped))
+    (when (or (not ask)
+              (y-or-n-p (format "%s%s %s? " (upcase (substring verb 0 1))
+                                (substring verb 1)
+                                (mapconcat #'ygg-projects--entry-name picked ", "))))
+      (ygg-projects--leave-selection)
+      ;; the one question has been answered for all of them
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (mapc act picked))
+      (ygg-projects-refresh)
+      (message "projects: %s %d%s" verb (length picked) skipped))))
+
+(defun ygg-projects-cancel ()
+  "Stop the turn of the session on this line, or of each one selected."
+  (interactive)
+  (ygg-projects--act "cancel" #'ygg-projects--running-p
+                     (lambda (s) (aob--call s :cancel nil))))
+
+(defun ygg-projects-say (text)
+  "Send TEXT to the session on this line, or to each one selected."
+  (interactive
+   (let* ((all (if (ygg-projects--selecting-p)
+                   (ygg-projects--selected-entries)
+                 (list (ygg-projects--entry-at-point))))
+          (names (mapcar #'ygg-projects--entry-name
+                         (seq-filter #'ygg-projects--running-p
+                                     (seq-remove #'ygg-projects--subagent-entry-p all)))))
+     (unless names (user-error "projects: no running session to say anything to"))
+     (list (read-string (format "%s » " (string-join names ", "))))))
+  (ygg-projects--act "say to" #'ygg-projects--running-p
+                     (lambda (s) (let ((aob-prompt-typed t)) (aob-prompt s text)))))
+
 (defun ygg-projects-delete ()
   "Remove what this line stands for: a session for good, or a project.
 A session that ran here is a conversation, so deleting it is deleting
-that; a project row is only the list this sidebar keeps."
+that; a project row is only the list this sidebar keeps.  In visual
+state, every session selected, after one question."
   (interactive)
-  (let ((entry (ygg-projects--entry-at-point)))
-    (cond
-     ((and (consp entry) (plist-member entry :acp-id))
-      (aob-acp-forget-entry entry)
-      (ygg-projects-refresh))
-     ((aob-session-p entry)
-      (aob-acp-delete-session entry)
-      (ygg-projects-refresh))
-     (t (ygg-projects-remove)))))
+  (if (ygg-projects--selecting-p)
+      (ygg-projects--act "delete for good" #'ygg-projects--conversation-p
+                         #'ygg-projects--delete-entry t)
+    (ygg-projects--delete-entry (ygg-projects--entry-at-point))))
+
+(defun ygg-projects--delete-entry (entry)
+  (cond
+   ((and (consp entry) (plist-member entry :acp-id))
+    (aob-acp-forget-entry entry)
+    (ygg-projects-refresh))
+   ((aob-session-p entry)
+    (aob-acp-delete-session entry)
+    (ygg-projects-refresh))
+   (t (ygg-projects-remove))))
+
+(defun ygg-projects--ended-p (entry)
+  (and (consp entry) (proper-list-p entry) (plist-member entry :acp-id) t))
 
 (defun ygg-projects-resume ()
-  "Start the conversation on this line up again."
+  "Start the conversation on this line up again, or each one selected."
   (interactive)
-  (let ((entry (ygg-projects--entry-at-point)))
-    (unless (and (consp entry) (plist-member entry :acp-id))
-      (user-error "projects: no ended conversation on this line"))
-    (when (y-or-n-p (format "Resume %s? " (or (plist-get entry :name)
-                                              (plist-get entry :agent))))
-      (aob-acp-resume-entry entry)
-      (ygg-projects-refresh))))
+  (if (ygg-projects--selecting-p)
+      (ygg-projects--act "resume" #'ygg-projects--ended-p
+                         #'aob-acp-resume-entry t)
+    (let ((entry (ygg-projects--entry-at-point)))
+      (unless (ygg-projects--ended-p entry)
+        (user-error "projects: no ended conversation on this line"))
+      (when (y-or-n-p (format "Resume %s? " (or (plist-get entry :name)
+                                                (plist-get entry :agent))))
+        (aob-acp-resume-entry entry)
+        (ygg-projects-refresh)))))
 
 (defun ygg-projects--put-away (entry)
   "Put ENTRY away, by whichever record it is kept in.
@@ -1131,44 +1354,53 @@ instead."
   (when (fboundp 'aob-transcript-forget) (aob-transcript-forget)))
 
 (defun ygg-projects-archive ()
-  "Put the conversation on this line away, keeping it resumable."
+  "Put the conversation on this line away, keeping it resumable.
+In visual state, every ended one selected."
   (interactive)
-  (let ((entry (ygg-projects--entry-at-point)))
-    (cond
+  (if (ygg-projects--selecting-p)
+      (ygg-projects--act "archive" #'ygg-projects--ended-p #'ygg-projects--put-away)
+    (let ((entry (ygg-projects--entry-at-point)))
+      (cond
      ((and (consp entry) (plist-member entry :acp-id))
-      (ygg-projects--put-away entry)
-      (ygg-projects-refresh))
-     ((aob-session-p entry)
-      (user-error "projects: that one is still running — end it first"))
-     (t (user-error "projects: no conversation on this line")))))
+        (ygg-projects--put-away entry)
+        (ygg-projects-refresh))
+       ((aob-session-p entry)
+        (user-error "projects: that one is still running — end it first"))
+       (t (user-error "projects: no conversation on this line"))))))
 
 (defun ygg-projects-archive-ask ()
   "Put the conversation on this line away, after asking.
 One still running is ended first and archived on the next press: an
-agent holding a conversation open is the reason it cannot be filed."
+agent holding a conversation open is the reason it cannot be filed.
+In visual state, every session selected, after one question."
   (interactive)
-  (let ((entry (ygg-projects--entry-at-point)))
-    (cond
-     ((and (consp entry) (plist-member entry :acp-id))
-      (when (y-or-n-p (format "Archive %s? "
-                              (or (plist-get entry :name) "this conversation")))
-        (ygg-projects--put-away entry)
-        (ygg-projects-refresh)))
-     ;; a conversation opened for reading is a session object with no
-     ;; agent behind it: there is nothing to end, only something to file
-     ((and (aob-session-p entry)
-           (or (aob-session-ref entry :asleep)
-               (memq (aob-session-state entry) '(done dead failed))))
-      (when (y-or-n-p (format "Archive %s? " (aob-session-name entry)))
-        (when-let* ((past (aob-session-ref entry :asleep)))
-          (ygg-projects--put-away past))
-        (aob-remove-session entry)
-        (ygg-projects-refresh)))
-     ((aob-session-p entry)
-      (when (y-or-n-p (format "End %s? " (aob-session-name entry)))
-        (ignore-errors (aob--call entry :kill))
-        (ygg-projects-refresh)))
-     (t (user-error "projects: no conversation on this line")))))
+  (if (ygg-projects--selecting-p)
+      (ygg-projects--act "end or archive" #'ygg-projects--conversation-p
+                         #'ygg-projects--archive-entry t)
+    (ygg-projects--archive-entry (ygg-projects--entry-at-point))))
+
+(defun ygg-projects--archive-entry (entry)
+  (cond
+   ((and (consp entry) (plist-member entry :acp-id))
+    (when (y-or-n-p (format "Archive %s? "
+                            (or (plist-get entry :name) "this conversation")))
+      (ygg-projects--put-away entry)
+      (ygg-projects-refresh)))
+   ;; a conversation opened for reading is a session object with no
+   ;; agent behind it: there is nothing to end, only something to file
+   ((and (aob-session-p entry)
+         (or (aob-session-ref entry :asleep)
+             (memq (aob-session-state entry) '(done dead failed))))
+    (when (y-or-n-p (format "Archive %s? " (aob-session-name entry)))
+      (when-let* ((past (aob-session-ref entry :asleep)))
+        (ygg-projects--put-away past))
+      (aob-remove-session entry)
+      (ygg-projects-refresh)))
+   ((aob-session-p entry)
+    (when (y-or-n-p (format "End %s? " (aob-session-name entry)))
+      (ignore-errors (aob--call entry :kill))
+      (ygg-projects-refresh)))
+   (t (user-error "projects: no conversation on this line"))))
 
 (defun ygg-projects--on-import ()
   "Redraw while a project is being taken in, if anyone is watching."
@@ -1402,8 +1634,10 @@ row was picked from."
         (dired root)))))
 
 (defun ygg-projects-visit ()
-  "Act on the row under point."
+  "Act on the row under point, the one row even in visual state."
   (interactive)
+  (when (and (ygg-projects--selecting-p) (fboundp 'ygg-normal-state))
+    (ygg-normal-state))
   (let* ((root (get-text-property (line-beginning-position) 'ygg-project))
          (row (get-text-property (line-beginning-position) 'ygg-row))
          (entry (get-text-property (line-beginning-position) 'ygg-entry)))
@@ -1497,6 +1731,9 @@ row was picked from."
     (define-key map "-" #'ygg-projects-archive)
     (define-key map "x" #'ygg-projects-archive-ask)
     (define-key map "R" #'ygg-projects-resume)
+    (define-key map "C" #'ygg-projects-cancel)
+    (define-key map "a" #'ygg-projects-say)
+    (define-key map "V" #'ygg-toggle-visual)
     (define-key map "q" #'ygg-projects-close)
     map)
   "The sidebar's own verbs, ahead of yggdrasil's normal state.")
@@ -1522,6 +1759,27 @@ and no state gets to put its cursor back."
   (when (and (bound-and-true-p ygg--normal-p) mark-active)
     (set-mark (point))
     (deactivate-mark)))
+
+(defun ygg-projects--anchor ()
+  "Begin a selection of rows on the row it was started from."
+  (set-marker (mark-marker) (line-beginning-position)))
+
+(defvar-local ygg-projects--selection-overlay nil)
+
+(defun ygg-projects--paint-selection ()
+  "Light the rows a visual selection holds, the region face being off here."
+  (if (ygg-projects--selecting-p)
+      (let ((beg (save-excursion (goto-char (min (point) (mark t)))
+                                 (line-beginning-position)))
+            (end (save-excursion (goto-char (max (point) (mark t)))
+                                 (line-beginning-position 2))))
+        (unless ygg-projects--selection-overlay
+          (setq ygg-projects--selection-overlay (make-overlay beg end))
+          (overlay-put ygg-projects--selection-overlay 'face 'ygg-projects-current))
+        (move-overlay ygg-projects--selection-overlay beg end))
+    (when ygg-projects--selection-overlay
+      (delete-overlay ygg-projects--selection-overlay)
+      (setq ygg-projects--selection-overlay nil))))
 
 (defun ygg-projects--window (&optional frame)
   "The sidebar\='s own window on FRAME: the side window down the left.
@@ -1680,6 +1938,8 @@ windows around, the width it was opened at is the width it keeps."
     (setq-local hl-line-face 'ygg-projects-current)
     (hl-line-mode 1)
     (add-hook 'post-command-hook #'ygg-projects--drop-selection 90 t)
+    (add-hook 'post-command-hook #'ygg-projects--paint-selection 91 t)
+    (add-hook 'ygg-visual-entry-hook #'ygg-projects--anchor nil t)
     (add-hook 'post-command-hook #'ygg-projects--follow-point nil t)
     (add-hook 'window-configuration-change-hook #'ygg-projects--trim-window nil t)))
 

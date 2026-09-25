@@ -45,8 +45,8 @@
                    (list (region-beginning) (region-end))
                  (list nil nil)))
   (let* ((file (or (buffer-file-name) (buffer-name)))
-         (text (if beg (buffer-substring-no-properties beg end)
-                 (buffer-substring-no-properties (point-min) (point-max))))
+         (text (substring-no-properties
+                (filter-buffer-substring (or beg (point-min)) (or end (point-max)))))
          (item (list :file file :text text
                      :beg (and beg (line-number-at-pos beg))
                      :end (and end (line-number-at-pos end)))))

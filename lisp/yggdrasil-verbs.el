@@ -178,7 +178,8 @@ contents, \"# selection indices, \"_ black hole (empty) — all vim/helix."
 KIND is `yank' or `delete'; it feeds the vim register conventions
 \(\"0 for yanks, the \"1-\"9 ring for deletes, named on demand)."
   (let* ((regions (ygg--verb-regions))
-         (texts (mapcar (lambda (r) (buffer-substring-no-properties (car r) (cadr r)))
+         (texts (mapcar (lambda (r) (substring-no-properties
+                                     (filter-buffer-substring (car r) (cadr r))))
                         regions))
          (reg (ygg--register-consume)))
     ;; "_ black hole: leave the kill ring and every register untouched
@@ -865,7 +866,8 @@ the paragraph at point instead (vim gq)."
 ;;; g X — exchange (evil-exchange)
 
 (defface ygg-exchange-highlight '((t :inherit region :underline t))
-  "Region marked by a pending `g X' exchange.")
+  "Region marked by a pending `g X' exchange."
+  :group 'yggdrasil)
 
 (defvar-local ygg--exchange-pending nil
   "(BEG-MARKER END-MARKER OVERLAY) for a first `g X' mark, or nil.")
