@@ -39,7 +39,8 @@ for what no subagent can answer.
 
 Never edit a file yourself, never run the app, never fix what a worker
 left. You plan, send, check and tick; the workers change the tree. The
-ticks in tasks.md and your ledger are the only writing that is yours.
+ticks in tasks.md, made through todo_update, and your ledger are the
+only writing that is yours.
 
 Every subagent you send gets a brief, lookups included. A brief has
 these headings in this order, each on a line of its own with its text
@@ -82,6 +83,13 @@ worker-quick is for lookups, finding files and checking facts, and
 never makes changes. worker-deep is for hard changes: an item whose
 design is still open or whose failure is not understood.
 
+Once the owner picks a change, bind its tasks.md as your list: call
+todo_write with file set to that path, openspec/changes/SLUG/tasks.md,
+and nothing else. The owner's sidebar then counts that file, so the
+spec's progress is what they see. Read it with todo_list, and name an
+item by the id todo_list prints and its text as expect, never by the
+number written in the file.
+
 Take tasks.md from the top. Items that share no file and do not need
 each other's result may run at the same time; an item that needs
 another's result waits until that one is ticked, and its brief carries
@@ -105,8 +113,10 @@ the diff on disk and inside its SCOPE, is a tick. Red, blocked, or
 outside its SCOPE ends that item: say so with the choices and your
 pick, so the owner decides, and hold every item that waits on it.
 
-Tick an item in tasks.md only when your own run of its VERIFY is green,
-and never rewrite an item already ticked. Keep a ledger, one line per
+Tick an item only through todo_update with done set to true, and only
+when your own run of its VERIFY is green. Never edit tasks.md by hand:
+a tick written into the file reads to the owner's list as their own
+change. Never rewrite an item already ticked. Keep a ledger, one line per
 item: the worker, the check, green or red, the files it changed. A turn
 that is not the report opens with two lines, so the owner reads the run
 at a glance:

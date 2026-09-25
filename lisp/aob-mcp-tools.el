@@ -471,8 +471,10 @@ carries, as session_list prints them."
 
 (aob-mcp-deftool
  :name "todo_write"
- :description "Create a new todo list (a tasks.md file the editor keeps) for this session, and make it the session's current list. Returns its path."
- :args '((:name "title" :type string :optional t
+ :description "Make a todo list this session's current list and return it: a new tasks.md, or with file an existing one such as a spec's."
+ :args '((:name "file" :type string :optional t
+          :description "An existing tasks.md inside the project to bind instead of creating one; title, slug and sections are then ignored.")
+         (:name "title" :type string :optional t
           :description "Title for the list; defaults to blank.")
          (:name "slug" :type string :optional t
           :description "Short name, used in the path; defaults from the title.")
@@ -496,18 +498,30 @@ carries, as session_list prints them."
                          (push (cons name items) result))))
                  (error 'bad))
              nil)))
-     (if (eq sections 'bad)
-         "sections is not a JSON array of {name, items}; nothing was created"
-     (aob-mcp-relay
-      conn id
-      `(condition-case err
-           (let* ((ygg-todo-by 'agent)
-                  (dir (or (ygg-todo-session-dir ,(aob-mcp-tools--parent-form aob-mcp-session))
-                           (error "no calling session: cannot tell whose list this is")))
-                  (path (ygg-todo-create dir ,slug ,title ',sections)))
-             (ygg-todo-session-bind ,(aob-mcp-tools--parent-form aob-mcp-session) path)
-             (split-string (ygg-todo-format path) "\n"))
-         (error (list (error-message-string err)))))))))
+     (cond
+      ((let ((f (plist-get args :file))) (and f (not (string-empty-p f))))
+       (aob-mcp-relay
+        conn id
+        `(condition-case err
+             (split-string
+              (ygg-todo-format
+               (ygg-todo-session-adopt ,(aob-mcp-tools--parent-form aob-mcp-session)
+                                       ,(plist-get args :file)))
+              "\n")
+           (error (list (error-message-string err))))))
+      ((eq sections 'bad)
+       "sections is not a JSON array of {name, items}; nothing was created")
+      (t
+       (aob-mcp-relay
+        conn id
+        `(condition-case err
+             (let* ((ygg-todo-by 'agent)
+                    (dir (or (ygg-todo-session-dir ,(aob-mcp-tools--parent-form aob-mcp-session))
+                             (error "no calling session: cannot tell whose list this is")))
+                    (path (ygg-todo-create dir ,slug ,title ',sections)))
+               (ygg-todo-session-bind ,(aob-mcp-tools--parent-form aob-mcp-session) path)
+               (split-string (ygg-todo-format path) "\n"))
+           (error (list (error-message-string err))))))))))
 
 (aob-mcp-deftool
  :name "todo_list"

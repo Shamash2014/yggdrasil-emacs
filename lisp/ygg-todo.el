@@ -393,18 +393,43 @@ finished items too."
   "Bind FILE as the list of session S."
   (when-let* ((s (ygg-todo--session s)))
     (aob-session-put s :todo-file (expand-file-name file))
+    (aob-session-put s :todo-adopted nil)
     (when (fboundp 'aob--dirty) (aob--dirty s))
     ;; sessions are otherwise written only on exit, and a crash would
     ;; leave the list without the session it belongs to
     (when (fboundp 'aob-acp--persist) (ignore-errors (aob-acp--persist)))
     file))
 
+(defun ygg-todo--session-root (s)
+  (or (aob-session-project s) (aob-session-dir s) default-directory))
+
 (defun ygg-todo-session-dir (s)
   "Where new lists for session S are created."
   (when-let* ((s (ygg-todo--session s)))
-    (expand-file-name ".aob/tasks/"
-                      (or (aob-session-project s) (aob-session-dir s)
-                          default-directory))))
+    (expand-file-name ".aob/tasks/" (ygg-todo--session-root s))))
+
+(defun ygg-todo-session-adopt (s file)
+  "Bind the existing list FILE, inside S's project, as S's list; return its path.
+A relative FILE is read from the project root."
+  (let* ((s (or (ygg-todo--session s)
+                (user-error "todo: no calling session: cannot tell whose list this is")))
+         (root (file-name-as-directory (expand-file-name (ygg-todo--session-root s))))
+         (path (expand-file-name file root)))
+    (unless (file-regular-p path)
+      (user-error "todo: no such file: %s" path))
+    (unless (file-in-directory-p path root)
+      (user-error "todo: %s is outside the project %s" path root))
+    (ygg-todo-session-bind s path)
+    (aob-session-put s :todo-adopted t)
+    (ygg-todo--seen-update path)
+    path))
+
+(defun ygg-todo--made-here-p (s file)
+  "Whether FILE is a list aob made for S, not one bound from elsewhere.
+An adopted list is never S's own, even one another session keeps here."
+  (when-let* ((dir (ygg-todo-session-dir s))
+              ((not (aob-session-ref s :todo-adopted))))
+    (file-in-directory-p file dir)))
 
 ;;; A session's list: its agent's plan carried in, the user's edits told back
 
@@ -511,16 +536,19 @@ The snapshot replaces what the agent's plan put there before: its
 entries are added, reworded, ticked and unticked to match, and items it
 no longer names go.  What the user added or changed stays and waits for
 the agent as a note; an item the user removed is not put back.  A list
-is started for a first plan when S has none."
+is started for a first plan when S has none.  A list bound from outside
+the session's own lists, a spec's tasks.md, is never written into."
   (let* ((ygg-todo-by 'agent)
          (entries (ygg-todo--plan-entries u))
-         (file (or (ygg-todo-session-file s)
-                   (when entries
-                     (let ((path (ygg-todo-create (ygg-todo-session-dir s)
-                                                  (aob-session-name s)
-                                                  (aob-session-name s) nil)))
-                       (ygg-todo-session-bind s path)
-                       path)))))
+         (bound (ygg-todo-session-file s))
+         (file (cond ((null bound)
+                      (when entries
+                        (let ((path (ygg-todo-create (ygg-todo-session-dir s)
+                                                     (aob-session-name s)
+                                                     (aob-session-name s) nil)))
+                          (ygg-todo-session-bind s path)
+                          path)))
+                     ((ygg-todo--made-here-p s bound) bound))))
     (when file
       (let ((file (expand-file-name file)))
         (ygg-todo--reconcile file)

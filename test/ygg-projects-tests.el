@@ -155,11 +155,32 @@ Each lookup is counted in CALLS and its callback kept in REPLY."
     (should (get-text-property 0 'ygg-cont text))
     (should (eq (get-text-property 0 'ygg-entry text) 'session))))
 
+(ert-deftest ygg-projects-rows-hold-their-place-while-sessions-stream ()
+  "Rows sort by when a session started, so a new event moves nothing."
+  (require 'aob-subagent)
+  (let ((ygg-projects-show-past nil) (ygg-projects-show-subagents t)
+        (ygg-projects--pin-list nil)
+        (root (file-name-as-directory (file-truename temporary-file-directory)))
+        made)
+    (unwind-protect
+        (let ((old (aob-create-session :id "p-old" :backend 'acp :name "old"
+                                       :project root :state 'working
+                                       :started (time-subtract nil 60)))
+              (new (aob-create-session :id "p-new" :backend 'acp :name "new"
+                                       :project root :state 'working)))
+          (setq made (list old new))
+          (cl-letf (((symbol-function 'ygg-projects--roots) (lambda () (list root)))
+                    ((symbol-function 'ygg-projects--past) #'ignore))
+            (should (equal (mapcar #'car (ygg-projects--entries root 'agents)) '("new" "old")))
+            (aob-event old 'message :title "streaming")
+            (should (equal (mapcar #'car (ygg-projects--entries root 'agents)) '("new" "old")))))
+      (mapc #'aob-remove-session made))))
+
 (ert-deftest ygg-projects-subagent-row-lives-as-long-as-its-work ()
   "A running subagent is a row under its sender and counted once; done,
 failed or killed it is neither."
   (require 'aob-subagent)
-  (let ((ygg-projects-show-past nil)
+  (let ((ygg-projects-show-past nil) (ygg-projects-show-subagents t)
         (root (file-name-as-directory (file-truename temporary-file-directory))))
     (dolist (end '(done failed killed))
       (let* ((parent (aob-create-session :id "p" :backend 'acp :name "lead"
@@ -182,6 +203,27 @@ failed or killed it is neither."
           (ignore-errors (aob-remove-session kid))
           (aob-remove-session parent))))))
 
+(ert-deftest ygg-projects-subagent-row-shows-its-plan-progress ()
+  "A subagent keeps no list; its row counts its own plan instead."
+  (require 'aob-subagent)
+  (let* ((root (file-name-as-directory (file-truename temporary-file-directory)))
+         (parent (aob-create-session :id "p" :backend 'acp :name "lead"
+                                     :project root :state 'working))
+         (kid (aob-create-session :id "p/k" :backend 'native-subagent :name "scout"
+                                  :project root :state 'working
+                                  :refs (list :parent-session "p"))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ygg-todo-session-file) #'ignore)
+                  ((symbol-function 'aob-session-clock) #'ignore)
+                  ((symbol-function 'aob-session-spend) #'ignore)
+                  ((symbol-function 'aob-session-quiet) #'ignore))
+          (should-not (string-search "/" (ygg-projects--badge kid 40)))
+          (aob-session-put kid :plan-progress '(2 . 5))
+          (should (equal (substring-no-properties (ygg-projects--badge kid 40))
+                         "2/5 working"))
+          (should-not (string-search "2/5" (ygg-projects--badge parent 40))))
+      (mapc #'aob-remove-session (list kid parent)))))
+
 (ert-deftest ygg-projects-subagent-row-says-its-kind-underneath ()
   (require 'aob-subagent)
   (let* ((root (file-name-as-directory (file-truename temporary-file-directory)))
@@ -201,7 +243,7 @@ failed or killed it is neither."
                    :raw (:description "scout" :subagent_type "Explore")))
           (should (equal (ygg-projects--entry-tree typed) "claude · Explore"))
           (should (equal (ygg-projects--entry-tree plain) "claude"))
-          (should (equal (ygg-projects--entry-tree parent) "claude")))
+          (should (equal (ygg-projects--entry-tree parent) "claude · ▸ 2")))
       (mapc #'aob-remove-session (list typed plain parent)))))
 
 ;;; Acting on a visual selection of rows
@@ -349,7 +391,7 @@ a folder outside git; the lookup is seeded, so no git runs."
   (declare (indent 2))
   `(progn
      (require 'aob-subagent)
-     (let ((ygg-projects-show-past nil)
+     (let ((ygg-projects-show-past nil) (ygg-projects-show-subagents t)
            (ygg-projects--tree-notes (make-hash-table :test #'equal))
            (ygg-projects--tree-mains (make-hash-table :test #'equal))
            (made nil))
@@ -417,7 +459,7 @@ a folder outside git; the lookup is seeded, so no git runs."
 Each spec is (ID PARENT TS); a session with no PARENT is a lead.  Pins
 start empty and live in a file of their own."
   (require 'aob-subagent)
-  (let* ((ygg-projects-show-past nil)
+  (let* ((ygg-projects-show-past nil) (ygg-projects-show-subagents t)
          (aob-acp-persist-file nil)
          (ygg-projects-pins-file (make-temp-file "ygg-projects-pins"))
          (ygg-projects--pin-list 'unread)
@@ -521,6 +563,36 @@ key is written; a pin taken early moves onto the conversation once it exists."
       (should (< (string-search "claude" (funcall note "a"))
                  (string-search "claude" (funcall note "a2"))
                  (string-search "claude" (funcall note "a2x")))))))
+
+(ert-deftest ygg-projects-subagents-fold-until-tab-opens-their-lead ()
+  "A lead's subagents are hidden by default and counted on its grey line;
+TAB on the lead shows them, TAB on one of them folds them back."
+  (ygg-projects-tests--with-tree (("lead" nil 5) ("a" "lead" 1) ("b" "lead" 2) ("solo" nil 1))
+    (let ((ygg-projects-show-subagents nil)
+          (ygg-projects--expanded nil))
+      (should (equal (ygg-projects-tests--names root) '("lead" "solo")))
+      (should (string-suffix-p "▸ 2" (or (ygg-projects--entry-tree (aob-session-get "lead")) "")))
+      (should-not (string-search "▸" (or (ygg-projects--entry-tree (aob-session-get "solo")) "")))
+      (cl-letf (((symbol-function 'ygg-projects-refresh) #'ignore))
+        (with-temp-buffer
+          (insert (propertize "lead" 'ygg-project root 'ygg-row 'agents
+                              'ygg-entry (aob-session-get "lead")))
+          (goto-char (point-min))
+          (ygg-projects-toggle)
+          (should (equal (ygg-projects-tests--names root) '("lead" "└ b" "└ a" "solo")))
+          (should-not (string-search "▸" (or (ygg-projects--entry-tree (aob-session-get "lead")) "")))
+          (erase-buffer)
+          (insert (propertize "└ a" 'ygg-project root 'ygg-row 'agents
+                              'ygg-entry (aob-session-get "a")))
+          (goto-char (point-min))
+          (ygg-projects-toggle)
+          (should (equal (ygg-projects-tests--names root) '("lead" "solo"))))))))
+
+(ert-deftest ygg-projects-tab-on-a-lead-without-subagents-keeps-its-old-use ()
+  (ygg-projects-tests--with-tree (("solo" nil 1))
+    (let ((ygg-projects-show-subagents nil) (ygg-projects--expanded nil))
+      (should-not (ygg-projects--toggle-subagents (aob-session-get "solo")))
+      (should-not ygg-projects--expanded))))
 
 (ert-deftest ygg-projects-tree-hides-an-ended-grandchild ()
   (ygg-projects-tests--with-tree (("lead" nil 5) ("a" "lead" 1) ("a1" "a" 1))

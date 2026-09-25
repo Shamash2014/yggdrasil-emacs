@@ -1891,17 +1891,32 @@ As session refs; the first preset settling each one decides it."
               ((ygg-aob--dirty-p root)))
     (list (cons "diff" "  what the checkout changed"))))
 
+(defun ygg-aob--diff-dir ()
+  "The checkout an @diff reads: the target session's worktree, else the draft's."
+  (if-let* ((s (ygg-aob--draft-target)))
+      (or (aob-session-dir s) (aob-session-project s))
+    (or (bound-and-true-p aob-compose--dir) default-directory)))
+
+(defun ygg-aob--worktree-line (root)
+  "One line naming ROOT's worktree folder and branch."
+  (let ((branch (with-temp-buffer
+                  (let ((default-directory root))
+                    (call-process "git" nil t nil "symbolic-ref" "-q" "--short" "HEAD"))
+                  (string-trim (buffer-string)))))
+    (format "worktree %s · branch %s"
+            (file-name-nondirectory (directory-file-name root))
+            (if (string-empty-p branch) "detached HEAD" branch))))
+
 (defun ygg-aob--expand-diff (text)
   "TEXT with the checkout's diff carried after it when it says @diff."
   (when-let* (((string-match-p "@diff\\(?:[^[:alnum:]_-]\\|\\'\\)" text))
-              (root (ygg-aob--repo (or (bound-and-true-p aob-compose--dir)
-                                       default-directory)))
+              (root (ygg-aob--repo (ygg-aob--diff-dir)))
               (diff (with-temp-buffer
                       (let ((default-directory root))
                         (call-process "git" nil t nil "diff" "HEAD"))
                       (buffer-string)))
               ((not (string-empty-p (string-trim diff)))))
-    (concat text "\n\n<diff>\n"
+    (concat text "\n\n<diff>\n" (ygg-aob--worktree-line root) "\n"
             (if (> (length diff) ygg-aob-diff-max-chars)
                 (concat (substring diff 0 ygg-aob-diff-max-chars)
                         (format "\n… %d more characters left out"

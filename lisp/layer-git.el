@@ -68,6 +68,14 @@
 (defvar magit-status-headers-hook)
 (declare-function magit-auto-revert-repository-buffer-p "magit-autorevert")
 
+(declare-function magit-add-section-hook "magit-section")
+(declare-function magit-insert-worktrees "magit-worktree")
+
+;; magit-insert-worktrees inserts nothing when the repository has one worktree
+(with-eval-after-load 'magit-status
+  (magit-add-section-hook 'magit-status-sections-hook #'magit-insert-worktrees
+                          #'magit-insert-status-headers t))
+
 (declare-function magit-blame-next-chunk "magit-blame")
 (declare-function magit-blame-previous-chunk "magit-blame")
 (declare-function magit-blame-cycle-style "magit-blame")
@@ -510,6 +518,39 @@ so it rendered two lines for a mode with a hundred keys."
       (progn (kill-new branch) (message "%s" branch))
     (user-error "No current branch")))
 
+(declare-function magit-list-worktrees "magit-git")
+(declare-function magit-rev-abbrev "magit-git")
+
+(defun ygg-git--worktree-choices ()
+  "Other worktrees of this repository as (LABEL . PATH).
+LABEL is the worktree's name, branch and path."
+  (let* ((here (magit-toplevel))
+         (rows (seq-keep
+                (pcase-lambda (`(,path ,commit ,branch ,bare ,_detached ,_locked ,prunable))
+                  (let ((path (file-name-as-directory path)))
+                    (unless (or bare prunable (and here (file-equal-p path here)))
+                      (list (file-name-nondirectory (directory-file-name path))
+                            (or branch (magit-rev-abbrev commit))
+                            path))))
+                (magit-list-worktrees)))
+         (name-width (apply #'max 0 (mapcar (lambda (r) (string-width (nth 0 r))) rows)))
+         (branch-width (apply #'max 0 (mapcar (lambda (r) (string-width (nth 1 r))) rows))))
+    (mapcar (pcase-lambda (`(,name ,branch ,path))
+              (cons (format "%s  %s  %s"
+                            (string-pad name name-width)
+                            (propertize (string-pad branch branch-width) 'face 'shadow)
+                            (propertize (abbreviate-file-name path) 'face 'shadow))
+                    path))
+            rows)))
+
+(defun ygg-git-worktree-status ()
+  "Open magit status in another worktree of this repository."
+  (interactive)
+  (require 'magit)
+  (let ((choices (or (ygg-git--worktree-choices)
+                     (user-error "No other worktree"))))
+    (magit-status (cdr (assoc (completing-read "Worktree: " choices nil t) choices)))))
+
 ;;; File reference helpers: copy path:line or code with reference
 
 (defun ygg--file-reference ()
@@ -659,6 +700,7 @@ so it rendered two lines for a mode with a hundred keys."
   "f" #'magit-pull :label "pull/fetch"
   "B" #'magit-branch :label "branch menu"
   "w" #'magit-worktree :label "worktrees"
+  "W" #'ygg-git-worktree-status :label "worktree status"
   "x" ygg-git-conflict-map :label "conflicts"
   "y" #'ygg-git-yank-branch :label "yank branch"
   "F" #'forge-dispatch :label "forge menu"

@@ -201,6 +201,41 @@ SENDING is non-nil while the turn that made the call is still going."
         (setf (aob-session-events kid) (seq-take (aob-session-events kid) keep)
               (aob-session-nevents kid) keep)))))
 
+(defun aob-subagent--plan-items (ev)
+  "The items of the plan EV states, or t when EV states none.
+A plan update lists entries; a TodoWrite call lists todos in its input."
+  (pcase (plist-get ev :type)
+    ('plan (plist-get ev :entries))
+    ('tool (let ((todos (and (listp (plist-get ev :raw))
+                             (plist-get (plist-get ev :raw) :todos))))
+             (if (and (consp todos)
+                      (seq-every-p (lambda (e) (and (listp e) (plist-get e :status))) todos))
+                 todos
+               t)))
+    (_ t)))
+
+(defvar aob-subagent-progress-functions nil
+  "Called with a subagent whose :plan-progress just changed.")
+
+(defun aob-subagent--plan-note (kid ev)
+  "Keep KID's :plan-progress, (DONE . TOTAL), level with the plan EV states."
+  (let ((items (aob-subagent--plan-items ev)))
+    (unless (eq items t)
+      (aob-session-put kid :plan-progress
+                       (and items
+                            (cons (seq-count (lambda (e) (equal (plist-get e :status) "completed"))
+                                             items)
+                                  (length items))))
+      (aob--dirty kid)
+      (run-hook-with-args 'aob-subagent-progress-functions kid))))
+
+(defun aob-subagent--own-plan-note (s ev)
+  "A subagent's own step EV, made on S itself, as a workflow's are."
+  (when (and (aob-subagent-p s) (not (plist-get ev :parent)))
+    (aob-subagent--plan-note s ev)))
+
+(add-hook 'aob-event-change-functions #'aob-subagent--own-plan-note)
+
 (defun aob-subagent--native-note (s ev)
   "Keep the subagent EV belongs to, or is, in step with EV of stream S."
   (unless (aob-subagent-native-p s)
@@ -209,6 +244,7 @@ SENDING is non-nil while the turn that made the call is still going."
            (owner (or (and kids pid (aob-session-get (gethash pid kids))) s)))
       (unless (eq owner s)
         (aob-subagent--native-take owner ev)
+        (aob-subagent--plan-note owner ev)
         (aob--dirty owner))
       (when (and (eq (plist-get ev :type) 'tool) (plist-get ev :subagent))
         (aob-subagent--native-sync

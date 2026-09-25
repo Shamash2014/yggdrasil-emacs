@@ -595,8 +595,14 @@ before it is dispatched.")
           (aob-acp--models-refresh s))
          ;; claude sends "plan"; codex/hermes stream "plan_update" (and
          ;; "plan_removed" to clear) — all carry the same :entries shape
-         ((or "plan" "plan_update") (aob-acp--plan s u))
-         ("plan_removed" (aob-acp--plan s '(:entries nil))))))))
+         ((or "plan" "plan_update")
+          (if-let* ((pid (aob-acp--parent-of u)))
+              (aob-acp--sub-plan s u pid)
+            (aob-acp--plan s u)))
+         ("plan_removed"
+          (if-let* ((pid (aob-acp--parent-of u)))
+              (aob-acp--sub-plan s '(:entries nil) pid)
+            (aob-acp--plan s '(:entries nil)))))))))
 
 (defvar aob-acp--command-map nil)
 
@@ -1051,6 +1057,26 @@ redrawing the parent's line."
                      (aob-refresh-summary s ev))
             (aob-session-put s :plan-ev
                              (aob-event s 'plan :title title :entries entries))))))))
+
+(defun aob-acp--sub-plan (s u pid)
+  "A subagent's plan U, under the call PID that sent it.
+It is the subagent's own, so it neither replaces S's plan nor reaches
+S's todo list; its event rides with the subagent's other steps."
+  (let* ((slot (intern (format ":plan-ev@%s" pid)))
+         (ev (aob-session-ref s slot))
+         (entries (plist-get u :entries)))
+    (unless (if ev (equal entries (plist-get ev :entries)) (null entries))
+      (let ((title (format "plan %d/%d"
+                           (seq-count (lambda (e) (equal (plist-get e :status) "completed"))
+                                      entries)
+                           (length entries))))
+        (if (and ev (eq ev (car (aob-session-events s))))
+            (progn (plist-put ev :title title)
+                   (plist-put ev :entries entries)
+                   (plist-put ev :line nil)
+                   (aob-refresh-summary s ev))
+          (aob-session-put s slot
+                           (aob-event s 'plan :parent pid :title title :entries entries)))))))
 
 ;;; Verbs (backend side)
 
@@ -1706,21 +1732,39 @@ Bare and prunable entries are left out; a detached one has no BRANCH."
           (seq-filter (lambda (w) (file-directory-p (car w)))
                       (aob-acp--parse-worktrees (buffer-string))))))))
 
+(defconst aob-acp-place-others-max 8
+  "How many of the repository's other worktrees a place note names.")
+
+(defun aob-acp--place-others (wts here)
+  "The tail of a place note at HERE naming the other worktrees in WTS."
+  (let* ((others (remove here wts))
+         (named (mapcar (lambda (w)
+                          (format "%s (%s)"
+                                  (file-name-nondirectory (directory-file-name (car w)))
+                                  (or (cdr w) "detached")))
+                        (take aob-acp-place-others-max others))))
+    (if (null named) ""
+      (format " · other worktrees: %s%s"
+              (string-join named ", ")
+              (if (nthcdr aob-acp-place-others-max others) ", …" "")))))
+
 (defun aob-acp--place-note (dir)
-  "One line naming DIR's worktree and branch, or nil outside a repository."
+  "One line naming DIR's worktree and branch, and the repository's others.
+Nil outside a repository."
   (when-let* ((wts (aob-acp--worktrees dir))
               (here (car (sort (seq-filter (lambda (w) (file-in-directory-p dir (car w))) wts)
                                :key (lambda (w) (- (length (car w))))))))
-    (format "[workspace: %s · branch %s%s]"
+    (format "[workspace: %s · branch %s%s%s]"
             (directory-file-name (car here))
             (or (cdr here) "detached HEAD")
             (if (eq here (car wts)) ""
-              (format " · linked worktree of %s" (directory-file-name (caar wts)))))))
+              (format " · linked worktree of %s" (directory-file-name (caar wts))))
+            (aob-acp--place-others wts here))))
 
 (defun aob-acp--place-block (s)
   "The place note S has not yet been told, as a prompt block, else nil.
 Sent in the prompt because only some adapters read _meta.systemPrompt,
-and again after a branch switch."
+and again after a branch switch or a worktree added or removed."
   (let ((note (aob-acp--place-note (or (aob-session-dir s) (aob-session-project s)))))
     (unless (or (null note) (equal note (aob-session-ref s :place-told)))
       (aob-session-put s :place-told note)

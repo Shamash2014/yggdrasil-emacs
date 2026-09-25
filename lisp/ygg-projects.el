@@ -661,6 +661,24 @@ From the cache, asking git without waiting — safe on a drawing path."
 (declare-function aob-subagent-live-count "aob-subagent" (s))
 (declare-function aob-subagent-parent "aob-subagent" (s))
 
+(defcustom ygg-projects-show-subagents nil
+  "Non-nil shows every lead's subagents; nil shows only the leads opened with TAB."
+  :type 'boolean :group 'ygg-projects)
+
+(defvar ygg-projects--expanded nil
+  "Ids of the leads whose subagents are on show.")
+
+(defun ygg-projects--expanded-p (s)
+  (or ygg-projects-show-subagents
+      (member (aob-session-id s) ygg-projects--expanded)))
+
+(defun ygg-projects--hidden-count (s)
+  "How many live subagents S keeps folded away, zero when on show."
+  (if (or (ygg-projects--expanded-p s) (not (fboundp 'aob-subagent-children)))
+      0
+    (seq-count (lambda (k) (not (ygg-projects--ended-subagent-p k)))
+               (aob-subagent-children s))))
+
 (defun ygg-projects--entry-tree (payload)
   "The grey line under PAYLOAD's row: the agent running it, then a
 subagent's kind, or a lead's live subagents against its cap and the
@@ -677,20 +695,24 @@ twice."
                        (unless (equal kind agent) kind))
                    (ygg-projects--session-tree (or (aob-session-dir payload)
                                                    (aob-session-project payload)))))
+           (hidden (if sub 0 (ygg-projects--hidden-count payload)))
            (parts (delq nil (list (and (stringp agent) agent)
                                   (and cap (format "%s/%s"
                                                    (aob-subagent-live-count payload)
                                                    cap))
-                                  more))))
+                                  more
+                                  (and (> hidden 0) (format "▸ %d" hidden))))))
       (and parts (string-join parts " · ")))))
 
 
 ;;; What a row holds, when you open it
 
 (defun ygg-projects--session-ts (s)
-  "When S last had something to say, as a number."
-  (float-time (or (plist-get (car (aob-session-events s)) :ts)
-                  (ignore-errors (aob-session-started s)))))
+  "When S started, as a number: a row keeps its place while it streams.
+Ordering by the last event made every row trade places each second."
+  (float-time (or (ignore-errors (aob-session-started s))
+                  (plist-get (car (last (aob-session-events s))) :ts)
+                  0)))
 
 (defcustom ygg-projects-pins-file (locate-user-emacs-file "var/projects-pins.eld")
   "Where the pinned sessions are kept, first pinned first."
@@ -761,7 +783,7 @@ A pin taken before S had a conversation moves onto it once it has one."
       (setq s (aob-subagent-parent s) n (1+ n)))
     n))
 
-(defun ygg-projects--by-recency (sessions)
+(defun ygg-projects--by-start (sessions)
   (sort (copy-sequence sessions)
         (lambda (a b) (> (ygg-projects--session-ts a) (ygg-projects--session-ts b)))))
 
@@ -776,7 +798,7 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
                                     (aob-session-name kid))
                             kid)
                       (ygg-projects--descendant-rows kid (1+ depth) seen))))
-            (ygg-projects--by-recency
+            (ygg-projects--by-start
              (seq-remove #'ygg-projects--ended-subagent-p
                          (aob-subagent-children s))))))
 
@@ -795,7 +817,8 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
                     ;; what it sent goes under it, two columns a level:
                     ;; a row this narrow has no more to spare
                     (cons (cons (aob-session-name s) s)
-                          (ygg-projects--descendant-rows s 0 (list s)))))
+                          (and (ygg-projects--expanded-p s)
+                               (ygg-projects--descendant-rows s 0 (list s))))))
             (groups (mapcar (lambda (s) (cons (ygg-projects--session-ts s)
                                               (funcall rows s)))
                             (seq-difference live pinned #'eq)))
@@ -808,7 +831,7 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
                                                   "session")
                                               e))))
                           (ygg-projects--past root)))))
-       ;; running first and then ended, each newest first, with air
+       ;; running first, newest started first, then ended, with air
        ;; between: what is alive is told from what is kept without
        ;; reading a single badge, and a session's own rows go with it
        (let ((newest (lambda (cells)
@@ -890,11 +913,13 @@ by when, not by that they were all today."
         (t "")))
 
 (defun ygg-projects--session-progress (s)
-  "S's todo list as done/total, or nil when it keeps none or has stopped."
+  "S's todo list as done/total, or nil when it keeps none or has stopped.
+A subagent keeps no list, only its own plan, counted into :plan-progress."
   (when-let* (((not (memq (aob-session-state s) '(dead failed))))
-              ((fboundp 'ygg-todo-session-file))
-              (file (ygg-todo-session-file s))
-              (progress (ygg-todo-progress file)))
+              (progress (or (when-let* (((fboundp 'ygg-todo-session-file))
+                                        (file (ygg-todo-session-file s)))
+                              (ygg-todo-progress file))
+                            (aob-session-ref s :plan-progress))))
     (format "%d/%d" (car progress) (cdr progress))))
 
 (defun ygg-projects--badge (payload &optional room)
@@ -1736,6 +1761,28 @@ going on, not the history of the project."
 (defun ygg-projects-next-project () (interactive) (ygg-projects--goto 1 t))
 (defun ygg-projects-prev-project () (interactive) (ygg-projects--goto -1 t))
 
+(defun ygg-projects--toggle-subagents (entry)
+  "Fold or unfold the subagents of the lead ENTRY stands under; nil when
+ENTRY is no session, or a lead with none, so TAB keeps its other use."
+  (when-let* (((and (fboundp 'aob-session-p) (aob-session-p entry)))
+              (lead (ygg-projects--sender entry))
+              ((or (not (eq lead entry))
+                   (and (fboundp 'aob-subagent-children)
+                        (seq-some (lambda (k) (not (ygg-projects--ended-subagent-p k)))
+                                  (aob-subagent-children lead))))))
+    (let ((id (aob-session-id lead)))
+      (setq ygg-projects--expanded
+            (if (member id ygg-projects--expanded)
+                (delete id ygg-projects--expanded)
+              (cons id ygg-projects--expanded))))
+    ;; a folded subagent's line is gone; its lead is where point belongs
+    (unless (eq lead entry)
+      (let ((pos (point-min)) found)
+        (while (and (not found) (setq pos (next-single-property-change pos 'ygg-entry)))
+          (when (eq (get-text-property pos 'ygg-entry) lead) (setq found pos)))
+        (when found (goto-char found))))
+    t))
+
 (defun ygg-projects-toggle ()
   "Open what this line stands for: a project's rows, or a row's entries.
 The line keeps its place on screen; what opens, opens below it."
@@ -1748,6 +1795,8 @@ The line keeps its place on screen; what opens, opens below it."
                         (line-number-at-pos (window-start win))))))
     (cond
      ((null root) nil)
+     ((ygg-projects--toggle-subagents
+       (get-text-property (line-beginning-position) 'ygg-entry)))
      ((eq kind 'project)
       (setq ygg-projects--open (unless (equal root ygg-projects--open) root)))
      (t (let ((cell (cons root kind)))
@@ -2044,6 +2093,14 @@ turns while nobody is typing."
   (add-hook 'aob-session-removed-hook #'ygg-projects--redraw-soon)
   (add-hook 'aob-state-change-hook #'ygg-projects--redraw-soon)
   (add-hook 'aob-meter-change-hook #'ygg-projects--redraw-soon))
+
+;; a list ticking changes a badge without any session event the hooks above see
+(defvar aob-subagent-progress-functions)
+(defvar ygg-todo-changed-functions)
+(with-eval-after-load 'aob-subagent
+  (add-hook 'aob-subagent-progress-functions #'ygg-projects--redraw-soon))
+(with-eval-after-load 'ygg-todo
+  (add-hook 'ygg-todo-changed-functions #'ygg-projects--redraw-soon))
 
 (defun ygg-projects-close ()
   "Close the sidebar, and mean it: it stays closed until you open it."

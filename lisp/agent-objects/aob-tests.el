@@ -1557,6 +1557,159 @@ line above it and no second copy of the plan."
           (should-not (string-match-p "agent plan" (buffer-string))))
       (kill-buffer (aob-todo-buffer s)))))
 
+(defconst aob-tests--openspec-tasks
+  "## 1. Parser\n\n- [x] 1.1 Read the format\n- [ ] 1.2 Parse numbered items\n\n## 2. Tests\n\n- [ ] 2.1 Cover the spec\n"
+  "An OpenSpec change's tasks.md.")
+
+(defun aob-tests--spec (dir)
+  "Write an OpenSpec tasks.md under DIR and return its path."
+  (let ((file (expand-file-name "openspec/changes/parse/tasks.md" dir)))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file (insert aob-tests--openspec-tasks))
+    file))
+
+(defun aob-tests--todo-write (s args)
+  "Call the todo_write tool as S's agent would, with ARGS; return its answer."
+  (require 'aob-mcp-tools)
+  (let ((handler (plist-get (gethash "todo_write" aob-mcp--tools) :handler))
+        form)
+    (cl-letf (((symbol-function 'aob-mcp-host-session) (lambda (_) s))
+              ((symbol-function 'aob-mcp-relay)
+               (lambda (_conn _id f &rest _) (setq form f))))
+      (let ((direct (funcall handler args nil 1)))
+        (if form (eval form t) direct)))))
+
+(ert-deftest aob-todo-openspec-tasks-parse ()
+  "Numbered checkbox items under numbered headings read as items, and a
+tick by id changes that one line and no other byte."
+  (let* ((dir (make-temp-file "aob-spec-" t))
+         (file (aob-tests--spec dir)))
+    (unwind-protect
+        (let ((items (plist-get (ygg-todo-read file) :items)))
+          (should (equal '("1.1" "1.2" "2.1") (mapcar (lambda (it) (plist-get it :id)) items)))
+          (should (equal '("1. Parser" "1. Parser" "2. Tests")
+                         (mapcar (lambda (it) (plist-get it :section)) items)))
+          (should (equal '(("1.1 Read the format" . t) ("1.2 Parse numbered items") ("2.1 Cover the spec"))
+                         (aob-tests--list-items file)))
+          (should (equal '(1 . 3) (ygg-todo-progress file)))
+          (ygg-todo-set-done file "1.2" t "1.2 Parse numbered items")
+          (should (equal (replace-regexp-in-string "- \\[ \\] 1.2" "- [x] 1.2"
+                                                   aob-tests--openspec-tasks)
+                         (with-temp-buffer (insert-file-contents file) (buffer-string)))))
+      (delete-directory dir t))))
+
+(ert-deftest aob-todo-write-binds-an-existing-file ()
+  "todo_write with file binds that tasks.md instead of making a list; a
+missing file or one outside the project is refused and binds nothing."
+  (aob-tests--with-list s file
+    (let* ((root (aob-session-project s))
+           (spec (aob-tests--spec root))
+           (outside (make-temp-file "aob-outside-" nil ".md" "- [ ] elsewhere\n")))
+      (unwind-protect
+          (progn
+            (should (string-match-p "no such file"
+                                    (car (aob-tests--todo-write
+                                          s '(:file "openspec/changes/none/tasks.md")))))
+            (should-not (funcall file))
+            (should (string-match-p "outside the project"
+                                    (car (aob-tests--todo-write s (list :file outside)))))
+            (should-not (funcall file))
+            (let ((answer (aob-tests--todo-write
+                           s '(:file "openspec/changes/parse/tasks.md" :title "ignored"))))
+              (should (string-match-p "1/3" (car answer)))
+              (should (member "1.2 1.2 Parse numbered items" answer)))
+            (should (equal (funcall file) spec))
+            (should-not (file-exists-p (expand-file-name ".aob/tasks/" root)))
+            (should (string-match-p "tasks.md 1/3"
+                                    (car (aob-tests--todo-write s (list :file spec))))))
+        (delete-file outside)))))
+
+(ert-deftest aob-todo-plan-never-mirrors-into-a-bound-spec ()
+  "Once a spec's tasks.md is the session's list, plans leave it alone:
+same bytes, still bound, and no list of the agent's own is started."
+  (aob-tests--with-list s file
+    (let ((spec (aob-tests--spec (aob-session-project s))))
+      (ygg-todo-session-adopt s spec)
+      (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "completed"))
+                                                 ((content . "Write the fix") (status . "pending")))))
+      (should (equal aob-tests--openspec-tasks
+                     (with-temp-buffer (insert-file-contents spec) (buffer-string))))
+      (should (equal (funcall file) spec))
+      (should-not (file-exists-p (expand-file-name ".aob/tasks/" (aob-session-project s))))
+      (let ((ygg-todo-by 'user)) (ygg-todo-set-done spec "2.1" t))
+      (should (string-match-p "ticked: 2.1 Cover the spec" (ygg-todo-session-note s))))))
+
+(ert-deftest aob-subagent-plan-counts-under-its-row ()
+  "A subagent's TodoWrite reaches aob as a plan stamped with the Agent
+call it runs under: the subagent keeps it as :plan-progress, and the
+sender's plan and list never see it."
+  (aob-tests--with-list s file
+    (aob-tests--feed s aob-tests--agent-call)
+    (let ((kid (aob-session-native-child s (car (aob-session-subagents s))))
+          (plan (lambda (entries)
+                  (format "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"plan\",\"entries\":%s,\"_meta\":{\"claudeCode\":{\"parentToolUseId\":\"toolu_A\"}}}}}"
+                          (json-encode entries)))))
+      (should kid)
+      (aob-tests--feed s (funcall plan '(((content . "a") (status . "in_progress"))
+                                         ((content . "b") (status . "pending"))
+                                         ((content . "c") (status . "pending")))))
+      (should (equal '(0 . 3) (aob-session-ref kid :plan-progress)))
+      (aob-tests--feed s (funcall plan '(((content . "a") (status . "completed"))
+                                         ((content . "b") (status . "in_progress"))
+                                         ((content . "c") (status . "pending")))))
+      (should (equal '(1 . 3) (aob-session-ref kid :plan-progress)))
+      (should (= 1 (seq-count (lambda (e) (eq (plist-get e :type) 'plan))
+                              (aob-session-events kid))))
+      (should-not (aob-session-ref s :plan-ev))
+      (should-not (funcall file))
+      (should-not (aob-session-ref s :plan-progress))
+      (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"toolu_T\",\"title\":\"Update TODOs: a, b, c\",\"kind\":\"think\",\"status\":\"pending\",\"rawInput\":{\"todos\":[{\"content\":\"a\",\"status\":\"completed\",\"activeForm\":\"A\"},{\"content\":\"b\",\"status\":\"completed\",\"activeForm\":\"B\"},{\"content\":\"c\",\"status\":\"in_progress\",\"activeForm\":\"C\"}]},\"_meta\":{\"claudeCode\":{\"toolName\":\"TodoWrite\",\"parentToolUseId\":\"toolu_A\"}}}}}")
+      (should (equal '(2 . 3) (aob-session-ref kid :plan-progress)))
+      (aob-tests--agent-child s "k9" "ls" "completed")
+      (should (equal '(2 . 3) (aob-session-ref kid :plan-progress))))))
+
+(ert-deftest aob-subagent-plan-removed-leaves-the-sender-alone ()
+  "A subagent clearing its plan clears its own count, never the sender's plan or list."
+  (aob-tests--with-list s file
+    (aob-tests--feed s aob-tests--agent-call)
+    (let ((kid (aob-session-native-child s (car (aob-session-subagents s))))
+          (told 0))
+      (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"plan\",\"entries\":[{\"content\":\"root one\",\"status\":\"pending\"},{\"content\":\"root two\",\"status\":\"pending\"}]}}}")
+      (should (= 2 (length (aob-tests--list-items (funcall file)))))
+      (let ((aob-subagent-progress-functions (list (lambda (_) (setq told (1+ told))))))
+        (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"plan\",\"entries\":[{\"content\":\"a\",\"status\":\"pending\"}],\"_meta\":{\"claudeCode\":{\"parentToolUseId\":\"toolu_A\"}}}}}")
+        (should (equal '(0 . 1) (aob-session-ref kid :plan-progress)))
+        (should (> told 0))
+        (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"plan_removed\",\"_meta\":{\"claudeCode\":{\"parentToolUseId\":\"toolu_A\"}}}}}"))
+      (should (aob-session-ref s :plan-ev))
+      (should (= 2 (length (aob-tests--list-items (funcall file)))))
+      (should-not (aob-session-ref kid :plan-progress)))))
+
+(ert-deftest aob-todo-adopted-list-is-never-mirrored-even-under-aob-tasks ()
+  "A list adopted from another session's .aob/tasks is not the adopter's to rewrite."
+  (aob-tests--with-list s file
+    (let ((other (ygg-todo-create (ygg-todo-session-dir s) "worker-x" "worker-x" nil)))
+      (let ((ygg-todo-by 'agent)) (ygg-todo-add other "worker item"))
+      (ygg-todo-session-adopt s other)
+      (let ((before (with-temp-buffer (insert-file-contents other) (buffer-string))))
+        (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"plan\",\"entries\":[{\"content\":\"lead item\",\"status\":\"pending\"}]}}}")
+        (should (equal (funcall file) (expand-file-name other)))
+        (should (equal before (with-temp-buffer (insert-file-contents other) (buffer-string))))))))
+
+(ert-deftest aob-workflow-subagent-todowrite-counts ()
+  "A workflow agent's TodoWrite step, read from its transcript, counts too."
+  (let* ((lead (aob-create-session :id "wf-lead" :backend 'acp :name "lead" :state 'working))
+         (kid (aob-create-session :id "wf-lead/a1" :backend 'workflow-subagent :name "a1"
+                                  :state 'working :refs (list :parent-session "wf-lead"))))
+    (unwind-protect
+        (progn
+          (aob-subagent--workflow-step
+           kid (aob-subagent--workflow-parse
+                "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"TodoWrite\",\"input\":{\"todos\":[{\"content\":\"x\",\"status\":\"completed\"},{\"content\":\"y\",\"status\":\"pending\"}]}}]}}"))
+          (should (equal '(1 . 2) (aob-session-ref kid :plan-progress)))
+          (should-not (aob-session-ref lead :plan-progress)))
+      (mapc #'aob-remove-session (list kid lead)))))
+
 (ert-deftest aob-acp-repeated-tool-call-updates-the-call ()
   "A tool_call re-sent with an id already known is that call changing,
 not a second one: the parent's child count stays true."
@@ -1811,10 +1964,10 @@ session is writing into, so it moves the name and nothing else."
                    "commit" "-q" "--allow-empty" "-m" "0")
           (funcall git main "worktree" "add" "-q" "-b" "feat" tree)
           (should (equal (aob-acp--place-note main)
-                         (format "[workspace: %s · branch trunk]"
+                         (format "[workspace: %s · branch trunk · other worktrees: tree (feat)]"
                                  (directory-file-name main))))
           (should (equal (plist-get (aob-acp--place-block s) :text)
-                         (format "[workspace: %s · branch feat · linked worktree of %s]"
+                         (format "[workspace: %s · branch feat · linked worktree of %s · other worktrees: main (trunk)]"
                                  (directory-file-name tree)
                                  (directory-file-name main))))
           (should-not (aob-acp--place-block s))
@@ -1825,6 +1978,51 @@ session is writing into, so it moves the name and nothing else."
           (should-not (aob-acp--place-note temporary-file-directory)))
       (aob-remove-session s)
       (delete-directory root t))))
+
+(ert-deftest aob-a-session-is-told-of-the-other-worktrees-when-one-is-added ()
+  (let* ((root (file-name-as-directory (file-truename (make-temp-file "aob-place" t))))
+         (main (file-name-as-directory (expand-file-name "main" root)))
+         (tree (file-name-as-directory (expand-file-name "tree" root)))
+         (other (file-name-as-directory (expand-file-name "other" root)))
+         (git (lambda (dir &rest args)
+                (let ((default-directory dir))
+                  (should (eq 0 (apply #'call-process "git" nil nil nil args))))))
+         (s (aob-create-session :id "acp:place:2" :backend 'acp :name "place"
+                                :project main :dir tree :state 'idle)))
+    (unwind-protect
+        (progn
+          (make-directory main)
+          (funcall git main "init" "-q" "-b" "trunk")
+          (funcall git main "-c" "user.email=t@t" "-c" "user.name=t"
+                   "commit" "-q" "--allow-empty" "-m" "0")
+          (funcall git main "worktree" "add" "-q" "-b" "feat" tree)
+          (should (string-suffix-p "other worktrees: main (trunk)]"
+                                   (plist-get (aob-acp--place-block s) :text)))
+          (funcall git main "worktree" "add" "-q" "-b" "fix/y" other)
+          (should (equal (plist-get (aob-acp--place-block s) :text)
+                         (format "[workspace: %s · branch feat · linked worktree of %s · other worktrees: main (trunk), other (fix/y)]"
+                                 (directory-file-name tree)
+                                 (directory-file-name main))))
+          (should-not (aob-acp--place-block s))
+          (should (string-suffix-p "other worktrees: other (fix/y), tree (feat)]"
+                                   (aob-acp--place-note main)))
+          (delete-directory other t)
+          (should (string-suffix-p "other worktrees: main (trunk)]"
+                                   (plist-get (aob-acp--place-block s) :text))))
+      (aob-remove-session s)
+      (delete-directory root t))))
+
+(ert-deftest aob-a-place-note-names-at-most-a-few-other-worktrees ()
+  (let* ((wts (cons '("/r/main/" . "trunk")
+                    (mapcar (lambda (n) (cons (format "/r/w%d/" n) (format "b%d" n)))
+                            (number-sequence 1 10))))
+         (tail (aob-acp--place-others wts (nth 1 wts))))
+    (should (string-prefix-p " · other worktrees: main (trunk), w2 (b2), " tail))
+    (should (string-suffix-p "w8 (b8), …" tail))
+    (should-not (string-match-p "w9" tail))
+    (should (equal (aob-acp--place-others (list (car wts) '("/r/x/")) (car wts))
+                   " · other worktrees: x (detached)"))
+    (should (equal (aob-acp--place-others (list (car wts)) (car wts)) ""))))
 
 (ert-deftest aob-a-renamed-session-renames-the-trace-it-already-has ()
   (let* ((aob-acp-persist-file nil)
@@ -4372,6 +4570,51 @@ next chunk does not pull the page back down."
         (should (string-match-p "\\`> why\\?\nsee this\n\n *go" (caar sent)))
         (should (equal (cdar sent) '("/tmp/own.png" "/tmp/held.png")))))
     (should-not (aob-session-ref s :comments))))
+
+(ert-deftest aob-compose-diff-reads-the-target-sessions-own-worktree ()
+  (dolist (name '(ygg-aob--repo ygg-aob--draft-target ygg-aob--diff-dir
+                  ygg-aob--worktree-line ygg-aob--expand-diff))
+    (aob-tests--host-defun name))
+  (defvar ygg-aob-diff-max-chars)
+  (let* ((ygg-aob-diff-max-chars 60000)
+         (root (file-name-as-directory (file-truename (make-temp-file "aob-diff" t))))
+         (main (file-name-as-directory (expand-file-name "main" root)))
+         (tree (file-name-as-directory (expand-file-name "feat-x" root)))
+         (git (lambda (dir &rest args)
+                (let ((default-directory dir))
+                  (should (eq 0 (apply #'call-process "git" nil nil nil args))))))
+         (in-tree (aob-create-session :id "acp:diff:1" :backend 'acp :name "diff"
+                                      :project main :dir tree :state 'idle))
+         (on-main (aob-create-session :id "acp:diff:2" :backend 'acp :name "diff"
+                                      :project main :state 'idle))
+         (expand (lambda (target)
+                   (with-temp-buffer
+                     (setq default-directory main)
+                     (setq-local aob-compose--target target)
+                     (ygg-aob--expand-diff "look @diff")))))
+    (unwind-protect
+        (progn
+          (make-directory main)
+          (funcall git main "init" "-q" "-b" "trunk")
+          (with-temp-file (expand-file-name "a.txt" main) (insert "one\n"))
+          (funcall git main "add" "a.txt")
+          (funcall git main "-c" "user.email=t@t" "-c" "user.name=t"
+                   "commit" "-q" "-m" "0")
+          (funcall git main "worktree" "add" "-q" "-b" "feat/x" tree)
+          (with-temp-file (expand-file-name "a.txt" tree) (insert "two\n"))
+          (let ((out (funcall expand "acp:diff:1")))
+            (should (string-match-p "<diff>\nworktree feat-x · branch feat/x\n" out))
+            (should (string-match-p "^\\+two$" out)))
+          (should-not (funcall expand "acp:diff:2"))
+          (should-not (funcall expand nil))
+          (with-temp-file (expand-file-name "a.txt" main) (insert "three\n"))
+          (let ((out (funcall expand "acp:diff:2")))
+            (should (string-match-p "<diff>\nworktree main · branch trunk\n" out))
+            (should (string-match-p "^\\+three$" out))
+            (should-not (string-match-p "two" out))))
+      (aob-remove-session in-tree)
+      (aob-remove-session on-main)
+      (delete-directory root t))))
 
 (ert-deftest aob-compose-reopened-draft-keeps-its-images ()
   (aob-tests--with-session s
