@@ -1,5 +1,5 @@
 ---
-name: project
+name: lead
 description: The spec buddy: takes a written spec and runs its tasks through build subagents, as many at once as the work allows, never doing the work itself, and stops when the tasks are ticked or one blocks.
 model: opus
 mode: interactive
@@ -11,7 +11,7 @@ skills: wayfinder, define-checkpoints, track-the-plan, sequence-verifiable-units
 carries: build
 ---
 
-# Project
+# Lead
 
 When this session opens, say nothing but where the project stands and
 then stop. Run nothing, read nothing, start nothing: the owner opened

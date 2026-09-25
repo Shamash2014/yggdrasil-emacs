@@ -5237,7 +5237,7 @@ and copying a line leaves its mark behind."
                     (aob-session-events s))))
 
 (ert-deftest aob-orch-cap-stored-from-preset ()
-  "The project preset named in a draft gives its session a cap, briefs and workers."
+  "The lead preset named in a draft gives its session a cap, briefs and workers."
   (require 'ygg-preset)
   (aob-tests--host-defun 'ygg-aob--preset-limits)
   (let* ((ygg-preset-config-directory
@@ -5246,7 +5246,7 @@ and copying a line leaves its mark behind."
     (cl-letf (((symbol-function 'ygg-aob--presets-of)
                (lambda (_dir) (cons nil (ygg-preset-list)))))
       (let* ((refs (ygg-aob--preset-limits
-                    "run it\n\n<preset name=\"project\">\nbody\n</preset>"))
+                    "run it\n\n<preset name=\"lead\">\nbody\n</preset>"))
              (search (ygg-aob--preset-limits
                       "find it\n\n<preset name=\"search\">\nbody\n</preset>"))
              (s (aob-create-session :id "acp:orch:cap" :backend 'acp :name "orch"
@@ -5658,9 +5658,9 @@ Once the thread exists, THREAD ran on MODEL at EFFORT and is in STATE."
     (aob-session-put s :agent "codex")
     (should (member "ultra" (aob-acp--worker-efforts s)))))
 
-(ert-deftest aob-orch-project-preset-deep-differs-from-build ()
+(ert-deftest aob-orch-lead-preset-deep-differs-from-build ()
   (let ((text (with-temp-buffer
-                (insert-file-contents (expand-file-name "../../presets/project.md"
+                (insert-file-contents (expand-file-name "../../presets/lead.md"
                                                         (file-name-directory aob-tests--file)))
                 (buffer-string))))
     (should (string-match "^thinking: medium$" text))
@@ -5668,7 +5668,7 @@ Once the thread exists, THREAD ran on MODEL at EFFORT and is in STATE."
     (should (string-match "deep=opus/high" text))))
 
 (ert-deftest aob-orch-effort-quick-is-read-only-explorer ()
-  "The project preset's quick level runs the search body with the reading tools only."
+  "The lead preset's quick level runs the search body with the reading tools only."
   (require 'ygg-preset)
   (aob-tests--host-defun 'ygg-aob--preset-limits)
   (let* ((ygg-preset-config-directory
@@ -5677,7 +5677,7 @@ Once the thread exists, THREAD ran on MODEL at EFFORT and is in STATE."
     (cl-letf (((symbol-function 'ygg-aob--presets-of)
                (lambda (_dir) (cons nil (ygg-preset-list)))))
       (let* ((refs (ygg-aob--preset-limits
-                    "run it\n\n<preset name=\"project\">\nbody\n</preset>"))
+                    "run it\n\n<preset name=\"lead\">\nbody\n</preset>"))
              (agents (aob-tests--agents-sent aob-tests--claude-init refs)))
         (should (equal '("Read" "Grep" "Glob") (plist-get (plist-get agents :worker-quick) :tools)))
         (should (string-prefix-p "# Search" (plist-get (plist-get agents :worker-quick) :prompt)))
