@@ -5663,9 +5663,9 @@ Once the thread exists, THREAD ran on MODEL at EFFORT and is in STATE."
                 (insert-file-contents (expand-file-name "../../presets/project.md"
                                                         (file-name-directory aob-tests--file)))
                 (buffer-string))))
-    (should (string-match "^thinking: xhigh$" text))
-    (should (string-match "deep=opus/xhigh" text))
-    (should (equal "high" (aob-acp--effort-below "xhigh")))))
+    (should (string-match "^thinking: medium$" text))
+    (should (string-match "build=opus/medium" text))
+    (should (string-match "deep=opus/high" text))))
 
 (ert-deftest aob-orch-effort-quick-is-read-only-explorer ()
   "The project preset's quick level runs the search body with the reading tools only."

@@ -4,9 +4,9 @@ description: The spec buddy: takes a written spec and runs its tasks through bui
 model: opus
 mode: interactive
 place: before
-thinking: xhigh
+thinking: medium
 subagents: 6
-workers: build, quick=sonnet/low, deep=opus/xhigh
+workers: build=opus/medium, quick=sonnet/low, deep=opus/high
 skills: wayfinder, define-checkpoints, track-the-plan, sequence-verifiable-units, decision-memo
 carries: build
 ---
