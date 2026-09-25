@@ -1,16 +1,12 @@
-;;; layer-rass.el --- multiplex eglot servers with harper via rass -*- lexical-binding: t; -*-
+;;; layer-rass.el --- every eglot server beside harper, through rass -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; Opt-in multi-LSP.  Eglot is one-server-per-buffer; rassumfrassum (`rass',
-;; https://github.com/joaotavora/rassumfrassum) presents several servers as
-;; one, so harper-ls grammar-checks comments/docstrings alongside the real
-;; language server in the same buffer.
-;;
-;; Enable/disable: add or remove `(require 'layer-rass)' in init.el (then
-;; restart), or toggle live with `ygg-rass-enable' / `ygg-rass-disable'.
-;; rass is 0.3.x and no-warranty, and sits between eglot and every routed
-;; server, so `ygg-rass-modes' is kept to a few well-behaved single-binary
-;; servers — JS-land servers need rass hooking presets and are left out.
+;; Every eglot server runs through rassumfrassum (rass,
+;; https://github.com/joaotavora/rassumfrassum) with harper-ls beside it, so
+;; comments and docstrings are grammar-checked in every language.  The wrap
+;; happens when eglot resolves a contact, so entries registered in any order
+;; are covered.  TCP servers, remote buffers, and harper itself stay direct.
+;; ygg-rass-disable turns it off live; restart the server to apply either way.
 
 ;;; Code:
 
@@ -18,36 +14,13 @@
 (defvar eglot-server-programs)
 (declare-function eglot--major-modes "eglot")
 
-(defcustom ygg-rass-modes
-  '(python-ts-mode python-mode elixir-ts-mode elixir-mode heex-ts-mode
-    dart-mode dart-ts-mode kotlin-mode kotlin-ts-mode swift-mode swift-ts-mode)
-  "Major modes whose eglot server is multiplexed with harper-ls via rass."
-  :type '(repeat symbol) :group 'eglot)
-
-(defun ygg-rass--modes (entry)
-  (let ((k (car entry))) (if (listp k) k (list k))))
-
-(defun ygg-rass--wrap (cmd)
-  "Wrap plain server command CMD through rass + harper-ls.
-Eglot 1.24.31, in Emacs 31, advertises and merges $/streamDiagnostics,
-and rass 0.3.4 streams whenever the client advertises it, so
-`--no-stream-diagnostics' only keeps an eglot without that handler on
-standard `textDocument/publishDiagnostics'."
-  (append '("rass" "--no-stream-diagnostics" "--") cmd '("--" "harper-ls" "--stdio")))
+(defconst ygg-rass-harper-preset
+  (expand-file-name "../etc/rass-harper.py"
+                    (file-name-directory (or load-file-name buffer-file-name)))
+  "The rass preset that sends commands it cannot place to the language server.")
 
 (defvar ygg-rass--wrapped-contacts nil
   "Each contact function wrapped through rass, paired with the original.")
-
-(defun ygg-rass--wrap-contact (contact)
-  "CONTACT, a function eglot asks for a command, answering through rass."
-  (let ((wrapped (lambda (&rest args)
-                   (let ((cmd (apply contact args)))
-                     (if (and (consp cmd) (cl-every #'stringp cmd)
-                              (not (member "rass" cmd)))
-                         (ygg-rass--wrap cmd)
-                       cmd)))))
-    (push (cons wrapped contact) ygg-rass--wrapped-contacts)
-    wrapped))
 
 (defun ygg-rass--unwrap (cmd)
   "Strip a rass wrapping from CMD, recovering the original server command."
@@ -55,38 +28,50 @@ standard `textDocument/publishDiagnostics'."
          (end (cl-position "--" after :test #'equal)))
     (if end (cl-subseq after 0 end) cmd)))
 
+(defun ygg-rass-with-harper (contact)
+  "CONTACT, a resolved eglot contact, running through rass beside harper-ls.
+Left as is when it is not a local stdio command or rass is missing.
+Keyword options such as :initializationOptions stay at the end."
+  (let* ((split (or (cl-position-if #'keywordp contact) (length contact)))
+         (command (seq-take contact split))
+         (options (nthcdr split contact)))
+    (if (and command
+             (cl-every #'stringp command)
+             (not (plist-member options :autoport))
+             (not (member (file-name-nondirectory (car command)) '("rass" "harper-ls")))
+             (not (file-remote-p default-directory))
+             (executable-find "rass")
+             (executable-find "harper-ls")
+             (file-exists-p ygg-rass-harper-preset))
+        `("rass" "--no-stream-diagnostics" ,ygg-rass-harper-preset
+          "--" ,@command "--" "harper-ls" "--stdio" ,@options)
+      contact)))
+
+(defun ygg-rass--wrap-guess (guess)
+  "GUESS, what eglot--guess-contact returns, with its contact beside harper."
+  (if (consp (nth 3 guess))
+      (append (seq-take guess 3) (list (ygg-rass-with-harper (nth 3 guess))) (nthcdr 4 guess))
+    guess))
+
+(defun ygg-rass--guess-contact (fn &optional interactive)
+  ;; a command typed at C-u M-x eglot runs as typed
+  (let ((guess (funcall fn interactive)))
+    (if (and interactive current-prefix-arg) guess (ygg-rass--wrap-guess guess))))
+
 ;;;###autoload
 (defun ygg-rass-enable ()
-  "Route `ygg-rass-modes' servers through rass + harper-ls, in place.
-Only wraps an entry when rass, harper-ls, and the base server are all on
-PATH and the entry is a plain command list, or a named contact function
-whose command is wrapped when eglot asks for it; otherwise it is left
-as-is, so a missing binary never kills a language's LSP.
-Reconnect eglot to apply."
+  "Run every eglot server through rass beside harper-ls.
+A running server keeps its command until it is shut down and started again."
   (interactive)
-  (if (not (and (executable-find "rass") (executable-find "harper-ls")))
-      (when (called-interactively-p 'interactive)
-        (message "layer-rass: rass or harper-ls not on PATH — nothing wrapped"))
-    (let ((n 0))
-      (dolist (entry eglot-server-programs)
-        (let ((cmd (cdr entry)))
-          (when (cl-intersection (ygg-rass--modes entry) ygg-rass-modes)
-            (cond ((and (consp cmd) (cl-every #'stringp cmd)
-                        (not (member "rass" cmd))
-                        (executable-find (car cmd)))
-                   (setf (cdr entry) (ygg-rass--wrap cmd))
-                   (cl-incf n))
-                  ((and (symbolp cmd) (fboundp cmd))
-                   (setf (cdr entry) (ygg-rass--wrap-contact cmd))
-                   (cl-incf n))))))
-      (when (called-interactively-p 'interactive)
-        (message "layer-rass: wrapped %d server(s)" n))
-      n)))
+  (advice-add 'eglot--guess-contact :around #'ygg-rass--guess-contact)
+  (ygg-rass-eslint-enable))
 
 ;;;###autoload
 (defun ygg-rass-disable ()
-  "Restore the un-wrapped server commands.  Reconnect eglot to apply."
+  "Run eglot servers directly again.
+A running server keeps its command until it is shut down and started again."
   (interactive)
+  (advice-remove 'eglot--guess-contact #'ygg-rass--guess-contact)
   (dolist (entry eglot-server-programs)
     (let ((cmd (cdr entry)))
       (cond ((and (consp cmd) (equal (car cmd) "rass"))
@@ -95,7 +80,7 @@ Reconnect eglot to apply."
              (setf (cdr entry) (cdr (assq cmd ygg-rass--wrapped-contacts)))))))
   (setq ygg-rass--wrapped-contacts nil)
   (when (called-interactively-p 'interactive)
-    (message "layer-rass: servers un-wrapped")))
+    (message "layer-rass: servers run directly")))
 
 ;;; The project's ESLint beside the TypeScript server
 
@@ -148,6 +133,7 @@ where eglot reads them.  TypeScript 7's tsc is never paired."
              (executable-find "vscode-eslint-language-server"))
         `("rass" "--no-stream-diagnostics" ,ygg-rass-typescript-preset
           "--" ,@command "--" "vscode-eslint-language-server" "--stdio"
+          ,@(and (executable-find "harper-ls") '("--" "harper-ls" "--stdio"))
           ,@options)
       base)))
 
@@ -184,8 +170,7 @@ by itself."
 
 ;; run after layer-lsp has registered the base entries (require it later)
 (with-eval-after-load 'eglot
-  (ygg-rass-enable)
-  (ygg-rass-eslint-enable))
+  (ygg-rass-enable))
 
 (provide 'layer-rass)
 ;;; layer-rass.el ends here

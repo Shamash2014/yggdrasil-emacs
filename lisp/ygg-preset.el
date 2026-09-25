@@ -440,6 +440,61 @@ crowd nobody asked for is a run the owner cannot read."
       (string-to-number (string-trim raw)))
      (t 0))))
 
+(defun ygg-preset-workers (d)
+  "The worker levels D names, as plists of :name and, when given, :model
+and :effort.  Written on one line, workers: build, quick=sonnet/low; a
+bare name leaves the level's model and effort to whoever opens the
+session, and an entry that parses as neither is dropped."
+  (let ((raw (ygg-preset-setting d :workers)))
+    (delq nil
+          (mapcar (lambda (entry)
+                    (let ((e (string-trim entry)))
+                      (cond
+                       ((string-match "\\`\\([[:alnum:]_-]+\\)=\\([^/ ]+\\)/\\([[:alpha:]]+\\)\\'" e)
+                        (list :name (match-string 1 e) :model (match-string 2 e)
+                              :effort (downcase (match-string 3 e))))
+                       ((string-match-p "\\`[[:alnum:]_-]+\\'" e) (list :name e)))))
+                  (cond ((stringp raw) (split-string raw "," t))
+                        ((listp raw) raw))))))
+
+(defcustom ygg-preset-worker-levels '(("quick" :preset "search" :read-only t))
+  "What a worker level is beyond its model and effort, by level name.
+:preset names the preset whose body the level runs under in place of the
+carried one, and :read-only gives it the tools that read and none that
+change anything."
+  :type '(alist :key-type string :value-type plist) :group 'ygg-preset)
+
+(defun ygg-preset--worker-level (w known)
+  "W with the prompt and read-only its level takes from ygg-preset-worker-levels.
+The prompt is the body of the level's preset, found among KNOWN."
+  (let* ((spec (cdr (assoc (plist-get w :name) ygg-preset-worker-levels)))
+         (d (and (plist-get spec :preset)
+                 (seq-find (lambda (d) (equal (ygg-preset-name d) (plist-get spec :preset)))
+                           known))))
+    (append w
+            (and d (list :prompt (string-trim (or (ygg-preset-body d) ""))))
+            (and (plist-get spec :read-only) (list :read-only t)))))
+
+(defun ygg-preset-subagent-refs (presets &optional known)
+  "The session refs the first of PRESETS to settle subagents asks for.
+The cap is how many workers may be out at once.  A preset that carries
+another to its workers orchestrates them, and each goes out with a brief.
+Its worker levels go along with the body of the preset it carries, found
+among KNOWN, as the prompt every level runs under, save a level that
+ygg-preset-worker-levels gives a preset of its own."
+  (when-let* ((p (seq-find (lambda (d) (ygg-preset-settles-p d :subagents))
+                           presets)))
+    (let* ((workers (mapcar (lambda (w) (ygg-preset--worker-level w known))
+                            (ygg-preset-workers p)))
+           (carried (seq-find (lambda (d) (equal (ygg-preset-name d)
+                                                 (car (ygg-preset-carries p))))
+                              known)))
+      (append (list :subagent-cap (ygg-preset-subagents p))
+              (and (ygg-preset-carries p) (list :subagent-briefs t))
+              (and workers (list :workers workers))
+              (and workers carried
+                   (list :worker-prompt (string-trim (or (ygg-preset-body carried) ""))))))))
+
 (defconst ygg-preset-modes '("one-shot" "interactive")
   "The ways the harness itself works, which a mode field may name.
 One shot is one turn with the whole context supplied and a verdict at
@@ -497,7 +552,7 @@ is the launch's question, not the reader's."
   "The tools D lets its agent use, by name, or nil when it names none."
   (ygg-preset-names (ygg-preset-setting d :tools)))
 
-(defconst ygg-preset-thinking-levels '("off" "low" "medium" "high")
+(defconst ygg-preset-thinking-levels '("off" "low" "medium" "high" "xhigh" "max")
   "What a thinking field may say, least first.")
 
 (defun ygg-preset-thinking (d)

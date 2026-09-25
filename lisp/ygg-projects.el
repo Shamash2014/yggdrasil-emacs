@@ -658,13 +658,31 @@ From the cache, asking git without waiting — safe on a drawing path."
     (gethash (file-name-as-directory (expand-file-name dir))
              ygg-projects--tree-mains)))
 
+(declare-function aob-subagent-live-count "aob-subagent" (s))
+(declare-function aob-subagent-parent "aob-subagent" (s))
+
 (defun ygg-projects--entry-tree (payload)
-  "The worktree line under PAYLOAD's row, when it is a session outside
-its repository's main checkout; its subagents stand where it does."
-  (when (and (fboundp 'aob-session-p) (aob-session-p payload)
-             (not (and (fboundp 'aob-subagent-p) (aob-subagent-p payload))))
-    (ygg-projects--session-tree (or (aob-session-dir payload)
-                                    (aob-session-project payload)))))
+  "The grey line under PAYLOAD's row: the agent running it, then a
+subagent's kind, or a lead's live subagents against its cap and the
+worktree of a session outside its repository's main checkout; a
+subagent stands where its sender does, so its worktree is never said
+twice."
+  (when (and (fboundp 'aob-session-p) (aob-session-p payload))
+    (let* ((agent (aob-session-ref payload :agent))
+           (sub (and (fboundp 'aob-subagent-p) (aob-subagent-p payload)))
+           (cap (and (not sub) (fboundp 'aob-subagent-live-count)
+                     (aob-session-ref payload :subagent-cap)))
+           (more (if sub
+                     (let ((kind (aob-session-ref payload :subagent-type)))
+                       (unless (equal kind agent) kind))
+                   (ygg-projects--session-tree (or (aob-session-dir payload)
+                                                   (aob-session-project payload)))))
+           (parts (delq nil (list (and (stringp agent) agent)
+                                  (and cap (format "%s/%s"
+                                                   (aob-subagent-live-count payload)
+                                                   cap))
+                                  more))))
+      (and parts (string-join parts " · ")))))
 
 
 ;;; What a row holds, when you open it
@@ -674,6 +692,94 @@ its repository's main checkout; its subagents stand where it does."
   (float-time (or (plist-get (car (aob-session-events s)) :ts)
                   (ignore-errors (aob-session-started s)))))
 
+(defcustom ygg-projects-pins-file (locate-user-emacs-file "var/projects-pins.eld")
+  "Where the pinned sessions are kept, first pinned first."
+  :type 'file :group 'ygg-projects)
+
+(defvar ygg-projects--pin-list 'unread
+  "The pinned sessions' keys in pin order, or unread before the file is.")
+
+(defun ygg-projects--pins ()
+  (when (eq ygg-projects--pin-list 'unread)
+    (setq ygg-projects--pin-list
+          (and ygg-projects-pins-file (file-readable-p ygg-projects-pins-file)
+               (ignore-errors
+                 (with-temp-buffer
+                   (insert-file-contents ygg-projects-pins-file)
+                   (seq-filter #'stringp (read (current-buffer))))))))
+  ygg-projects--pin-list)
+
+(defun ygg-projects--save-pins (pins)
+  "Keep PINS; the file gets only conversation keys, since session ids
+are handed out again from 1 after a restart and would pin a stranger."
+  (setq ygg-projects--pin-list pins)
+  (when ygg-projects-pins-file
+    (make-directory (file-name-directory ygg-projects-pins-file) t)
+    (with-temp-file ygg-projects-pins-file
+      (prin1 (seq-remove (lambda (k) (string-prefix-p "acp:" k)) pins)
+             (current-buffer)))))
+
+(defun ygg-projects--pin-key (s)
+  "What S is pinned by: its conversation, which outlives a resume's new id."
+  (or (aob-session-ref s :acp-id) (aob-session-id s)))
+
+(defun ygg-projects--pin-keys (s)
+  "Every key S may have been pinned under: one pinned while starting has
+no conversation yet."
+  (delq nil (list (aob-session-ref s :acp-id) (aob-session-id s))))
+
+(defun ygg-projects--pin-rank (s)
+  "S's place among the pins, or nil when it is not pinned.
+A pin taken before S had a conversation moves onto it once it has one."
+  (when-let* ((pins (ygg-projects--pins))
+              ((ygg-projects--session-p s))
+              (ranks (delq nil (mapcar (lambda (k) (seq-position pins k))
+                                       (ygg-projects--pin-keys s)))))
+    (let ((rank (apply #'min ranks))
+          (conv (aob-session-ref s :acp-id)))
+      (when (and conv (equal (nth rank pins) (aob-session-id s)))
+        (ygg-projects--save-pins
+         (seq-uniq (mapcar (lambda (k) (if (equal k (aob-session-id s)) conv k)) pins))))
+      rank)))
+
+(defun ygg-projects--pinned-p (s)
+  (and (ygg-projects--pin-rank s) t))
+
+(defun ygg-projects--sender (s)
+  "The top-level session S was sent by, S itself when nobody sent it."
+  (let ((seen (list s)))
+    (while-let ((up (and (fboundp 'aob-subagent-parent) (aob-subagent-parent s)))
+                ((not (memq up seen))))
+      (push up seen)
+      (setq s up))
+    s))
+
+(defun ygg-projects--depth (s)
+  (let ((top (ygg-projects--sender s)) (n 0) (seen nil))
+    (while (and (not (eq s top)) (not (memq s seen)))
+      (push s seen)
+      (setq s (aob-subagent-parent s) n (1+ n)))
+    n))
+
+(defun ygg-projects--by-recency (sessions)
+  (sort (copy-sequence sessions)
+        (lambda (a b) (> (ygg-projects--session-ts a) (ygg-projects--session-ts b)))))
+
+(defun ygg-projects--descendant-rows (s depth seen)
+  "The rows of what S sent, and what they sent, DEPTH levels in.
+SEEN holds the sessions already drawn, so a loop in the refs ends."
+  (when (fboundp 'aob-subagent-children)
+    (mapcan (lambda (kid)
+              (unless (memq kid seen)
+                (push kid seen)
+                (cons (cons (concat (make-string (* 2 depth) ?\s) "└ "
+                                    (aob-session-name kid))
+                            kid)
+                      (ygg-projects--descendant-rows kid (1+ depth) seen))))
+            (ygg-projects--by-recency
+             (seq-remove #'ygg-projects--ended-subagent-p
+                         (aob-subagent-children s))))))
+
 (defun ygg-projects--entries (root kind)
   "The things ROOT's KIND row stands for: (LABEL . PAYLOAD) each."
   (pcase kind
@@ -682,20 +788,17 @@ its repository's main checkout; its subagents stand where it does."
                                 (and (fboundp 'aob-subagent-p)
                                      (aob-subagent-p x)))
                               (ygg-projects--sessions root)))
-            (groups
-             (mapcar
-              (lambda (s)
-                ;; what it sent goes under it, marked rather than
-                ;; indented: a row this narrow has no columns to spare
-                (cons (ygg-projects--session-ts s)
-                      (append
-                       (list (cons (aob-session-name s) s))
-                       (mapcar (lambda (kid)
-                                 (cons (format "└ %s" (aob-session-name kid)) kid))
-                               (and (fboundp 'aob-subagent-children)
-                                    (seq-remove #'ygg-projects--ended-subagent-p
-                                                (aob-subagent-children s)))))))
-              live))
+            (pinned (sort (seq-filter #'ygg-projects--pinned-p live)
+                          (lambda (a b)
+                            (< (ygg-projects--pin-rank a) (ygg-projects--pin-rank b)))))
+            (rows (lambda (s)
+                    ;; what it sent goes under it, two columns a level:
+                    ;; a row this narrow has no more to spare
+                    (cons (cons (aob-session-name s) s)
+                          (ygg-projects--descendant-rows s 0 (list s)))))
+            (groups (mapcar (lambda (s) (cons (ygg-projects--session-ts s)
+                                              (funcall rows s)))
+                            (seq-difference live pinned #'eq)))
             ;; ended, but the conversation is still there to pick up
             (past (and ygg-projects-show-past
                   (mapcar (lambda (e)
@@ -711,8 +814,9 @@ its repository's main checkout; its subagents stand where it does."
        (let ((newest (lambda (cells)
                        (apply #'append
                               (mapcar #'cdr (sort cells (lambda (a b) (> (car a) (car b)))))))))
-         (append (funcall newest groups)
-                 (and groups past (list (cons "" 'ygg-projects-gap)))
+         (append (mapcan rows pinned)
+                 (funcall newest groups)
+                 (and live past (list (cons "" 'ygg-projects-gap)))
                  (funcall newest past)))))
     ('commands (mapcar (lambda (c)
                          (cons (format "%s  %s" (plist-get c :name)
@@ -841,7 +945,10 @@ A row never wraps: the badge sheds its least parts until the name has
 the columns ygg-projects-entry-min-name asks for, and the name is cut
 to what is left after that; a path loses its head, not its name."
   (let* ((indent (+ ygg-projects-entry-indent 2))
-         (line (- (ygg-projects--width) indent 1))
+         (pin (if (ygg-projects--pinned-p payload)
+                  (propertize "⊤ " 'font-lock-face 'ygg-projects-count)
+                ""))
+         (line (- (ygg-projects--width) indent 1 (string-width pin)))
          (badge (ygg-projects--badge
                  payload (- line (min (string-width label) ygg-projects-entry-min-name))))
          ;; a rail down the indent, the way a tree says depth without
@@ -860,7 +967,7 @@ to what is left after that; a path loses its head, not its name."
                           (setq tail (substring tail 1)))
                         (concat "…" tail)))
                      (t (truncate-string-to-width label room nil nil "…")))))
-    (propertize (concat head
+    (propertize (concat head pin
                         (propertize name 'font-lock-face 'ygg-projects-entry)
                         (ygg-projects--right
                          badge (+ 1.0 ygg-projects-entry-spacing)))
@@ -893,10 +1000,14 @@ it."
 (defun ygg-projects--tree-text (note root kind payload)
   "NOTE as the grey line under PAYLOAD's row, set in under its name.
 The same row to every command, but never a line point stops on."
-  (let ((line (- (ygg-projects--width) ygg-projects-entry-indent 3)))
+  (let* ((depth (if (ygg-projects--session-p payload)
+                    (* 2 (ygg-projects--depth payload))
+                  0))
+         (line (- (ygg-projects--width) ygg-projects-entry-indent 3 depth)))
     (propertize (concat (make-string (max 0 (- ygg-projects-entry-indent 2)) ?\s)
                         (propertize "│" 'font-lock-face 'ygg-projects-idle)
                         "   "
+                        (make-string depth ?\s)
                         (propertize (truncate-string-to-width note line nil nil "…")
                                     'font-lock-face 'ygg-projects-count)
                         (ygg-projects--pad))
@@ -1301,6 +1412,54 @@ their sender's to steer; otherwise it is the row at point."
      (list (read-string (format "%s » " (string-join names ", "))))))
   (ygg-projects--act "say to" #'ygg-projects--running-p
                      (lambda (s) (let ((aob-prompt-typed t)) (aob-prompt s text)))))
+
+(defvar aob-buffer-session-id)
+(declare-function aob-session-get "aob" (id))
+
+(defun ygg-projects--in-sidebar-p ()
+  (or (bound-and-true-p ygg-projects--modal)
+      (equal (buffer-name) ygg-projects-buffer-name)))
+
+(defun ygg-projects--pin-targets ()
+  "The top-level sessions pinning acts on here, each once, top first.
+In the sidebar, the row at point or every row selected; elsewhere, the
+session the buffer shows."
+  (let ((picked
+         (if (ygg-projects--in-sidebar-p)
+             (if (ygg-projects--selecting-p)
+                 (ygg-projects--selected-entries)
+               (list (ygg-projects--entry-at-point)))
+           (list (and (bound-and-true-p aob-buffer-session-id)
+                      (fboundp 'aob-session-get)
+                      (aob-session-get aob-buffer-session-id)))))
+        (out nil))
+    (dolist (entry picked)
+      (when (ygg-projects--session-p entry)
+        (let ((top (ygg-projects--sender entry)))
+          (unless (memq top out) (push top out)))))
+    (nreverse out)))
+
+(defun ygg-projects-toggle-pin ()
+  "Pin the session here above the rest of its project, or unpin it.
+A subagent pins the session that sent it.  Across a visual selection,
+every one is unpinned when all of them already are pinned, else the
+rest are pinned after them."
+  (interactive)
+  (let ((targets (ygg-projects--pin-targets))
+        (pins (ygg-projects--pins)))
+    (unless targets
+      (when (ygg-projects--in-sidebar-p) (ygg-projects--leave-selection))
+      (user-error "projects: no session here to pin"))
+    (let ((unpin (seq-every-p #'ygg-projects--pinned-p targets)))
+      (ygg-projects--save-pins
+       (if unpin
+           (seq-difference pins (mapcan #'ygg-projects--pin-keys targets))
+         (append pins (mapcar #'ygg-projects--pin-key
+                              (seq-remove #'ygg-projects--pinned-p targets)))))
+      (when (ygg-projects--in-sidebar-p) (ygg-projects--leave-selection))
+      (ygg-projects-refresh)
+      (message "projects: %s %s" (if unpin "unpinned" "pinned")
+               (mapconcat #'aob-session-name targets ", ")))))
 
 (defun ygg-projects-delete ()
   "Remove what this line stands for: a session for good, or a project.
@@ -1733,6 +1892,7 @@ row was picked from."
     (define-key map "R" #'ygg-projects-resume)
     (define-key map "C" #'ygg-projects-cancel)
     (define-key map "a" #'ygg-projects-say)
+    (define-key map "p" #'ygg-projects-toggle-pin)
     (define-key map "V" #'ygg-toggle-visual)
     (define-key map "q" #'ygg-projects-close)
     map)

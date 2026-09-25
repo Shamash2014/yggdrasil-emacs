@@ -572,7 +572,7 @@ A child process, so the glue's advice and keys never reach the other tests."
                                   (:value "high" :name "High")))))
     (let (wire)
       (cl-letf (((symbol-function 'completing-read)
-                 (lambda (prompt coll &rest _)
+                 (lambda (prompt _coll &rest _)
                    (cond ((string-prefix-p "Option:" prompt) "Reasoning")
                          (t "High"))))
                 ((symbol-function 'aob-acp--set-config)
@@ -4419,6 +4419,7 @@ next chunk does not pull the page back down."
 (defvar ygg-preset-user-directory)
 (defvar ygg-preset-read-old-homes)
 (declare-function ygg-aob--preset-limits "layer-aob" (text))
+(declare-function ygg-aob--space-of "layer-aob" (s))
 (declare-function ygg-preset-list "ygg-preset" (&optional root))
 (declare-function ygg-preset-get "ygg-preset" (name &optional root))
 (declare-function ygg-preset-tools "ygg-preset" (d))
@@ -5210,3 +5211,726 @@ and copying a line leaves its mark behind."
       (let ((copied (filter-buffer-substring (point-min) (point-max))))
         (should (string-search "$ pwd" copied))
         (should-not (text-property-any 0 (length copied) 'aob-status 'done copied))))))
+
+(defconst aob-tests--full-brief
+  (mapconcat #'identity
+             '("GOAL" "Count the files under src." "SCOPE" "Writes nothing."
+               "CONTEXT" "src/" "ACCEPTANCE" "A number." "VERIFY" "find src | wc -l"
+               "REPORT" "The count and the command.")
+             "\n"))
+
+(defun aob-tests--send-agent (s id prompt)
+  "Feed S a claude Agent call ID whose prompt is PROMPT."
+  (aob-tests--feed
+   s (json-encode
+      `((jsonrpc . "2.0") (method . "session/update")
+        (params . ((update . ((sessionUpdate . "tool_call") (toolCallId . ,id)
+                              (title . ,id) (kind . "think") (status . "in_progress")
+                              (rawInput . ((description . ,id) (prompt . ,prompt)
+                                           (subagent_type . "general-purpose")))
+                              (_meta . ((claudeCode . ((toolName . "Agent")
+                                                       (subagent . t)))))))))))))
+
+(defun aob-tests--notices (s)
+  (delq nil (mapcar (lambda (e) (and (eq (plist-get e :type) 'state)
+                                     (plist-get e :title)))
+                    (aob-session-events s))))
+
+(ert-deftest aob-orch-cap-stored-from-preset ()
+  "The project preset named in a draft gives its session a cap, briefs and workers."
+  (require 'ygg-preset)
+  (aob-tests--host-defun 'ygg-aob--preset-limits)
+  (let* ((ygg-preset-config-directory
+          (expand-file-name "../../presets/" (file-name-directory aob-tests--file)))
+         (ygg-preset-user-directory (make-temp-name "/tmp/aob-tests-no-presets-")))
+    (cl-letf (((symbol-function 'ygg-aob--presets-of)
+               (lambda (_dir) (cons nil (ygg-preset-list)))))
+      (let* ((refs (ygg-aob--preset-limits
+                    "run it\n\n<preset name=\"project\">\nbody\n</preset>"))
+             (search (ygg-aob--preset-limits
+                      "find it\n\n<preset name=\"search\">\nbody\n</preset>"))
+             (s (aob-create-session :id "acp:orch:cap" :backend 'acp :name "orch"
+                                    :project "/tmp/proj/" :dir "/tmp/proj/"
+                                    :state 'idle :refs refs)))
+        (unwind-protect
+            (progn
+              (should (eql 6 (aob-session-ref s :subagent-cap)))
+              (should (aob-session-ref s :subagent-briefs))
+              (should (equal "build" (plist-get (car (aob-session-ref s :workers)) :name)))
+              (should (string-prefix-p "# Build" (aob-session-ref s :worker-prompt)))
+              (should (eql 0 (plist-get search :subagent-cap)))
+              (should-not (plist-get search :subagent-briefs))
+              (should-not (plist-get search :workers)))
+          (aob-remove-session s))))))
+
+(ert-deftest aob-orch-live-count ()
+  "Only the subagents still working count as live."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-tests--send-agent s "toolu_1" aob-tests--full-brief)
+          (aob-tests--send-agent s "toolu_2" aob-tests--full-brief)
+          (should (= 2 (aob-subagent-live-count s)))
+          (aob-set-state (aob-session-get (format "%s/toolu_1" (aob-session-id s))) 'done)
+          (should (= 1 (aob-subagent-live-count s))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-orch-warns-over-cap ()
+  "A subagent past the cap leaves a notice in the sender's trace."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-session-put s :subagent-cap 1)
+          (aob-tests--send-agent s "toolu_1" aob-tests--full-brief)
+          (should-not (seq-find (lambda (n) (string-match-p "cap passed" n))
+                                (aob-tests--notices s)))
+          (aob-tests--send-agent s "toolu_2" aob-tests--full-brief)
+          (should (member "subagent cap passed: 2 working, cap 1"
+                          (aob-tests--notices s)))
+          (with-current-buffer (aob-trace-buffer s)
+            (aob-trace--render t)
+            (should (string-match-p "subagent cap passed" (buffer-string)))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-orch-warns-missing-brief-headings ()
+  "A brief without its headings is named in the sender's trace."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-session-put s :subagent-cap 6)
+          (aob-session-put s :subagent-briefs t)
+          (aob-tests--send-agent s "toolu_1" "GOAL\nDo it.\nscope\nall\nVERIFY\nmake")
+          (should (member "brief for toolu_1 lacks SCOPE CONTEXT ACCEPTANCE REPORT"
+                          (aob-tests--notices s))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-orch-no-warning-for-complete-brief-or-uncapped ()
+  "A full brief warns nothing, and a session with no cap is never checked."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-session-put s :subagent-cap 6)
+          (aob-session-put s :subagent-briefs t)
+          (aob-tests--send-agent s "toolu_1" aob-tests--full-brief)
+          (should-not (aob-tests--notices s)))
+      (aob-tests--kill-views)))
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (dotimes (i 3)
+            (aob-tests--send-agent s (format "toolu_%d" i) "just count the files"))
+          (should (= 3 (aob-subagent-live-count s)))
+          (should-not (aob-tests--notices s)))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-orch-subagent-space-follows-lead ()
+  "A subagent's buffers go to the space of the session at the head of its chain."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-session-put s :space 7)
+          (aob-tests--send-agent s "toolu_1" aob-tests--full-brief)
+          (let* ((kid (aob-session-get (format "%s/toolu_1" (aob-session-id s))))
+                 (grand (aob-create-session :id "acp:orch:grand" :backend 'native-subagent
+                                            :name "grand" :project "/tmp/proj/"
+                                            :dir "/tmp/proj/" :state 'working
+                                            :refs (list :parent-session (aob-session-id kid)
+                                                        :space 99))))
+            (unwind-protect
+                (progn
+                  (should (eq s (aob-subagent-lead grand)))
+                  (should (eq s (aob-subagent-lead s)))
+                  (should (eql 7 (aob-session-ref (aob-subagent-lead grand) :space)))
+                  (aob-tests--host-defun 'ygg-aob--space-of)
+                  (should (eql 7 (ygg-aob--space-of grand))))
+              (aob-remove-session grand))))
+      (aob-tests--kill-views))))
+
+(defconst aob-tests--claude-init
+  '(:agentInfo (:name "@agentclientprotocol/claude-agent-acp")))
+
+(defun aob-tests--agents-sent (init refs)
+  "The agents option a session/new under INIT with REFS sends, or :none."
+  (pcase-let* ((`(,wire ,_ ,_) (aob-tests--opened-with init refs))
+               (cc (plist-get (plist-get (plist-get wire :params) :_meta) :claudeCode)))
+    (if (plist-member (plist-get cc :options) :agents)
+        (plist-get (plist-get cc :options) :agents)
+      :none)))
+
+(ert-deftest aob-orch-effort-agents-map-per-level ()
+  "Each worker level reaches Claude as an agent with its model, effort and prompt."
+  (let ((agents (aob-tests--agents-sent
+                 aob-tests--claude-init
+                 '(:want-thinking "high" :worker-prompt "Build it."
+                   :workers ((:name "build") (:name "quick" :model "sonnet" :effort "low")
+                             (:name "deep" :model "opus" :effort "xhigh"))))))
+    (should (equal "opus" (plist-get (plist-get agents :worker-build) :model)))
+    (should (equal "medium" (plist-get (plist-get agents :worker-build) :effort)))
+    (should (equal "sonnet" (plist-get (plist-get agents :worker-quick) :model)))
+    (should (equal "low" (plist-get (plist-get agents :worker-quick) :effort)))
+    (should (equal "xhigh" (plist-get (plist-get agents :worker-deep) :effort)))
+    (should (equal "Build it." (plist-get (plist-get agents :worker-quick) :prompt)))
+    (should (stringp (plist-get (plist-get agents :worker-deep) :description))))
+  (let ((agents (aob-tests--agents-sent
+                 aob-tests--claude-init
+                 '(:workers ((:name "quick" :model "sonnet" :effort "low"))))))
+    (should (equal "opus" (plist-get (plist-get agents :worker-build) :model)))
+    (should (equal "medium" (plist-get (plist-get agents :worker-build) :effort)))))
+
+(ert-deftest aob-orch-effort-override-wins ()
+  "The owner's worker effort is every level's, the derived one included."
+  (let ((agents (aob-tests--agents-sent
+                 aob-tests--claude-init
+                 '(:want-thinking "high" :worker-effort "max"
+                   :workers ((:name "build") (:name "quick" :model "sonnet" :effort "low"))))))
+    (should (equal "max" (plist-get (plist-get agents :worker-build) :effort)))
+    (should (equal "max" (plist-get (plist-get agents :worker-quick) :effort))))
+  (aob-tests--with-session s
+    (aob-session-put s :limits '(:workers ((:name "build"))))
+    (aob-acp-worker-effort s "xhigh")
+    (should (equal "xhigh" (aob-session-ref s :worker-effort)))
+    (should (equal "xhigh" (plist-get (aob-session-ref s :limits) :worker-effort)))
+    (aob-acp-worker-effort s "none")
+    (should-not (aob-session-ref s :worker-effort))))
+
+(ert-deftest aob-orch-effort-none-without-workers-or-claude ()
+  "A preset naming no workers sends no agents, and no other adapter gets any."
+  (should (eq :none (aob-tests--agents-sent aob-tests--claude-init
+                                            '(:want-thinking "high"))))
+  (pcase-let ((`(,wire ,_ ,_) (aob-tests--opened-with
+                               '(:agentInfo (:name "codex-acp"))
+                               '(:workers ((:name "build"))))))
+    (should-not (plist-member (plist-get (plist-get wire :params) :_meta) :claudeCode))))
+
+(ert-deftest aob-orch-effort-below-lead-steps-down-one ()
+  "The build worker runs one effort under its lead: xhigh high, high medium, low low."
+  (should (equal "high" (aob-acp--effort-below "xhigh")))
+  (should (equal "medium" (aob-acp--effort-below "high")))
+  (should (equal "low" (aob-acp--effort-below "low")))
+  (should (equal "xhigh" (aob-acp--effort-below "max")))
+  (should (equal "medium" (aob-acp--effort-below nil)))
+  (should (equal "low" (plist-get (plist-get (aob-tests--agents-sent
+                                              aob-tests--claude-init
+                                              '(:want-thinking "low"
+                                                :workers ((:name "build"))))
+                                             :worker-build)
+                                  :effort)))
+  (aob-tests--with-session s
+    (aob-session-put s :config-options
+                     '((:id "effort" :category "thought_level" :currentValue "xhigh")))
+    (should (equal "high" (aob-acp--effort-below (aob-acp--lead-effort s nil))))))
+
+(ert-deftest aob-orch-effort-xhigh-lead-sends-high-workers ()
+  "A preset lead at xhigh asks Claude for xhigh and gives its opus workers high."
+  (require 'ygg-preset)
+  (should (member "xhigh" (symbol-value 'ygg-preset-thinking-levels)))
+  (let ((sent (aob-tests--agents-sent aob-tests--claude-init
+                                      '(:want-thinking "xhigh"
+                                        :workers ((:name "build"))))))
+    (should (equal "high" (plist-get (plist-get sent :worker-build) :effort)))
+    (should (equal "opus" (plist-get (plist-get sent :worker-build) :model)))))
+
+(defun aob-tests--conn-env (refs &optional spec)
+  "The environment a connection for a session with REFS is started under.
+SPEC is the agent the session runs, a fake Claude by default."
+  (let* ((spec (or spec '("fake" :command ("cat"))))
+         (aob-acp-agents (list spec))
+         (aob-acp-command-function #'identity)
+         (aob-acp-environment-function nil)
+         (s (aob-create-session :id "acp:orch:env" :backend 'acp :name "env"
+                                :project "/tmp/" :dir "/tmp/" :state 'starting
+                                :refs (append (list :agent (car spec)) refs)))
+        env)
+    (unwind-protect
+        (cl-letf* ((real (symbol-function 'make-process))
+                   ((symbol-function 'make-process)
+                    (lambda (&rest args)
+                      (setq env process-environment)
+                      (apply real args))))
+          (aob-acp--connect s #'ignore #'ignore)
+          env)
+      (when-let* ((proc (aob-session-conn s)))
+        (remhash (process-get proc 'aob-conn-key) aob-acp--conns)
+        (ignore-errors (kill-buffer (process-get proc 'aob-json-buf)))
+        (ignore-errors (kill-buffer (process-get proc 'aob-stderr-buf)))
+        (delete-process proc))
+      (aob-remove-session s))))
+
+(ert-deftest aob-orch-workflow-cap-reaches-the-process ()
+  "A capped session's adapter starts with the workflow limit; an uncapped one without."
+  (should (member "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=6"
+                  (aob-tests--conn-env '(:subagent-cap 6))))
+  (should-not (seq-find (lambda (v) (string-prefix-p "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=" v))
+                        (aob-tests--conn-env nil)))
+  (should-not (seq-find (lambda (v) (string-prefix-p "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=" v))
+                        (aob-tests--conn-env '(:subagent-cap 0)))))
+
+(defconst aob-tests--codex-agent '("codex" :command ("sh" "-c" "cat" "codex-acp"))
+  "A codex agent the connection code can tell apart, running cat.")
+
+(defconst aob-tests--codex-refs
+  '(:want-thinking "xhigh" :subagent-cap 6 :worker-prompt "Build it."
+    :workers ((:name "build")
+              (:name "quick" :model "sonnet" :effort "low" :read-only t :prompt "Find it.")
+              (:name "deep" :model "opus" :effort "high"))))
+
+(defmacro aob-tests--with-codex-roles (dir &rest body)
+  "Run BODY with codex role files written under a fresh DIR, removed after."
+  (declare (indent 1))
+  `(let* ((,dir (file-name-as-directory (make-temp-file "aob-codex-roles-" t)))
+          (aob-acp-codex-roles-directory ,dir))
+     (unwind-protect (progn ,@body)
+       (delete-directory ,dir t))))
+
+(defun aob-tests--codex-config (refs)
+  "The CODEX_CONFIG a codex connection for REFS starts under, parsed, or nil."
+  (when-let* ((entry (seq-find (lambda (v) (string-prefix-p "CODEX_CONFIG=" v))
+                               (aob-tests--conn-env refs aob-tests--codex-agent))))
+    (json-parse-string (substring entry (length "CODEX_CONFIG="))
+                       :object-type 'plist :array-type 'list)))
+
+(defun aob-tests--codex-role (config name)
+  "The text of the role file CONFIG names for role NAME."
+  (with-temp-buffer
+    (insert-file-contents
+     (plist-get (plist-get (plist-get config :agents) (intern (concat ":" name)))
+                :config_file))
+    (buffer-string)))
+
+(ert-deftest aob-orch-codex-session-carries-roles-with-model-and-effort ()
+  "Codex gets each worker level as a role on its connection, model and effort in the role file."
+  (aob-tests--with-codex-roles dir
+    (let* ((config (aob-tests--codex-config aob-tests--codex-refs))
+           (build (aob-tests--codex-role config "worker-build"))
+           (quick (aob-tests--codex-role config "worker-quick"))
+           (deep (aob-tests--codex-role config "worker-deep")))
+      (should (string-match-p "^name = \"worker-build\"$" build))
+      (should (string-match-p "^model = \"gpt-6-astra\"$" build))
+      (should (string-match-p "^model_reasoning_effort = \"high\"$" build))
+      (should (string-match-p "^developer_instructions = \"Build it.\"$" build))
+      (should (string-match-p "^model = \"gpt-6-sol\"$" quick))
+      (should (string-match-p "^model_reasoning_effort = \"low\"$" quick))
+      (should (string-match-p "^model = \"gpt-6-astra\"$" deep))
+      (should (string-match-p "^model_reasoning_effort = \"high\"$" deep))
+      (should (string-prefix-p dir (plist-get (plist-get (plist-get config :agents) :worker-deep)
+                                              :config_file)))
+      (should (stringp (plist-get (plist-get (plist-get config :agents) :worker-quick)
+                                  :description)))
+      (should (eq :false (plist-get (plist-get config :features) :multi_agent_v2)))))
+  (pcase-let ((`(,wire ,_ ,_) (aob-tests--opened-with '(:agentInfo (:name "codex-acp"))
+                                                      aob-tests--codex-refs)))
+    (should-not (plist-member (plist-get (plist-get wire :params) :_meta) :claudeCode))))
+
+(ert-deftest aob-orch-codex-effort-below-steps-down-codex-ladder ()
+  "One step under the lead is taken on codex's ladder, which runs past Claude's to ultra."
+  (let ((ladder aob-acp-codex-effort-ladder))
+    (should (equal "max" (aob-acp--effort-below "ultra" ladder)))
+    (should (equal "xhigh" (aob-acp--effort-below "max" ladder)))
+    (should (equal "high" (aob-acp--effort-below "xhigh" ladder)))
+    (should (equal "low" (aob-acp--effort-below "low" ladder)))
+    (should (equal "medium" (aob-acp--effort-below nil ladder)))
+    (should (equal "medium" (aob-acp--effort-below "ultra"))))
+  (aob-tests--with-codex-roles dir
+    (let ((config (aob-tests--codex-config '(:want-thinking "ultra" :workers ((:name "build"))))))
+      (should (string-match-p "^model_reasoning_effort = \"max\"$"
+                              (aob-tests--codex-role config "worker-build"))))))
+
+(ert-deftest aob-orch-codex-override-wins ()
+  "The owner's worker effort is every codex role's, and a pair two roles share names no role."
+  (aob-tests--with-codex-roles dir
+    (let ((config (aob-tests--codex-config
+                   (append '(:worker-effort "max") aob-tests--codex-refs))))
+      (dolist (name '("worker-build" "worker-quick" "worker-deep"))
+        (should (string-match-p "^model_reasoning_effort = \"max\"$"
+                                (aob-tests--codex-role config name))))))
+  (aob-tests--with-session s
+    (aob-session-put s :codex-roles '(("worker-build" "gpt-6-astra" "max")
+                                      ("worker-quick" "gpt-6-sol" "max")
+                                      ("worker-deep" "gpt-6-astra" "max")))
+    (should (equal "worker-quick"
+                   (aob-acp--codex-role s '(:model "gpt-6-sol" :reasoningEffort "max"))))
+    (should (equal "gpt-6-astra · max"
+                   (aob-acp--codex-role s '(:model "gpt-6-astra" :reasoningEffort "max"))))
+    (should-not (aob-acp--codex-role s '(:model "" :reasoningEffort "medium")))))
+
+(ert-deftest aob-orch-codex-cap-setting ()
+  "A capped codex session caps codex's concurrent threads; an uncapped one sends nothing."
+  (aob-tests--with-codex-roles dir
+    (should (eql 6 (plist-get (plist-get (aob-tests--codex-config '(:subagent-cap 6)) :agents)
+                              :max_concurrent_threads_per_session)))
+    (should-not (aob-tests--codex-config '(:subagent-cap 0)))
+    (should-not (aob-tests--codex-config nil))))
+
+(ert-deftest aob-orch-codex-roles-go-to-codex-alone ()
+  "Claude gets no codex config and codex no Claude agents or workflow limit."
+  (aob-tests--with-codex-roles dir
+    (let ((claude-env (aob-tests--conn-env aob-tests--codex-refs))
+          (codex-env (aob-tests--conn-env aob-tests--codex-refs aob-tests--codex-agent)))
+      (should-not (seq-find (lambda (v) (string-prefix-p "CODEX_CONFIG=" v)) claude-env))
+      (should (member "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=6" claude-env))
+      (should (seq-find (lambda (v) (string-prefix-p "CODEX_CONFIG=" v)) codex-env))
+      (should-not (seq-find (lambda (v) (string-prefix-p "CLAUDE_CODE_WORKFLOW" v)) codex-env)))
+    (let ((agents (aob-tests--agents-sent aob-tests--claude-init aob-tests--codex-refs)))
+      (should (equal "opus" (plist-get (plist-get agents :worker-build) :model)))
+      (should-not (string-prefix-p "gpt-" (plist-get (plist-get agents :worker-quick) :model))))))
+
+(defun aob-tests--codex-spawn (s id update prompt status &optional thread model effort state)
+  "Feed S codex's spawn call ID as UPDATE, sent PROMPT, the call at STATUS.
+Once the thread exists, THREAD ran on MODEL at EFFORT and is in STATE."
+  (aob-tests--feed
+   s (json-encode
+      `((jsonrpc . "2.0") (method . "session/update")
+        (params . ((update . ((sessionUpdate . ,update) (toolCallId . ,id)
+                              (kind . "other") (title . "spawnAgent") (status . ,status)
+                              (rawInput . ((prompt . ,prompt) (senderThreadId . "lead")
+                                           (receiverThreadIds . ,(if thread (vector thread) []))
+                                           (agentsStates . ,(if thread
+                                                                `((,(intern thread) . ((status . ,state))))
+                                                              (make-hash-table)))
+                                           (model . ,(or model ""))
+                                           (reasoningEffort . ,(or effort "medium"))
+                                           (status . ,status)))
+                              (_meta . ((codex . ((collaboration . ((tool . "spawnAgent")
+                                                                    (senderThreadId . "lead")
+                                                                    (receiverThreadIds . ,(if thread (vector thread) []))))))))))))))))
+
+(defun aob-tests--codex-wait (s id thread state)
+  "Feed S codex's finished wait call ID reporting THREAD in STATE."
+  (aob-tests--feed
+   s (json-encode
+      `((jsonrpc . "2.0") (method . "session/update")
+        (params . ((update . ((sessionUpdate . "tool_call") (toolCallId . ,id)
+                              (kind . "other") (title . "wait") (status . "completed")
+                              (rawInput . ((senderThreadId . "lead")
+                                           (receiverThreadIds . ,(vector thread))
+                                           (agentsStates . ((,(intern thread) . ((status . ,state)))))))
+                              (_meta . ((codex . ((collaboration . ((tool . "wait")))))))))))))))
+
+(ert-deftest aob-orch-codex-brief-warning-on-spawn ()
+  "A codex spawn is a subagent: its brief is checked, its role named, its cap counted."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-session-put s :subagent-cap 1)
+          (aob-session-put s :subagent-briefs t)
+          (aob-session-put s :codex-roles '(("worker-quick" "gpt-6-luna" "low")))
+          (aob-tests--codex-spawn s "call_1" "tool_call" "GOAL\nList the files.\nVERIFY\nls" "in_progress")
+          (aob-tests--codex-spawn s "call_1" "tool_call_update" "GOAL\nList the files.\nVERIFY\nls"
+                                  "completed" "thread-1" "gpt-6-luna" "low" "running")
+          (let ((kid (aob-session-get (format "%s/call_1" (aob-session-id s)))))
+            (should kid)
+            (should (equal "List the files." (aob-session-name kid)))
+            (should (equal "worker-quick" (aob-session-ref kid :subagent-type)))
+            (should (eq 'working (aob-session-state kid)))
+            (should (member "brief for List the files. lacks SCOPE CONTEXT ACCEPTANCE REPORT"
+                            (aob-tests--notices s)))
+            (aob-tests--codex-spawn s "call_2" "tool_call" aob-tests--full-brief "in_progress")
+            (should (member "subagent cap passed: 2 working, cap 1" (aob-tests--notices s)))
+            (aob-tests--codex-wait s "call_3" "thread-1" "completed")
+            (should (eq 'done (aob-session-state kid)))))
+      (aob-tests--kill-views))))
+
+;; a codex thread outlives the lead's turn: its own report settles it, not the lead going idle
+(ert-deftest aob-orch-codex-worker-outlives-the-lead-turn ()
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-session-put s :codex-roles '(("worker-quick" "gpt-6-luna" "low")))
+          (aob-tests--codex-spawn s "call_1" "tool_call_update" "GOAL\nx" "completed"
+                                  "thread-1" "gpt-6-luna" "low" "running")
+          (let ((kid (aob-session-get (format "%s/call_1" (aob-session-id s)))))
+            (aob-set-state s 'working)
+            (aob-set-state s 'idle)
+            (should (eq 'working (aob-session-state kid)))
+            (should (= 1 (aob-subagent-live-count s)))
+            (aob-tests--codex-wait s "call_2" "thread-1" "errored")
+            (should (eq 'failed (aob-session-state kid)))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-orch-codex-role-file-escapes-del ()
+  (should (equal (aob-acp--toml-string (string ?a #x7f ?b)) "\"a\\u007Fb\""))
+  (should (equal (aob-acp--toml-string "q\"n\n") "\"q\\\"n\\n\"")))
+
+(ert-deftest aob-orch-worker-effort-offers-the-agent-ladder ()
+  (aob-tests--with-session s
+    (aob-session-put s :agent "claude")
+    (should-not (member "ultra" (aob-acp--worker-efforts s)))
+    (aob-session-put s :agent "codex")
+    (should (member "ultra" (aob-acp--worker-efforts s)))))
+
+(ert-deftest aob-orch-project-preset-deep-differs-from-build ()
+  (let ((text (with-temp-buffer
+                (insert-file-contents (expand-file-name "../../presets/project.md"
+                                                        (file-name-directory aob-tests--file)))
+                (buffer-string))))
+    (should (string-match "^thinking: xhigh$" text))
+    (should (string-match "deep=opus/xhigh" text))
+    (should (equal "high" (aob-acp--effort-below "xhigh")))))
+
+(ert-deftest aob-orch-effort-quick-is-read-only-explorer ()
+  "The project preset's quick level runs the search body with the reading tools only."
+  (require 'ygg-preset)
+  (aob-tests--host-defun 'ygg-aob--preset-limits)
+  (let* ((ygg-preset-config-directory
+          (expand-file-name "../../presets/" (file-name-directory aob-tests--file)))
+         (ygg-preset-user-directory (make-temp-name "/tmp/aob-tests-no-presets-")))
+    (cl-letf (((symbol-function 'ygg-aob--presets-of)
+               (lambda (_dir) (cons nil (ygg-preset-list)))))
+      (let* ((refs (ygg-aob--preset-limits
+                    "run it\n\n<preset name=\"project\">\nbody\n</preset>"))
+             (agents (aob-tests--agents-sent aob-tests--claude-init refs)))
+        (should (equal '("Read" "Grep" "Glob") (plist-get (plist-get agents :worker-quick) :tools)))
+        (should (string-prefix-p "# Search" (plist-get (plist-get agents :worker-quick) :prompt)))
+        (should (string-prefix-p "# Build" (plist-get (plist-get agents :worker-build) :prompt)))
+        (should-not (plist-member (plist-get agents :worker-build) :tools))
+        (should-not (plist-member (plist-get agents :worker-deep) :tools))
+        (aob-tests--with-codex-roles dir
+          (let* ((config (aob-tests--codex-config refs))
+                 (quick (aob-tests--codex-role config "worker-quick"))
+                 (build (aob-tests--codex-role config "worker-build")))
+            (should (string-match-p "^sandbox_mode = \"read-only\"$" quick))
+            (should (string-match-p "^developer_instructions = \"# Search" quick))
+            (should-not (string-match-p "sandbox_mode" build))
+            (should (string-match-p "^developer_instructions = \"# Build" build))))))))
+
+(defmacro aob-tests--with-workflow (s dir &rest body)
+  "Bind S to a fake ACP session and DIR to a fresh run dir, then clear followers."
+  (declare (indent 2))
+  `(let ((,dir (file-name-as-directory (make-temp-file "aob-wf-" t)))
+         (aob-subagent-workflow-settle-secs 0))
+     (unwind-protect
+         (aob-tests--with-session ,s ,@body)
+       (maphash (lambda (_d wf) (aob-subagent--workflow-stop wf)) aob-subagent--workflows)
+       (clrhash aob-subagent--workflows)
+       (aob-tests--kill-views)
+       (delete-directory ,dir t))))
+
+(defun aob-tests--wf-append (file &rest objs)
+  "Append each of OBJS to FILE as one JSON line."
+  (let ((coding-system-for-write 'utf-8))
+    (write-region (mapconcat (lambda (o) (concat (json-encode o) "\n")) objs "")
+                  nil file t 'silent)))
+
+(defun aob-tests--send-tool (s id title dir)
+  "Feed S a finished tool call ID titled TITLE whose output names DIR."
+  (aob-tests--feed
+   s (json-encode
+      `((jsonrpc . "2.0") (method . "session/update")
+        (params . ((update . ((sessionUpdate . "tool_call") (toolCallId . ,id)
+                              (title . ,title) (kind . "other") (status . "completed")
+                              (rawInput . ((script . "export const meta = {}")))
+                              (content . [((type . "content")
+                                           (content . ((type . "text")
+                                                       (text . ,(format "Workflow launched in background.\nTranscript dir: %s\nRun ID: wf_1" (directory-file-name dir))))))])))))))))
+
+(defun aob-tests--wf-of (dir)
+  (gethash dir aob-subagent--workflows))
+
+(defun aob-tests--wf-kid (s id)
+  (aob-session-get (format "%s/%s" (aob-session-id s) id)))
+
+(ert-deftest aob-orch-workflow-journal-children-appear-on-started ()
+  "Each started line makes one read-only child of the lead, working."
+  (aob-tests--with-workflow s dir
+    (aob-session-put s :agent "claude")
+    (aob-tests--wf-append (expand-file-name "journal.jsonl" dir)
+                          '((type . "launched"))
+                          '((type . "started") (key . "k1") (agentId . "a1")
+                            (label . "count:a.txt") (phase . "Count"))
+                          '((type . "started") (key . "k2") (agentId . "a2") (phase . "Count")))
+    (aob-tests--send-tool s "toolu_wf" "Workflow" dir)
+    (should (equal "Workflow" (plist-get (seq-find (lambda (e) (eq (plist-get e :type) 'tool))
+                                                   (aob-session-events s))
+                                         :title)))
+    (let ((wf (aob-tests--wf-of dir)))
+      (should wf)
+      (should (timerp (aob-subagent--wf-timer wf)))
+      (should-not (aob-subagent-children s))
+      (aob-subagent--workflow-poll wf)
+      (let ((a1 (aob-tests--wf-kid s "a1"))
+            (a2 (aob-tests--wf-kid s "a2")))
+        (should (= 2 (length (aob-subagent-children s))))
+        (should (eq 'workflow-subagent (aob-session-backend a1)))
+        (should (equal "count:a.txt" (aob-session-name a1)))
+        (should (equal "Count a2" (aob-session-name a2)))
+        (should (eq 'working (aob-session-state a1)))
+        (should (equal (aob-session-id s) (aob-session-ref a1 :parent-session)))
+        (should (equal "claude" (aob-session-ref a1 :agent)))
+        (should (equal "workflow · Count" (aob-session-ref a1 :subagent-type)))
+        (should (equal dir (aob-session-ref a1 :workflow-dir)))
+        (should (equal "a1" (aob-session-ref a1 :workflow-agent)))
+        (should (= 2 (aob-subagent-live-count s)))
+        (should-error (aob-prompt a1 "hi") :type 'user-error)
+        (should-error (aob-interject a1 "hi") :type 'user-error)
+        (aob-subagent--workflow-poll wf)
+        (should (= 2 (length (aob-subagent-children s))))
+        (should (timerp (aob-subagent--wf-timer wf)))))))
+
+(ert-deftest aob-orch-workflow-journal-result-settles-child ()
+  "A result line ends its child done with the answer in its trace; a failure fails it;
+the follower stops once every started agent has settled."
+  (aob-tests--with-workflow s dir
+    (let ((journal (expand-file-name "journal.jsonl" dir)))
+      (aob-tests--wf-append journal
+                            '((type . "launched"))
+                            '((type . "started") (agentId . "a1") (label . "one"))
+                            '((type . "started") (agentId . "a2") (label . "two")))
+      (aob-tests--send-tool s "toolu_wf" "Workflow" dir)
+      (let ((wf (aob-tests--wf-of dir)))
+        (aob-subagent--workflow-poll wf)
+        (aob-tests--wf-append journal '((type . "result") (agentId . "a1") (result . "3 lines — counted")))
+        (aob-subagent--workflow-poll wf)
+        (let ((a1 (aob-tests--wf-kid s "a1")))
+          (should (eq 'done (aob-session-state a1)))
+          (should (seq-find (lambda (e) (and (eq (plist-get e :type) 'message)
+                                             (equal "3 lines — counted" (plist-get e :text))))
+                            (aob-session-events a1)))
+          (with-current-buffer (aob-trace-buffer a1)
+            (aob-trace--render t)
+            (should (string-match-p "3 lines — counted" (buffer-string))))
+          (should (= 1 (aob-subagent-live-count s)))
+          (should (timerp (aob-subagent--wf-timer wf)))
+          (aob-tests--wf-append journal '((type . "stopped") (agentId . "a2") (error . "boom")))
+          (aob-subagent--workflow-poll wf)
+          (should (eq 'failed (aob-session-state (aob-tests--wf-kid s "a2"))))
+          (should (= 0 (aob-subagent-live-count s)))
+          (should-not (aob-subagent--wf-timer wf)))))))
+
+(ert-deftest aob-orch-workflow-journal-waits-out-a-gap-between-agents ()
+  "With every agent answered the journal is still read for the settle time."
+  (aob-tests--with-workflow s dir
+    (let ((journal (expand-file-name "journal.jsonl" dir))
+          (aob-subagent-workflow-settle-secs 60))
+      (aob-tests--wf-append journal
+                            '((type . "started") (agentId . "a1") (label . "one"))
+                            '((type . "result") (agentId . "a1") (result . "ok")))
+      (aob-tests--send-tool s "toolu_wf" "Workflow" dir)
+      (let ((wf (aob-tests--wf-of dir)))
+        (aob-subagent--workflow-poll wf)
+        (should (timerp (aob-subagent--wf-timer wf)))
+        (aob-tests--wf-append journal '((type . "started") (agentId . "a2") (label . "two")))
+        (aob-subagent--workflow-poll wf)
+        (should (eq 'working (aob-session-state (aob-tests--wf-kid s "a2"))))
+        (aob-tests--wf-append journal '((type . "result") (agentId . "a2") (result . "ok")))
+        (aob-subagent--workflow-poll wf)
+        (setf (aob-subagent--wf-heard wf) (- (float-time) 61))
+        (aob-subagent--workflow-poll wf)
+        (should-not (aob-subagent--wf-timer wf))))))
+
+(ert-deftest aob-orch-workflow-journal-reads-only-whole-new-lines ()
+  "A half-written line waits for its end; each poll reads only what is new."
+  (aob-tests--with-workflow s dir
+    (let ((journal (expand-file-name "journal.jsonl" dir)))
+      (aob-tests--send-tool s "toolu_wf" "Workflow" dir)
+      (let ((wf (aob-tests--wf-of dir)))
+        (aob-subagent--workflow-poll wf)
+        (should (= 0 (aob-subagent--wf-offset wf)))
+        (write-region "{\"type\":\"started\",\"agentId\":\"a1\",\"label\":\"one — é\"" nil journal nil 'silent)
+        (aob-subagent--workflow-poll wf)
+        (should-not (aob-subagent-children s))
+        (write-region "}\n" nil journal t 'silent)
+        (aob-subagent--workflow-poll wf)
+        (should (equal "one — é" (aob-session-name (aob-tests--wf-kid s "a1"))))
+        (should (= (file-attribute-size (file-attributes journal))
+                   (aob-subagent--wf-offset wf)))
+        (aob-subagent--workflow-poll wf)
+        (should (= 1 (length (aob-subagent-children s))))))))
+
+(ert-deftest aob-orch-workflow-journal-steps-from-agent-transcript ()
+  "An agent's transcript gives its child the prompt and the tools it ran."
+  (aob-tests--with-workflow s dir
+    (let ((journal (expand-file-name "journal.jsonl" dir))
+          (steps (expand-file-name "agent-a1.jsonl" dir)))
+      (aob-tests--wf-append journal '((type . "started") (agentId . "a1") (label . "one")))
+      (aob-tests--wf-append steps
+                            '((type . "user") (message . ((role . "user") (content . "Count the lines — all of them"))))
+                            '((type . "attachment") (attachment . ((type . "x")))))
+      (aob-tests--send-tool s "toolu_wf" "Workflow" dir)
+      (let ((wf (aob-tests--wf-of dir)))
+        (aob-subagent--workflow-poll wf)
+        (let ((a1 (aob-tests--wf-kid s "a1")))
+          (should (equal "Count the lines — all of them"
+                         (plist-get (seq-find (lambda (e) (eq (plist-get e :type) 'prompt))
+                                              (aob-session-events a1))
+                                    :text)))
+          (aob-tests--wf-append steps
+                                '((type . "assistant")
+                                  (message . ((role . "assistant")
+                                              (content . [((type . "tool_use") (id . "tu1") (name . "Bash")
+                                                           (input . ((command . "wc -l a.txt"))))]))))
+                                '((type . "user") (message . ((role . "user")
+                                                              (content . [((type . "tool_result") (content . "3"))])))))
+          (aob-tests--wf-append journal '((type . "result") (agentId . "a1") (result . "3")))
+          (aob-subagent--workflow-poll wf)
+          (should (= 1 (seq-count (lambda (e) (eq (plist-get e :type) 'prompt)) (aob-session-events a1))))
+          (should (seq-find (lambda (e) (and (eq (plist-get e :type) 'tool)
+                                             (equal "Bash wc -l a.txt" (plist-get e :title))))
+                            (aob-session-events a1)))
+          (should (eq 'message (plist-get (car (aob-session-events a1)) :type))))))))
+
+(ert-deftest aob-orch-workflow-journal-non-workflow-tool-starts-nothing ()
+  "Only a call titled Workflow is followed, whatever its output says."
+  (aob-tests--with-workflow s dir
+    (aob-tests--wf-append (expand-file-name "journal.jsonl" dir)
+                          '((type . "started") (agentId . "a1") (label . "one")))
+    (aob-tests--send-tool s "toolu_bash" "Bash" dir)
+    (should-not (aob-tests--wf-of dir))
+    (should (= 0 (hash-table-count aob-subagent--workflows)))))
+
+(ert-deftest aob-orch-workflow-journal-lead-gone-stops-and-drops ()
+  "Removing the lead lets its workflow go and takes the children with it."
+  (aob-tests--with-workflow s dir
+    (aob-tests--wf-append (expand-file-name "journal.jsonl" dir)
+                          '((type . "started") (agentId . "a1") (label . "one")))
+    (aob-tests--send-tool s "toolu_wf" "Workflow" dir)
+    (let ((wf (aob-tests--wf-of dir)))
+      (aob-subagent--workflow-poll wf)
+      (let ((a1 (aob-tests--wf-kid s "a1")))
+        (aob-remove-session s)
+        (should-not (aob-session-get (aob-session-id a1)))
+        (should-not (aob-subagent--wf-timer wf))
+        (should-not (aob-tests--wf-of dir))))))
+
+(ert-deftest aob-orch-workflow-journal-followed-when-output-comes-in-an-update ()
+  "A Workflow call first seen with no output is followed once its update names the dir."
+  (aob-tests--with-workflow s dir
+    (aob-tests--feed
+     s (json-encode
+        `((jsonrpc . "2.0") (method . "session/update")
+          (params . ((update . ((sessionUpdate . "tool_call") (toolCallId . "toolu_wf")
+                                (title . "Workflow") (kind . "other") (status . "pending")
+                                (rawInput . ((script . "export const meta = {}"))))))))))
+    (should (= 0 (hash-table-count aob-subagent--workflows)))
+    (aob-tests--feed
+     s (json-encode
+        `((jsonrpc . "2.0") (method . "session/update")
+          (params . ((update . ((sessionUpdate . "tool_call_update") (toolCallId . "toolu_wf")
+                                (title . "Workflow") (status . "completed")
+                                (content . [((type . "content")
+                                             (content . ((type . "text")
+                                                         (text . ,(format "Transcript dir: %s" dir)))))]))))))))
+    (should (equal "Workflow" (plist-get (seq-find (lambda (e) (eq (plist-get e :type) 'tool))
+                                                   (aob-session-events s))
+                                         :title)))
+    (should (timerp (aob-subagent--wf-timer (aob-tests--wf-of dir))))))
+
+(ert-deftest aob-orch-workflow-journal-idle-cap-counts-transcript-growth ()
+  "A working agent whose transcript grows keeps its workflow followed; silence past
+the cap fails it and lets the workflow go."
+  (aob-tests--with-workflow s dir
+    (let ((steps (expand-file-name "agent-a1.jsonl" dir))
+          (aob-subagent-workflow-idle-secs 60))
+      (aob-tests--wf-append (expand-file-name "journal.jsonl" dir)
+                            '((type . "started") (agentId . "a1") (label . "one")))
+      (aob-tests--send-tool s "toolu_wf" "Workflow" dir)
+      (let ((wf (aob-tests--wf-of dir)))
+        (aob-subagent--workflow-poll wf)
+        (setf (aob-subagent--wf-heard wf) (- (float-time) 61))
+        (aob-tests--wf-append steps '((type . "user") (message . ((role . "user") (content . "go")))))
+        (aob-subagent--workflow-poll wf)
+        (should (eq 'working (aob-session-state (aob-tests--wf-kid s "a1"))))
+        (should (timerp (aob-subagent--wf-timer wf)))
+        (setf (aob-subagent--wf-heard wf) (- (float-time) 61))
+        (aob-subagent--workflow-poll wf)
+        (should (eq 'failed (aob-session-state (aob-tests--wf-kid s "a1"))))
+        (should-not (aob-subagent--wf-timer wf))))))

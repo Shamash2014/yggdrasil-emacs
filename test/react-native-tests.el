@@ -378,6 +378,7 @@ The directory is bound to root."
                      `("rass" "--no-stream-diagnostics" ,ygg-rass-typescript-preset
                        "--" "typescript-language-server" "--stdio"
                        "--" "vscode-eslint-language-server" "--stdio"
+                       "--" "harper-ls" "--stdio"
                        :initializationOptions (:a 1))))
       (should (equal (ygg-rass-with-eslint '("/opt/tsgo/bin/tsc" "--lsp" "--stdio"))
                      '("/opt/tsgo/bin/tsc" "--lsp" "--stdio"))))

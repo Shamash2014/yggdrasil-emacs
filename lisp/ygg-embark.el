@@ -79,7 +79,6 @@
 (declare-function ygg-daemon-continue "ygg-daemon" (task &optional note))
 (declare-function ygg-daemon-stop "ygg-daemon" (task &optional note))
 (declare-function ygg-daemon-edit-composed "ygg-daemon" (task))
-(declare-function ygg-task-dispatch-answer "ygg-task-dispatch" (task answer))
 (declare-function ygg-task-archive "ygg-task" (task))
 (declare-function ygg-task-open-root "ygg-task-space" (task &optional root))
 (declare-function ygg-task-space "ygg-task-space" (task))
@@ -491,7 +490,6 @@ than stopping where the path does.")
                    "1" #'ygg-daemon-oneshot-task
                    "c" #'ygg-daemon-continue
                    "s" #'ygg-daemon-stop
-                   "a" #'ygg-task-dispatch-answer
                    "e" #'ygg-daemon-edit-composed
                    "X" #'ygg-task-archive
                    "D" #'ygg-task-open-root

@@ -116,19 +116,16 @@
 
 ;; kotlin-lsp's command is a function now, and must still pair with harper
 (ert-deftest ygg-jdk-kotlin-contact-still-goes-through-rass ()
-  (let ((eglot-server-programs
-         (list (cons '(kotlin-mode kotlin-ts-mode)
-                     (defalias 'ygg-jdk-tests--contact
-                       (lambda (_interactive _project)
-                         '("env" "JAVA_HOME=/jdk" "kotlin-lsp" "--stdio"))))))
-        (ygg-rass--wrapped-contacts nil))
+  (let ((contact (funcall (lambda (_interactive _project)
+                            '("env" "JAVA_HOME=/jdk" "kotlin-lsp" "--stdio"))
+                          nil nil))
+        (default-directory "/tmp/"))
     (cl-letf (((symbol-function 'executable-find) (lambda (name &rest _) (concat "/bin/" name))))
-      (ygg-rass-enable)
-      (should (equal (funcall (cdar eglot-server-programs) nil nil)
-                     '("rass" "--no-stream-diagnostics" "--" "env" "JAVA_HOME=/jdk"
-                       "kotlin-lsp" "--stdio" "--" "harper-ls" "--stdio")))
-      (ygg-rass-disable)
-      (should (eq (cdar eglot-server-programs) 'ygg-jdk-tests--contact)))))
+      (should (equal (nth 3 (ygg-rass--wrap-guess
+                             (list '(kotlin-ts-mode) nil 'eglot-lsp-server contact '("kotlin"))))
+                     `("rass" "--no-stream-diagnostics" ,ygg-rass-harper-preset "--"
+                       "env" "JAVA_HOME=/jdk" "kotlin-lsp" "--stdio"
+                       "--" "harper-ls" "--stdio"))))))
 
 (provide 'ygg-jdk-tests)
 ;;; ygg-jdk-tests.el ends here

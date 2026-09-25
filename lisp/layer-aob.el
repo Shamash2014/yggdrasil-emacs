@@ -139,6 +139,7 @@
 (declare-function aob-acp-config "aob-acp")
 (declare-function aob-acp-mcp "aob-acp")
 (declare-function aob-deliver-to "aob-deliver")
+(declare-function aob-acp-worker-effort "aob-acp" (s level))
 ;; how an agent answers is a property of the one in front of you, so it
 ;; is set from its own buffer: the localleader already knows which
 ;; session that is, where the global leader has to ask
@@ -171,6 +172,11 @@
 (yggdrasil-localleader-def 'aob-trace-mode "K" #'aob-trace-queue-earlier "queued: move earlier")
 (yggdrasil-localleader-def 'aob-trace-mode "J" #'aob-trace-queue-later "queued: move later")
 (yggdrasil-localleader-def 'aob-trace-mode "u" #'aob-trace-usage "usage: time, tokens, cost")
+
+(autoload 'ygg-projects-toggle-pin "ygg-projects" nil t)
+(dolist (mode '(aob-trace-mode aob-plan-mode))
+  (yggdrasil-localleader-def mode "P" #'ygg-projects-toggle-pin "pin session")
+  (yggdrasil-localleader-def mode "W" #'aob-acp-worker-effort "worker effort"))
 
 (declare-function ygg-ex--cmd-write "yggdrasil-ex" (range bang args))
 (declare-function aob-trace-send "aob-trace")
@@ -897,7 +903,7 @@ buffer-local that says where the words were going."
 
 (defun ygg-aob--show-new-trace (s)
   "Show a new session's trace; a subagent its agent runs opens only when asked."
-  (unless (aob-session-ref s :native-tool-id)
+  (unless (or (aob-session-ref s :native-tool-id) (aob-session-ref s :workflow-agent))
     (ygg-aob--show-trace s)))
 
 (add-hook 'aob-session-created-hook #'ygg-aob--show-new-trace 95)
@@ -1006,13 +1012,18 @@ The spawn cannot do this itself: the worktree is made on its way out."
 (defvar aob-trace--session-id)
 (defvar ygg--space-buffers)
 
+(defun ygg-aob--space-of (s)
+  "The space S's buffers belong in: its lead's, since a subagent works there."
+  (or (aob-session-ref (aob-subagent-lead s) :space)
+      (aob-session-ref s :space)))
+
 (defun ygg-aob--adopt-trace (buf)
   (with-current-buffer buf
     ;; where the buffer stands is the trace's own call: it follows the
     ;; agent into the repository it works in when its folder is none
     (when-let* ((s (aob-session-get aob-trace--session-id)))
       (when (boundp 'ygg--space-buffers)
-        (when-let* ((id (aob-session-ref s :space)))
+        (when-let* ((id (ygg-aob--space-of s)))
           (cl-pushnew buf (gethash id ygg--space-buffers))))))
   buf)
 
@@ -1024,7 +1035,7 @@ The spawn cannot do this itself: the worktree is made on its way out."
   (when (boundp 'ygg--space-buffers)
     (with-current-buffer buf
       (when-let* ((s (aob-session-get aob-plan--session-id))
-                  (id (aob-session-ref s :space)))
+                  (id (ygg-aob--space-of s)))
         (cl-pushnew buf (gethash id ygg--space-buffers)))))
   buf)
 
@@ -1502,19 +1513,13 @@ needs no key."
               (ygg-aob--goto hit)
             (user-error "no agent on %c" ch)))))))
 
-(declare-function ygg-task-dispatch-answer-next "ygg-task-dispatch" ())
-
 (defun ygg-aob-resolve-next ()
-  "Answer the first pending Decision, then the first parked question.
-Permissions come first because a worker holding one is stopped where it
-stands; with none left the same key goes on to the daemon's parked
-questions, so one queue empties under one key."
+  "Answer the first pending Decision of any session.
+A worker holding one is stopped where it stands, so the oldest waits least."
   (interactive)
   (if-let* ((s (seq-find #'aob-session-decisions (aob-sessions))))
       (aob-resolve s)
-    (unless (fboundp 'ygg-task-dispatch-answer-next)
-      (user-error "no pending decisions"))
-    (ygg-task-dispatch-answer-next)))
+    (user-error "no pending decisions")))
 
 ;;; Resolution queue → *quickfix*, live while it is open.  Decision
 ;;; lines carry their own RET (resolve) and vanish as they are answered;
@@ -1744,6 +1749,7 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 (declare-function ygg-preset-field "ygg-preset" (d key))
 (declare-function ygg-preset-tools "ygg-preset" (d))
 (declare-function ygg-preset-thinking "ygg-preset" (d))
+(declare-function ygg-preset-subagent-refs "ygg-preset" (presets &optional known))
 (autoload 'ygg-preset-edit "ygg-preset" nil t)
 (autoload 'ygg-preset-new "ygg-preset" nil t)
 (declare-function ygg-preset-skill-files "ygg-preset" (root))
@@ -1840,7 +1846,8 @@ As session refs; the first preset settling each one decides it."
            (tools (seq-some #'ygg-preset-tools presets))
            (thinking (seq-some #'ygg-preset-thinking presets)))
       (append (and tools (list :want-tools tools))
-              (and thinking (list :want-thinking thinking))))))
+              (and thinking (list :want-thinking thinking))
+              (ygg-preset-subagent-refs presets known)))))
 
 (defun ygg-aob--preset-commands (dir)
   "DIR's presets for the popup a slash opens, marked as presets."

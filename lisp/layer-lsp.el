@@ -49,13 +49,22 @@ checker asking for a whole repository costs thousands of them for a
 dictionary it could reread on demand.")
 
 (defun ygg-lsp--server-binary (server)
-  "Name of the binary SERVER runs, without its directory or an env wrapper."
+  "Name of the binary SERVER runs, without its directory or an env wrapper.
+Through rass it is the language server rass leads with, not rass."
   (when-let* ((proc (ignore-errors (jsonrpc--process server)))
+              (command (ygg-lsp--primary-command (process-command proc)))
               (cmd (seq-find (lambda (arg)
                                (not (or (equal (file-name-nondirectory arg) "env")
                                         (string-match-p "\\`[A-Za-z_][A-Za-z0-9_]*=" arg))))
-                             (process-command proc))))
+                             command)))
     (file-name-nondirectory cmd)))
+
+(defun ygg-lsp--primary-command (command)
+  "COMMAND, or the first server's command when COMMAND runs rass."
+  (if (equal (file-name-nondirectory (car command)) "rass")
+      (let ((after (cdr (member "--" command))))
+        (seq-take after (or (seq-position after "--") (length after))))
+    command))
 
 (defun ygg-lsp--unwatched-server-p (server)
   "Whether SERVER is one whose file watches are declined."

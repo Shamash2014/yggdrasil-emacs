@@ -744,7 +744,9 @@ that will be correct a second later."
          (done 0))
     (dolist (d dirs)
       (dolist (f (directory-files d t "\\`[^.].*\\.el\\'"))
-        (unless (string-prefix-p "layer-" (file-name-nondirectory f))
+        (unless (or (string-prefix-p "layer-" (file-name-nondirectory f))
+                    ;; tests are loaded from source by the batch runs, never by this Emacs
+                    (string-suffix-p "-tests.el" f))
           (when (and (ygg--elc-stale-p f) (ygg--readable-elisp-p f))
             (when (ignore-errors (byte-compile-file f)) (setq done (1+ done)))))))
     ;; native compilation is left to the jit: it works from the .elc,

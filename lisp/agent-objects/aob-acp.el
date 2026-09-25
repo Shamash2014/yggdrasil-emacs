@@ -148,12 +148,39 @@ another session does can reach it.
 
 Nil keys the connection the way it always was, by agent and tree.")
 
+(defvar aob-acp--session-env nil
+  "Entries the session opening now adds to its connection's environment.
+Bound around a connect; the key carries them, so only sessions asking
+for the same entries share a process.")
+
+(defun aob-acp--cap-env (s)
+  "S's subagent cap as the environment Claude's workflows read their limit from."
+  (when-let* ((cap (aob-session-ref s :subagent-cap))
+              ((>= cap 1)))
+    (list (format "CLAUDE_CODE_WORKFLOW_MAX_CONCURRENT_AGENTS=%d" (min cap 256)))))
+
+(defun aob-acp--codex-agent-p (agent)
+  "Whether AGENT runs codex's adapter."
+  (and (seq-some (lambda (arg) (string-match-p "codex-acp" arg))
+                 (plist-get (cdr (assoc agent aob-acp-agents)) :command))
+       t))
+
+(defun aob-acp--agent-env (s)
+  "The environment S's agent reads its subagent limits and roles from.
+Codex's adapter merges the JSON in CODEX_CONFIG into every thread it
+starts or resumes, and reads nothing of the kind from session/new."
+  (if (aob-acp--codex-agent-p (aob-session-ref s :agent))
+      (when-let* ((config (aob-acp--codex-config s)))
+        (list (concat "CODEX_CONFIG=" (json-serialize config))))
+    (aob-acp--cap-env s)))
+
 (defun aob-acp--conn-env (agent project)
   "The environment a connection for AGENT on PROJECT would be started with."
-  (and aob-acp-environment-function
-       (ignore-errors
-         (funcall aob-acp-environment-function
-                  agent project project aob-acp-isolate))))
+  (append aob-acp--session-env
+          (and aob-acp-environment-function
+               (ignore-errors
+                 (funcall aob-acp-environment-function
+                          agent project project aob-acp-isolate)))))
 
 (defun aob-acp--conn-key (agent project)
   "What the connection for AGENT on PROJECT is filed under.
@@ -180,7 +207,8 @@ first."
          ;; a claude spawned with CLAUDECODE set refuses to start (nested
          ;; guard); the append keeps envrc/mise buffer-local env visible
          (process-environment
-          (append (and aob-acp-environment-function
+          (append aob-acp--session-env
+                  (and aob-acp-environment-function
                        (funcall aob-acp-environment-function
                                 agent project project aob-acp-isolate))
                   (seq-remove (lambda (v) (string-prefix-p "CLAUDECODE=" v))
@@ -817,6 +845,19 @@ never learns there was more than one."
         (cons nil (file-name-nondirectory
                    (directory-file-name (or (plist-get sub :path) "subagent"))))))))
 
+(defun aob-acp--codex-spawn-p (u)
+  "Whether U is codex's spawn call, whose raw input holds the prompt it sent."
+  (equal (plist-get (plist-get (plist-get (plist-get u :_meta) :codex) :collaboration) :tool)
+         "spawnAgent"))
+
+(defun aob-acp--brief-title (text)
+  "The first line of TEXT that is more than a heading, or nil."
+  (when (stringp text)
+    (let ((case-fold-search nil))
+      (seq-find (lambda (l) (not (or (string-empty-p l)
+                                     (string-match-p "\\`#*[ \t]*[A-Z]+:?\\'" l))))
+                (mapcar #'string-trim (split-string text "\n"))))))
+
 (defun aob-acp--tool-call (s u)
   (aob-acp--break-accum s)
   (when (equal (plist-get u :kind) "edit")
@@ -831,6 +872,7 @@ never learns there was more than one."
          (raw (plist-get u :rawInput))
          (id (plist-get u :toolCallId))
          (codex (aob-acp--codex-subagent s u id))
+         (spawn (aob-acp--codex-spawn-p u))
          ;; an Agent call is titled by its description once its input streams in
          (task (or (equal (plist-get u :title) "Task")
                    (eq (plist-get meta :subagent) t)
@@ -843,10 +885,14 @@ never learns there was more than one."
                         ;; (codex) — never by the bare tool
                         :title (or (and task (or (plist-get raw :description)
                                                  (plist-get raw :prompt)))
+                                   (and spawn (or (aob-acp--brief-title (plist-get raw :prompt))
+                                                  "subagent"))
                                    (cdr codex)
                                    (aob-acp--tool-title u raw))
                         :raw raw
-                        :subagent (and (or task (cdr codex)) t)
+                        :subagent (and (or task spawn (cdr codex)) t)
+                        :codex-spawn spawn
+                        :subagent-type (and spawn (aob-acp--codex-role s raw))
                         :parent (or (aob-acp--parent-of u)
                                     (plist-get meta :parentToolUseId)
                                     (car codex))
@@ -890,7 +936,7 @@ column of the word bash."
                       ;; updates re-send the bare tool name; a subagent
                       ;; already traded it for what it was sent to do
                       ((not (and (eq key :title) (plist-get ev :subagent)
-                                 (equal val "Task")))))
+                                 (member val '("Task" "spawnAgent"))))))
             (plist-put ev key
                        (if (eq key :title)
                            (aob-acp--tool-title u (plist-get ev :raw))
@@ -901,6 +947,9 @@ column of the word bash."
                     ((listp raw))
                     (named (or (plist-get raw :description) (plist-get raw :prompt))))
           (plist-put ev :title named))
+        (when-let* (((plist-get ev :codex-spawn))
+                    (role (aob-acp--codex-role s (plist-get ev :raw))))
+          (plist-put ev :subagent-type role))
         (when-let* ((st (aob-acp--diff-stat (plist-get ev :content))))
           (plist-put ev :stat st))
         (when (and (member (plist-get ev :status) '("completed" "failed"))
@@ -1892,28 +1941,178 @@ session on another."
   (append (when tools (list :tools (vconcat tools)))
           (pcase thinking
             ("off" (list :thinking (list :type "disabled")))
-            ((or "low" "medium" "high") (list :effort thinking)))))
+            ((or "low" "medium" "high" "xhigh" "max") (list :effort thinking)))))
+
+(defconst aob-acp-effort-ladder '("low" "medium" "high" "xhigh" "max")
+  "Claude's effort levels, least first.")
+
+(defconst aob-acp-codex-effort-ladder '("low" "medium" "high" "xhigh" "max" "ultra")
+  "Codex's reasoning efforts its current models offer, least first.
+Its enum also has none and minimal, which none of those models accept.")
+
+(defcustom aob-acp-codex-worker-models
+  '(("opus" . "gpt-6-astra") ("sonnet" . "gpt-6-sol") ("haiku" . "gpt-6-luna"))
+  "The codex model each worker model a preset names stands for.
+A name not here goes to codex as it is written."
+  :type '(alist :key-type string :value-type string) :group 'aob)
+
+(defcustom aob-acp-codex-roles-directory (locate-user-emacs-file "var/aob-codex-roles/")
+  "Where the codex role files a session's worker levels point at are written.
+Codex reads a role's model, effort and instructions only from a file;
+the session names these files in its own config, never in a codex home."
+  :type 'directory :group 'aob)
+
+(defun aob-acp--effort-below (level &optional ladder)
+  "The effort one step under LEVEL on LADDER, Claude's by default.
+The lowest stays where it is; medium when LEVEL is unknown."
+  (let ((ladder (or ladder aob-acp-effort-ladder)))
+    (if-let* ((tail (member level ladder)))
+        (nth (max 0 (- (length ladder) (length tail) 1)) ladder)
+      "medium")))
+
+(defun aob-acp--lead-effort (s thinking &optional ladder)
+  "The effort S opens at: THINKING when on LADDER, else its effort option."
+  (let ((ladder (or ladder aob-acp-effort-ladder)))
+    (or (car (member thinking ladder))
+        (when-let* ((opt (seq-find (lambda (o) (equal (plist-get o :category) "thought_level"))
+                                   (aob-session-ref s :config-options))))
+          (car (member (plist-get opt :currentValue) ladder))))))
+
+(defun aob-acp--worker-levels (s thinking ladder model-of)
+  "S's :workers as the levels an agent is handed, or nil for none.
+Each is a plist of :level, :name worker-LEVEL, :model, :effort, :prompt
+and :read-only.  The build level is always there: opus, one effort on
+LADDER under the lead's, which is THINKING or S's own effort option.  A
+level naming no model or effort of its own takes build's, one without a
+prompt of its own takes S's :worker-prompt, and S's :worker-effort,
+when set, is every level's.  MODEL-OF turns a preset's model name into
+the agent's."
+  (when-let* ((workers (aob-session-ref s :workers)))
+    (let ((below (aob-acp--effort-below (aob-acp--lead-effort s thinking ladder) ladder))
+          (override (car (member (aob-session-ref s :worker-effort) ladder)))
+          (prompt (or (aob-session-ref s :worker-prompt)
+                      "Carry out the brief you are given and report as it asks.")))
+      (mapcar (lambda (w)
+                (list :level (plist-get w :name)
+                      :name (concat "worker-" (plist-get w :name))
+                      :model (funcall model-of (or (plist-get w :model) "opus"))
+                      :effort (or override (car (member (plist-get w :effort) ladder)) below)
+                      :prompt (or (plist-get w :prompt) prompt)
+                      :read-only (plist-get w :read-only)))
+              (if (seq-find (lambda (w) (equal (plist-get w :name) "build")) workers)
+                  workers
+                (cons (list :name "build") workers))))))
+
+(defun aob-acp--level-description (level)
+  "What the agent is told of LEVEL when it picks a worker."
+  (format "The %s worker: %s at %s effort%s." (plist-get level :level)
+          (plist-get level :model) (plist-get level :effort)
+          (if (plist-get level :read-only) ", read-only: finds and checks, changes nothing" "")))
+
+(defun aob-acp--claude-agents (s thinking)
+  "The agents option Claude's adapter takes for S's :workers, or nil for none.
+A read-only level gets only the tools that read."
+  (when-let* ((levels (aob-acp--worker-levels s thinking aob-acp-effort-ladder #'identity)))
+    (let (map)
+      (dolist (l levels)
+        (setq map (plist-put map (intern (concat ":" (plist-get l :name)))
+                             (append (list :description (aob-acp--level-description l)
+                                           :prompt (plist-get l :prompt)
+                                           :model (plist-get l :model)
+                                           :effort (plist-get l :effort))
+                                     (and (plist-get l :read-only)
+                                          (list :tools (vector "Read" "Grep" "Glob")))))))
+      (list :agents map))))
+
+(defun aob-acp--codex-model (name)
+  (or (cdr (assoc name aob-acp-codex-worker-models)) name))
+
+(defun aob-acp--toml-string (text)
+  "TEXT as a TOML basic string; JSON escapes all TOML needs but DEL."
+  (replace-regexp-in-string "\x7f" "\\u007F" (json-encode-string text) t t))
+
+(defun aob-acp--codex-role-file (level)
+  "LEVEL as a codex role file under aob-acp-codex-roles-directory, its path.
+The name carries a hash of the text, so a file once written never changes."
+  (let* ((text (concat "name = " (aob-acp--toml-string (plist-get level :name))
+                       "\ndescription = " (aob-acp--toml-string (aob-acp--level-description level))
+                       "\nmodel = " (aob-acp--toml-string (plist-get level :model))
+                       "\nmodel_reasoning_effort = " (aob-acp--toml-string (plist-get level :effort))
+                       (if (plist-get level :read-only) "\nsandbox_mode = \"read-only\"" "")
+                       "\ndeveloper_instructions = " (aob-acp--toml-string (plist-get level :prompt))
+                       "\n"))
+         (dir (file-name-as-directory (expand-file-name aob-acp-codex-roles-directory)))
+         (file (format "%s%s-%s.toml" dir (plist-get level :name)
+                       (substring (secure-hash 'sha1 text) 0 12))))
+    (unless (file-exists-p file)
+      (make-directory dir t)
+      (let ((coding-system-for-write 'utf-8-unix))
+        (write-region text nil file nil 'silent)))
+    file))
+
+(defun aob-acp--codex-config (s)
+  "The codex config S's subagent cap and worker levels ask for, or nil.
+Each level is a role the spawn tool offers as its agent_type.  The
+multi-agent tools stay the first version, whose spawn event carries the
+prompt the brief check reads and the model and effort the role ran at.
+A remote session gets its cap and no roles: their files are local."
+  (let* ((cap (aob-session-ref s :subagent-cap))
+         (levels (and (not (file-remote-p (or (aob-session-project s) "")))
+                      (aob-acp--worker-levels s (aob-session-ref s :want-thinking)
+                                              aob-acp-codex-effort-ladder
+                                              #'aob-acp--codex-model)))
+         (agents (and cap (>= cap 1)
+                      (list :max_concurrent_threads_per_session (min cap 256)))))
+    (dolist (l levels)
+      (setq agents (plist-put agents (intern (concat ":" (plist-get l :name)))
+                              (list :description (aob-acp--level-description l)
+                                    :config_file (aob-acp--codex-role-file l)))))
+    (aob-session-put s :codex-roles
+                     (mapcar (lambda (l) (list (plist-get l :name) (plist-get l :model)
+                                               (plist-get l :effort)))
+                             levels))
+    (when agents
+      (append (list :agents agents)
+              (and levels (list :features (list :multi_agent t :multi_agent_v2 :false)))))))
+
+(defun aob-acp--codex-role (s raw)
+  "The role S's codex spawn ran as, from the model and effort in its RAW input.
+Codex tells neither the role nor the call's agent_type, so the role is
+the one level of S's that runs at that pair; two such levels, or none,
+and the pair itself is the answer."
+  (when-let* ((model (plist-get raw :model))
+              ((not (string-empty-p model)))
+              (effort (plist-get raw :reasoningEffort)))
+    (let ((hits (seq-filter (lambda (r) (equal (cdr r) (list model effort)))
+                            (aob-session-ref s :codex-roles))))
+      (if (= (length hits) 1)
+          (caar hits)
+        (format "%s · %s" model effort)))))
 
 (defun aob-acp--with-limits (s init method params)
   "PARAMS for the opening METHOD carrying S's :want-tools and :want-thinking.
 Claude's adapter takes both in _meta on session/new, resume and load, and
 S keeps them as :limits so a restore or fork asks for them again.  A fork,
 or any other agent, gets its thinking after it opens, and the trace says a
-tools limit went unenforced."
+tools limit went unenforced.  S's :workers go to Claude here, as agents;
+codex takes its roles from the connection, aob-acp--agent-env."
   (let ((tools (aob-session-ref s :want-tools))
-        (thinking (aob-session-ref s :want-thinking)))
-    (when (or tools thinking)
-      (aob-session-put s :limits (append (and tools (list :want-tools tools))
-                                         (and thinking (list :want-thinking thinking)))))
+        (thinking (aob-session-ref s :want-thinking))
+        (workers (aob-session-ref s :workers)))
+    (when-let* ((limits (append (and tools (list :want-tools tools))
+                                (and thinking (list :want-thinking thinking))
+                                (aob-acp--orch-refs s))))
+      (aob-session-put s :limits limits))
     (cond
-     ((not (or tools thinking)) params)
+     ((not (or tools thinking workers)) params)
      ((and (aob-acp--claude-p init)
            (member method '("session/new" "session/resume" "session/load")))
       (aob-session-put s :want-thinking nil)
       (let* ((meta (copy-sequence (plist-get params :_meta)))
              (cc (copy-sequence (plist-get meta :claudeCode)))
              (opts (append (plist-get cc :options)
-                           (aob-acp--claude-options tools thinking))))
+                           (aob-acp--claude-options tools thinking)
+                           (aob-acp--claude-agents s thinking))))
         (plist-put (copy-sequence params) :_meta
                    (plist-put meta :claudeCode (plist-put cc :options opts)))))
      (t
@@ -1921,6 +2120,36 @@ tools limit went unenforced."
         (aob-event s 'state :title (format "tools limit not enforced for %s"
                                            (aob-session-ref s :agent))))
       params))))
+
+(defun aob-acp--orch-refs (s)
+  "S's subagent cap and worker refs, as a restore or fork hands them on."
+  (cl-loop for key in '(:subagent-cap :subagent-briefs :workers :worker-prompt :worker-effort)
+           for value = (aob-session-ref s key)
+           when value append (list key value)))
+
+(defun aob-acp--worker-efforts (&optional s)
+  "The efforts S's agent takes for its workers; both ladders when S is unknown."
+  (pcase (and s (aob-session-ref s :agent))
+    ("codex" aob-acp-codex-effort-ladder)
+    ((pred stringp) aob-acp-effort-ladder)
+    (_ (seq-uniq (append aob-acp-effort-ladder aob-acp-codex-effort-ladder)))))
+
+(defun aob-acp-worker-effort (s level)
+  "Run every worker S sends at LEVEL; none puts each back on its own level.
+Claude and codex read their workers only when a session opens, so this
+holds from S's next open, a wake or a restore, and not in the turn
+already running."
+  (interactive
+   (let ((s (aob-target)))
+     (list s (completing-read (format "%s workers at: " (aob-session-name s))
+                              (cons "none" (aob-acp--worker-efforts s)) nil t nil nil
+                              (or (aob-session-ref s :worker-effort) "none")))))
+  (let ((effort (car (member level (aob-acp--worker-efforts s)))))
+    (aob-session-put s :worker-effort effort)
+    (when-let* ((limits (aob-session-ref s :limits)))
+      (aob-session-put s :limits (plist-put (copy-sequence limits) :worker-effort effort)))
+    (message "aob: %s workers %s from its next open" (aob-session-name s)
+             (if effort (concat "at " effort) "on their own levels"))))
 
 (defun aob-acp--want-thinking (s level)
   "Set S's thought_level option to LEVEL, or say in the trace it has none.
@@ -2350,6 +2579,7 @@ parameter outright rather than ignoring it."
   "Attach S to its agent's shared connection and open its ACP session."
   (let* ((agent (aob-session-ref s :agent))
          (project (aob-session-project s))
+         (aob-acp--session-env (aob-acp--agent-env s))
          (proc (or (aob-acp--live-conn agent project)
                    (aob-acp--start-conn agent project))))
     (setf (aob-session-conn s) proc)

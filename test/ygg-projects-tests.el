@@ -13,6 +13,7 @@ It reports CLOCK, SPEND and todo PROGRESS as a (DONE . TOTAL) cons, and
 ygg-projects-tests--state as its state."
   (declare (indent 3))
   `(cl-letf (((symbol-function 'aob-session-p) (lambda (s) (eq s 'session)))
+             ((symbol-value 'ygg-projects--pin-list) nil)
              ((symbol-function 'aob-session-state) (lambda (_) ygg-projects-tests--state))
              ((symbol-function 'aob-session-clock) (lambda (_) ,clock))
              ((symbol-function 'aob-session-quiet) #'ignore)
@@ -180,6 +181,28 @@ failed or killed it is neither."
               (should (equal (ygg-projects--agents root) '(1 . 1))))
           (ignore-errors (aob-remove-session kid))
           (aob-remove-session parent))))))
+
+(ert-deftest ygg-projects-subagent-row-says-its-kind-underneath ()
+  (require 'aob-subagent)
+  (let* ((root (file-name-as-directory (file-truename temporary-file-directory)))
+         (parent (aob-create-session :id "p" :backend 'acp :name "lead"
+                                     :project root :state 'working
+                                     :refs (list :agent "claude")))
+         (typed (aob-create-session :id "p/t" :backend 'native-subagent :name "scout"
+                                    :project root :state 'working
+                                    :refs (list :parent-session "p" :agent "claude")))
+         (plain (aob-create-session :id "p/u" :backend 'native-subagent :name "helper"
+                                    :project root :state 'working
+                                    :refs (list :parent-session "p" :agent "claude"))))
+    (unwind-protect
+        (progn
+          (aob-subagent--native-sync
+           typed '(:title "scout" :status "in_progress"
+                   :raw (:description "scout" :subagent_type "Explore")))
+          (should (equal (ygg-projects--entry-tree typed) "claude · Explore"))
+          (should (equal (ygg-projects--entry-tree plain) "claude"))
+          (should (equal (ygg-projects--entry-tree parent) "claude")))
+      (mapc #'aob-remove-session (list typed plain parent)))))
 
 ;;; Acting on a visual selection of rows
 
@@ -354,7 +377,10 @@ a folder outside git; the lookup is seeded, so no git runs."
     (should (equal (ygg-projects-tests--names "/ygg-t/repo/") '("feat")))
     (should (equal (ygg-projects--agents "/ygg-t/repo/") '(1 . 1)))
     (should (equal (ygg-projects--entry-tree (aob-session-get "feat"))
-                   "⌥ wt · feat"))))
+                   "⌥ wt · feat"))
+    (aob-session-put (aob-session-get "feat") :agent "codex")
+    (should (equal (ygg-projects--entry-tree (aob-session-get "feat"))
+                   "codex · ⌥ wt · feat"))))
 
 (ert-deftest ygg-projects-linked-worktree-that-is-a-project-is-listed-once ()
   "The main project has it; the worktree's own card does not repeat it."
@@ -375,6 +401,186 @@ a folder outside git; the lookup is seeded, so no git runs."
   (should (equal (ygg-projects--main-worktree
                   "worktree /r/repo\nHEAD abc\nbranch refs/heads/main\n\nworktree /r/repo-feat\nHEAD def\nbranch refs/heads/feat\n")
                  "/r/repo/")))
+
+;;; Pinning, and the tree of what a session sent
+
+(defvar aob-acp-persist-file)
+
+(defvar ygg-projects-tests--ts nil
+  "Each stand-in session's last word, as (ID . SECONDS).")
+
+(defvar ygg-projects-tests--made nil
+  "The sessions the tree fixture made, for a test that makes more.")
+
+(defun ygg-projects-tests--call-with-tree (specs body)
+  "Call BODY with the project root, over sessions made from SPECS.
+Each spec is (ID PARENT TS); a session with no PARENT is a lead.  Pins
+start empty and live in a file of their own."
+  (require 'aob-subagent)
+  (let* ((ygg-projects-show-past nil)
+         (aob-acp-persist-file nil)
+         (ygg-projects-pins-file (make-temp-file "ygg-projects-pins"))
+         (ygg-projects--pin-list 'unread)
+         (root (file-name-as-directory (file-truename temporary-file-directory)))
+         (ygg-projects-tests--ts (mapcar (lambda (spec) (cons (nth 0 spec) (nth 2 spec)))
+                                         specs))
+         (ygg-projects-tests--made
+          (mapcar (lambda (spec)
+                    (aob-create-session
+                     :id (nth 0 spec) :name (nth 0 spec)
+                     :backend (if (nth 1 spec) 'native-subagent 'acp)
+                     :project root :state 'working
+                     :refs (and (nth 1 spec) (list :parent-session (nth 1 spec)))))
+                  specs)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ygg-projects--roots) (lambda () (list root)))
+                  ((symbol-function 'ygg-projects--past) #'ignore)
+                  ((symbol-function 'ygg-projects--session-ts)
+                   (lambda (s) (cdr (assoc (aob-session-id s) ygg-projects-tests--ts)))))
+          (funcall body root))
+      (mapc (lambda (s) (ignore-errors (aob-remove-session s))) ygg-projects-tests--made)
+      (delete-file ygg-projects-pins-file))))
+
+(defmacro ygg-projects-tests--with-tree (specs &rest body)
+  "Run BODY with root bound, over the sessions SPECS describe."
+  (declare (indent 1))
+  (list 'ygg-projects-tests--call-with-tree (list 'quote specs)
+        (cons 'lambda (cons '(root) body))))
+
+(defun ygg-projects-tests--pin (id)
+  "Toggle the pin of session ID from a buffer showing it."
+  (with-temp-buffer
+    (setq-local aob-buffer-session-id id)
+    (ygg-projects-toggle-pin)))
+
+(ert-deftest ygg-projects-pinned-sorts-first-whatever-its-recency ()
+  (ygg-projects-tests--with-tree (("old" nil 1) ("mid" nil 2) ("new" nil 3))
+    (should (equal (ygg-projects-tests--names root) '("new" "mid" "old")))
+    (ygg-projects-tests--pin "old")
+    (ygg-projects-tests--pin "mid")
+    (should (equal (ygg-projects-tests--names root) '("old" "mid" "new")))))
+
+(ert-deftest ygg-projects-pin-twice-unpins ()
+  (ygg-projects-tests--with-tree (("old" nil 1) ("new" nil 3))
+    (ygg-projects-tests--pin "old")
+    (should (ygg-projects--pinned-p (aob-session-get "old")))
+    (ygg-projects-tests--pin "old")
+    (should-not (ygg-projects--pinned-p (aob-session-get "old")))
+    (should (equal (ygg-projects-tests--names root) '("new" "old")))))
+
+(ert-deftest ygg-projects-pin-survives-a-refresh-and-a-restart ()
+  "A pin is kept by conversation: read back from its file, it holds a
+session resumed under another id."
+  (ygg-projects-tests--with-tree (("old" nil 1) ("new" nil 3))
+    (aob-session-put (aob-session-get "old") :acp-id "conv-1")
+    (ygg-projects-tests--pin "old")
+    (ygg-projects-refresh)
+    (should (equal (ygg-projects-tests--names root) '("old" "new")))
+    (aob-remove-session (aob-session-get "old"))
+    (let ((again (aob-create-session :id "old<2>" :name "old<2>" :backend 'acp
+                                     :project root :state 'working
+                                     :refs (list :acp-id "conv-1"))))
+      (push again ygg-projects-tests--made)
+      (push (cons "old<2>" 0) ygg-projects-tests--ts)
+      (setq ygg-projects--pin-list 'unread)
+      (should (ygg-projects--pinned-p again))
+      (should (equal (ygg-projects-tests--names root) '("old<2>" "new"))))))
+
+(ert-deftest ygg-projects-pin-holds-when-the-conversation-arrives-later ()
+  (ygg-projects-tests--with-tree (("old" nil 1) ("new" nil 3))
+    (ygg-projects-tests--pin "old")
+    (aob-session-put (aob-session-get "old") :acp-id "conv-late")
+    (should (ygg-projects--pinned-p (aob-session-get "old")))
+    (should (equal (ygg-projects-tests--names root) '("old" "new")))
+    (ygg-projects-tests--pin "old")
+    (should-not (ygg-projects--pins))))
+
+(ert-deftest ygg-projects-pin-by-session-id-never-reaches-the-file ()
+  "Session ids start again from 1 after a restart, so only a conversation
+key is written; a pin taken early moves onto the conversation once it exists."
+  (ygg-projects-tests--with-tree (("acp:claude:1" nil 1))
+    (ygg-projects-tests--pin "acp:claude:1")
+    (should (ygg-projects--pinned-p (aob-session-get "acp:claude:1")))
+    (setq ygg-projects--pin-list 'unread)
+    (should-not (ygg-projects--pins))
+    (ygg-projects-tests--pin "acp:claude:1")
+    (aob-session-put (aob-session-get "acp:claude:1") :acp-id "conv-9")
+    (should (ygg-projects--pinned-p (aob-session-get "acp:claude:1")))
+    (setq ygg-projects--pin-list 'unread)
+    (should (equal (ygg-projects--pins) '("conv-9")))))
+
+(ert-deftest ygg-projects-tree-nests-three-levels-by-recency ()
+  (ygg-projects-tests--with-tree (("lead" nil 5)
+                                  ("a" "lead" 1) ("b" "lead" 2)
+                                  ("a1" "a" 1) ("a2" "a" 3)
+                                  ("a2x" "a2" 1))
+    (should (equal (ygg-projects-tests--names root)
+                   '("lead" "└ b" "└ a" "  └ a2" "    └ a2x" "  └ a1")))
+    (let ((note (lambda (id) (ygg-projects--tree-text "claude" root 'agents
+                                                      (aob-session-get id)))))
+      (should (< (string-search "claude" (funcall note "a"))
+                 (string-search "claude" (funcall note "a2"))
+                 (string-search "claude" (funcall note "a2x")))))))
+
+(ert-deftest ygg-projects-tree-hides-an-ended-grandchild ()
+  (ygg-projects-tests--with-tree (("lead" nil 5) ("a" "lead" 1) ("a1" "a" 1))
+    (aob-set-state (aob-session-get "a1") 'done)
+    (should (equal (ygg-projects-tests--names root) '("lead" "└ a")))))
+
+(ert-deftest ygg-projects-pinned-lead-keeps-its-children-under-it ()
+  (ygg-projects-tests--with-tree (("old" nil 1) ("new" nil 9)
+                                  ("kid" "old" 2) ("grand" "kid" 3))
+    (ygg-projects-tests--pin "grand")
+    (should (ygg-projects--pinned-p (aob-session-get "old")))
+    (should (equal (ygg-projects-tests--names root)
+                   '("old" "└ kid" "  └ grand" "new")))))
+
+(ert-deftest ygg-projects-pin-row-carries-a-grey-mark ()
+  (ygg-projects-tests--with-tree (("old" nil 1))
+    (ygg-projects-tests--pin "old")
+    (let* ((s (aob-session-get "old"))
+           (row (ygg-projects--entry-text "old" root 'agents s))
+           (at (string-search "⊤" row)))
+      (should at)
+      (should (eq (get-text-property at 'font-lock-face row) 'ygg-projects-count)))))
+
+(ert-deftest ygg-projects-pin-outside-the-sidebar-needs-a-session ()
+  (with-temp-buffer
+    (should-error (ygg-projects-toggle-pin) :type 'user-error)))
+
+(ert-deftest ygg-projects-lead-count-says-live-against-cap ()
+  (ygg-projects-tests--with-tree (("lead" nil 1))
+    (let ((s (aob-session-get "lead")))
+      (aob-session-put s :agent "claude")
+      (cl-letf (((symbol-function 'ygg-projects--session-tree) #'ignore)
+                ((symbol-function 'aob-subagent-live-count) (lambda (_) 3)))
+        (should (equal (ygg-projects--entry-tree s) "claude"))
+        (aob-session-put s :subagent-cap 6)
+        (should (equal (ygg-projects--entry-tree s) "claude · 3/6"))
+        (cl-letf (((symbol-function 'aob-subagent-live-count) nil))
+          (should (equal (ygg-projects--entry-tree s) "claude")))))))
+
+(ert-deftest ygg-projects-selection-pins-and-unpins-all ()
+  (ygg-projects-tests--with-rows
+    (let ((ygg-projects-pins-file (make-temp-file "ygg-projects-pins"))
+          (ygg-projects--pin-list 'unread))
+      (unwind-protect
+          (progn
+            (setq-local ygg-projects--modal t)
+            (ygg-projects-tests--select 3 6)
+            (ygg-projects-toggle-pin)
+            (should (ygg-projects--pinned-p a))
+            (should (ygg-projects--pinned-p b))
+            (should-not ygg--visual-p)
+            (should (equal (ygg-projects--pins) '("t:alpha" "t:beta")))
+            (ygg-projects-tests--select 5 6)
+            (ygg-projects-toggle-pin)
+            (should (ygg-projects--pinned-p a))
+            (should-not (ygg-projects--pinned-p b))
+            (ygg-projects-tests--select 3 3)
+            (ygg-projects-toggle-pin)
+            (should-not (ygg-projects--pins)))
+        (delete-file ygg-projects-pins-file)))))
 
 (provide 'ygg-projects-tests)
 ;;; ygg-projects-tests.el ends here
