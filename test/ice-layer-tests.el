@@ -726,17 +726,23 @@ real ones, and every cache starts empty."
   (should (eq (lookup-key ygg-ice-view-mode-map "Q") #'ygg-ice-view-quickfix))
   (should (eq (lookup-key ygg-ice-view-mode-map "c") #'ygg-ice-view-context)))
 
-(ert-deftest ice-leader-keys-hold-the-gap-confirm-and-maintain-rows ()
-  (dolist (row '(("G" ygg-ice-gaps "gap detector")
-                 ("R" ygg-ice-confirm-intent "confirm intent")
-                 ("M" ygg-ice-maintain "maintain feature map")))
-    (should (member row ygg-ice-leader-keys))
-    (should (eq (lookup-key ygg-ice-leader-map (kbd (car row))) (nth 1 row)))
-    (should (equal (alist-get (aref (kbd (car row)) 0) (cdr ygg-ice-leader-map))
-                   (cons (nth 2 row) (nth 1 row))))
-    (should (commandp (nth 1 row))))
-  (should (= (length ygg-ice-leader-keys)
-             (length (seq-uniq (mapcar #'car ygg-ice-leader-keys))))))
+(ert-deftest ice-leader-keys-are-the-owners-two-acts-and-four-lookups ()
+  (should (equal (mapcar (lambda (row) (list (car row) (nth 1 row))) ygg-ice-leader-keys)
+                 '(("R" ygg-ice-confirm-intent)
+                   ("A" ygg-ice-approve-checkpoints)
+                   ("o" ygg-ice-changes-list)
+                   ("s" ygg-ice-lat-search)
+                   ("c" ygg-ice-connections)
+                   ("b" ygg-ice-c4-preview))))
+  (dolist (key '("w" "i" "e" "p" "G" "M" "l" "f" "C" "O" "t" "a" "g" "v" "d" "r"))
+    (should-not (lookup-key ygg-ice-leader-map (kbd key))))
+  (dolist (cmd '(ygg-ice-wire ygg-ice-check-intent ygg-ice-check-expect ygg-ice-check-plan
+                 ygg-ice-gaps ygg-ice-maintain ygg-ice-lat-check ygg-ice-follow
+                 ygg-ice-connections-pick ygg-ice-open-change ygg-ice-tasks ygg-ice-open-adr
+                 ygg-ice-open-glossary ygg-ice-c4-validate ygg-ice-c4-drift ygg-ice-c4-readme))
+    (should (commandp cmd)))
+  (should (eq (lookup-key ygg-ice-view-mode-map "t") #'ygg-ice-view-tasks))
+  (should (eq (lookup-key ygg-ice-view-mode-map (kbd "RET")) #'ygg-ice-view-visit)))
 
 ;;; ice-check intent: the restate-back gate
 
@@ -764,13 +770,42 @@ real ones, and every cache starts empty."
               (cons status (split-string (buffer-string) "\n" t)))))
       (delete-directory dir t))))
 
-(defconst ice-tests--unconfirmed "ice-check intent c: not confirmed: the owner sets Confirmed: YYYY-MM-DD under Restated")
+(defconst ice-tests--unconfirmed "ice-check intent c: not confirmed: the owner sets Confirmed: YYYY-MM-DD sha1:XXXXXXXX under Restated (SPC a k R)")
+(defconst ice-tests--unhashed "ice-check intent c: not confirmed: the Confirmed line carries no sha1 of What is wanted and Restated; the owner confirms again (SPC a k R)")
+(defconst ice-tests--changed "ice-check intent c: intent changed since it was confirmed: the owner confirms again (SPC a k R)")
+
+(defun ice-tests--hash (text)
+  "The sha1 prefix ygg-ice writes on the Confirmed line of an intent.md holding TEXT."
+  (with-temp-buffer
+    (insert text)
+    (ygg-ice--intent-hash)))
+
+(defun ice-tests--confirmed (text date)
+  "TEXT with a Confirmed line for DATE carrying TEXT's hash."
+  (format "%s\nConfirmed: %s sha1:%s\n" text date (ice-tests--hash text)))
 (defconst ice-tests--unrestated "ice-check intent c: empty section: Restated: the agent restates the intent in its own words")
 
 (ert-deftest ice-check-intent-passes-only-restated-and-confirmed ()
+  (should (equal (ice-tests--intent (ice-tests--confirmed
+                                     (concat ice-tests--intent-body "\n## Restated\n\nCarts show a sum in cents.\n")
+                                     "2026-09-26"))
+                 '(0 "ice-check intent c: ok"))))
+
+(ert-deftest ice-check-intent-fails-a-date-without-a-hash ()
   (should (equal (ice-tests--intent (concat ice-tests--intent-body
                                             "\n## Restated\n\nCarts show a sum in cents.\n\nConfirmed: 2026-09-26\n"))
-                 '(0 "ice-check intent c: ok"))))
+                 (list 1 ice-tests--unhashed))))
+
+(ert-deftest ice-check-intent-fails-once-the-intent-changes-after-confirmation ()
+  (let ((confirmed (ice-tests--confirmed
+                    (concat ice-tests--intent-body "\n## Restated\n\nCarts show a sum in cents.\n")
+                    "2026-09-26")))
+    (should (equal (ice-tests--intent (string-replace "Carts show a sum in cents." "Carts show a sum in euros." confirmed))
+                   (list 1 ice-tests--changed)))
+    (should (equal (ice-tests--intent (string-replace "Carts total." "Carts total and tax." confirmed))
+                   (list 1 ice-tests--changed)))
+    (should (equal (ice-tests--intent (string-replace "Cents only." "Euros only." confirmed))
+                   '(0 "ice-check intent c: ok")))))
 
 (ert-deftest ice-check-intent-fails-without-a-restated-section ()
   (should (equal (ice-tests--intent ice-tests--intent-body)
@@ -785,8 +820,8 @@ real ones, and every cache starts empty."
     (should (member ice-tests--unconfirmed (cdr out)))))
 
 (ert-deftest ice-check-intent-fails-when-only-the-confirmed-line-is-there ()
-  (should (equal (ice-tests--intent (concat ice-tests--intent-body
-                                            "\n## Restated\n\nConfirmed: 2026-09-26\n"))
+  (should (equal (ice-tests--intent (ice-tests--confirmed (concat ice-tests--intent-body "\n## Restated\n")
+                                                          "2026-09-26"))
                  (list 1 ice-tests--unrestated))))
 
 (ert-deftest ice-check-intent-fails-until-confirmed-holds-a-real-date ()
@@ -834,8 +869,23 @@ real ones, and every cache starts empty."
       (should (string-match-p "cart" asked))
       (should (equal shown "Carts show a sum in cents.\n")))
     (should (equal (ice-tests--intent-of change)
-                   (concat ice-tests--intent-body "\n## Restated\n\nCarts show a sum in cents.\n\nConfirmed: "
-                           (format-time-string "%Y-%m-%d") "\n")))
+                   (ice-tests--confirmed (concat ice-tests--intent-body "\n## Restated\n\nCarts show a sum in cents.\n")
+                                         (format-time-string "%Y-%m-%d"))))
+    (should (= 0 (ice-tests--check-change change)))))
+
+(ert-deftest ice-confirm-intent-hashes-what-ice-check-hashes ()
+  (ice-tests--with-intent change
+      (concat (string-replace "Carts total." "Carts total.  \nThe shopper’s sum.\t" ice-tests--intent-body)
+              "\n## Restated\n\n  \nThe shopper’s cart shows a sum.   \n\n\nConfirmed: 2020-01-01\n")
+    (cl-letf (((symbol-function 'y-or-n-p) #'always))
+      (ygg-ice-confirm-intent change))
+    (should (string-match-p "^Confirmed: [0-9-]+ sha1:[0-9a-f]\\{8\\}$" (ice-tests--intent-of change)))
+    (should (= 0 (ice-tests--check-change change)))
+    (with-temp-file (expand-file-name "intent.md" (plist-get change :dir))
+      (insert (string-replace "cart shows" "basket shows" (ice-tests--intent-of change))))
+    (should (= 1 (ice-tests--check-change change)))
+    (cl-letf (((symbol-function 'y-or-n-p) #'always))
+      (ygg-ice-confirm-intent change))
     (should (= 0 (ice-tests--check-change change)))))
 
 (ert-deftest ice-confirm-intent-adds-the-line-once-and-keeps-what-follows ()
@@ -844,14 +894,14 @@ real ones, and every cache starts empty."
     (cl-letf (((symbol-function 'y-or-n-p) #'always))
       (ygg-ice-confirm-intent change))
     (should (equal (ice-tests--intent-of change)
-                   (format "## Restated\n\nCarts show a sum.\nConfirmed: %s\n\n## Notes\n\nkept\n"
-                           (format-time-string "%Y-%m-%d")))))
+                   (format "## Restated\n\nCarts show a sum.\nConfirmed: %s sha1:%s\n\n## Notes\n\nkept\n"
+                           (format-time-string "%Y-%m-%d") (ice-tests--hash "## Restated\n\nCarts show a sum.\n")))))
   (ice-tests--with-intent change "## Restated\n\nCarts show a sum.\n\n## Notes\n\nkept\n"
     (cl-letf (((symbol-function 'y-or-n-p) #'always))
       (ygg-ice-confirm-intent change))
     (should (equal (ice-tests--intent-of change)
-                   (format "## Restated\n\nCarts show a sum.\n\nConfirmed: %s\n\n## Notes\n\nkept\n"
-                           (format-time-string "%Y-%m-%d"))))))
+                   (format "## Restated\n\nCarts show a sum.\n\nConfirmed: %s sha1:%s\n\n## Notes\n\nkept\n"
+                           (format-time-string "%Y-%m-%d") (ice-tests--hash "## Restated\n\nCarts show a sum.\n"))))))
 
 (ert-deftest ice-confirm-intent-writes-nothing-on-no-and-refuses-an-empty-restatement ()
   (let ((text (concat ice-tests--intent-body "\n## Restated\n\nCarts show a sum.\n\nConfirmed: YYYY-MM-DD\n")))
@@ -933,6 +983,56 @@ Presets come from PRESETS only; the preset path is layer-aob's own."
     (ice-tests--spawns spawns (make-temp-name "/tmp/ice-tests-no-presets-")
       (should-error (ygg-ice-gaps change) :type 'user-error)
       (should-not spawns))))
+
+(ert-deftest ice-gaps-and-maintain-spawn-in-the-project-never-a-drafts-worktree ()
+  (defvar ygg-aob--draft-tree)
+  (ice-tests--with-intent change ice-tests--intent-body
+    (let (trees)
+      (ice-tests--spawns spawns ice-tests--presets
+        (with-temp-buffer
+          (setq-local ygg-aob--draft-tree "/other/draft/tree/")
+          (let ((aob-compose-spawn-function
+                 (lambda (&rest _) (push ygg-aob--draft-tree trees) 'spawned)))
+            (should (eq (ygg-ice-gaps change) 'spawned))
+            (should (eq (ygg-ice-maintain root) 'spawned)))
+          (should (equal ygg-aob--draft-tree "/other/draft/tree/"))))
+      (should (equal trees '(nil nil))))))
+
+(require 'aob)
+
+(defmacro ice-tests--live-in (dirs &rest body)
+  "Run BODY with aob-live-sessions answering one session per folder in DIRS."
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'aob-live-sessions)
+              (lambda () (mapcar (lambda (dir) (aob-session--create :id "s" :dir dir)) ,dirs))))
+     ,@body))
+
+(ert-deftest ice-maintain-refuses-a-project-with-a-live-agent-session ()
+  (ice-tests--with-repo root ice-tests--files
+    (ice-tests--spawns spawns ice-tests--presets
+      (ice-tests--live-in (list (expand-file-name "sub/" root) nil)
+        (should-error (ygg-ice-maintain root) :type 'user-error)
+        (should-not spawns))
+      (ice-tests--live-in (list "/somewhere/else/" nil)
+        (should (eq (ygg-ice-maintain root) 'spawned))))))
+
+(ert-deftest ice-maintain-daily-skips-a-project-with-a-live-agent-session ()
+  (let* ((stamps (make-temp-file "ice-stamps" nil ".eld"))
+         (ygg-ice-maintain-stamp-file stamps)
+         (root (file-name-as-directory (make-temp-file "ice-daily" t)))
+         (ygg-ice-maintain-daily (list root))
+         runs said)
+    (unwind-protect
+        (cl-letf (((symbol-function 'ygg-ice-maintain) (lambda (r) (push r runs)))
+                  ((symbol-function 'message) (lambda (&rest args) (push (apply #'format args) said))))
+          (delete-file stamps)
+          (ice-tests--live-in (list root)
+            (ygg-ice--maintain-tick))
+          (should-not runs)
+          (should-not (file-exists-p stamps))
+          (should (string-match-p "skipped: 1 live agent session there" (car said))))
+      (ignore-errors (delete-file stamps))
+      (delete-directory root t))))
 
 (ert-deftest ice-maintain-spawns-under-the-maintain-preset-in-the-project ()
   (ice-tests--with-repo root ice-tests--files
@@ -1062,6 +1162,280 @@ Presets come from PRESETS only; the preset path is layer-aob's own."
 (ert-deftest ice-likec4-files-open-in-the-likec4-mode ()
   (should (eq (assoc-default "docs/arch/model.c4" auto-mode-alist #'string-match)
               'ygg-likec4-mode)))
+
+;;; The owner's approval of the checkpoints
+
+(defconst ice-tests--checkpoints
+  "# Tasks\n\n## Checkpoints\n\n1. Cart shows a sum  \n2. Tax\tline added\n\nApproved:\n\n## Slices\n\n- [ ] 1. a\n  - Pass when: x\n  - Evidence: y\n- [ ] 2. b\n  - Pass when: x\n  - Evidence: y\n"
+  "A tasks.md with two checkpoints, trailing blanks and a tab, not yet approved.")
+
+(defmacro ice-tests--with-tasks (var text &rest body)
+  "Run BODY with VAR a change whose tasks.md is TEXT, in a fresh repo."
+  (declare (indent 2))
+  `(ice-tests--with-repo root (list (cons "openspec/changes/cart/tasks.md" ,text))
+     (let ((,var (list :name "cart" :dir (expand-file-name "openspec/changes/cart/" root)
+                       :tasks (expand-file-name "openspec/changes/cart/tasks.md" root))))
+       (unwind-protect (progn ,@body)
+         (when-let* ((buf (find-buffer-visiting (plist-get ,var :tasks))))
+           (with-current-buffer buf (set-buffer-modified-p nil))
+           (kill-buffer buf))))))
+
+(defun ice-tests--tasks-of (change)
+  (with-temp-buffer
+    (insert-file-contents (plist-get change :tasks))
+    (buffer-string)))
+
+(defun ice-tests--checkpoint-gaps (change)
+  "ice-check plan's lines about CHANGE's checkpoints, the expect gaps left out."
+  (with-temp-buffer
+    (setq default-directory (plist-get change :dir))
+    (call-process "python3" nil t nil ice-tests--check-script "plan"
+                  (directory-file-name (plist-get change :dir)))
+    (seq-filter (lambda (line) (string-match-p "checkpoint\\|approv" line))
+                (split-string (buffer-string) "\n" t))))
+
+(defun ice-tests--python-checkpoints-hash (file)
+  "ice-check's checkpoints_hash over FILE's Checkpoints section."
+  (with-temp-buffer
+    (setq default-directory (file-name-directory file))
+    (call-process "python3" nil t nil "-c"
+                  (concat "import importlib.machinery as m, importlib.util as u, sys\n"
+                          "sys.dont_write_bytecode = True\n"
+                          "l = m.SourceFileLoader('c', sys.argv[1]); c = u.module_from_spec(u.spec_from_loader('c', l)); l.exec_module(c)\n"
+                          "print(c.checkpoints_hash(c.h2_sections(c.read(sys.argv[2]))['checkpoints']))")
+                  ice-tests--check-script file)
+    (string-trim (buffer-string))))
+
+(ert-deftest ice-approve-checkpoints-hashes-what-ice-check-hashes ()
+  (ice-tests--with-tasks change ice-tests--checkpoints
+    (should (member (format "ice-check plan %s: not approved: the owner approves the checkpoints with SPC a k A"
+                            (directory-file-name (plist-get change :dir)))
+                    (ice-tests--checkpoint-gaps change)))
+    (let (shown)
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (_) (setq shown (with-current-buffer "*ice: checkpoints cart*" (buffer-string))) t)))
+        (should (equal (ygg-ice-approve-checkpoints change) (format-time-string "%Y-%m-%d"))))
+      (should (equal shown "1. Cart shows a sum\n2. Tax\tline added\n")))
+    (let ((hash (ice-tests--python-checkpoints-hash (plist-get change :tasks))))
+      (should (string-match-p "\\`[0-9a-f]\\{8\\}\\'" hash))
+      (should (equal (ice-tests--tasks-of change)
+                     (string-replace "Approved:\n" (format "Approved: %s sha1:%s\n" (format-time-string "%Y-%m-%d") hash)
+                                     ice-tests--checkpoints)))
+      (with-current-buffer (find-file-noselect (plist-get change :tasks))
+        (should (equal (ygg-ice--checkpoints-hash) hash))))
+    (should-not (ice-tests--checkpoint-gaps change))
+    (with-temp-file (plist-get change :tasks)
+      (insert (string-replace "2. Tax\tline added" "2. Tax line added" (ice-tests--tasks-of change))))
+    (should (equal (ice-tests--checkpoint-gaps change)
+                   (list (format "ice-check plan %s: checkpoints changed since approval: the owner approves the checkpoints with SPC a k A"
+                                 (directory-file-name (plist-get change :dir))))))
+    (cl-letf (((symbol-function 'y-or-n-p) #'always))
+      (ygg-ice-approve-checkpoints change))
+    (should-not (ice-tests--checkpoint-gaps change))
+    (should (= 1 (with-temp-buffer
+                   (insert (ice-tests--tasks-of change))
+                   (how-many "^Approved:" (point-min) (point-max)))))))
+
+(ert-deftest ice-approve-checkpoints-writes-nothing-on-no-and-refuses-without-a-list ()
+  (ice-tests--with-tasks change ice-tests--checkpoints
+    (cl-letf (((symbol-function 'y-or-n-p) #'ignore))
+      (should-not (ygg-ice-approve-checkpoints change)))
+    (should (equal (ice-tests--tasks-of change) ice-tests--checkpoints)))
+  (ice-tests--with-tasks change "# Tasks\n\n- [ ] 1. a\n"
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Asked"))))
+      (should-error (ygg-ice-approve-checkpoints change) :type 'user-error))))
+
+(ert-deftest ice-check-plan-holds-the-checkpoint-list-to-its-shape ()
+  (ice-tests--with-tasks change
+      (concat "# Tasks\n\n## Checkpoints\n\n- [ ] 1. a checkbox\n2. one two three four five six seven eight nine\n\n"
+              "Approved:\n\n## Slices\n\n- [ ] 1. a\n  - Pass when: x\n  - Evidence: y\n")
+    (let ((dir (directory-file-name (plist-get change :dir))))
+      (should (equal (ice-tests--checkpoint-gaps change)
+                     (mapcar (lambda (gap) (format "ice-check plan %s: %s" dir gap))
+                             '("checkpoint line is not 'N. few words' (never a checkbox): - [ ] 1. a checkbox"
+                               "checkpoint 2 has 9 words, at most 8"
+                               "checkpoints are not numbered 1..1 in order"
+                               "not approved: the owner approves the checkpoints with SPC a k A"
+                               "1 checkpoints but 2 slices: one checkpoint per slice"))))))
+  (ice-tests--with-tasks change "# Tasks\n\n## Slices\n\n- [ ] 1. a\n\n## Checkpoints\n\n1. a\n"
+    (should (equal (ice-tests--checkpoint-gaps change)
+                   (list (format "ice-check plan %s: '## Checkpoints' must be the first h2 of tasks.md"
+                                 (directory-file-name (plist-get change :dir))))))))
+
+(ert-deftest ice-check-plan-wants-one-checkpoint-per-slice ()
+  (ice-tests--with-tasks change (string-replace "2. Tax\tline added\n" "" ice-tests--checkpoints)
+    (with-temp-buffer
+      (setq default-directory (plist-get change :dir))
+      (call-process "python3" nil t nil ice-tests--check-script "plan"
+                    (directory-file-name (plist-get change :dir)))
+      (should (string-match-p ": 1 checkpoints but 2 slices: one checkpoint per slice$" (buffer-string))))))
+
+(ert-deftest ice-check-reviews-passes-on-two-approvals-in-the-last-round-and-an-approved-ui ()
+  (ice-tests--with-repo root
+      '(("c/reviews/code-1.md" . "## Round 1, reviewer A\n\nVerdict: blockers 1\n\n## Round 1, reviewer B\n\nVerdict: approve\n\n## Round 2, reviewer A\n\nVerdict: approve\n\n## Round 2, reviewer B\n\nVerdict: approve\n")
+        ("c/reviews/code-2.md" . "## Round 1, reviewer A\n\nVerdict: approve\n\n## Round 1, reviewer B\n\nVerdict: blockers 2\n")
+        ("c/reviews/code-3.md" . "## Round 1, reviewer A\n\nVerdict: approve\n\n## Round 1, reviewer B\n\nVerdict: approve\n")
+        ("c/reviews/ui-3.md" . "## Round 1\n\nVerdict: approve\n\n## Round 2\n\nVerdict: blockers 1\n"))
+    (let ((run (lambda (n)
+                 (with-temp-buffer
+                   (setq default-directory root)
+                   (list (call-process "python3" nil t nil ice-tests--check-script "reviews"
+                                       (expand-file-name "c" root) n)
+                         (string-trim (buffer-string)))))))
+      (should (equal (car (funcall run "1")) 0))
+      (should (equal (funcall run "2")
+                     (list 1 (format "ice-check reviews %sc: code review not approved: the last round of reviews/code-2.md ends on approve, blockers 2; both reviewers must approve" root))))
+      (should (equal (funcall run "3")
+                     (list 1 (format "ice-check reviews %sc: ui review not approved: the last verdict of reviews/ui-3.md is blockers 1" root))))
+      (should (equal (car (funcall run "4")) 1)))))
+
+;;; The test runner: found at wiring, run once as the baseline
+
+(defconst ice-tests--runner-script
+  (expand-file-name "../etc/ice/ice-runner" (file-name-directory (or load-file-name buffer-file-name)))
+  "This checkout's ice-runner.")
+
+(defun ice-tests--detect (files)
+  "What ice-runner detect finds in a fresh repository holding FILES."
+  (ice-tests--with-repo root files
+    (let ((default-directory root))
+      (call-process "git" nil nil nil "init" "-q")
+      (with-temp-buffer
+        (call-process "python3" nil t nil ice-tests--runner-script "detect" root)
+        (goto-char (point-min))
+        (json-parse-buffer :object-type 'alist :null-object nil)))))
+
+(ert-deftest ice-runner-detects-pytest-vitest-cargo-ert-and-says-when-it-cannot ()
+  (let ((pytest (ice-tests--detect '(("tests/test_cart.py" . "def test_a():\n    pass\n"))))
+        (vitest (ice-tests--detect '(("package.json" . "{\"devDependencies\": {\"vitest\": \"^2.0.0\"}}\n"))))
+        (cargo (ice-tests--detect '(("Cargo.toml" . "[package]\nname = \"cart\"\n"))))
+        (ert (ice-tests--detect '(("test/cart-tests.el" . "(ert-deftest a () t)\n"))))
+        (unknown (ice-tests--detect '(("README.md" . "cart\n")))))
+    (should (equal (alist-get 'runner pytest) "pytest"))
+    (should (equal (alist-get 'test_cmd pytest)
+                   "python3 -m pytest -q -p no:cacheprovider {file}::{filter} --junitxml={report}"))
+    (should (equal (alist-get 'runner vitest) "vitest"))
+    (should (string-match-p "\\`npx vitest run {file} --testNamePattern={filter} .*{report}" (alist-get 'test_cmd vitest)))
+    (should (equal (alist-get 'runner cargo) "cargo"))
+    (should (equal (alist-get 'test_cmd cargo) "cargo test {filter}"))
+    (should (equal (alist-get 'lock_paths cargo) "Cargo.toml"))
+    (should (string-match-p "writes no JUnit report" (aref (alist-get 'asks cargo) 0)))
+    (should (equal (alist-get 'runner ert) "ert"))
+    (should (string-match-p "{filter}" (alist-get 'test_cmd ert)))
+    (should (string-match-p "{report}" (alist-get 'test_cmd ert)))
+    (should-not (alist-get 'runner unknown))
+    (should-not (alist-get 'test_cmd unknown))
+    (should (string-match-p "\\`no test runner found" (aref (alist-get 'asks unknown) 0)))))
+
+(ert-deftest ice-runner-fills-an-untouched-config-and-never-an-edited-one ()
+  (ice-tests--with-repo root '(("tests/test_cart.py" . "def test_a():\n    pass\n"))
+    (let ((default-directory root)
+          (config (expand-file-name ".ice/config" root)))
+      (call-process "git" nil nil nil "init" "-q")
+      (should (= 0 (call-process "python3" nil nil nil ice-tests--runner-script "config" root)))
+      (should (string-match-p "^test_cmd = python3 -m pytest" (with-temp-buffer (insert-file-contents config) (buffer-string))))
+      (with-temp-file config (insert "test_cmd = mine {file} {filter}\n"))
+      (call-process "python3" nil nil nil ice-tests--runner-script "config" root)
+      (should (equal (with-temp-buffer (insert-file-contents config) (buffer-string))
+                     "test_cmd = mine {file} {filter}\n"))))
+  (ice-tests--with-repo root '(("README.md" . "cart\n"))
+    (let ((default-directory root))
+      (call-process "git" nil nil nil "init" "-q")
+      (with-temp-buffer
+        (call-process "python3" nil t nil ice-tests--runner-script "config" root)
+        (should (string-match-p "^ask: no test runner found" (buffer-string))))
+      (should-not (with-temp-buffer
+                    (insert-file-contents (expand-file-name ".ice/config" root))
+                    (re-search-forward "^test_cmd" nil t))))))
+
+(ert-deftest ice-runner-baseline-runs-a-real-pytest-suite-once-inside-the-repo ()
+  (skip-unless (= 0 (call-process "python3" nil nil nil "-m" "pytest" "--version")))
+  (ice-tests--with-repo root '(("cart.py" . "def total(items):\n    return sum(items)\n")
+                               ("tests/conftest.py" . "import os, sys\nsys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n")
+                               ("tests/test_cart.py" . "from cart import total\n\n\ndef test_total():\n    assert total([1, 2]) == 3\n\n\ndef test_empty():\n    assert total([]) == 0\n"))
+    (let ((default-directory root)
+          (record (expand-file-name ".ice/state/baseline.json" root)))
+      (call-process "git" nil nil nil "init" "-q")
+      (call-process "python3" nil nil nil ice-tests--runner-script "config" root)
+      (with-temp-buffer
+        (call-process "python3" nil t nil ice-tests--runner-script "baseline" root)
+        (should (string-match-p "^note: .ice/state/baseline.json recorded: passed (2 tests)" (buffer-string))))
+      (let ((json (with-temp-buffer (insert-file-contents record)
+                                    (json-parse-buffer :object-type 'alist :null-object nil))))
+        (should (equal (alist-get 'status json) "passed"))
+        (should (equal (alist-get 'tests (alist-get 'counts json)) 2))
+        (should (equal (alist-get 'log json) ".ice/state/baseline.log"))
+        (should (file-exists-p (expand-file-name ".ice/state/baseline.log" root))))
+      (should-not (file-exists-p (expand-file-name ".ice/state/baseline-sandbox" root)))
+      (should-not (directory-files-recursively root "__pycache__\\|\\.pytest_cache" t))
+      (let ((before (with-temp-buffer (insert-file-contents record) (buffer-string))))
+        (with-temp-buffer
+          (call-process "python3" nil t nil ice-tests--runner-script "baseline" root)
+          (should (string-match-p "already recorded: passed" (buffer-string))))
+        (should (equal before (with-temp-buffer (insert-file-contents record) (buffer-string)))))
+      (with-temp-file (expand-file-name "tests/test_cart.py" root)
+        (insert "def test_red():\n    assert False\n"))
+      (with-temp-buffer
+        (call-process "python3" nil t nil ice-tests--runner-script "baseline" root "--force")
+        (should (string-match-p "^ask: the baseline suite is failed" (buffer-string)))))))
+
+;;; Import: skills and ice are extras
+
+(ert-deftest ice-import-step-wires-or-rewires ()
+  (dolist (wired (list t nil))
+    (ice-tests--with-repo root (if wired '((".ice/config" . "test_cmd = x\n")) '(("README.md" . "x\n")))
+      (let (calls)
+        (cl-letf (((symbol-function 'ygg-ice-wire)
+                   (lambda (&optional dir rebaseline) (push (list dir rebaseline) calls))))
+          (should (ygg-ice-import-step root))
+          (should (equal calls (list (list root wired)))))))))
+
+(ert-deftest ice-import-runs-extras-only-when-picked ()
+  (require 'ygg-project-scan)
+  (let (steps)
+    (cl-letf (((symbol-function 'ygg-project-import--run) (lambda (_root s _cb) (setq steps s))))
+      (ygg-project-import "/tmp/cart/")
+      (should-not (assoc "ice" steps))
+      (should-not (assoc "agent skills" steps))
+      (should (assoc "skills" steps))
+      (ygg-project-import "/tmp/cart/" nil '("ice"))
+      (should (equal (car (car (last steps))) "ice"))
+      (should-not (assoc "agent skills" steps))
+      (ygg-project-import "/tmp/cart/" nil '("skills" "ice"))
+      (should (assoc "agent skills" steps))
+      (should (assoc "ice" steps)))
+    (let (stepped installed)
+      (cl-letf (((symbol-function 'ygg-ice-import-step) (lambda (root) (push root stepped)))
+                ((symbol-function 'ygg-agent-skills-ensure) (lambda () (setq installed t)))
+                ((symbol-function 'ygg-agent-link-project-skills) #'ignore))
+        (funcall (cdr (assoc "ice" steps)))
+        (funcall (cdr (assoc "agent skills" steps)))
+        (funcall (cdr (assoc "skills" steps))))
+      (should (equal stepped '("/tmp/cart/")))
+      (should installed))))
+
+(ert-deftest ice-import-reinstalls-stale-skills-and-leaves-fresh-ones ()
+  (require 'ygg-agent-skills)
+  (let* ((src (make-temp-file "ice-skills-src" t))
+         (dst (make-temp-file "ice-skills-dst" t))
+         (ygg-agent-skills-root src)
+         (ygg-agent--shared-skills dst)
+         (installs 0))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ygg-agent-skill-install) (lambda () (cl-incf installs)))
+                  ((symbol-function 'ygg-agent--notify) #'ignore))
+          (dolist (dir (list src dst))
+            (make-directory (expand-file-name "cart" dir))
+            (with-temp-file (expand-file-name "cart/SKILL.md" dir) (insert "v1\n")))
+          (set-file-times (expand-file-name "cart/SKILL.md" src) (time-subtract nil 60))
+          (ygg-agent-skills-ensure)
+          (should (= installs 0))
+          (set-file-times (expand-file-name "cart/SKILL.md" src) (time-add nil 60))
+          (should (equal (ygg-agent--skills-stale) '("cart")))
+          (ygg-agent-skills-ensure)
+          (should (= installs 1)))
+      (delete-directory src t)
+      (delete-directory dst t))))
 
 (provide 'ice-layer-tests)
 ;;; ice-layer-tests.el ends here

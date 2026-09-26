@@ -4,6 +4,8 @@ import datetime
 import importlib.machinery
 import importlib.util
 import os
+import re
+import shlex
 import subprocess
 import sys
 
@@ -16,22 +18,34 @@ _loader.exec_module(ice)
 DESCRIPTION = """The lead's VERIFY for an ICE change, in one command.
 
 Steps, in order; the first that fails or cannot run stops the rest:
+  intent    ice-check intent on the change folder: the Confirmed hash
+            still matches What is wanted and Restated
   plan      ice-check plan on the change folder
-  lock      ice-lock verify
+  lock      ice-lock verify: the locked checks, .ice scripts, config,
+            intent, conftest and runner configs are unchanged
+  base      ice-fail-on-base: every check fails on the locked base and
+            passes on the working tree
   unit      test_cmd over the whole suite ({file} and {filter} dropped,
             {report} filled with report_path), then
   coverage  ice-coverage on that report
   live      live_cmd, when .ice/config sets it
   perf      perf_cmd, when set
-  mutate    mutate_cmd, when set ({base} is the merge-base)
+  mutate    mutate_cmd, when set ({base} is the locked base, else the
+            merge-base)
 live_cmd, perf_cmd and mutate_cmd run through sh with ICE_CHANGE,
-ICE_CHANGE_DIR, ICE_SHA, ICE_BASE and ICE_EVIDENCE set; exit 75 means
-blocked rather than failed.
+ICE_CHANGE_DIR, ICE_SHA, ICE_BASE (the base in the lock record when the
+change is locked, else the merge-base) and ICE_EVIDENCE set; {base}, {change}
+and {sha} are shell-quoted; exit 75 means blocked rather than failed.
+
+The dirty list covers the whole tree but .ice/state, .ice/evidence and
+.ice/ledger.tsv. A tampered .ice copy of this script can skip its own
+steps: the judge runs the copy in the Emacs checkout (etc/ice/ice-verify
+CHANGE from the repo), which checks the .ice copies against the lock.
 
 Prints one verdict line:
   verdict: unit-verified | live-verified | failed STEP | blocked STEP
 and appends ts, change, branch, sha, verdict, evidence to .ice/ledger.tsv;
-each step's output is kept under .ice/evidence/CHANGE/SHA/.
+each step's output is kept under .ice/evidence/CHANGE/SHA/RUN/, one folder per run.
 
 --status CHANGE prints the ledger row for the current branch and HEAD
 only; rows for an older sha are stale. Exit 0 only for a verified row."""
@@ -118,14 +132,18 @@ class Run:
 def verify(root, change, name):
     config = ice.read_config(root)
     head, branch = ice.git("rev-parse", "HEAD", cwd=root), branch_of(root)
-    base = ice.git("merge-base", "HEAD", ice.default_branch(root), cwd=root, check=False)
-    evidence = os.path.join(root, ".ice", "evidence", name, head[:12])
+    record, _ = ice.tag_record(root, name)
+    base = (record or {}).get("base") or ice.git("merge-base", "HEAD", ice.default_branch(root), cwd=root, check=False)
+    # workers never commit, so HEAD alone would let each item's run overwrite the last
+    stamp = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%dT%H%M%S%f")
+    evidence = os.path.join(root, ".ice", "evidence", name, head[:12], stamp)
     os.makedirs(evidence, exist_ok=True)
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", ICE_CHANGE=name, ICE_CHANGE_DIR=change,
                ICE_SHA=head, ICE_BASE=base, ICE_EVIDENCE=evidence)
     run = Run(root, change, evidence, env)
     live = False
-    dirty = ice.git("status", "--porcelain", "--", ".", ":(exclude).ice", cwd=root).splitlines()
+    dirty = ice.git("status", "--porcelain", "--untracked-files=all", "--", ".", ":(exclude).ice/state",
+                    ":(exclude).ice/evidence", ":(exclude).ice/ledger.tsv", cwd=root).splitlines()
     if dirty:
         print("note: %d path(s) differ from HEAD %s; the verdict covers the working tree, the ledger names HEAD" % (len(dirty), head[:7]))
         with open(os.path.join(evidence, "dirty.txt"), "w", encoding="utf-8") as f:
@@ -135,6 +153,7 @@ def verify(root, change, name):
         if not os.path.isfile(checker):
             print("step plan: blocked, no ice-check beside ice-verify")
             raise Stop("blocked", "plan")
+        run.step("intent", [sys.executable, checker, "intent", os.path.relpath(change, root)])
         run.step("plan", [sys.executable, checker, "plan", os.path.relpath(change, root)])
         lock = subprocess.run([sys.executable, os.path.join(HERE, "ice-lock"), change, "verify"],
                               cwd=root, capture_output=True, text=True, env=env)
@@ -143,6 +162,7 @@ def verify(root, change, name):
         print("step lock: %s" % (lock.stdout.strip() or lock.stderr.strip()).replace("\n", "\n  "))
         if lock.returncode:
             raise Stop("blocked" if lock.returncode == 2 else "failed", "lock")
+        run.step("base", [sys.executable, os.path.join(HERE, "ice-fail-on-base"), change], blocked_exit=2)
 
         if not config.get("test_cmd"):
             print("step unit: blocked, no test_cmd in .ice/config")
@@ -160,7 +180,8 @@ def verify(root, change, name):
 
         for step, key in (("live", "live_cmd"), ("perf", "perf_cmd"), ("mutate", "mutate_cmd")):
             if config.get(key):
-                command = config[key].replace("{base}", base).replace("{change}", name).replace("{sha}", head)
+                values = {"base": base, "change": name, "sha": head}
+                command = re.sub(r"\{(base|change|sha)\}", lambda m: shlex.quote(values[m.group(1)]), config[key])
                 run.step(step, command, shell=True, blocked_exit=BLOCKED_EXIT)
                 live |= step == "live"
             else:

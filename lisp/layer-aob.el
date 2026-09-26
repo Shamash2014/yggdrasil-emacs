@@ -1683,8 +1683,6 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   ;; the verbs the sidebar has, where `:' and the leader can find them:
   ;; a command reachable only by a key in one buffer is a command you
   ;; have to already know about
-  "p" #'ygg-project-import :label "import project"
-  "P" #'ygg-projects-add :label "add project"
   "v" #'ygg-conversations :label "conversations"
   "z" #'ygg-projects-toggle-past :label "old sessions on/off"
   "Z" #'ygg-projects-toggle-archived :label "archived on/off")

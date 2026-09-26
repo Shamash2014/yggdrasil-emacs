@@ -5908,7 +5908,9 @@ Once the thread exists, THREAD ran on MODEL at EFFORT and is in STATE."
                 (buffer-string))))
     (should (string-match "^thinking: medium$" text))
     (should (string-match "build=opus/medium" text))
-    (should (string-match "deep=opus/high" text))))
+    (should (string-match "deep=opus/high" text))
+    (should (string-match "review=opus/high" text))
+    (should (string-match "ui=opus/medium" text))))
 
 (ert-deftest aob-orch-effort-quick-is-read-only-explorer ()
   "The lead preset's quick level runs the search body with the reading tools only."
@@ -5935,6 +5937,45 @@ Once the thread exists, THREAD ran on MODEL at EFFORT and is in STATE."
             (should (string-match-p "^developer_instructions = \"# Search" quick))
             (should-not (string-match-p "sandbox_mode" build))
             (should (string-match-p "^developer_instructions = \"# Build" build))))))))
+
+(ert-deftest aob-orch-review-and-ui-levels-run-their-skills-read-only ()
+  "The lead's review and ui levels run the ICE review skills with the reading tools only."
+  (require 'ygg-preset)
+  (aob-tests--host-defun 'ygg-aob--preset-limits)
+  (let* ((repo (expand-file-name "../../" (file-name-directory aob-tests--file)))
+         (ygg-preset-config-directory (expand-file-name "presets/" repo))
+         (ygg-preset-own-skills-dir (expand-file-name "skills/" repo))
+         (ygg-preset-user-directory (make-temp-name "/tmp/aob-tests-no-presets-"))
+         (ygg-preset-home-dir (make-temp-name "/tmp/aob-tests-no-home-"))
+         (default-directory (file-name-as-directory (make-temp-name "/tmp/aob-tests-no-root-"))))
+    (cl-letf (((symbol-function 'ygg-aob--presets-of)
+               (lambda (_dir) (cons nil (ygg-preset-list)))))
+      (let* ((refs (ygg-aob--preset-limits
+                    "run it\n\n<preset name=\"lead\">\nbody\n</preset>"))
+             (agents (aob-tests--agents-sent aob-tests--claude-init refs)))
+        (dolist (level '((:worker-review . "# ICE review loop")
+                         (:worker-ui . "# ICE UI review")))
+          (let ((agent (plist-get agents (car level))))
+            (should (equal '("Read" "Grep" "Glob") (plist-get agent :tools)))
+            (should (string-prefix-p (cdr level) (plist-get agent :prompt)))))
+        (should (equal "opus" (plist-get (plist-get agents :worker-review) :model)))
+        (should (equal "high" (plist-get (plist-get agents :worker-review) :effort)))
+        (should (equal "medium" (plist-get (plist-get agents :worker-ui) :effort)))
+        (aob-tests--with-codex-roles dir
+          (let ((review (aob-tests--codex-role (aob-tests--codex-config refs) "worker-review")))
+            (should (string-match-p "^sandbox_mode = \"read-only\"$" review))
+            (should (string-match-p "^developer_instructions = \"# ICE review loop" review))))))))
+
+(ert-deftest aob-orch-skill-level-without-its-skill-keeps-the-carried-prompt ()
+  "A level whose skill nobody wrote gets no prompt of its own and stays read-only."
+  (require 'ygg-preset)
+  (let ((ygg-preset-worker-levels '(("review" :skill "no-such-skill" :read-only t)))
+        (ygg-preset-own-skills-dir (make-temp-name "/tmp/aob-tests-no-skills-"))
+        (ygg-preset-home-dir (make-temp-name "/tmp/aob-tests-no-home-"))
+        (default-directory (file-name-as-directory (make-temp-name "/tmp/aob-tests-no-root-"))))
+    (let ((w (ygg-preset--worker-level (list :name "review" :model "opus") nil)))
+      (should-not (plist-member w :prompt))
+      (should (plist-get w :read-only)))))
 
 (defmacro aob-tests--with-workflow (s dir &rest body)
   "Bind S to a fake ACP session and DIR to a fresh run dir, then clear followers."

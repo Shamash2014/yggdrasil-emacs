@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import datetime
+import hashlib
 import os
 import re
 import sys
@@ -15,6 +16,15 @@ INTENT_SECTIONS = [
     "Alternatives refused",
 ]
 CONFIRMED = re.compile(r"^\s*Confirmed:\s*(.*?)\s*$")
+CONFIRMED_VALUE = re.compile(r"^(\S+)(?:\s+sha1:([0-9a-f]{8}))?$")
+APPROVED = re.compile(r"^\s*Approved:\s*(.*?)\s*$")
+APPROVE = "the owner approves the checkpoints with SPC a k A"
+CHECKPOINT = re.compile(r"^(\d+)\.(?:\s+(.*?))?\s*$")
+CHECKPOINT_WORDS = 8
+VERDICT = re.compile(r"^Verdict:\s*(.*?)\s*$")
+ROUND = re.compile(r"^##\s+Round\s+(\d+)\b")
+CHANGE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+AGAIN = "the owner confirms again (SPC a k R)"
 PLACEHOLDER_LINE = re.compile(r"^\s*(-|\*|Feature:|- \[[ xX]\])?\s*$")
 LIST_ITEM = re.compile(r"^\s*[-*]\s+\S")
 SCENARIO_HEADING = re.compile(r"^##\s+Scenario:(.*)$")
@@ -68,7 +78,7 @@ def check_intent(change):
                 gaps.append("no refused alternative: Alternatives refused needs at least one list item")
         elif not content:
             gaps.append("empty section: %s" % name)
-    return gaps + check_restated(sections.get("restated"))
+    return gaps + check_restated(sections.get("restated"), intent_hash(sections))
 
 
 def confirmed_date(value):
@@ -78,16 +88,70 @@ def confirmed_date(value):
         return None
 
 
-def check_restated(body):
+def section_text(body, stamp=CONFIRMED):
+    return "\n".join(l.rstrip() for l in body or [] if not stamp.match(l)).strip("\n")
+
+
+def intent_hash(sections):
+    # must match ygg-ice--intent-hash byte for byte
+    text = section_text(sections.get("what is wanted")) + "\n\n" + section_text(sections.get("restated"))
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+
+
+def checkpoints_hash(body):
+    # must match ygg-ice--checkpoints-hash byte for byte
+    return hashlib.sha1(section_text(body, APPROVED).encode("utf-8")).hexdigest()[:8]
+
+
+def check_checkpoints(lines):
+    first = next((l for l in lines if re.match(r"^##\s", l) and not l.startswith("###")), None)
+    if first is None or normalize(first[2:]) != "checkpoints":
+        return ["'## Checkpoints' must be the first h2 of tasks.md"], None
+    body = h2_sections(lines)["checkpoints"]
+    gaps, numbers = [], []
+    for line in body:
+        if not line.strip() or APPROVED.match(line):
+            continue
+        m = CHECKPOINT.match(line.strip())
+        if not m:
+            gaps.append("checkpoint line is not 'N. few words'%s: %s"
+                        % (" (never a checkbox)" if re.match(r"^\s*[-*]\s*\[", line) else "", line.strip()))
+            continue
+        numbers.append(int(m.group(1)))
+        words = (m.group(2) or "").split()
+        if not words:
+            gaps.append("checkpoint %s is empty" % m.group(1))
+        elif len(words) > CHECKPOINT_WORDS:
+            gaps.append("checkpoint %s has %d words, at most %d" % (m.group(1), len(words), CHECKPOINT_WORDS))
+    if not numbers:
+        gaps.append("no numbered checkpoint lines under ## Checkpoints")
+    elif numbers != list(range(1, len(numbers) + 1)):
+        gaps.append("checkpoints are not numbered 1..%d in order" % len(numbers))
+    values = [APPROVED.match(l).group(1) for l in body if APPROVED.match(l)]
+    stamps = [CONFIRMED_VALUE.match(v) for v in values if v]
+    stamps = [m for m in stamps if m and confirmed_date(m.group(1)) and m.group(2)]
+    if not stamps:
+        gaps.append("not approved: " + APPROVE)
+    elif not any(m.group(2) == checkpoints_hash(body) for m in stamps):
+        gaps.append("checkpoints changed since approval: " + APPROVE)
+    return gaps, len(numbers)
+
+
+def check_restated(body, digest):
     if body is None:
         return ["missing section: Restated"]
-    confirmed = [CONFIRMED.match(l).group(1) for l in body if CONFIRMED.match(l)]
+    values = [CONFIRMED_VALUE.match(CONFIRMED.match(l).group(1)) for l in body if CONFIRMED.match(l)]
+    dated = [v for v in values if v and confirmed_date(v.group(1))]
     words = [l for l in body if not PLACEHOLDER_LINE.match(l) and not CONFIRMED.match(l)]
     gaps = []
     if not words:
         gaps.append("empty section: Restated: the agent restates the intent in its own words")
-    if not any(confirmed_date(c) for c in confirmed):
-        gaps.append("not confirmed: the owner sets Confirmed: YYYY-MM-DD under Restated")
+    if not dated:
+        gaps.append("not confirmed: the owner sets Confirmed: YYYY-MM-DD sha1:XXXXXXXX under Restated (SPC a k R)")
+    elif not any(v.group(2) for v in dated):
+        gaps.append("not confirmed: the Confirmed line carries no sha1 of What is wanted and Restated; " + AGAIN)
+    elif not any(v.group(2) == digest for v in dated):
+        gaps.append("intent changed since it was confirmed: " + AGAIN)
     return gaps
 
 
@@ -176,8 +240,11 @@ def check_plan(change):
     path = os.path.join(change, "tasks.md")
     if not os.path.isfile(path):
         return gaps + ["tasks.md is missing"]
+    lines = read(path)
+    checkpoint_gaps, count = check_checkpoints(lines)
+    gaps += checkpoint_gaps
     slices, current = [], None
-    for line in read(path):
+    for line in lines:
         m = SLICE.match(line)
         if m:
             current = {"label": "%s. %s" % (m.group(1), m.group(2).strip()), "fields": {}}
@@ -190,6 +257,8 @@ def check_plan(change):
             current = None
     if not slices:
         gaps.append("tasks.md has no slices ('- [ ] N. <slice>')")
+    elif count and count != len(slices):
+        gaps.append("%d checkpoints but %d slices: one checkpoint per slice" % (count, len(slices)))
     for s in slices:
         for field in ("Pass when", "Evidence"):
             if not s["fields"].get(normalize(field)):
@@ -206,6 +275,10 @@ def check_repo(root):
         change = os.path.join(changes_dir, name)
         if name == "archive" or not os.path.isdir(change):
             continue
+        if not CHANGE_NAME.match(name) or not name.strip("."):
+            print("ice-check repo %s: refused change name: use letters, digits, dot, underscore and dash only" % change)
+            failed = True
+            continue
         runs = []
         if os.path.isfile(os.path.join(change, "intent.md")):
             runs.append("intent")
@@ -218,11 +291,45 @@ def check_repo(root):
     return 1 if failed else 0
 
 
+def last_round(lines):
+    rounds = [int(ROUND.match(l).group(1)) for l in lines if ROUND.match(l)]
+    if not rounds:
+        return []
+    last, inside, verdicts = max(rounds), False, []
+    for line in lines:
+        m = ROUND.match(line)
+        if m or re.match(r"^##\s", line):
+            inside = bool(m) and int(m.group(1)) == last
+        elif inside and VERDICT.match(line):
+            verdicts.append(VERDICT.match(line).group(1))
+    return verdicts
+
+
+def check_reviews(change, slice_number):
+    reviews = os.path.join(change, "reviews")
+    code = os.path.join(reviews, "code-%s.md" % slice_number)
+    ui = os.path.join(reviews, "ui-%s.md" % slice_number)
+    gaps = []
+    if not os.path.isfile(code):
+        gaps.append("reviews/code-%s.md is missing: run the review loop (ice-review-loop)" % slice_number)
+    else:
+        verdicts = last_round(read(code))
+        if verdicts.count("approve") < 2 or set(verdicts) != {"approve"}:
+            gaps.append("code review not approved: the last round of reviews/code-%s.md ends on %s; both reviewers must approve"
+                        % (slice_number, ", ".join(verdicts) or "no verdict"))
+    if os.path.isfile(ui):
+        verdicts = [VERDICT.match(l).group(1) for l in read(ui) if VERDICT.match(l)]
+        if not verdicts or verdicts[-1] != "approve":
+            gaps.append("ui review not approved: the last verdict of reviews/ui-%s.md is %s"
+                        % (slice_number, verdicts[-1] if verdicts else "missing"))
+    return gaps
+
+
 CHECKS = {"intent": check_intent, "expect": check_expect, "plan": check_plan}
 
 
-def report(kind, change):
-    gaps = CHECKS[kind](change)
+def report(kind, change, *args):
+    gaps = CHECKS[kind](change, *args) if kind in CHECKS else check_reviews(change, *args)
     for gap in gaps:
         print("ice-check %s %s: %s" % (kind, change, gap))
     if not gaps:
@@ -231,11 +338,15 @@ def report(kind, change):
 
 
 def main(argv):
-    if len(argv) == 3 and argv[1] in CHECKS:
-        return report(argv[1], argv[2].rstrip("/"))
+    if (len(argv) == 3 and argv[1] in CHECKS) or (len(argv) == 4 and argv[1] == "reviews" and argv[3].isdigit()):
+        name = os.path.basename(os.path.abspath(argv[2].rstrip("/")))
+        if not CHANGE_NAME.match(name) or not name.strip("."):
+            sys.stderr.write("ice-check: refused change name %r: use letters, digits, dot, underscore and dash only\n" % name)
+            return 2
+        return report(argv[1], argv[2].rstrip("/"), *argv[3:])
     if len(argv) in (2, 3) and argv[1] == "repo":
         return check_repo(argv[2] if len(argv) == 3 else ".")
-    sys.stderr.write("usage: ice-check intent|expect|plan CHANGE-DIR\n       ice-check repo [ROOT]\n")
+    sys.stderr.write("usage: ice-check intent|expect|plan CHANGE-DIR\n       ice-check reviews CHANGE-DIR N\n       ice-check repo [ROOT]\n")
     return 2
 
 

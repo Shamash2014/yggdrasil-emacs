@@ -2,6 +2,8 @@
 set -eu
 
 ice_dir=$(cd "$(dirname "$0")" && pwd)
+rebaseline=""
+if [ "${1:-}" = "--rebaseline" ]; then rebaseline=--force; shift; fi
 root=$(git -C "${1:-.}" rev-parse --show-toplevel)
 agents=${ICE_AGENTS:-claude,codex,pi}
 wired=""
@@ -100,26 +102,23 @@ fi
 for tool in ice-check ice-archive-to-lat ice-c4-drift ice-scenarios ice-fail-on-base ice-lock ice-coverage ice-verify; do
   if copy_if_changed "$ice_dir/$tool" ".ice/$tool"; then chmod +x ".ice/$tool"; note x ".ice/$tool installed"; else note x ".ice/$tool (already current)"; fi
 done
-if [ -f .ice/config ]; then
-  note x ".ice/config (already present, left alone)"
-else
-  cat > .ice/config <<'CONFIG'
-# ICE settings: key = value, one per line. Fill test_cmd before ice-verify can pass.
-# test_cmd runs one test with {file} and {filter}; the whole-suite run drops each token whose placeholders are empty, so keep a placeholder in one token with its flag. {report} is report_path.
-# test_cmd = python3 -m pytest -q -p no:cacheprovider {file}::{filter} --junitxml={report}
-# report_path = .ice/state/junit.xml
-# lock_paths = pyproject.toml, pytest.ini
-# live_cmd, perf_cmd, mutate_cmd run through sh; {base}, {change}, {sha} are filled; exit 75 means blocked.
-# live_cmd = scripts/verify-live.sh
-# perf_cmd =
-# mutate_cmd =
-CONFIG
-  note x ".ice/config template written"
-fi
+runner() {
+  python3 "$ice_dir/ice-runner" "$@" "$root" > "$iso/runner.out" 2>&1 \
+    || { cat "$iso/runner.out" >&2; echo "ice-wire: ice-runner $1 failed" >&2; exit 1; }
+  while IFS= read -r line; do
+    case "$line" in
+      "note: "*) note x "${line#note: }" ;;
+      "ask: "*) ask "${line#ask: }" ;;
+    esac
+  done < "$iso/runner.out"
+}
+runner config
 
 for pair in claude:.claude codex:.agents pi:.pi; do
   case ",$agents," in *",${pair%%:*},"*) ;; *) continue ;; esac
-  for skill in "$ice_dir/../../skills/ice-checks" "$ice_dir/skills/likec4-dsl"; do
+  for skill in "$ice_dir/../../skills/ice" "$ice_dir/../../skills/ice-checks" "$ice_dir/../../skills/ice-review-loop" \
+               "$ice_dir/../../skills/ice-ui-review" "$ice_dir/../../skills/ice-prototype" "$ice_dir/../../skills/ice-learnings" \
+               "$ice_dir/skills/likec4-dsl"; do
     dest="${pair#*:}/skills/$(basename "$skill")"
     if [ -d "$dest" ] && diff -r -q "$skill" "$dest" >/dev/null 2>&1; then
       note x "$dest (already current)"
@@ -138,6 +137,14 @@ if [ ! -f lat.md/features.md ]; then
 else
   note x "lat.md/features.md feature map (already present)"
 fi
+for seed in rules learnings; do
+  if [ -f "lat.md/$seed.md" ]; then
+    note x "lat.md/$seed.md (already present, left alone)"
+  else
+    cp "$ice_dir/lat/$seed.md" "lat.md/$seed.md"
+    note x "lat.md/$seed.md seeded from etc/ice/lat"
+  fi
+done
 python3 - "$root/lat.md" "$arch" "$docs" <<'EOF'
 import os, re, sys
 lat, arch, docs = sys.argv[1:4]
@@ -160,7 +167,9 @@ path = os.path.join(lat, "lat.md")
 text = open(path, encoding="utf-8").read()
 entries = {"features": "feature map, one section per user-visible feature",
            "changes": "archived OpenSpec changes, filed by ice-archive-to-lat",
-           "architecture": "C4 views, one link per LikeC4 view"}
+           "architecture": "C4 views, one link per LikeC4 view",
+           "rules": "do-not rules the reviewers cite, the owner's",
+           "learnings": "lessons from owner feedback and recurring findings, pasted into briefs"}
 missing = ["- [[%s]] — %s\n" % (k, v) for k, v in entries.items()
            if os.path.isfile(os.path.join(lat, k + ".md")) and not re.search(r"^- \[\[%s\]\]" % k, text, re.M)]
 links = {"CONTEXT.md": "Glossary: [CONTEXT.md](../CONTEXT.md)",
@@ -172,7 +181,7 @@ if missing or extra:
     text = text.rstrip("\n") + sep + "".join(missing) + ("\n" + "".join(extra) if extra else "")
 write_if_changed(path, text)
 EOF
-note x "lat.md/lat.md indexes the feature map and lat.md/architecture.md links each C4 view"
+note x "lat.md/lat.md indexes the feature map, rules and learnings, and lat.md/architecture.md links each C4 view"
 if [ -f CONTEXT.md ]; then note x "CONTEXT.md linked from lat.md/lat.md"; else ask "CONTEXT.md: none yet; the first agreed term creates it (domain-modeling), then rerun ice-wire to link it"; fi
 if [ -d "$docs/adr" ]; then note x "$docs/adr linked from lat.md/lat.md"; else ask "$docs/adr: none yet; the first decision that is hard to reverse, surprising and a real trade-off creates it"; fi
 ask "$arch: replace the TODO titles and each container's metadata code and lat paths; rerun ice-wire after adding views so lat.md/architecture.md links them"
@@ -281,12 +290,15 @@ if [ "$placed" = no ]; then
   fi
 fi
 
+runner baseline $rebaseline
+
 ask "lat init gitignored .claude, .codex, .pi and .mcp.json (they hold local paths); that also hides OpenSpec's skills and commands there from git. Keep or un-ignore"
 ask "lat hooks and MCP call 'lat' from PATH; confirm each agent's environment (Emacs daemon, CI) finds the mise shim"
 ask "semantic search uses lat's local model; set LAT_LLM_KEY for hosted embeddings, or leave it"
 ask "who writes the scenario checks: you, or a spec-only session you approve and lock"
 ask ".ice/ice-check repo in pre-commit blocks every commit while an active change has an incomplete intent.md, expectations.md or tasks.md; keep that gate or drop the line"
-ask "expectations.md is owner-only by instruction; once the owner confirms a change's checks, .ice/ice-lock CHANGE lock tags them (signed when user.signingkey is set) and the lead's .ice/ice-verify CHANGE checks the lock; neither is in pre-commit or CI (tests are slow for a hook, and CI checkouts lack the tag); add them there or leave them to the lead"
+ask "expectations.md is owner-only by instruction; once the owner confirms a change's checks, the owner runs .ice/ice-lock CHANGE lock, which tags them (signed when user.signingkey is set) with the .ice scripts, .ice/config, intent.md, conftest.py and runner configs; a re-lock needs ICE_LOCK_OWNER=1 and --force. The lead's ice-verify CHANGE checks the lock; neither is in pre-commit or CI (tests are slow for a hook, and CI checkouts lack the tag); add them there or leave them to the lead"
+ask "rerunning ice-wire after etc/ice changes updates the .ice scripts, so every locked change fails its lock until the owner re-locks it (ICE_LOCK_OWNER=1 .ice/ice-lock CHANGE lock --force)"
 ask ".ice/state and .ice/evidence hold per-run reports and logs; gitignore them or keep them. .ice/locks and .ice/ledger.tsv are the lock copy and the verdicts"
 
 printf 'ICE wiring for %s\n\nWired:%s\n\nOwner decides:%s\n' "$root" "$wired" "$decide"

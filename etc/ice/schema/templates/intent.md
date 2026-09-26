@@ -22,4 +22,4 @@ Feature:
 
 ## Restated
 
-Confirmed: YYYY-MM-DD
+Confirmed: YYYY-MM-DD sha1:XXXXXXXX

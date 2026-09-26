@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import ast
+import json
 import os
 import re
 import shlex
@@ -11,14 +13,23 @@ Print the scenario ids of a change's expectations.md, one per line.
 CHANGE is a change name under openspec/changes or a path to its folder.
 --tests adds, after a tab, each test that names the scenario, as FILE::NAME.
 
-A test names a scenario when its title, name or docstring holds the id
-(cart#promo-before-tax) or its slug (cart__promo_before_tax).
-The other ice tools load this file for the shared parts."""
+A test names a scenario when its own name, title, decorator, docstring
+or body holds the id (cart#promo-before-tax) or its slug
+(cart__promo_before_tax); an id at module level or in a helper that is
+not a test counts for nothing. A change name is letters, digits, dot,
+underscore and dash only. The other ice tools load this file for the
+shared parts."""
 
 SCENARIO_HEADING = re.compile(r"^##\s+Scenario:\s*(\S+)")
 CONFIG_KEYS = ("test_cmd", "report_path", "lock_paths", "live_cmd", "perf_cmd", "mutate_cmd")
 TEST_FILE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*_test\.go|[^/]*[._-](test|spec)s?\.[cm]?[jt]sx?|[^/]*-tests?\.el|[^/]*_spec\.rb|[^/]*Tests?\.(swift|kt|java))$")
 TEST_SUPPORT = re.compile(r"(^|/)(conftest\.py|__snapshots__/|__fixtures__/|fixtures/|testdata/|test-data/|test_helper[^/]*|test-helper[^/]*)")
+CHANGE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
+SUPPORT_NAMES = ("conftest.py", "pyproject.toml", "pytest.ini", "setup.cfg", "tox.ini", "package.json")
+SUPPORT_CONFIG = re.compile(r"^(jest|vitest|vite)\.config\.[A-Za-z0-9.]+$")
+RECORD_BEGIN = "-----BEGIN ICE LOCK RECORD-----"
+RECORD_END = "-----END ICE LOCK RECORD-----"
+CLOSING_LINE = re.compile(r"^\s*[\]\)}]")
 TEST_DEF = [
     re.compile(r"^\s*(?:async\s+)?def\s+(test\w*)"),
     re.compile(r"^\s*(?:it|test|describe)(?:\.\w+)?\s*\(\s*(['\"`])(.+?)\1"),
@@ -55,9 +66,17 @@ def default_branch(root):
     die("ice: no default branch found; pass --base")
 
 
+def check_name(name):
+    if not CHANGE_NAME.match(name or "") or not name.strip("."):
+        die("ice: refused change name %r: use letters, digits, dot, underscore and dash only" % name)
+    return name
+
+
 def change_dir(root, change):
+    check_name(os.path.basename(change.rstrip("/")))
     for path in (change, os.path.join(root, change), os.path.join(root, "openspec", "changes", change)):
         if os.path.isfile(os.path.join(path, "expectations.md")):
+            check_name(os.path.basename(os.path.realpath(path)))
             return os.path.realpath(path)
     die("ice: no expectations.md for change %s (looked under openspec/changes)" % change)
 
@@ -120,27 +139,119 @@ def test_name(line):
     return None
 
 
+def python_tests(text):
+    tree, lines, out = ast.parse(text), text.splitlines(), []
+
+    def add(node, prefix):
+        start = min([d.lineno for d in node.decorator_list] + [node.lineno])
+        out.append((prefix + node.name, "\n".join(lines[start - 1:node.end_lineno])))
+
+    functions = (ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in tree.body:
+        if isinstance(node, functions) and node.name.startswith("test"):
+            add(node, "")
+        elif isinstance(node, ast.ClassDef):
+            for sub in node.body:
+                if isinstance(sub, functions) and sub.name.startswith("test"):
+                    add(sub, node.name + "::")
+    return out
+
+
+def indent_of(line):
+    return len(line) - len(line.lstrip())
+
+
+def block_tests(text):
+    lines, blocks = text.splitlines(), []
+    for i, line in enumerate(lines):
+        name = test_name(line)
+        if not name:
+            continue
+        start, base, end = i, indent_of(line), i + 1
+        while start > 0 and lines[start - 1].strip().startswith("@") and indent_of(lines[start - 1]) == base:
+            start -= 1
+        while end < len(lines) and (not lines[end].strip() or indent_of(lines[end]) > base):
+            end += 1
+        if end < len(lines) and indent_of(lines[end]) == base and CLOSING_LINE.match(lines[end]):
+            end += 1
+        blocks.append((name, i, start, end))
+    out = []
+    for name, i, start, end in blocks:
+        nested = {n for _, j, s, e in blocks if i < j < end for n in range(s, e)}
+        out.append((name, "\n".join(l for n, l in enumerate(lines[start:end], start) if n not in nested)))
+    return out
+
+
+def tests_in(rel, text):
+    if rel.endswith(".py"):
+        try:
+            return python_tests(text)
+        except SyntaxError:
+            pass
+    return block_tests(text)
+
+
 def find_tests(root, ids):
     found = {sid: [] for sid in ids}
     for rel in test_files(root):
         try:
             with open(os.path.join(root, rel), encoding="utf-8") as f:
-                lines = f.read().splitlines()
+                text = f.read()
         except (UnicodeDecodeError, OSError):
             continue
-        current, klass = None, None
-        for line in lines:
-            if rel.endswith(".py") and re.match(r"^\S", line):
-                klass = (re.match(r"^class\s+(\w+)", line) or [None, None])[1]
-            name = test_name(line)
-            if name and klass and line[:1].isspace():
-                name = "%s::%s" % (klass, name)
-            current = name or current
+        for name, body in tests_in(rel, text):
             for sid in ids:
-                if names_scenario(line, sid):
-                    if current and (rel, current) not in found[sid]:
-                        found[sid].append((rel, current))
+                if names_scenario(body, sid) and (rel, name) not in found[sid]:
+                    found[sid].append((rel, name))
     return found
+
+
+def support_dirs(test_dirs):
+    dirs = {""}
+    for folder in test_dirs:
+        parts = [p for p in folder.split("/") if p]
+        dirs.update("/".join(parts[:n]) for n in range(1, len(parts) + 1))
+    return sorted(dirs)
+
+
+def support_files(root, dirs):
+    found = set()
+    for folder in dirs:
+        full = os.path.join(root, folder)
+        if not os.path.isdir(full):
+            continue
+        for entry in os.listdir(full):
+            if (entry in SUPPORT_NAMES or SUPPORT_CONFIG.match(entry)) and os.path.isfile(os.path.join(full, entry)):
+                found.add(os.path.join(folder, entry) if folder else entry)
+    return found
+
+
+def ice_scripts(root):
+    folder = os.path.join(root, ".ice")
+    if not os.path.isdir(folder):
+        return set()
+    return {".ice/" + e for e in os.listdir(folder) if e.startswith("ice-") and os.path.isfile(os.path.join(folder, e))}
+
+
+def tag_name(name):
+    return "ice-expect/" + name
+
+
+def tag_record(root, name):
+    ref = "refs/tags/" + tag_name(name)
+    if not git("rev-parse", "-q", "--verify", ref, cwd=root, check=False):
+        return None, None
+    raw = git("cat-file", "-p", ref, cwd=root)
+    signed = bool(re.search(r"^-----BEGIN (PGP|SSH) SIGNATURE-----", raw, re.M))
+    lines = raw.split("\n")
+    if RECORD_BEGIN not in lines or RECORD_END not in lines[lines.index(RECORD_BEGIN):]:
+        return {}, signed
+    begin = lines.index(RECORD_BEGIN)
+    end = lines.index(RECORD_END, begin)
+    try:
+        return json.loads("\n".join(lines[begin + 1:end])), signed
+    except ValueError:
+        return {}, signed
 
 
 def fill(template, values):

@@ -1,0 +1,320 @@
+#!/usr/bin/env python3
+import argparse
+import datetime
+import importlib.machinery
+import importlib.util
+import json
+import os
+import re
+import shutil
+import subprocess
+import sys
+import xml.etree.ElementTree as ElementTree
+
+sys.dont_write_bytecode = True
+_loader = importlib.machinery.SourceFileLoader("ice_scenarios", os.path.join(os.path.dirname(os.path.realpath(__file__)), "ice-scenarios"))
+ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scenarios", _loader))
+_loader.exec_module(ice)
+
+DESCRIPTION = """The test runner of a repo wired for ICE, found and run once.
+
+config ROOT     fill .ice/config from the runner the repo uses, when the
+                file is absent or still the untouched template; a linked
+                worktree takes the main checkout's config instead
+detect ROOT     print what config would fill, as JSON, and write nothing
+baseline ROOT   run the whole suite once through test_cmd, isolated, into
+                .ice/state/baseline.json and .ice/state/baseline.log; kept
+                once recorded unless --force
+
+Runners, first match wins: pytest, vitest, jest, cargo test, go test,
+flutter test, Emacs ERT, then the repo's own test entry point (justfile,
+Makefile, package.json). Each line of output starts with note: or ask:."""
+
+TEMPLATE = """# ICE settings: key = value, one per line. Fill test_cmd before ice-verify can pass.
+# test_cmd runs one test with {file} and {filter}; the whole-suite run drops each token whose placeholders are empty, so keep a placeholder in one token with its flag. {report} is report_path.
+# test_cmd = python3 -m pytest -q -p no:cacheprovider {file}::{filter} --junitxml={report}
+# report_path = .ice/state/junit.xml
+# lock_paths = tests/data, scripts/test-env.sh (conftest.py and runner configs are locked already)
+# live_cmd, perf_cmd, mutate_cmd run through sh; {base}, {change}, {sha} are filled; exit 75 means blocked.
+# live_cmd = scripts/verify-live.sh
+# perf_cmd =
+# mutate_cmd =
+"""
+REPORT = ".ice/state/junit.xml"
+NO_JUNIT = "%s writes no JUnit report, so ice-verify stops at coverage: point test_cmd at a runner that writes {report} (%s) and set report_path"
+NO_FILTER = "test_cmd runs the suite through %s, which takes no test name: fail-on-base and ice-verify need {filter}; give test_cmd one"
+BASELINE_TIMEOUT = int(os.environ.get("ICE_BASELINE_TIMEOUT", "1800"))
+
+
+def read(root, rel):
+    path = os.path.join(root, rel)
+    if not os.path.isfile(path):
+        return None
+    with open(path, encoding="utf-8", errors="replace") as f:
+        return f.read()
+
+
+def package(root):
+    text = read(root, "package.json")
+    try:
+        return json.loads(text) if text else None
+    except ValueError:
+        return None
+
+
+def package_mentions(pkg, name):
+    deps = {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+    return name in deps or any(re.search(r"\b%s\b" % name, v) for v in pkg.get("scripts", {}).values())
+
+
+def recipe(text, name):
+    return bool(text and re.search(r"^%s\s*:" % name, text, re.M))
+
+
+def pytest_evidence(root):
+    pyproject = read(root, "pyproject.toml") or ""
+    if "[tool.pytest" in pyproject or re.search(r"""["']pytest\b""", pyproject):
+        return "pyproject.toml"
+    if os.path.isfile(os.path.join(root, "pytest.ini")):
+        return "pytest.ini"
+    if "[tool:pytest]" in (read(root, "setup.cfg") or ""):
+        return "setup.cfg"
+    for folder in ("tests", "test"):
+        path = os.path.join(root, folder)
+        if os.path.isdir(path) and any(re.match(r"^test_.*\.py$", f) for f in os.listdir(path)):
+            return folder + "/test_*.py"
+    return None
+
+
+def ert_folder(root):
+    for folder in ("test", "tests"):
+        path = os.path.join(root, folder)
+        if os.path.isdir(path) and any(f.endswith("-tests.el") for f in os.listdir(path)):
+            return folder
+    return None
+
+
+def detect(root):
+    """The runner, its evidence, the config keys it fills and the asks it leaves."""
+    pkg = package(root)
+    evidence = pytest_evidence(root)
+    if evidence:
+        python = ".venv/bin/python" if os.path.isfile(os.path.join(root, ".venv/bin/python")) else "python3"
+        return {"runner": "pytest", "evidence": evidence, "asks": [],
+                "test_cmd": python + " -m pytest -q -p no:cacheprovider {file}::{filter} --junitxml={report}",
+                "report_path": REPORT}
+    if pkg and package_mentions(pkg, "vitest"):
+        return {"runner": "vitest", "evidence": "package.json", "asks": [],
+                "test_cmd": "npx vitest run {file} --testNamePattern={filter} --reporter=default --reporter=junit --outputFile.junit={report}",
+                "report_path": REPORT}
+    if pkg and package_mentions(pkg, "jest"):
+        asks = [] if package_mentions(pkg, "jest-junit") else [
+            "jest writes the JUnit report through jest-junit, which package.json lacks; add it as a devDependency or ice-verify stops at coverage"]
+        return {"runner": "jest", "evidence": "package.json", "asks": asks,
+                "test_cmd": "env JEST_JUNIT_OUTPUT_FILE={report} npx jest {file} --testNamePattern={filter} --ci --reporters=default --reporters=jest-junit",
+                "report_path": REPORT}
+    if os.path.isfile(os.path.join(root, "Cargo.toml")):
+        return {"runner": "cargo", "evidence": "Cargo.toml", "lock_paths": "Cargo.toml",
+                "test_cmd": "cargo test {filter}",
+                "asks": [NO_JUNIT % ("cargo test", "cargo nextest with a junit profile")]}
+    if os.path.isfile(os.path.join(root, "go.mod")):
+        return {"runner": "go", "evidence": "go.mod", "lock_paths": "go.mod",
+                "test_cmd": "go test -run=^{filter}$ ./...",
+                "asks": [NO_JUNIT % ("go test", "gotestsum --junitfile {report}")]}
+    if "flutter" in (read(root, "pubspec.yaml") or ""):
+        return {"runner": "flutter", "evidence": "pubspec.yaml", "lock_paths": "pubspec.yaml",
+                "test_cmd": "flutter test {file} --plain-name={filter}",
+                "asks": [NO_JUNIT % ("flutter test", "flutter test --machine piped through tojunit")]}
+    folder = ert_folder(root)
+    if folder:
+        return {"runner": "ert", "evidence": folder + "/*-tests.el", "asks": [], "report_path": REPORT,
+                "test_cmd": ("emacs -Q --batch -L . -L %s "
+                             "\"--eval=(setq ice-filter \\\"{filter}\\\")\" "
+                             "\"--eval=(setq ice-report \\\"{report}\\\")\" "
+                             "\"--eval=(mapc (lambda (f) (load (expand-file-name f) nil t)) (file-expand-wildcards \\\"%s/*-tests.el\\\"))\" "
+                             "\"--eval=(let ((stats (ert-run-tests-batch (if (boundp 'ice-filter) (list 'member (intern ice-filter)) t)))) "
+                             "(when (boundp 'ice-report) (let ((ert-load-file-name ice-report)) (ert-write-junit-test-report stats))) "
+                             "(kill-emacs (if (zerop (ert-stats-completed-unexpected stats)) 0 1)))\""
+                             % (folder, folder))}
+    for name, evidence, command in (("justfile", "justfile", "just test"), ("Justfile", "Justfile", "just test"),
+                                    ("Makefile", "Makefile", "make test")):
+        if recipe(read(root, name), "test"):
+            return {"runner": evidence, "evidence": evidence + " test recipe", "lock_paths": name,
+                    "test_cmd": command, "asks": [NO_FILTER % command, NO_JUNIT % (command, "the runner it wraps")]}
+    script = (pkg or {}).get("scripts", {}).get("test", "")
+    if script and "no test specified" not in script:
+        return {"runner": "npm", "evidence": "package.json test script", "test_cmd": "npm test",
+                "asks": [NO_FILTER % "npm test", NO_JUNIT % ("npm test", "the runner it wraps")]}
+    return {"runner": None, "evidence": None, "asks": [
+        "no test runner found: fill test_cmd, report_path and lock_paths in .ice/config, then rerun ice-wire for the baseline"]}
+
+
+def config_text(found):
+    lines = TEMPLATE.splitlines()
+    out = lines[:2] + ["# Detected: %s (%s)." % (found["runner"], found["evidence"])]
+    for line in lines[2:]:
+        key = re.match(r"^# (test_cmd|report_path|lock_paths) = ", line)
+        out.append("%s = %s" % (key.group(1), found[key.group(1)]) if key and found.get(key.group(1)) else line)
+    return "\n".join(out) + "\n"
+
+
+def main_checkout(root):
+    common = ice.git("rev-parse", "--path-format=absolute", "--git-common-dir", cwd=root)
+    own = ice.git("rev-parse", "--path-format=absolute", "--git-dir", cwd=root)
+    if os.path.realpath(common) == os.path.realpath(own) or os.path.basename(common) != ".git":
+        return None
+    return os.path.dirname(common)
+
+
+def config(root):
+    path = os.path.join(root, ".ice", "config")
+    current = read(root, ".ice/config")
+    if current is not None and current != TEMPLATE:
+        print("note: .ice/config (already present, left alone)")
+        return 0
+    main = main_checkout(root)
+    shared = read(main, ".ice/config") if main else None
+    if shared is not None and shared != TEMPLATE:
+        write(path, shared)
+        print("note: .ice/config reused from the main checkout %s" % main)
+        return 0
+    found = detect(root)
+    if found["runner"]:
+        write(path, config_text(found))
+        print("note: .ice/config filled for %s (%s): test_cmd = %s" % (found["runner"], found["evidence"], found["test_cmd"]))
+    elif current is None:
+        write(path, TEMPLATE)
+        print("note: .ice/config template written")
+    for ask in found["asks"]:
+        print("ask: " + ask)
+    return 0
+
+
+def write(path, text):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def resolved(argv):
+    """argv with its program made absolute while the real PATH still finds it."""
+    argv = list(argv)
+    at = 0
+    if argv and argv[0] == "env":
+        at = next((i for i, a in enumerate(argv[1:], 1) if "=" not in a), len(argv))
+    if at >= len(argv) or "/" in argv[at]:
+        return argv
+    found = shutil.which(argv[at])
+    if found and "/mise/shims/" in found:
+        out = subprocess.run(["mise", "which", argv[at]], capture_output=True, text=True)
+        found = out.stdout.strip() if out.returncode == 0 and out.stdout.strip() else found
+    if found:
+        argv[at] = found
+    return argv
+
+
+def counts(report):
+    try:
+        tree = ElementTree.parse(report).getroot()
+    except (OSError, ElementTree.ParseError):
+        return None
+    suites = [tree] if tree.tag == "testsuite" or tree.get("tests") is not None else list(tree.iter("testsuite"))
+    total = {k: 0 for k in ("tests", "failures", "errors", "skipped")}
+    for suite in suites:
+        for key in total:
+            total[key] += int(suite.get(key) or 0)
+    return total
+
+
+def sandboxed_env(sandbox):
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    for key, sub in (("HOME", "home"), ("TMPDIR", "tmp"), ("XDG_CONFIG_HOME", "home/.config"),
+                     ("XDG_CACHE_HOME", "home/.cache"), ("XDG_DATA_HOME", "home/.local/share"),
+                     ("XDG_STATE_HOME", "home/.local/state"), ("CODEX_HOME", "home/.codex"),
+                     ("CLAUDE_CONFIG_DIR", "home/.claude")):
+        env[key] = os.path.join(sandbox, sub)
+        os.makedirs(env[key], exist_ok=True)
+    return env
+
+
+def baseline(root, force):
+    state = os.path.join(root, ".ice", "state")
+    record_path = os.path.join(state, "baseline.json")
+    if os.path.isfile(record_path) and not force:
+        with open(record_path, encoding="utf-8") as f:
+            record = json.load(f)
+        print("note: .ice/state/baseline.json (already recorded: %s)" % describe(record))
+        ask_about(record)
+        return 0
+    settings = ice.read_config(root)
+    if not settings.get("test_cmd"):
+        print("ask: no baseline: .ice/config has no test_cmd; fill it and rerun ice-wire")
+        return 0
+    report = settings.get("report_path") or os.path.join(".ice", "state", "baseline-junit.xml")
+    report_abs = report if os.path.isabs(report) else os.path.join(root, report)
+    if os.path.exists(report_abs):
+        os.remove(report_abs)
+    os.makedirs(os.path.dirname(report_abs), exist_ok=True)
+    argv = resolved(ice.fill(settings["test_cmd"], {"file": "", "filter": "", "report": report_abs}))
+    sandbox = os.path.join(state, "baseline-sandbox")
+    shutil.rmtree(sandbox, ignore_errors=True)
+    log = os.path.join(state, "baseline.log")
+    try:
+        out = subprocess.run(argv, cwd=root, capture_output=True, text=True, env=sandboxed_env(sandbox),
+                             timeout=BASELINE_TIMEOUT)
+        code, text = out.returncode, out.stdout + out.stderr
+    except FileNotFoundError as err:
+        code, text = None, str(err) + "\n"
+    except subprocess.TimeoutExpired as err:
+        code, text = None, "timed out after %ds\n%s" % (BASELINE_TIMEOUT, err.stdout or "")
+    finally:
+        shutil.rmtree(sandbox, ignore_errors=True)
+    with open(log, "w", encoding="utf-8") as f:
+        f.write("$ %s\n%s\nexit %s\n" % (" ".join(argv), text, code))
+    tally = counts(report_abs) if os.path.isfile(report_abs) else None
+    if code == 0:
+        status = "passed"
+    elif code is not None and tally and tally["tests"] and tally["failures"] + tally["errors"]:
+        status = "failed"
+    else:
+        status = "broken"
+    record = {"status": status, "command": argv, "exit": code, "counts": tally,
+              "log": os.path.relpath(log, root), "report": os.path.relpath(report_abs, root) if tally else None,
+              "sha": ice.git("rev-parse", "--verify", "-q", "HEAD", cwd=root, check=False) or None,
+              "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")}
+    write(record_path, json.dumps(record, indent=2) + "\n")
+    print("note: .ice/state/baseline.json recorded: %s" % describe(record))
+    ask_about(record)
+    return 0
+
+
+def describe(record):
+    tally = record.get("counts")
+    shown = ", ".join("%d %s" % (tally[k], k) for k in ("tests", "failures", "errors", "skipped") if tally.get(k)) if tally else "no report"
+    return "%s (%s), log %s" % (record["status"], shown, record["log"])
+
+
+def ask_about(record):
+    if record["status"] != "passed":
+        print("ask: the baseline suite is %s before any change (see %s): fix it or accept it as the starting point"
+              % (record["status"], record["log"]))
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="ice-runner", description=DESCRIPTION,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("action", choices=("config", "detect", "baseline"))
+    parser.add_argument("root")
+    parser.add_argument("--force", action="store_true", help="baseline: run again over a recorded one")
+    args = parser.parse_args()
+    root = os.path.realpath(args.root)
+    if args.action == "detect":
+        print(json.dumps(detect(root), indent=2))
+        return 0
+    if args.action == "config":
+        return config(root)
+    return baseline(root, args.force)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

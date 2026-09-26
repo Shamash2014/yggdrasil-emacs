@@ -259,8 +259,8 @@ signs and nobody reads a path that way."
     (easysession-switch-to
      (cdr (assoc (completing-read "Session: " table nil t) labels)))))
 
-(autoload 'ygg-project-init "ygg-project" nil t)
-(autoload 'ygg-project-report "ygg-project" nil t)
+(declare-function ygg-project-import "ygg-project-scan" (root &optional callback))
+(declare-function ygg-projects-add "ygg-projects" (dir))
 
 ;;; Workspaces — native tab-bar spaces (yggdrasil-spacetree)
 
@@ -329,8 +329,8 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
   "z" #'ygg-space-pick :label "pick/jump"
   "t" #'ygg-space-tree :label "tree sidebar"
   "p" #'project-switch-project :label "switch project"
-  "i" #'ygg-project-init :label "project init"
-  "I" #'ygg-project-report :label "project doctor: tools and checks"
+  "i" #'ygg-project-import :label "import / re-import project"
+  "P" #'ygg-projects-add :label "add project to the sidebar"
   "m" #'ygg-session-pick :label "session picker"
   "w" #'ygg-session-save-project :label "save project session"
   "r" #'ygg-session-load-project :label "resume project session"

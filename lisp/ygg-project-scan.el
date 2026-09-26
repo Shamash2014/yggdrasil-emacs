@@ -51,6 +51,7 @@ handed to that project's agents as an additional directory."
 (declare-function ygg-projects-forget-root "ygg-projects" (root))
 (declare-function aob-transcript-forget "aob-transcript" ())
 (declare-function aob-transcript-found "aob-transcript" (project &optional agent))
+(declare-function ygg-ice-import-step "ygg-ice" (root))
 
 (defun ygg-project-scan--walk-1 (dir)
   "Repositories under DIR, by their `.git', which may be a file or a folder."
@@ -269,14 +270,35 @@ The walk is a source of suggestions for the import, and nothing else."
                    (ygg-project-import--run root (cdr steps) callback)))))
 
 ;;;###autoload
-(defun ygg-project-import (root &optional callback)
-  "Take ROOT in: its skills, the config its agents answer under, what
-it is laid out as and what it can run.  CALLBACK is called with ROOT
-when the last of it settles.  Nothing here blocks."
+(defcustom ygg-project-import-extras nil
+  "Extras an import runs without being picked: skills installs and
+refreshes the config's skills for every agent, ice wires the project for
+ICE or refreshes its wiring."
+  :type '(set (const "skills") (const "ice")) :group 'ygg)
+
+(defconst ygg-project-import--extra-names '("skills" "ice"))
+
+(defun ygg-project-import--read-extras ()
+  (let ((picked (completing-read-multiple
+                 "Extras (skills, ice; RET for none): "
+                 ygg-project-import--extra-names nil t
+                 (and ygg-project-import-extras
+                      (string-join ygg-project-import-extras ",")))))
+    (seq-intersection picked ygg-project-import--extra-names)))
+
+;;;###autoload
+(defun ygg-project-import (root &optional callback extras)
+  "Take ROOT in: its project skills, the config its agents answer under,
+what it is laid out as and what it can run.  EXTRAS, picked when called
+interactively, add the config's skills for every agent (skills) and ICE
+wiring (ice).  CALLBACK is called with ROOT when the last of it settles.
+Nothing here blocks."
   (interactive (list (completing-read "Import project: "
                                       (mapcar #'abbreviate-file-name
                                               (ygg-project-roots))
-                                      nil t)))
+                                      nil t)
+                     nil
+                     (ygg-project-import--read-extras)))
   (let ((root (ygg-project--key root)))
     ;; an import is also a re-import: whatever was cached about this
     ;; project is what the import is being run to replace
@@ -284,14 +306,12 @@ when the last of it settles.  Nothing here blocks."
     (when (fboundp 'ygg-projects-forget-root) (ygg-projects-forget-root root))
     (ygg-project-import--run
      root
-     (list (cons "skills"
-                 (lambda ()
-                   ;; the config's skills, wherever every agent reads them,
-                   ;; then the project's own, where its sessions start
-                   (when (fboundp 'ygg-agent-skills-ensure)
-                     (ygg-agent-skills-ensure))
-                   (when (fboundp 'ygg-agent-link-project-skills)
-                     (ygg-agent-link-project-skills root))))
+     (append
+      (list (cons "skills"
+                  (lambda ()
+                    ;; the project's own skills, where its sessions start
+                    (when (fboundp 'ygg-agent-link-project-skills)
+                      (ygg-agent-link-project-skills root))))
            (cons "config"
                  (lambda ()
                    (when (and (fboundp 'ygg-agent--config-env)
@@ -313,7 +333,18 @@ when the last of it settles.  Nothing here blocks."
            (cons "sessions"
                  (lambda ()
                    (when (fboundp 'aob-transcript-found)
-                     (aob-transcript-found root)))))
+                     (aob-transcript-found root))))
+           )
+      (and (member "skills" extras)
+           (list (cons "agent skills"
+                       (lambda ()
+                         (when (fboundp 'ygg-agent-skills-ensure)
+                           (ygg-agent-skills-ensure))))))
+      (and (member "ice" extras)
+           (list (cons "ice"
+                       (lambda ()
+                         (when (fboundp 'ygg-ice-import-step)
+                           (ygg-ice-import-step root)))))))
      callback)))
 
 ;;;###autoload

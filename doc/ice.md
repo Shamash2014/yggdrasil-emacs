@@ -158,8 +158,8 @@ check the building agent can run and never edit:
   code;
 - unit at the seam; live through the verification skill driving the real
   app (Tan); perf against a trunk baseline with the number that fails;
-- each new check fails on the base commit, then is locked (signed tag,
-  checked outside the agent);
+- each new check fails on the locked base, or now (--red) before
+  implementation, then is locked (signed tag, checked outside the agent);
 - mutation testing on the diff where the language has a tool;
 - a flag-a-bad-check exit for the agent; capped retries; an evidence
   bundle with every verdict.
@@ -201,6 +201,41 @@ ice-fail-on-base; plus a lat step that files an archived change.
 ### Ceremony by size
 A one-sentence diff skips ICE; unattended or multi-agent work gets all of
 it.
+
+## Built
+
+Scripts, in etc/ice (ice-wire copies all but ice-runner into .ice/):
+- ice-wire.sh: lat.md, OpenSpec with the ice schema, a C4 skeleton,
+  pre-commit hooks, the skills below for claude, codex and pi, lat.md
+  rules and learnings seeded, .ice/config filled from the test runner and
+  a baseline run; a second run changes nothing (--rebaseline records the
+  baseline again).
+- ice-runner: finds the runner (pytest, vitest, jest, cargo, go,
+  flutter, ERT, else justfile, Makefile or npm test), fills .ice/config
+  when absent or the untouched template, and runs the suite once,
+  isolated, into .ice/state/baseline.json.
+- ice-check: intent (Confirmed hash), expect, plan (Checkpoints first,
+  Approved hash, one checkpoint per slice), reviews CHANGE N, repo.
+- ice-lock, ice-fail-on-base (--red), ice-coverage, ice-scenarios,
+  ice-verify (one verdict line and a ledger row), ice-c4-drift.
+- ice-archive-to-lat: files an archived change under its feature,
+  deletes docs/prototypes/CHANGE/, moves its learnings into
+  lat.md/learnings.md.
+
+Skills: ice, ice-checks, ice-review-loop, ice-ui-review, ice-prototype,
+ice-learnings, likec4-dsl, create-verification-skill.
+
+Presets: lead (workers gaps, review and ui), gaps, maintain.
+
+Keys, SPC a k: R confirm intent and A approve checkpoints (the owner's
+alone), o changes, s lat search, c connections, b C4 preview. Every other
+ICE command is M-x only.
+
+Import: SPC p i imports a project and offers two extras, none picked by
+default: skills (install and refresh the config's skills for every agent)
+and ice (wire the project, or refresh a wired one's scripts, skills and
+baseline). ygg-project-import-extras preselects them. M-x ygg-ice-wire
+wires a project on its own.
 
 ## Open for the owner
 

@@ -18,10 +18,10 @@ artifacts:
       3. Draft every section of intent.md. Check each term against CONTEXT.md
          when the repo has one, and use its words.
       4. Run the gap detector: a separate read-only session under the gaps
-         preset (SPC a k G in Emacs) reads intent.md and the repo and writes
-         gaps.md beside it. Do not detect the gaps yourself in this session.
-         If you cannot start that session, stop, ask the owner to run it,
-         and wait for gaps.md.
+         preset (worker-gaps under a lead, M-x ygg-ice-gaps by hand) reads
+         intent.md and the repo and writes gaps.md beside it. Do not detect
+         the gaps yourself in this session. If you cannot start that
+         session, stop, ask the owner to run it, and wait for gaps.md.
       5. Settle every gaps.md item marked "settle by probe/prototype" by
          running it. Ask the owner only the "ask owner" items still open, all
          at once, in one message, each with its default. When gaps.md says
@@ -34,7 +34,11 @@ artifacts:
       Never, whatever the owner seems to have said:
       - write, fill, change or delete the Confirmed line under Restated. The
         owner sets it (ygg-ice-confirm-intent, SPC a k R) and nobody else;
-        the gate reads it as the owner's word;
+        the gate reads it as the owner's word. It reads
+        "Confirmed: YYYY-MM-DD sha1:XXXXXXXX", the sha1 taken over What is
+        wanted and Restated, so any edit to either after confirmation fails
+        ice-check intent ("intent changed since it was confirmed") until the
+        owner confirms again;
       - take a reply in chat as that confirmation, or start proposal.md
         before ice-check intent passes.
       If the owner asks you to write the line, stop and point them at the
@@ -55,7 +59,8 @@ artifacts:
       - Alternatives refused: at least one list item, each an approach
         considered and the reason it was refused.
       - Restated: the intent in your own words, a few lines, the caller's
-        view first. The Confirmed line below it is the owner's.
+        view first. The Confirmed line below it is the owner's, with the
+        date and the sha1 of What is wanted and Restated.
 
       Expectations are not written here. They come next, in expectations.md,
       once the owner has confirmed this intent.
@@ -71,7 +76,7 @@ artifacts:
       Create the proposal document that establishes WHY this change is needed.
       Build on the owner-confirmed intent.md; link to it rather than restate it,
       and do not start until ice-check intent passes, which needs the owner's
-      Confirmed line under Restated.
+      Confirmed line under Restated, its sha1 matching the intent as it is now.
 
       Sections:
       - **Why**: 1-2 sentences on the problem or opportunity. What problem does this solve? Why now?
@@ -298,8 +303,19 @@ artifacts:
       vertical cut through every layer that one fresh context can finish.
       Wide refactors run as expand, migrate, contract.
 
-      Each slice is one checkbox line, "- [ ] N. <slice>", followed by
-      indented fields:
+      tasks.md opens with "## Checkpoints", its first h2: one line per
+      slice, "N. few words", numbered 1..n in order, at most 8 words each,
+      never a checkbox. When the change has user-visible UI and nothing to
+      compare it with (the ice-prototype skill), checkpoint 1 is the
+      prototype. Below the list keeps an empty "Approved:" line that only
+      the owner fills: ygg-ice-approve-checkpoints (SPC a k A) writes
+      "Approved: YYYY-MM-DD sha1:XXXXXXXX" over the list, so any edit to a
+      checkpoint after that fails ice-check plan until the owner approves
+      again. Never write or fill that line, and never take a chat reply as
+      approval.
+
+      The slices follow under "## Slices". Each slice is one checkbox line,
+      "- [ ] N. <slice>", followed by indented fields:
       - Blocked by: the slice numbers it waits on, or none.
       - Files: the files it touches.
       - Scenario: the expectations.md scenario it satisfies.
@@ -307,8 +323,10 @@ artifacts:
       - Evidence: the path where the proof lands (test output, log, capture).
 
       Only the checkbox line is tracked; keep fields on indented lines below
-      it. Tick a slice only after its Pass when holds and its Evidence exists.
-      No prose sections, no groups, no restated design.
+      it. Tick a slice only after its Pass when holds and its Evidence exists,
+      and only when no lead runs the change; under a lead, only the lead
+      ticks, through todo_update.
+      No other prose sections, no groups, no restated design.
 
       Check with: ice-check plan <change-dir> (it also requires expect to pass)
     requires:
@@ -321,6 +339,10 @@ apply:
   instruction: |
     Work the slices in tasks.md in blocking order, one fresh context each.
     Read intent.md and expectations.md first; never edit expectations.md.
-    Tick a slice only after its Pass when holds and its Evidence file exists.
+    When no lead runs the change, tick a slice in tasks.md only after its
+    Pass when holds and its Evidence file exists. When a lead runs it, never
+    tick tasks.md yourself: report the slice as done to the lead, with its
+    Pass when result and Evidence path; the lead ticks it, through
+    todo_update, after its own ice-verify run.
     If a check looks wrong, stop and flag it to the owner; do not change it.
     Pause if you hit blockers or need clarification.

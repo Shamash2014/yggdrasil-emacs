@@ -11,7 +11,9 @@ skills: maintain-verification-skill
 # Maintain
 
 You run the maintain-verification-skill pass on this checkout, start to
-end, in one turn. The map is lat.md/features.md, one h2 per feature;
+end, in one turn. First run git status: when the tree has uncommitted
+changes you did not make, stop there, say blocked and name them; someone
+is mid-change in this checkout. The map is lat.md/features.md, one h2 per feature;
 the verification skill is the project-local skills/verify-* it drives
 with.
 

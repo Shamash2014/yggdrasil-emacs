@@ -457,22 +457,30 @@ session, and an entry that parses as neither is dropped."
                   (cond ((stringp raw) (split-string raw "," t))
                         ((listp raw) raw))))))
 
-(defcustom ygg-preset-worker-levels '(("quick" :preset "search" :read-only t))
+(defcustom ygg-preset-worker-levels '(("quick" :preset "search" :read-only t)
+                                      ("gaps" :preset "gaps")
+                                      ("review" :skill "ice-review-loop" :read-only t)
+                                      ("ui" :skill "ice-ui-review" :read-only t))
   "What a worker level is beyond its model and effort, by level name.
 :preset names the preset whose body the level runs under in place of the
-carried one, and :read-only gives it the tools that read and none that
-change anything."
+carried one, :skill names a skill whose body it runs under instead, and
+:read-only gives it the tools that read and none that change anything."
   :type '(alist :key-type string :value-type plist) :group 'ygg-preset)
 
 (defun ygg-preset--worker-level (w known)
   "W with the prompt and read-only its level takes from ygg-preset-worker-levels.
-The prompt is the body of the level's preset, found among KNOWN."
+The prompt is the body of the level's preset, found among KNOWN, or of
+its skill, found from the default directory the way a mode finds one.
+A level whose skill nobody wrote keeps the carried prompt."
   (let* ((spec (cdr (assoc (plist-get w :name) ygg-preset-worker-levels)))
          (d (and (plist-get spec :preset)
                  (seq-find (lambda (d) (equal (ygg-preset-name d) (plist-get spec :preset)))
-                           known))))
+                           known)))
+         (body (cond (d (or (ygg-preset-body d) ""))
+                     ((plist-get spec :skill)
+                      (ygg-preset-skill-body (plist-get spec :skill) default-directory)))))
     (append w
-            (and d (list :prompt (string-trim (or (ygg-preset-body d) ""))))
+            (and body (list :prompt (string-trim body)))
             (and (plist-get spec :read-only) (list :read-only t)))))
 
 (defun ygg-preset-subagent-refs (presets &optional known)

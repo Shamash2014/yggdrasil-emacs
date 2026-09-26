@@ -49,4 +49,4 @@ Run its own instructions end to end once: launch, doctor, drive ONE mapped featu
 
 ## 5. Offer the maintenance loop
 
-Point the user at `/maintain-verification-skill` for keeping the map honest as the app changes; in Emacs, the maintain preset runs it (SPC a k M), and ygg-ice-maintain-daily runs it once a day. Suggest a cadence only if they ask.
+Point the user at `/maintain-verification-skill` for keeping the map honest as the app changes; in Emacs, the maintain preset runs it (M-x ygg-ice-maintain), and ygg-ice-maintain-daily runs it once a day. Suggest a cadence only if they ask.

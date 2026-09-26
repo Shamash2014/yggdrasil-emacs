@@ -17,23 +17,36 @@ _loader = importlib.machinery.SourceFileLoader("ice_scenarios", os.path.join(os.
 ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scenarios", _loader))
 _loader.exec_module(ice)
 
-DESCRIPTION = """Each scenario's check must fail on the base commit and pass on HEAD.
+DESCRIPTION = """Each scenario's check must fail on the locked base and pass on the working tree.
+
+The base is the commit the checks were locked against, from the lock
+record in tag ice-expect/CHANGE; only when there is no lock record does
+it fall back to the merge-base of HEAD with the default branch. --base
+overrides both. The base may equal HEAD: the other side is the working
+tree, HEAD plus the uncommitted diff.
 
 The base tree is copied with git archive into a temporary folder and the
 test files and test support (conftest.py, fixtures, snapshots) in the
-scenario tests' folders are laid over it from the working tree, never
-source beside them; the working
-tree itself is never checked out, stashed or changed. HEAD runs in the
-working tree. Tests run one at a time through test_cmd in .ice/config, or
---test-cmd, with {file} and {filter} filled per test (e.g.
-python3 -m pytest -q {file}::{filter}); keep each placeholder inside one
-token with its flag (--testNamePattern={filter}), since the whole-suite
-run drops a token whose placeholders are empty. A test that errors on
-base, say on an import the change adds, counts as failing there. The
-result goes to
-.ice/state/CHANGE.json. Exit 0 when every scenario passes the gate, 1 when
-any does not, 2 when it cannot run."""
+scenario tests' folders, and every conftest.py and runner config from the
+repo root down to them (the same support ice-lock locks), are laid over it
+from the working tree, never source beside them; the working tree itself
+is never checked out, stashed or changed. Tests run one at a time through
+test_cmd in .ice/config, or --test-cmd, with {file} and {filter} filled
+per test (e.g. python3 -m pytest -q {file}::{filter}); keep each
+placeholder inside one token with its flag (--testNamePattern={filter}),
+since the whole-suite run drops a token whose placeholders are empty. A
+test that errors on base, say on an import the change adds, counts as
+failing there; exit 4 or 5 (pytest: no test matched or none collected)
+counts as not run, never as failing.
 
+--red is the lock-time gate, before any implementation: every scenario
+has a check and every check fails on the working tree now. It needs no
+base and writes no state.
+
+The result goes to .ice/state/CHANGE.json. Exit 0 when every scenario
+passes the gate, 1 when any does not, 2 when it cannot run."""
+
+NOT_RUN = (4, 5)
 LINKED_DIRS = ("node_modules", ".venv", "venv")
 
 
@@ -55,13 +68,44 @@ def run_test(template, cwd, rel, name):
     return out.returncode, (out.stdout + out.stderr).strip().splitlines()[-3:]
 
 
+def overlay(root, tmp, tests):
+    folders = {os.path.dirname(rel) for found in tests.values() for rel, _ in found}
+    paths = {rel for rel in ice.tracked_files(root)
+             if ice.is_test_or_support(rel) and any(ice.in_folder(rel, f) for f in folders)}
+    paths |= ice.support_files(root, ice.support_dirs(folders))
+    for rel in sorted(paths):
+        os.makedirs(os.path.dirname(os.path.join(tmp, rel)) or tmp, exist_ok=True)
+        shutil.copyfile(os.path.join(root, rel), os.path.join(tmp, rel))
+
+
+def red(ids, tests, template, root, name):
+    failed = False
+    for sid in ids:
+        if not tests[sid]:
+            print("MISSING %s: no test names it (id or %s)" % (sid, ice.slug(sid)))
+            failed = True
+            continue
+        for rel, test in tests[sid]:
+            code, tail = run_test(template, root, rel, test)
+            if code == 0 or code in NOT_RUN:
+                failed = True
+                print("REJECT %s: %s::%s %s now (exit %d)" % (sid, rel, test, "passes" if code == 0 else "did not run", code))
+                for line in tail:
+                    print("  " + line)
+            else:
+                print("red %s: %s::%s fails now (exit %d): %s" % (sid, rel, test, code, tail[-1] if tail else ""))
+    print("fail-on-base %s --red: %s" % (name, "fail" if failed else "pass, every check exists and fails"))
+    return 1 if failed else 0
+
+
 def main():
     parser = argparse.ArgumentParser(prog="ice-fail-on-base", description=DESCRIPTION,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("change")
-    parser.add_argument("--base", help="base commit (default: merge-base of HEAD with the default branch)")
+    parser.add_argument("--base", help="base commit (default: the lock record's base, else the merge-base)")
     parser.add_argument("--test-cmd", help="overrides test_cmd from .ice/config")
     parser.add_argument("--for", dest="only", metavar="SCENARIO_ID", help="gate this scenario only")
+    parser.add_argument("--red", action="store_true", help="every check exists and fails on the working tree now")
     args = parser.parse_args()
 
     root = ice.repo_root()
@@ -70,27 +114,32 @@ def main():
     template = args.test_cmd or ice.read_config(root).get("test_cmd")
     if not template or "{filter}" not in template:
         ice.die("ice-fail-on-base: no test_cmd with {filter} in .ice/config and no --test-cmd")
-    head = ice.git("rev-parse", "HEAD", cwd=root)
-    base = ice.git("rev-parse", args.base or ice.git("merge-base", "HEAD", ice.default_branch(root), cwd=root), cwd=root)
-    if base == head:
-        ice.die("ice-fail-on-base: base is HEAD (%s); run it on the change's branch or pass --base" % head[:12])
-
     ids = ice.scenario_ids(change)
     if args.only:
         if args.only not in ids:
             ice.die("ice-fail-on-base: %s is not a scenario of %s" % (args.only, name))
         ids = [args.only]
     tests = ice.find_tests(root, ids)
+    if args.red:
+        return red(ids, tests, template, root, name)
+
+    head = ice.git("rev-parse", "HEAD", cwd=root)
+    record, _ = ice.tag_record(root, name)
+    if args.base:
+        base_from, base = "--base", args.base
+    elif record and record.get("base"):
+        base_from, base = "lock record", record["base"]
+    elif record is not None:
+        ice.die("ice-fail-on-base: tag %s holds no lock record with a base; the owner re-locks" % ice.tag_name(name))
+    else:
+        base_from, base = "merge-base, no lock record", ice.git("merge-base", "HEAD", ice.default_branch(root), cwd=root)
+    base = ice.git("rev-parse", "--verify", base + "^{commit}", cwd=root)
     dirty = bool(ice.git("status", "--porcelain", "--untracked-files=no", cwd=root))
 
     results, failed = {}, False
     with tempfile.TemporaryDirectory(prefix="ice-base.") as tmp:
         export_tree(root, base, tmp)
-        folders = {os.path.dirname(rel) for found in tests.values() for rel, _ in found}
-        for rel in ice.tracked_files(root):
-            if ice.is_test_or_support(rel) and any(ice.in_folder(rel, f) for f in folders):
-                os.makedirs(os.path.dirname(os.path.join(tmp, rel)), exist_ok=True)
-                shutil.copyfile(os.path.join(root, rel), os.path.join(tmp, rel))
+        overlay(root, tmp, tests)
         for sid in ids:
             if not tests[sid]:
                 results[sid] = {"ok": False, "reason": "no test names this scenario", "tests": []}
@@ -103,15 +152,15 @@ def main():
                 head_code, head_tail = run_test(template, root, rel, test)
                 runs.append({"test": "%s::%s" % (rel, test), "base_exit": base_code, "head_exit": head_code,
                              "base_tail": base_tail, "head_tail": head_tail})
-            bad_base = [r["test"] for r in runs if r["base_exit"] == 0]
+            bad_base = [r["test"] for r in runs if r["base_exit"] == 0 or r["base_exit"] in NOT_RUN]
             bad_head = [r["test"] for r in runs if r["head_exit"] != 0]
             ok = not bad_base and not bad_head
             failed |= not ok
-            reason = "; ".join(filter(None, ["passes on base: " + ", ".join(bad_base) if bad_base else "",
-                                             "fails on HEAD: " + ", ".join(bad_head) if bad_head else ""]))
+            reason = "; ".join(filter(None, ["passes or does not run on base: " + ", ".join(bad_base) if bad_base else "",
+                                             "fails on the working tree: " + ", ".join(bad_head) if bad_head else ""]))
             results[sid] = {"ok": ok, "reason": reason, "tests": runs}
             if ok:
-                print("ok %s: %s fails on base %s, passes on HEAD %s" % (sid, ", ".join(r["test"] for r in runs), base[:7], head[:7]))
+                print("ok %s: %s fails on base %s, passes on the working tree" % (sid, ", ".join(r["test"] for r in runs), base[:7]))
             else:
                 print("REJECT %s: %s" % (sid, reason))
 
@@ -124,7 +173,7 @@ def main():
             state = json.load(f)
         if state.get("head") != head or state.get("base") != base:
             state = {}
-    state.update({"change": name, "base": base, "head": head, "dirty": dirty,
+    state.update({"change": name, "base": base, "base_from": base_from, "head": head, "dirty": dirty,
                   "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
                   "test_cmd": template})
     state.setdefault("scenarios", {}).update(results)
@@ -132,8 +181,8 @@ def main():
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
         f.write("\n")
-    print("fail-on-base %s: %s (base %s, head %s%s) -> %s" % (
-        name, "pass" if not failed else "fail", base[:7], head[:7], ", tree dirty" if dirty else "",
+    print("fail-on-base %s: %s (base %s from %s, working tree on HEAD %s%s) -> %s" % (
+        name, "pass" if not failed else "fail", base[:7], base_from, head[:7], ", dirty" if dirty else "",
         os.path.relpath(state_path, root)))
     return 1 if failed else 0
 

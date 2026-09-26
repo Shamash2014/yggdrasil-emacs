@@ -113,7 +113,12 @@ only not to modify them, left more than 85% cheating (2510.20270).
 
 Text is weakest against editing the check files themselves, so an ICE
 change locks its checks and verifies the lock outside the agent. This
-skill is the rule; the lock is what holds it.
+skill is the rule; the lock is what holds it. Before the owner locks,
+.ice/ice-fail-on-base CHANGE --red must pass: every scenario has a check
+and every check fails now, with no implementation in the tree. A check
+counts only from inside a test: its name, decorator, docstring or body
+names the scenario id; an id in a helper or at module level counts for
+nothing.
 
 ## Done
 

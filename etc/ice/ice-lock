@@ -17,21 +17,37 @@ _loader.exec_module(ice)
 
 DESCRIPTION = """Lock a change's checks, or verify they are unchanged since the lock.
 
-lock records the locked set: the change's expectations.md and spec deltas,
-the test files that name a scenario id, .ice/config, the paths in
+The owner runs lock; workers never do. lock records the locked set: the
+change's intent.md, expectations.md and spec deltas, the test files that
+name a scenario id, every .ice/ice-* script and .ice/config, every
+conftest.py from the repo root down to each test folder with the runner
+configs beside them (pyproject.toml, pytest.ini, setup.cfg, tox.ini,
+package.json, jest.config.*, vitest.config.*, vite.config.*), the paths in
 lock_paths (.ice/config, space or comma separated, files or folders), and
-the test scripts of package.json. It writes their sha256 and HEAD to
-.ice/locks/CHANGE.json and the same record into the annotated tag
-ice-expect/CHANGE, signed when git config user.signingkey is set. A lock
-that differs from the tag needs --force, which moves the tag.
+the test scripts of package.json. It writes their sha256, HEAD as the base
+the checks were locked against, and whether it signed, to
+.ice/locks/CHANGE.json and into the annotated tag ice-expect/CHANGE,
+signed when git config user.signingkey is set. A lock that differs from
+the tag needs --force, which moves the tag and refuses unless
+ICE_LOCK_OWNER=1 is set in the environment.
 
 verify compares the working tree with the record in the tag, and exits 1
 naming every locked path that changed or went missing, every new file in
-the spec deltas or a lock_paths folder, and every new test or test
-support file (conftest.py, fixtures, snapshots) beside a locked test;
-source beside a test stays free. Exit 2 when the change is not locked."""
+the spec deltas or a lock_paths folder, every new test or test support
+file beside a locked test, every new conftest.py or runner config on the
+way down to a test folder, and every new .ice/ice-* script; source beside
+a test stays free. When the record says signed, or the repo sets
+user.signingkey, the tag must carry a valid signature. Exit 2 when the
+change is not locked.
 
-SIGNATURE = re.compile(r"^-----BEGIN (PGP|SSH) SIGNATURE-----", re.M)
+Limits: a worker running as the owner can set ICE_LOCK_OWNER=1 itself, or
+delete the tag and lock afresh; only a signing key it cannot use stops
+that. The .ice copies of these scripts are locked, but a tampered copy can
+still lie about itself: judge with the copy in the Emacs checkout
+(etc/ice/ice-verify CHANGE, run from the repo), which reads the same
+record."""
+
+OWNER_ENV = "ICE_LOCK_OWNER"
 
 
 def sha256(path):
@@ -49,10 +65,20 @@ def package_test_scripts(root):
     return tests or None
 
 
+def fixed_paths(rel_change):
+    return [os.path.join(rel_change, "intent.md"), os.path.join(rel_change, "expectations.md"), ".ice/config"]
+
+
+def watched_now(root, record):
+    paths = set(ice.ice_scripts(root)) | ice.support_files(root, record.get("support_dirs", [""]))
+    paths |= {p for p in record.get("fixed", []) if os.path.isfile(os.path.join(root, p))}
+    return paths
+
+
 def locked_set(root, change):
     rel_change = os.path.relpath(change, root)
     listed = ice.tracked_files(root)
-    files, dirs, test_dirs = {os.path.join(rel_change, "expectations.md"), ".ice/config"}, set(), set()
+    files, dirs, test_dirs = set(fixed_paths(rel_change)), set(), set()
     specs = os.path.join(rel_change, "specs")
     if os.path.isdir(os.path.join(root, specs)):
         dirs.add(specs)
@@ -74,59 +100,55 @@ def locked_set(root, change):
     tests_inside = {d: sorted(p for p in listed if ice.is_test_or_support(p) and ice.in_folder(p, d)) for d in sorted(test_dirs)}
     for members in list(inside.values()) + list(tests_inside.values()):
         files.update(members)
+    record = {"dirs": inside, "test_dirs": tests_inside, "support_dirs": ice.support_dirs(test_dirs),
+              "fixed": fixed_paths(rel_change), "package_test_scripts": package_test_scripts(root)}
+    files |= watched_now(root, record)
     files = {f for f in files if os.path.isfile(os.path.join(root, f))}
-    return {"files": {f: sha256(os.path.join(root, f)) for f in sorted(files)},
-            "dirs": inside,
-            "test_dirs": tests_inside,
-            "package_test_scripts": package_test_scripts(root)}
-
-
-def tag_name(name):
-    return "ice-expect/" + name
-
-
-def tag_record(root, name):
-    ref = "refs/tags/" + tag_name(name)
-    if not ice.git("rev-parse", "-q", "--verify", ref, cwd=root, check=False):
-        return None, None
-    raw = ice.git("cat-file", "-p", ref, cwd=root)
-    message = raw.split("\n\n", 1)[1] if "\n\n" in raw else ""
-    signed = bool(SIGNATURE.search(message))
-    body = SIGNATURE.split(message)[0]
-    start = body.find("{")
-    return (json.loads(body[start:]) if start >= 0 else None), signed
+    record["files"] = {f: sha256(os.path.join(root, f)) for f in sorted(files)}
+    return record
 
 
 def comparable(record):
-    return {k: record.get(k) for k in ("files", "dirs", "test_dirs", "package_test_scripts")}
+    return {k: record.get(k) for k in ("files", "dirs", "test_dirs", "support_dirs", "fixed", "package_test_scripts")}
+
+
+def signing_key(root):
+    return ice.git("config", "user.signingkey", cwd=root, check=False)
 
 
 def lock(root, change, name, force):
     record = locked_set(root, change)
-    record.update({"change": name, "head": ice.git("rev-parse", "HEAD", cwd=root),
+    head = ice.git("rev-parse", "HEAD", cwd=root)
+    signing = bool(signing_key(root))
+    record.update({"change": name, "head": head, "base": head, "signed": signing,
                    "ts": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")})
-    existing, signed = tag_record(root, name)
+    existing, signed = ice.tag_record(root, name)
     lock_path = os.path.join(root, ".ice", "locks", name + ".json")
-    if existing is not None and comparable(existing) == comparable(record):
-        print("ice-lock %s: already locked, nothing changed (%d paths, tag %s, %s)"
-              % (name, len(record["files"]), tag_name(name), "signed" if signed else "unsigned"))
+    if existing and comparable(existing) == comparable(record):
+        print("ice-lock %s: already locked, nothing changed (%d paths, tag %s, %s, base %s)"
+              % (name, len(record["files"]), ice.tag_name(name), "signed" if signed else "unsigned",
+                 existing.get("base", "?")[:7]))
         if not os.path.isfile(lock_path):
             write_json(lock_path, existing)
         return 0
     if existing is not None and not force:
-        print("ice-lock %s: the locked set differs from tag %s; the owner re-locks with --force" % (name, tag_name(name)))
-        for line in differences(root, existing):
+        print("ice-lock %s: the locked set differs from tag %s; the owner re-locks with %s=1 and --force"
+              % (name, ice.tag_name(name), OWNER_ENV))
+        for line in differences(root, existing) if existing else ["the tag holds no lock record"]:
             print("  " + line)
         return 1
+    if force and os.environ.get(OWNER_ENV) != "1":
+        print("ice-lock %s: --force refused: only the owner re-locks, with %s=1 in the environment" % (name, OWNER_ENV))
+        return 1
     write_json(lock_path, record)
-    signing = bool(ice.git("config", "user.signingkey", cwd=root, check=False))
-    message = "ice-expect %s\n\n%s\n" % (name, json.dumps(record, indent=2, sort_keys=True))
-    argv = ["git", "tag", "-s" if signing else "-a", "--cleanup=verbatim", "-F", "-"] + (["-f"] if force else []) + [tag_name(name), "HEAD"]
+    message = "ice-expect %s\n\n%s\n%s\n%s\n" % (name, ice.RECORD_BEGIN, json.dumps(record, indent=2, sort_keys=True),
+                                               ice.RECORD_END)
+    argv = ["git", "tag", "-s" if signing else "-a", "--cleanup=verbatim", "-F", "-"] + (["-f"] if force else []) + [ice.tag_name(name), "HEAD"]
     out = subprocess.run(argv, cwd=root, input=message, capture_output=True, text=True)
     if out.returncode != 0:
         ice.die("ice-lock: git tag failed: %s" % out.stderr.strip())
-    print("ice-lock %s: locked %d paths at %s -> %s, tag %s (%s)" % (
-        name, len(record["files"]), record["head"][:7], os.path.relpath(lock_path, root), tag_name(name),
+    print("ice-lock %s: locked %d paths against base %s -> %s, tag %s (%s)" % (
+        name, len(record["files"]), head[:7], os.path.relpath(lock_path, root), ice.tag_name(name),
         "signed with user.signingkey" if signing else "unsigned annotated: no user.signingkey"))
     for path in record["files"]:
         print("  " + path)
@@ -150,6 +172,8 @@ def differences(root, record):
             lines.append("missing: " + path)
         elif sha256(full) != digest:
             lines.append("changed: " + path)
+    for path in sorted(watched_now(root, record) - set(record["files"])):
+        lines.append("new: %s (locked kind: .ice script, config, intent, conftest or runner config)" % path)
     listed = ice.tracked_files(root)
     for folder, members in sorted(record["dirs"].items()):
         for path in listed:
@@ -165,28 +189,37 @@ def differences(root, record):
 
 
 def verify(root, name):
-    record, signed = tag_record(root, name)
+    record, signed = ice.tag_record(root, name)
     if record is None:
-        print("ice-lock %s: not locked (no tag %s)" % (name, tag_name(name)))
+        print("ice-lock %s: not locked (no tag %s)" % (name, ice.tag_name(name)))
         return 2
+    if not record:
+        print("ice-lock %s: FAILED: tag %s holds no lock record; the owner re-locks with %s=1 and --force"
+              % (name, ice.tag_name(name), OWNER_ENV))
+        return 1
     problems = differences(root, record)
     lock_path = os.path.join(root, ".ice", "locks", name + ".json")
     if os.path.isfile(lock_path):
         with open(lock_path, encoding="utf-8") as f:
             if comparable(json.load(f)) != comparable(record):
-                problems.append("changed: %s differs from tag %s" % (os.path.relpath(lock_path, root), tag_name(name)))
-    if signed:
-        check = subprocess.run(["git", "tag", "-v", tag_name(name)], cwd=root, capture_output=True, text=True)
-        if check.returncode != 0:
-            problems.append("signature: tag %s does not verify" % tag_name(name))
+                problems.append("changed: %s differs from tag %s" % (os.path.relpath(lock_path, root), ice.tag_name(name)))
+    if record.get("signed") or signing_key(root):
+        if not signed:
+            problems.append("signature: tag %s is unsigned, but %s" % (
+                ice.tag_name(name), "its record says signed" if record.get("signed") else "the repo sets user.signingkey"))
+        elif subprocess.run(["git", "tag", "-v", ice.tag_name(name)], cwd=root, capture_output=True).returncode != 0:
+            problems.append("signature: tag %s does not verify" % ice.tag_name(name))
+    elif signed and subprocess.run(["git", "tag", "-v", ice.tag_name(name)], cwd=root, capture_output=True).returncode != 0:
+        problems.append("signature: tag %s does not verify" % ice.tag_name(name))
     kind = "signed" if signed else "unsigned"
+    base = record.get("base", record.get("head", "?"))[:7]
     if problems:
-        print("ice-lock %s: FAILED against tag %s (%s, locked at %s)" % (name, tag_name(name), kind, record["head"][:7]))
+        print("ice-lock %s: FAILED against tag %s (%s, base %s)" % (name, ice.tag_name(name), kind, base))
         for line in problems:
             print("  " + line)
         return 1
-    print("ice-lock %s: clean, %d paths match tag %s (%s, locked at %s)" % (
-        name, len(record["files"]), tag_name(name), kind, record["head"][:7]))
+    print("ice-lock %s: clean, %d paths match tag %s (%s, base %s)" % (
+        name, len(record["files"]), ice.tag_name(name), kind, base))
     return 0
 
 
@@ -195,7 +228,7 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("change")
     parser.add_argument("action", choices=("lock", "verify"))
-    parser.add_argument("--force", action="store_true", help="re-lock a changed set and move the tag")
+    parser.add_argument("--force", action="store_true", help="re-lock a changed set and move the tag; needs ICE_LOCK_OWNER=1")
     args = parser.parse_args()
     root = ice.repo_root()
     change = ice.change_dir(root, args.change)

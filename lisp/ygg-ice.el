@@ -1154,13 +1154,22 @@ With CODEX, CODEX_HOME points at an empty folder of its own."
   (if (file-executable-p script) (expand-file-name script)
     (user-error "ice: %s is not there yet" (abbreviate-file-name script))))
 
-(defun ygg-ice-wire ()
-  "Run ice-wire.sh on this repository."
+(defun ygg-ice-wire (&optional root rebaseline)
+  "Run ice-wire.sh on ROOT, this repository by default.
+With REBASELINE the test suite's baseline is recorded again.  A project
+imported with SPC p i is offered this as the import's ice step."
   (interactive)
-  (let ((root (ygg-ice-root)))
-    (ygg-ice--compile root (format "%s %s" (shell-quote-argument (ygg-ice--script ygg-ice-wire-script))
-                                   (shell-quote-argument (directory-file-name root)))
+  (let ((root (or root (ygg-ice-root))))
+    (ygg-ice--compile root (format "%s %s%s" (shell-quote-argument (ygg-ice--script ygg-ice-wire-script))
+                                   (if rebaseline "--rebaseline " "")
+                                   (shell-quote-argument (directory-file-name (expand-file-name root))))
                       "wire" t)))
+
+(defun ygg-ice-import-step (root)
+  "The ice extra of importing ROOT: wire it, or refresh a wired one's
+scripts, skills and baseline.  It runs only when the import picked it."
+  (ygg-ice-wire root (file-directory-p (expand-file-name ".ice" root)))
+  t)
 
 (defun ygg-ice-check (kind change)
   "Run ice-check KIND on CHANGE: intent, expect or plan."
@@ -1633,6 +1642,10 @@ on disk is shown as it is."
 
 (defvar aob-compose-spawn-function)
 (defvar aob-compose--dir)
+(defvar ygg-aob--draft-tree)
+(declare-function aob-live-sessions "aob" ())
+(declare-function aob-session-dir "aob" (s))
+(declare-function aob-session-project "aob" (s))
 (declare-function ygg-aob--expand-presets "layer-aob" (text))
 (declare-function ygg-preset-get "ygg-preset" (name &optional root))
 (declare-function ygg-preset-skills "ygg-preset" (d))
@@ -1658,6 +1671,7 @@ names ride after it."
     (user-error "ice: aob is not loaded"))
   (let* ((root (file-name-as-directory (expand-file-name root)))
          (aob-compose--dir root)
+         (ygg-aob--draft-tree nil)
          (default-directory root)
          (text (ygg-aob--expand-presets (format "@%s %s" preset goal))))
     (unless (and text (string-search (format "<preset name=\"%s\">" preset) text))
@@ -1682,10 +1696,25 @@ It reads intent.md and the repo and writes gaps.md beside it."
      (format "Find the gaps in the intent of change %s: read %s and write %sgaps.md. Never edit intent.md."
              (plist-get change :name) (file-relative-name intent root) dir))))
 
+(defun ygg-ice--live-sessions-in (root)
+  "The live agent sessions working inside ROOT."
+  (let ((root (file-truename (file-name-as-directory (expand-file-name root)))))
+    (and (fboundp 'aob-live-sessions)
+         (seq-filter (lambda (s)
+                       (when-let* ((dir (or (aob-session-dir s) (aob-session-project s))))
+                         (string-prefix-p root (file-truename (file-name-as-directory (expand-file-name dir))))))
+                     (aob-live-sessions)))))
+
 (defun ygg-ice-maintain (root)
   "Keep ROOT's verification skill and lat.md feature map honest.
-A session under the maintain preset; it ends clean, changed or blocked."
+A session under the maintain preset; it ends clean, changed or blocked.
+Skipped while an agent session is live in ROOT: its edits would land in
+the middle of that session's change."
   (interactive (list (ygg-ice-root)))
+  (when-let* ((live (ygg-ice--live-sessions-in root)))
+    (user-error "ice: maintain skipped in %s: %d live agent session%s there"
+                (abbreviate-file-name (directory-file-name (expand-file-name root)))
+                (length live) (if (cdr live) "s" "")))
   (ygg-ice--spawn-under
    "maintain" root
    (format "Run the maintain pass on %s: every feature section of lat.md/features.md from source, then live."
@@ -1696,16 +1725,45 @@ A session under the maintain preset; it ends clean, changed or blocked."
 (defconst ygg-ice--confirmed-re "^[ \t]*Confirmed:.*$"
   "The owner's line under Restated.")
 
-(defun ygg-ice--restated-bounds ()
-  "The body of this buffer's Restated section as (BEG . END), or nil."
+(defun ygg-ice--section-bounds (title-re)
+  "The body of the h2 section whose title matches TITLE-RE, as (BEG . END)."
   (save-excursion
     (goto-char (point-min))
     (let ((case-fold-search t))
-      (when (re-search-forward "^##[ \t]+Restated[ \t]*$" nil t)
+      (when (re-search-forward (concat "^##[ \t]+" title-re "[ \t]*$") nil t)
         (let ((beg (min (point-max) (1+ (point)))))
           (cons beg (if (re-search-forward "^##[ \t]" nil t)
                         (match-beginning 0)
                       (point-max))))))))
+
+(defun ygg-ice--restated-bounds ()
+  "The body of this buffer's Restated section as (BEG . END), or nil."
+  (ygg-ice--section-bounds "Restated"))
+
+(defun ygg-ice--section-canonical (title-re &optional stamp-re)
+  "The section under TITLE-RE as ice-check hashes it.
+Lines right-trimmed, the owner's STAMP-RE lines out (Confirmed lines by
+default), blank lines at the ends dropped."
+  (let ((bounds (ygg-ice--section-bounds title-re))
+        (stamp-re (or stamp-re ygg-ice--confirmed-re))
+        (case-fold-search nil))
+    (string-trim
+     (mapconcat #'string-trim-right
+                (seq-remove (lambda (line) (string-match-p stamp-re line))
+                            (and bounds (split-string (buffer-substring-no-properties (car bounds) (cdr bounds))
+                                                      "\n")))
+                "\n")
+     "\n+" "\n+")))
+
+(defun ygg-ice--intent-hash ()
+  "The sha1 prefix the Confirmed line carries.
+It covers What is wanted and Restated, as ice-check intent reads them."
+  (substring (secure-hash 'sha1 (encode-coding-string
+                                 (concat (ygg-ice--section-canonical "What[ \t]+is[ \t]+wanted")
+                                         "\n\n"
+                                         (ygg-ice--section-canonical "Restated"))
+                                 'utf-8))
+             0 8))
 
 (defun ygg-ice--restated-text ()
   "The Restated section's words in this buffer, its Confirmed line left out."
@@ -1715,26 +1773,34 @@ A session under the maintain preset; it ends clean, changed or blocked."
                                (buffer-substring-no-properties (car bounds) (cdr bounds))))))
 
 (defun ygg-ice--write-confirmed (date)
-  "Set this buffer's Confirmed line under Restated to DATE, the only one there."
-  (let ((bounds (or (ygg-ice--restated-bounds) (user-error "ice: no Restated section"))))
-    (save-excursion
-      (let ((end (copy-marker (cdr bounds))) placed)
-        (goto-char (car bounds))
-        (while (re-search-forward ygg-ice--confirmed-re end t)
-          (if placed
-              (delete-region (match-beginning 0) (min (point-max) (1+ (match-end 0))))
-            (replace-match (concat "Confirmed: " date) t t)
-            (setq placed t)))
-        (unless placed
-          (goto-char end)
-          (skip-chars-backward " \t\n" (car bounds))
-          (delete-region (point) end)
-          (insert "\n\nConfirmed: " date "\n" (if (< end (point-max)) "\n" "")))
-        (set-marker end nil)))))
+  "Set the Confirmed line under Restated to DATE and the intent's hash.
+It is left the only one there."
+  (ygg-ice--write-stamp (or (ygg-ice--restated-bounds) (user-error "ice: no Restated section"))
+                        ygg-ice--confirmed-re
+                        (concat "Confirmed: " date " sha1:" (ygg-ice--intent-hash))))
+
+(defun ygg-ice--write-stamp (bounds stamp-re line)
+  "Leave LINE the only STAMP-RE line in BOUNDS, in place of the first one.
+With none there, LINE goes after the section's last words."
+  (save-excursion
+    (let ((end (copy-marker (cdr bounds))) (case-fold-search nil) placed)
+      (goto-char (car bounds))
+      (while (re-search-forward stamp-re end t)
+        (if placed
+            (delete-region (match-beginning 0) (min (point-max) (1+ (match-end 0))))
+          (replace-match line t t)
+          (setq placed t)))
+      (unless placed
+        (goto-char end)
+        (skip-chars-backward " \t\n" (car bounds))
+        (delete-region (point) end)
+        (insert "\n\n" line "\n" (if (< end (point-max)) "\n" "")))
+      (set-marker end nil))))
 
 (defun ygg-ice-confirm-intent (change)
   "Show CHANGE's Restated intent and, on yes, set its Confirmed line to today.
-The owner's act: ice-check intent fails until the line holds a date."
+The line carries the sha1 of What is wanted and Restated; the owner's act:
+ice-check intent fails until the line holds a date and a matching hash."
   (interactive (list (ygg-ice-read-change (ygg-ice-root) "Confirm intent of: ")))
   (let* ((file (ygg-ice--intent-file change))
          (buf (ygg-ice--visit-fresh file))
@@ -1759,6 +1825,53 @@ The owner's act: ice-check intent fails until the line holds a date."
             (ygg-ice--write-confirmed date)
             (save-buffer))
           (message "ice: %s confirmed %s" name date)
+          date)))))
+
+;;; The owner's approval of the checkpoints
+
+(defconst ygg-ice--approved-re "^[ \t]*Approved:.*$"
+  "The owner's line under the Checkpoints list.")
+
+(defun ygg-ice--checkpoints-hash ()
+  "The sha1 prefix the Approved line carries, over the Checkpoints section.
+It matches ice-check plan's checkpoints_hash byte for byte."
+  (substring (secure-hash 'sha1 (encode-coding-string
+                                 (ygg-ice--section-canonical "Checkpoints" ygg-ice--approved-re)
+                                 'utf-8))
+             0 8))
+
+(defun ygg-ice-approve-checkpoints (change)
+  "Show CHANGE's checkpoints and, on yes, set their Approved line to today.
+The line carries the sha1 of the list; the owner's act: ice-check plan
+fails until the line holds a date and a matching hash."
+  (interactive (list (ygg-ice-read-change (ygg-ice-root) "Approve checkpoints of: ")))
+  (let* ((name (plist-get change :name))
+         (file (or (plist-get change :tasks) (user-error "ice: %s has no tasks.md" name)))
+         (buf (ygg-ice--visit-fresh file))
+         (text (with-current-buffer buf
+                 (unless (ygg-ice--section-bounds "Checkpoints")
+                   (user-error "ice: %s has no Checkpoints section in tasks.md" name))
+                 (ygg-ice--section-canonical "Checkpoints" ygg-ice--approved-re))))
+    (when (string-empty-p text)
+      (user-error "ice: %s has no checkpoints listed yet" name))
+    (let* ((shown (get-buffer-create (format "*ice: checkpoints %s*" name)))
+           (win (progn
+                  (with-current-buffer shown
+                    (special-mode)
+                    (let ((inhibit-read-only t))
+                      (erase-buffer)
+                      (insert text "\n")
+                      (goto-char (point-min))))
+                  (display-buffer shown)))
+           (yes (unwind-protect (y-or-n-p (format "Approve the checkpoints of %s? " name))
+                  (if (window-live-p win) (quit-restore-window win 'kill) (kill-buffer shown)))))
+      (when yes
+        (let ((date (format-time-string "%Y-%m-%d")))
+          (with-current-buffer buf
+            (ygg-ice--write-stamp (ygg-ice--section-bounds "Checkpoints") ygg-ice--approved-re
+                                  (concat "Approved: " date " sha1:" (ygg-ice--checkpoints-hash)))
+            (save-buffer))
+          (message "ice: %s checkpoints approved %s" name date)
           date)))))
 
 ;;; The daily maintain run, inside Emacs only
@@ -1795,13 +1908,16 @@ The owner's act: ice-check intent fails until the line holds a date."
       (let ((root (file-name-as-directory (expand-file-name root))))
         (when (and (file-directory-p root)
                    (not (equal (alist-get root stamps nil nil #'equal) today)))
-          (condition-case err
-              (progn
-                (ygg-ice-maintain root)
-                (setf (alist-get root stamps nil nil #'equal) today)
-                (setq started t))
-            (error (message "ice: the daily maintain in %s did not start: %s"
-                            (abbreviate-file-name root) (error-message-string err)))))))
+          (if-let* ((live (ygg-ice--live-sessions-in root)))
+              (message "ice: the daily maintain in %s skipped: %d live agent session%s there"
+                       (abbreviate-file-name root) (length live) (if (cdr live) "s" ""))
+            (condition-case err
+                (progn
+                  (ygg-ice-maintain root)
+                  (setf (alist-get root stamps nil nil #'equal) today)
+                  (setq started t))
+              (error (message "ice: the daily maintain in %s did not start: %s"
+                              (abbreviate-file-name root) (error-message-string err))))))))
     (when started (ygg-ice--maintain-save-stamps stamps))))
 
 (defun ygg-ice--maintain-arm ()
@@ -1829,28 +1945,15 @@ customize or setopt, so the timer follows."
   "The SPC a k prefix: intent, context and expectation docs.")
 
 (defconst ygg-ice-leader-keys
-  '(("w" ygg-ice-wire "wire this repo")
-    ("i" ygg-ice-check-intent "check intent")
-    ("e" ygg-ice-check-expect "check expectations")
-    ("p" ygg-ice-check-plan "check plan")
-    ("G" ygg-ice-gaps "gap detector")
-    ("R" ygg-ice-confirm-intent "confirm intent")
-    ("M" ygg-ice-maintain "maintain feature map")
-    ("l" ygg-ice-lat-check "lat check")
-    ("s" ygg-ice-lat-search "lat search")
-    ("f" ygg-ice-follow "follow link")
-    ("c" ygg-ice-connections "connections here")
-    ("C" ygg-ice-connections-pick "connections of…")
+  '(("R" ygg-ice-confirm-intent "confirm intent")
+    ("A" ygg-ice-approve-checkpoints "approve checkpoints")
     ("o" ygg-ice-changes-list "openspec changes")
-    ("O" ygg-ice-open-change "open a change")
-    ("t" ygg-ice-tasks "a change's tasks")
-    ("a" ygg-ice-open-adr "open an ADR")
-    ("g" ygg-ice-open-glossary "glossary")
-    ("v" ygg-ice-c4-validate "c4 validate")
-    ("d" ygg-ice-c4-drift "c4 drift")
-    ("b" ygg-ice-c4-preview "c4 preview")
-    ("r" ygg-ice-c4-readme "c4 readme"))
-  "Each key under SPC a k, its command and its which-key label.")
+    ("s" ygg-ice-lat-search "lat search")
+    ("c" ygg-ice-connections "connections here")
+    ("b" ygg-ice-c4-preview "c4 preview"))
+  "Each key under SPC a k, its command and its which-key label.
+The owner's two acts and four lookups; the lead runs the rest, and each
+other ICE command stays an M-x away.")
 
 (pcase-dolist (`(,key ,cmd ,label) ygg-ice-leader-keys)
   (define-key ygg-ice-leader-map (kbd key) (cons label cmd)))
