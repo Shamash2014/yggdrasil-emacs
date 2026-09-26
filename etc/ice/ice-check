@@ -1,0 +1,243 @@
+#!/usr/bin/env python3
+import datetime
+import os
+import re
+import sys
+
+INTENT_SECTIONS = [
+    "What is wanted",
+    "Caller's view",
+    "Constraints",
+    "Failure scenarios",
+    "Success scenarios",
+    "Connections",
+    "Out of scope",
+    "Alternatives refused",
+]
+CONFIRMED = re.compile(r"^\s*Confirmed:\s*(.*?)\s*$")
+PLACEHOLDER_LINE = re.compile(r"^\s*(-|\*|Feature:|- \[[ xX]\])?\s*$")
+LIST_ITEM = re.compile(r"^\s*[-*]\s+\S")
+SCENARIO_HEADING = re.compile(r"^##\s+Scenario:(.*)$")
+STEP = {k: re.compile(r"^\s*(?:[-*]\s*)?\**%s\**:?\**\s+\S" % k, re.I) for k in ("GIVEN", "WHEN", "THEN")}
+SCENARIO_ID = re.compile(r"^[A-Za-z0-9][\w./-]*#[A-Za-z0-9][\w.-]*$")
+CONTRACT_ID = re.compile(r"^\s*[-*]\s+\[?([CL]\d+)\]?[:.)]?\s+\S")
+CONTRACT_EMPTY = re.compile(r"^\s*[-*]\s+\[?([CL]\d+)\]?[:.)]?\s*$")
+CONTRACT_HEADINGS = {"preconditions": "Pre-conditions", "postconditions": "Post-conditions",
+                     "undefinedinputs": "Undefined inputs", "laws": "Laws"}
+COVERS = re.compile(r"^\s*(?:[-*]\s*)?\**Covers\**:?\**\s*(.*)$", re.I)
+CHECK = re.compile(r"^\s*(?:[-*]\s*)?\**Check\**:?\**\s*(.*)$", re.I)
+SLICE = re.compile(r"^- \[[ xX]\]\s+(\d+)\.\s*(.*)$")
+FIELD = re.compile(r"^\s+[-*]\s*([A-Za-z ]+):\s*(.*)$")
+
+
+def read(path):
+    with open(path, encoding="utf-8") as f:
+        return f.read().splitlines()
+
+
+def normalize(title):
+    return re.sub(r"\s+", " ", title.replace("’", "'")).strip().lower()
+
+
+def h2_sections(lines):
+    sections, current = {}, None
+    for line in lines:
+        m = re.match(r"^##\s+(.*?)\s*$", line)
+        if m and not line.startswith("###"):
+            current = normalize(m.group(1))
+            sections[current] = []
+        elif current is not None:
+            sections[current].append(line)
+    return sections
+
+
+def check_intent(change):
+    path = os.path.join(change, "intent.md")
+    if not os.path.isfile(path):
+        return ["intent.md is missing"]
+    sections = h2_sections(read(path))
+    gaps = []
+    for name in INTENT_SECTIONS:
+        body = sections.get(normalize(name))
+        if body is None:
+            gaps.append("missing section: %s" % name)
+            continue
+        content = [l for l in body if not PLACEHOLDER_LINE.match(l)]
+        if name == "Alternatives refused":
+            if not any(LIST_ITEM.match(l) for l in content):
+                gaps.append("no refused alternative: Alternatives refused needs at least one list item")
+        elif not content:
+            gaps.append("empty section: %s" % name)
+    return gaps + check_restated(sections.get("restated"))
+
+
+def confirmed_date(value):
+    try:
+        return datetime.datetime.strptime(value, "%Y-%m-%d").date()
+    except ValueError:
+        return None
+
+
+def check_restated(body):
+    if body is None:
+        return ["missing section: Restated"]
+    confirmed = [CONFIRMED.match(l).group(1) for l in body if CONFIRMED.match(l)]
+    words = [l for l in body if not PLACEHOLDER_LINE.match(l) and not CONFIRMED.match(l)]
+    gaps = []
+    if not words:
+        gaps.append("empty section: Restated: the agent restates the intent in its own words")
+    if not any(confirmed_date(c) for c in confirmed):
+        gaps.append("not confirmed: the owner sets Confirmed: YYYY-MM-DD under Restated")
+    return gaps
+
+
+def contract_heading(title):
+    return CONTRACT_HEADINGS.get(re.sub(r"[-\s]", "", title).lower())
+
+
+def contract_lines(lines):
+    """Contract list items as (kind, id, text, tested, heading); kind is None under an unknown h3."""
+    items, h2, h3 = [], None, None
+    for line in lines:
+        h = re.match(r"^###\s+(.*?)\s*$", line)
+        if h:
+            h3 = h.group(1)
+            continue
+        h = re.match(r"^##\s+(.*?)\s*$", line)
+        if h:
+            h2, h3 = normalize(h.group(1)), None
+            continue
+        if h3 is None or not LIST_ITEM.match(line):
+            continue
+        kind = contract_heading(h3)
+        if kind == "Undefined inputs" or (kind is None and not (h2 or "").startswith("contract")):
+            continue
+        m = CONTRACT_ID.match(line) or CONTRACT_EMPTY.match(line)
+        items.append((kind, m.group(1) if m else None, line.strip(),
+                      "(tested" in line.lower(), h3))
+    return items
+
+
+def check_expect(change):
+    path = os.path.join(change, "expectations.md")
+    if not os.path.isfile(path):
+        return ["expectations.md is missing"]
+    lines = read(path)
+    scenarios, current = [], None
+    for line in lines:
+        m = SCENARIO_HEADING.match(line)
+        if m:
+            current = [m.group(1).strip(), []]
+            scenarios.append(current)
+        elif re.match(r"^#{1,2}\s", line):
+            current = None
+        elif current is not None:
+            current[1].append(line)
+    if not scenarios:
+        return ["no Given/When/Then scenario: expectations.md has no '## Scenario:' section"]
+    gaps = []
+    for index, (title, body) in enumerate(scenarios, 1):
+        label = title or "scenario %d" % index
+        first = title.split()[0] if title else ""
+        if not SCENARIO_ID.match(first):
+            gaps.append("scenario '%s' has no id (capability#slug)" % label)
+        for step, pattern in STEP.items():
+            if not any(pattern.match(l) for l in body):
+                gaps.append("scenario '%s' is missing %s" % (label, step))
+    covered, property_covered = set(), set()
+    for title, body in scenarios:
+        ids = set()
+        for l in body:
+            m = COVERS.match(l)
+            if m:
+                ids |= set(re.findall(r"\b[CL]\d+\b", m.group(1)))
+        covered |= ids
+        if any((CHECK.match(l) and "property" in CHECK.match(l).group(1).lower()) for l in body):
+            property_covered |= ids
+    for kind, cid, text, tested, heading in contract_lines(lines):
+        if kind is None:
+            gaps.append("contract line under unknown heading '### %s': use %s: %s"
+                        % (heading, ", ".join("### " + h for h in CONTRACT_HEADINGS.values()), text))
+        elif cid is not None and CONTRACT_EMPTY.match(text):
+            gaps.append("contract line %s is empty" % cid)
+        elif cid is None:
+            gaps.append("contract line has no id (C1 for conditions, L1 for laws): %s" % text)
+        elif tested:
+            continue
+        elif kind == "Laws" and cid not in property_covered:
+            gaps.append("law %s has no property check: no scenario with Check: property covers it" % cid)
+        elif kind != "Laws" and cid not in covered:
+            gaps.append("contract line %s is untested: no scenario Covers it" % cid)
+    return gaps
+
+
+def check_plan(change):
+    gaps = ["expect: %s" % g for g in check_expect(change)]
+    path = os.path.join(change, "tasks.md")
+    if not os.path.isfile(path):
+        return gaps + ["tasks.md is missing"]
+    slices, current = [], None
+    for line in read(path):
+        m = SLICE.match(line)
+        if m:
+            current = {"label": "%s. %s" % (m.group(1), m.group(2).strip()), "fields": {}}
+            slices.append(current)
+            continue
+        f = FIELD.match(line)
+        if current is not None and f:
+            current["fields"][normalize(f.group(1))] = f.group(2).strip()
+        elif re.match(r"^\S", line):
+            current = None
+    if not slices:
+        gaps.append("tasks.md has no slices ('- [ ] N. <slice>')")
+    for s in slices:
+        for field in ("Pass when", "Evidence"):
+            if not s["fields"].get(normalize(field)):
+                gaps.append("slice '%s' has no %s" % (s["label"], field))
+    return gaps
+
+
+def check_repo(root):
+    changes_dir = os.path.join(root, "openspec", "changes")
+    failed = False
+    if not os.path.isdir(changes_dir):
+        return 0
+    for name in sorted(os.listdir(changes_dir)):
+        change = os.path.join(changes_dir, name)
+        if name == "archive" or not os.path.isdir(change):
+            continue
+        runs = []
+        if os.path.isfile(os.path.join(change, "intent.md")):
+            runs.append("intent")
+        if os.path.isfile(os.path.join(change, "tasks.md")):
+            runs.append("plan")
+        elif os.path.isfile(os.path.join(change, "expectations.md")):
+            runs.append("expect")
+        for kind in runs:
+            failed |= report(kind, change) != 0
+    return 1 if failed else 0
+
+
+CHECKS = {"intent": check_intent, "expect": check_expect, "plan": check_plan}
+
+
+def report(kind, change):
+    gaps = CHECKS[kind](change)
+    for gap in gaps:
+        print("ice-check %s %s: %s" % (kind, change, gap))
+    if not gaps:
+        print("ice-check %s %s: ok" % (kind, change))
+    return 1 if gaps else 0
+
+
+def main(argv):
+    if len(argv) == 3 and argv[1] in CHECKS:
+        return report(argv[1], argv[2].rstrip("/"))
+    if len(argv) in (2, 3) and argv[1] == "repo":
+        return check_repo(argv[2] if len(argv) == 3 else ".")
+    sys.stderr.write("usage: ice-check intent|expect|plan CHANGE-DIR\n       ice-check repo [ROOT]\n")
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

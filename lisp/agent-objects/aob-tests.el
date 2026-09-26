@@ -4412,14 +4412,14 @@ next chunk does not pull the page back down."
       (with-current-buffer (aob-trace--comment-box trace 1 "q" 1)
         (set-window-buffer (selected-window) (current-buffer))
         (insert "one line")
-        (should (= (aob-compose--wanted-height) 3))
+        (should (= (aob-compose--wanted-height) aob-compose-anchored-height))
         (insert "\n2\n3\n4\n5")
         (should (= (aob-compose--wanted-height) 7))
         (insert (make-string 40 ?\n))
         (should (= (aob-compose--wanted-height)
                    aob-compose-anchored-max-height))
         (erase-buffer)
-        (should (= (aob-compose--wanted-height) 3))))))
+        (should (= (aob-compose--wanted-height) aob-compose-anchored-height))))))
 
 (ert-deftest aob-trace-comment-box-holds-and-send-now-sends-all ()
   (aob-tests--with-session s

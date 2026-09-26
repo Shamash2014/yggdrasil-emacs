@@ -33,7 +33,15 @@ Write `skills/verify-<app>/SKILL.md` with YAML frontmatter (`name: verify-<app>`
 
 ## 3. Seed the feature map
 
-Create `skills/verify-<app>/features/README.md` plus one file per user-facing feature you can identify (aim for the top 3-5 to start, from routes, commands, menus, or docs). Follow the shape in [`references/feature-map-example/`](references/feature-map-example/), with a README index and one file per feature. Each file answers, from the user's point of view: what the feature is, how to reach it, how to drive it with the harness, and what observable end state proves it works. The four H2s are `Sub-features`, `How to get to it (user POV)`, `Driving it with <harness>`, and `Gotchas`. The map is the repo's maintained verification source; a proof that drives one convenient entry point is incomplete when the map lists others.
+The map lives in the repo's lat.md, not in the skill's folder: one file, lat.md/features.md, headed "# Features", with one h2 section per user-facing feature you can identify (aim for the top 3-5 to start, from routes, commands, menus, or docs). Follow the shape in [references/feature-map-example/features.md](references/feature-map-example/features.md). Each section answers, from the user's point of view: what the feature is, how to reach it, how to drive it with the harness, and what observable end state proves it works.
+
+- The h2 is the feature as a user names it. Intents point at it as "Feature: <name>" and the archive step files changes under it by that name, so rename one only on purpose. Nothing but features gets an h2 here: baseline state and driving conventions go in the h1's body or the verify skill's own sections.
+- Under it, four h3s in this order: Sub-features, How to get to it, Driving it, and Gotchas. Driving it names the harness in its opening line and pairs each user action with an exact command and the observable result. A Changes h3 belongs to the archive step; leave it alone.
+- lat refuses a section without a leading paragraph: every h1, h2 and h3 opens with one plain paragraph of at most 250 characters before any list.
+- Where the repo has no lat.md/ yet, create lat.md/lat.md with a one-line lead and an index line "- [[features]] — feature map, one section per user-visible feature". Where lat.md/lat.md exists, add that line if it is missing.
+- Run lat check from the repo root and fix what it reports before moving on. Its "No init version recorded" warning is not a failure; never run lat init to clear it, wiring the repo is ice-wire's job.
+
+The skill's SKILL.md points at the map as [[features]] in lat.md/features.md; it keeps no copy. The map is the repo's maintained verification source; a proof that drives one convenient entry point is incomplete when the map lists others.
 
 ## 4. Prove the generated skill before handing it over
 
@@ -41,4 +49,4 @@ Run its own instructions end to end once: launch, doctor, drive ONE mapped featu
 
 ## 5. Offer the maintenance loop
 
-Point the user at `/maintain-verification-skill` for keeping the map honest as the app changes. Suggest a cadence only if they ask.
+Point the user at `/maintain-verification-skill` for keeping the map honest as the app changes; in Emacs, the maintain preset runs it (SPC a k M), and ygg-ice-maintain-daily runs it once a day. Suggest a cadence only if they ask.

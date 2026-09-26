@@ -1685,7 +1685,7 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   ;; have to already know about
   "p" #'ygg-project-import :label "import project"
   "P" #'ygg-projects-add :label "add project"
-  "k" #'ygg-conversations :label "conversations"
+  "v" #'ygg-conversations :label "conversations"
   "z" #'ygg-projects-toggle-past :label "old sessions on/off"
   "Z" #'ygg-projects-toggle-archived :label "archived on/off")
 

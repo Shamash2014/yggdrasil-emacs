@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+HELP = """usage: ice-scenarios CHANGE [--tests]
+
+Print the scenario ids of a change's expectations.md, one per line.
+CHANGE is a change name under openspec/changes or a path to its folder.
+--tests adds, after a tab, each test that names the scenario, as FILE::NAME.
+
+A test names a scenario when its title, name or docstring holds the id
+(cart#promo-before-tax) or its slug (cart__promo_before_tax).
+The other ice tools load this file for the shared parts."""
+
+SCENARIO_HEADING = re.compile(r"^##\s+Scenario:\s*(\S+)")
+CONFIG_KEYS = ("test_cmd", "report_path", "lock_paths", "live_cmd", "perf_cmd", "mutate_cmd")
+TEST_FILE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*_test\.go|[^/]*[._-](test|spec)s?\.[cm]?[jt]sx?|[^/]*-tests?\.el|[^/]*_spec\.rb|[^/]*Tests?\.(swift|kt|java))$")
+TEST_SUPPORT = re.compile(r"(^|/)(conftest\.py|__snapshots__/|__fixtures__/|fixtures/|testdata/|test-data/|test_helper[^/]*|test-helper[^/]*)")
+TEST_DEF = [
+    re.compile(r"^\s*(?:async\s+)?def\s+(test\w*)"),
+    re.compile(r"^\s*(?:it|test|describe)(?:\.\w+)?\s*\(\s*(['\"`])(.+?)\1"),
+    re.compile(r"^\s*\(ert-deftest\s+([^\s()]+)"),
+    re.compile(r"^\s*func\s+(Test\w+)"),
+    re.compile(r"^\s*(?:it|scenario|specify)\s+(['\"])(.+?)\1"),
+    re.compile(r"^\s*(?:@Test\s+)?(?:public\s+)?(?:func|fun|void)\s+(test\w*)"),
+]
+
+
+def die(message, code=2):
+    print(message, file=sys.stderr)
+    sys.exit(code)
+
+
+def git(*args, cwd=None, check=True):
+    out = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if check and out.returncode != 0:
+        die("git %s: %s" % (" ".join(args), out.stderr.strip()))
+    return out.stdout.strip()
+
+
+def repo_root():
+    return git("rev-parse", "--show-toplevel")
+
+
+def default_branch(root):
+    ref = git("symbolic-ref", "-q", "--short", "refs/remotes/origin/HEAD", cwd=root, check=False)
+    if ref:
+        return ref
+    for name in (git("config", "init.defaultBranch", cwd=root, check=False), "main", "master"):
+        if name and git("rev-parse", "-q", "--verify", name + "^{commit}", cwd=root, check=False):
+            return name
+    die("ice: no default branch found; pass --base")
+
+
+def change_dir(root, change):
+    for path in (change, os.path.join(root, change), os.path.join(root, "openspec", "changes", change)):
+        if os.path.isfile(os.path.join(path, "expectations.md")):
+            return os.path.realpath(path)
+    die("ice: no expectations.md for change %s (looked under openspec/changes)" % change)
+
+
+def change_name(path):
+    return os.path.basename(path.rstrip("/"))
+
+
+def scenario_ids(change_path):
+    with open(os.path.join(change_path, "expectations.md"), encoding="utf-8") as f:
+        return [m.group(1) for m in map(SCENARIO_HEADING.match, f) if m]
+
+
+def slug(scenario_id):
+    return re.sub(r"[^A-Za-z0-9_]", "_", scenario_id.replace("#", "__"))
+
+
+def names_scenario(text, scenario_id):
+    by_id = r"(?<![\w#./-])%s(?![\w-])" % re.escape(scenario_id)
+    by_slug = r"(?<![A-Za-z0-9])%s(?![A-Za-z0-9]|_(?!_))" % re.escape(slug(scenario_id))
+    return bool(re.search(by_id, text) or re.search(by_slug, text))
+
+
+def read_config(root):
+    config, path = {}, os.path.join(root, ".ice", "config")
+    if os.path.isfile(path):
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = (part.strip() for part in line.split("=", 1))
+                if key in CONFIG_KEYS and value:
+                    config[key] = value
+    return config
+
+
+def tracked_files(root):
+    listed = git("ls-files", "--cached", "--others", "--exclude-standard", "-z", cwd=root)
+    return sorted({p for p in listed.split("\0") if p and os.path.isfile(os.path.join(root, p))})
+
+
+def test_files(root):
+    return [p for p in tracked_files(root) if TEST_FILE.search(p) and not p.startswith((".ice/", "openspec/"))]
+
+
+def is_test_or_support(rel):
+    return bool(TEST_FILE.search(rel) or TEST_SUPPORT.search(rel))
+
+
+def in_folder(rel, folder):
+    return os.path.dirname(rel) == folder or (folder != "" and rel.startswith(folder + "/"))
+
+
+def test_name(line):
+    for pattern in TEST_DEF:
+        m = pattern.match(line)
+        if m:
+            return m.group(m.lastindex)
+    return None
+
+
+def find_tests(root, ids):
+    found = {sid: [] for sid in ids}
+    for rel in test_files(root):
+        try:
+            with open(os.path.join(root, rel), encoding="utf-8") as f:
+                lines = f.read().splitlines()
+        except (UnicodeDecodeError, OSError):
+            continue
+        current, klass = None, None
+        for line in lines:
+            if rel.endswith(".py") and re.match(r"^\S", line):
+                klass = (re.match(r"^class\s+(\w+)", line) or [None, None])[1]
+            name = test_name(line)
+            if name and klass and line[:1].isspace():
+                name = "%s::%s" % (klass, name)
+            current = name or current
+            for sid in ids:
+                if names_scenario(line, sid):
+                    if current and (rel, current) not in found[sid]:
+                        found[sid].append((rel, current))
+    return found
+
+
+def fill(template, values):
+    # a token whose placeholders all come out empty is dropped, so one template serves one test and the whole suite
+    tokens = []
+    for token in shlex.split(template):
+        keys = re.findall(r"\{(\w+)\}", token)
+        if keys and all(not values.get(k) for k in keys):
+            continue
+        tokens.append(re.sub(r"\{(\w+)\}", lambda m: values.get(m.group(1), ""), token))
+    return tokens
+
+
+def main(argv):
+    args = [a for a in argv[1:] if not a.startswith("-")]
+    if "-h" in argv or "--help" in argv:
+        print(HELP)
+        return 0
+    if len(args) != 1:
+        die(HELP)
+    root = repo_root()
+    ids = scenario_ids(change_dir(root, args[0]))
+    tests = find_tests(root, ids) if "--tests" in argv else {}
+    for sid in ids:
+        if "--tests" in argv:
+            print("\t".join([sid] + (["%s::%s" % t for t in tests[sid]] or ["(no test)"])))
+        else:
+            print(sid)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

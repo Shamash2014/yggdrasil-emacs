@@ -1,0 +1,191 @@
+#!/usr/bin/env python3
+import argparse
+import datetime
+import importlib.machinery
+import importlib.util
+import os
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+HERE = os.path.dirname(os.path.realpath(__file__))
+_loader = importlib.machinery.SourceFileLoader("ice_scenarios", os.path.join(HERE, "ice-scenarios"))
+ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scenarios", _loader))
+_loader.exec_module(ice)
+
+DESCRIPTION = """The lead's VERIFY for an ICE change, in one command.
+
+Steps, in order; the first that fails or cannot run stops the rest:
+  plan      ice-check plan on the change folder
+  lock      ice-lock verify
+  unit      test_cmd over the whole suite ({file} and {filter} dropped,
+            {report} filled with report_path), then
+  coverage  ice-coverage on that report
+  live      live_cmd, when .ice/config sets it
+  perf      perf_cmd, when set
+  mutate    mutate_cmd, when set ({base} is the merge-base)
+live_cmd, perf_cmd and mutate_cmd run through sh with ICE_CHANGE,
+ICE_CHANGE_DIR, ICE_SHA, ICE_BASE and ICE_EVIDENCE set; exit 75 means
+blocked rather than failed.
+
+Prints one verdict line:
+  verdict: unit-verified | live-verified | failed STEP | blocked STEP
+and appends ts, change, branch, sha, verdict, evidence to .ice/ledger.tsv;
+each step's output is kept under .ice/evidence/CHANGE/SHA/.
+
+--status CHANGE prints the ledger row for the current branch and HEAD
+only; rows for an older sha are stale. Exit 0 only for a verified row."""
+
+LEDGER_COLUMNS = ("ts", "change", "branch", "sha", "verdict", "evidence")
+BLOCKED_EXIT = 75
+
+
+class Stop(Exception):
+    def __init__(self, kind, step):
+        super().__init__(step)
+        self.verdict = "%s %s" % (kind, step)
+
+
+def ledger_path(root):
+    return os.path.join(root, ".ice", "ledger.tsv")
+
+
+def read_ledger(root):
+    path = ledger_path(root)
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        rows = [line.rstrip("\n").split("\t") for line in f if line.strip()]
+    return [dict(zip(LEDGER_COLUMNS, row)) for row in rows if row and row[0] != "ts"]
+
+
+def append_ledger(root, row):
+    path = ledger_path(root)
+    fresh = not os.path.isfile(path)
+    with open(path, "a", encoding="utf-8") as f:
+        if fresh:
+            f.write("\t".join(LEDGER_COLUMNS) + "\n")
+        f.write("\t".join(row[c] for c in LEDGER_COLUMNS) + "\n")
+
+
+def branch_of(root):
+    return ice.git("rev-parse", "--abbrev-ref", "HEAD", cwd=root)
+
+
+def status(root, name):
+    head, branch = ice.git("rev-parse", "HEAD", cwd=root), branch_of(root)
+    rows = [r for r in read_ledger(root) if r.get("change") == name and r.get("branch") == branch]
+    current = [r for r in rows if r.get("sha") == head]
+    if current:
+        row = current[-1]
+        print("\t".join(LEDGER_COLUMNS))
+        print("\t".join(row[c] for c in LEDGER_COLUMNS))
+        return 0 if row["verdict"] in ("unit-verified", "live-verified") else 1
+    if rows:
+        print("stale: no verdict for %s at HEAD %s; %d older row(s), latest %s at %s"
+              % (name, head[:7], len(rows), rows[-1]["verdict"], rows[-1]["sha"][:7]))
+    else:
+        print("none: no verdict for %s on %s" % (name, branch))
+    return 1
+
+
+class Run:
+    def __init__(self, root, change, evidence, env):
+        self.root, self.change, self.evidence, self.env = root, change, evidence, env
+
+    def step(self, step, argv, shell=False, blocked_exit=None):
+        log = os.path.join(self.evidence, step + ".log")
+        try:
+            out = subprocess.run(argv, cwd=self.root, capture_output=True, text=True, env=self.env, shell=shell)
+        except FileNotFoundError as err:
+            with open(log, "w", encoding="utf-8") as f:
+                f.write(str(err) + "\n")
+            print("step %s: blocked, %s" % (step, err))
+            raise Stop("blocked", step)
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("$ %s\n%s%s\nexit %d\n" % (argv if shell else " ".join(argv), out.stdout, out.stderr, out.returncode))
+        tail = [l for l in (out.stdout + out.stderr).strip().splitlines() if l][-1:] or [""]
+        if out.returncode == 0:
+            print("step %s: ok  %s" % (step, tail[0]))
+            return
+        kind = "blocked" if blocked_exit is not None and out.returncode == blocked_exit else "failed"
+        print("step %s: %s (exit %d), see %s" % (step, kind, out.returncode, os.path.relpath(log, self.root)))
+        for line in (out.stdout + out.stderr).strip().splitlines()[-12:]:
+            print("  " + line)
+        raise Stop(kind, step)
+
+
+def verify(root, change, name):
+    config = ice.read_config(root)
+    head, branch = ice.git("rev-parse", "HEAD", cwd=root), branch_of(root)
+    base = ice.git("merge-base", "HEAD", ice.default_branch(root), cwd=root, check=False)
+    evidence = os.path.join(root, ".ice", "evidence", name, head[:12])
+    os.makedirs(evidence, exist_ok=True)
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", ICE_CHANGE=name, ICE_CHANGE_DIR=change,
+               ICE_SHA=head, ICE_BASE=base, ICE_EVIDENCE=evidence)
+    run = Run(root, change, evidence, env)
+    live = False
+    dirty = ice.git("status", "--porcelain", "--", ".", ":(exclude).ice", cwd=root).splitlines()
+    if dirty:
+        print("note: %d path(s) differ from HEAD %s; the verdict covers the working tree, the ledger names HEAD" % (len(dirty), head[:7]))
+        with open(os.path.join(evidence, "dirty.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(dirty) + "\n")
+    try:
+        checker = os.path.join(HERE, "ice-check")
+        if not os.path.isfile(checker):
+            print("step plan: blocked, no ice-check beside ice-verify")
+            raise Stop("blocked", "plan")
+        run.step("plan", [sys.executable, checker, "plan", os.path.relpath(change, root)])
+        lock = subprocess.run([sys.executable, os.path.join(HERE, "ice-lock"), change, "verify"],
+                              cwd=root, capture_output=True, text=True, env=env)
+        with open(os.path.join(evidence, "lock.log"), "w", encoding="utf-8") as f:
+            f.write(lock.stdout + lock.stderr)
+        print("step lock: %s" % (lock.stdout.strip() or lock.stderr.strip()).replace("\n", "\n  "))
+        if lock.returncode:
+            raise Stop("blocked" if lock.returncode == 2 else "failed", "lock")
+
+        if not config.get("test_cmd"):
+            print("step unit: blocked, no test_cmd in .ice/config")
+            raise Stop("blocked", "unit")
+        report = config.get("report_path") or os.path.join(".ice", "state", name + "-junit.xml")
+        report_abs = report if os.path.isabs(report) else os.path.join(root, report)
+        if os.path.exists(report_abs):
+            os.remove(report_abs)
+        os.makedirs(os.path.dirname(report_abs), exist_ok=True)
+        run.step("unit", ice.fill(config["test_cmd"], {"file": "", "filter": "", "report": report_abs}))
+        if not os.path.isfile(report_abs):
+            print("step coverage: blocked, test_cmd wrote no report at %s (use {report} or report_path)" % report)
+            raise Stop("blocked", "coverage")
+        run.step("coverage", [sys.executable, os.path.join(HERE, "ice-coverage"), change, "--report", report_abs])
+
+        for step, key in (("live", "live_cmd"), ("perf", "perf_cmd"), ("mutate", "mutate_cmd")):
+            if config.get(key):
+                command = config[key].replace("{base}", base).replace("{change}", name).replace("{sha}", head)
+                run.step(step, command, shell=True, blocked_exit=BLOCKED_EXIT)
+                live |= step == "live"
+            else:
+                print("step %s: skipped, no %s" % (step, key))
+        verdict = "live-verified" if live else "unit-verified"
+    except Stop as stop:
+        verdict = stop.verdict
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    append_ledger(root, {"ts": ts, "change": name, "branch": branch, "sha": head, "verdict": verdict,
+                         "evidence": os.path.relpath(evidence, root)})
+    print("verdict: " + verdict)
+    return 0 if verdict in ("unit-verified", "live-verified") else 1
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="ice-verify", description=DESCRIPTION,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("change")
+    parser.add_argument("--status", action="store_true", help="show the verdict for the current HEAD only")
+    args = parser.parse_args()
+    root = ice.repo_root()
+    change = ice.change_dir(root, args.change)
+    name = ice.change_name(change)
+    return status(root, name) if args.status else verify(root, change, name)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

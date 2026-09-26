@@ -115,6 +115,7 @@
 (require 'layer-notebook)
 (require 'ygg-kernel-picker)
 (require 'layer-aob)
+(require 'ygg-ice)
 (require 'layer-quickfix)
 (require 'layer-pcre)
 (require 'layer-dap)

@@ -116,25 +116,91 @@ SDD papers are mostly position papers and pilots; none compares SDD with
 no SDD. Spec drift is argued, never measured. OpenSpec about as
 deterministic as a stricter framework, more than Spec Kit (2606.30689).
 
-## Proposed shape (not built)
+## Synthesis (2026-09-25, owner's mapping)
 
-1. Intent: intent.md in an OpenSpec change with the five parts, caller's
-   view, out of scope, one refused alternative; a separate gap detector
-   before coding that asks only when incomplete; the agent restates intent
-   and the owner confirms; anything a probe can settle gets a prototype.
-2. Context: do-not standing rules with a why each; CONTEXT.md and ADRs;
-   lat.md; a code-to-test map; source loaded at the edit site on demand;
-   no repo overview.
-3. Expectation: owner agrees the seams; scenario tests written or approved
-   by the owner; each fails on base, then is locked by a signed tag; a
-   flag-a-bad-check tool; capped retries; checks with pass-when and
-   evidence; mutation on the diff where the language has a tool.
-4. Scripts to build: ice-check (intent parts present), ice-lock (locked
-   paths unchanged), ice-coverage (every scenario id tested and passed),
-   ice-fail-on-base.
-5. Ceremony by size: a one-sentence diff skips ICE.
-6. Ablation: date each artifact, re-test at a new model, drop what changes
-   nothing.
+Tan's approach as the spine, with more rigour and minimal plans; Pocock's
+language layer and test discipline added.
+
+### lat.md: Context, the project's bank
+One place the harness looks things up, on demand, never pasted whole:
+- code map: sections linked to code, @lat backlinks;
+- feature map (Tan): one section per user-visible feature with
+  sub-features, how to get there, driving it, gotchas; kept honest by a
+  daily maintain run that reports clean, changed or blocked;
+- archived specs: each archived OpenSpec change leaves a short section
+  (what changed, why, where) linked from the feature it touched;
+- how, why and recall results worth keeping, filed as sections;
+- CONTEXT.md glossary and docs/adr (Pocock) linked from the lat index;
+  ADR only when hard to reverse, surprising and a real trade-off.
+Gaps to handle: no .el scanning; no link into one OpenSpec requirement;
+the prompt hook pushes up to 5 sections a turn; wiring (MCP through aob
+vs lat init) still open.
+
+### OpenSpec: Intent
+The change folder holds the intent, reached through exploration:
+- explore first (opsx explore); anything a probe or prototype can settle
+  is settled that way, not asked (Tan);
+- a separate gap detector before coding surfaces hidden requirements and
+  asks only what is still open (arXiv 2603.26233); grill only on real
+  gaps (Pocock);
+- intent.md: IDSD's five parts, the caller's view first (Tan), out of
+  scope, at least one refused alternative, terms checked against
+  CONTEXT.md;
+- restate-back gate: the agent restates the intent in its own words and
+  nothing proceeds until the owner confirms;
+- ice-check refuses an intent with a missing part.
+
+### Expectation: Given / When / Then to checks
+Each scenario in the change's spec deltas (GIVEN, WHEN, THEN) becomes a
+check the building agent can run and never edit:
+- seams agreed with the owner first, the highest seam, ideally one
+  (Pocock); expected values from the scenario, never derived from the
+  code;
+- unit at the seam; live through the verification skill driving the real
+  app (Tan); perf against a trunk baseline with the number that fails;
+- each new check fails on the base commit, then is locked (signed tag,
+  checked outside the agent);
+- mutation testing on the diff where the language has a tool;
+- a flag-a-bad-check exit for the agent; capped retries; an evidence
+  bundle with every verdict.
+
+### Test quality, in markdown only (skills/ice-checks)
+Adopted rules, each with its evidence (arXiv, 2024-2026 survey of 31 papers):
+1. Contract before checks: pre/post-conditions and undefined inputs, one
+   check per untested line (+9.8pp bug detection, 2608.17177).
+2. Expected values from the spec; checks for possibly buggy code written
+   by a fresh subagent that sees only the spec (+79% bug-catching tests,
+   2607.22883; 25% vs 14% faults found, 2607.05139).
+3. Contract from existing code describes the corrected behaviour after an
+   audit for logic and robustness gaps (+18.9% bugs caught, 2607.22883).
+4. Property checks where a law holds, never filtering out edge regions
+   (+5 to +24pp for most models, 2605.15229).
+5. A listed never-bend policy plus stop-and-report (23.6% to 9.7%, 5.3%
+   with a report path, 2608.29460; prompt D and the abort flag, 2510.20270).
+Did not help as text: generic TDD procedure, chain-of-thought with code in
+view, spec beside the code, pass-all-tests framing, coverage goals, the
+agent's own tests as validation, iterating on feedback. Text is weakest
+against editing test files: keep the lock.
+
+### Minimal plans, more rigour than Tan
+- tasks.md is tracer-bullet vertical slices with blocking edges (Pocock),
+  one fresh context each; wide refactors run expand, migrate, contract;
+- each item: files, the scenario it satisfies, Pass when, evidence path;
+- linted like Tan's check-plan (ice-check covers plan and intent);
+- the lead runs items, ticks only after its own VERIFY, keeps the verdict
+  per commit; tasks and prototypes are thrown away after, the intent,
+  lat.md sections, glossary and ADRs outlive the change.
+- phase boundaries between stages: continue, clear, handoff, subagent,
+  compact, in that order (Pocock).
+
+### Scripts to build
+ice-check (intent parts and plan lint), ice-lock (locked paths
+unchanged), ice-coverage (every scenario id tested and passed),
+ice-fail-on-base; plus a lat step that files an archived change.
+
+### Ceremony by size
+A one-sentence diff skips ICE; unattended or multi-agent work gets all of
+it.
 
 ## Open for the owner
 
@@ -144,7 +210,6 @@ deterministic as a stricter framework, more than Spec Kit (2606.30689).
 - Are target repos on GitHub (CODEOWNERS as the merge gate).
 - What outlives a change (lean: intent, CONTEXT.md, ADRs, lat.md, the merged
   spec; tasks, prototypes and the decision trail are thrown away).
-- Feature map as well as lat.md (lean: both; the map drives live checks).
 - lat.md wiring: MCP through aob, lat init per repo, or both.
 - Where the flow lives: presets plus an Emacs layer, an aob workflow file,
   or a skill.

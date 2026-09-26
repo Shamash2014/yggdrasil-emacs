@@ -1,0 +1,183 @@
+#!/usr/bin/env python3
+import os
+import re
+import subprocess
+import sys
+
+MAX_LEAD = 240
+FEATURES_LEAD = ("One section per user-visible feature: sub-features, how to get there, "
+                 "driving it and gotchas, each as a subsection.")
+CHANGES_LEAD = "Archived OpenSpec changes, newest last: what changed, why and where, linked to the feature."
+INDEX_ENTRIES = {
+    "features": "feature map, one section per user-visible feature",
+    "changes": "archived OpenSpec changes, filed by ice-archive-to-lat",
+}
+
+
+def read(path):
+    if not os.path.isfile(path):
+        return ""
+    with open(path, encoding="utf-8") as f:
+        return f.read()
+
+
+def write_if_changed(path, text):
+    if read(path) == text:
+        return
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(text)
+
+
+def section(text, title):
+    m = re.search(r"^##\s+%s\s*$(.*?)(?=^##\s|\Z)" % re.escape(title), text, re.M | re.S | re.I)
+    return m.group(1) if m else ""
+
+
+def first_paragraph(body):
+    lines = []
+    for line in body.strip().splitlines():
+        if not line.strip() or line.startswith("#") or line.startswith("<!--"):
+            if lines:
+                break
+            continue
+        lines.append(re.sub(r"^\s*[-*]\s+", "", line).strip())
+    return " ".join(lines)
+
+
+def clip(text, limit=MAX_LEAD):
+    text = re.sub(r"\s+", " ", text).strip().replace("[[", "").replace("]]", "")
+    if len(text) <= limit:
+        return text
+    return text[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "..."
+
+
+def change_files(tasks):
+    files = []
+    for m in re.finditer(r"^[ \t]+[-*][ \t]*Files:[ \t]*(\S.*)$", tasks, re.M):
+        for f in re.split(r"[,\s]+", m.group(1).strip()):
+            if f and f not in files:
+                files.append(f)
+    return files
+
+
+def spec_names(archive):
+    specs = os.path.join(archive, "specs")
+    if not os.path.isdir(specs):
+        return []
+    return sorted(os.path.relpath(r, specs) for r, _, fs in os.walk(specs) if "spec.md" in fs)
+
+
+def split_h2(text):
+    head, blocks = [], []
+    for line in text.splitlines(keepends=True):
+        if line.startswith("## "):
+            blocks.append([line.strip()[3:].strip(), [line]])
+        elif blocks:
+            blocks[-1][1].append(line)
+        else:
+            head.append(line)
+    return "".join(head), blocks
+
+
+def join_h2(head, blocks):
+    out = head.rstrip("\n") + "\n"
+    for _, lines in blocks:
+        out += "\n" + "".join(lines).strip("\n") + "\n"
+    return out
+
+
+def upsert_change(path, name, body):
+    head, blocks = split_h2(read(path) or "# Changes\n\n%s\n" % CHANGES_LEAD)
+    block = ["## %s\n\n%s\n" % (name, body)]
+    for b in blocks:
+        if b[0] == name:
+            b[1] = block
+            break
+    else:
+        blocks.append([name, block])
+    write_if_changed(path, join_h2(head, blocks))
+
+
+def link_feature(path, feature, change):
+    head, blocks = split_h2(read(path) or "# Features\n\n%s\n" % FEATURES_LEAD)
+    link = "- [[changes#%s]]" % change
+    for b in blocks:
+        if b[0].lower() == feature.lower():
+            text = "".join(b[1])
+            if link in text:
+                break
+            changes = re.search(r"^### Changes[ \t]*\n(.*?)(?=^###? |\Z)", text, re.M | re.S)
+            if changes:
+                end = changes.end(1)
+                text = text[:end].rstrip("\n") + "\n" + link + "\n" + ("\n" + text[end:] if text[end:] else "")
+            else:
+                text = text.rstrip("\n") + "\n\n### Changes\n\nArchived changes that touched this feature.\n\n" + link + "\n"
+            b[1] = [text]
+            break
+    else:
+        blocks.append([feature, ["## %s\n\nStub filed by ice-archive-to-lat; fill in sub-features, how to get there, "
+                                  "driving it and gotchas.\n\n### Changes\n\nArchived changes that touched this "
+                                  "feature.\n\n%s\n" % (feature, link)]])
+    write_if_changed(path, join_h2(head, blocks))
+
+
+def ensure_index(lat_dir):
+    path = os.path.join(lat_dir, "lat.md")
+    text = read(path)
+    missing = ["- [[%s]] — %s\n" % (stem, desc) for stem, desc in INDEX_ENTRIES.items()
+               if os.path.isfile(os.path.join(lat_dir, stem + ".md"))
+               and not re.search(r"^- \[\[%s\]\]" % stem, text, re.M)]
+    if missing:
+        lines = text.rstrip("\n").splitlines()
+        separator = "\n" if lines and lines[-1].startswith("- [[") else "\n\n"
+        text = text.rstrip("\n") + separator + "".join(missing)
+    write_if_changed(path, text)
+
+
+def main(argv):
+    if len(argv) not in (2, 3):
+        sys.stderr.write("usage: ice-archive-to-lat openspec/changes/archive/DATE-NAME [FEATURE]\n")
+        return 2
+    archive = os.path.abspath(argv[1].rstrip("/"))
+    name = os.path.basename(archive)
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(archive))))
+    if os.path.basename(os.path.dirname(archive)) != "archive" or not os.path.isdir(archive):
+        sys.stderr.write("ice-archive-to-lat: %s is not an archived change directory\n" % argv[1])
+        return 2
+    lat_dir = os.path.join(root, "lat.md")
+    if not os.path.isdir(lat_dir):
+        sys.stderr.write("ice-archive-to-lat: no lat.md/ in %s; run ice-wire first\n" % root)
+        return 2
+    intent = read(os.path.join(archive, "intent.md"))
+    proposal = read(os.path.join(archive, "proposal.md"))
+    tasks = read(os.path.join(archive, "tasks.md"))
+    feature = argv[2] if len(argv) == 3 else None
+    if not feature:
+        m = re.search(r"^[ \t]*[-*]?[ \t]*Feature:[ \t]*(\S.*?)[ \t]*$", section(intent, "Connections"), re.M)
+        feature = m.group(1) if m else None
+    if feature:
+        feature = re.sub(r"^features#", "", feature.strip("[] ")).split("|")[0].strip()
+    if not feature:
+        sys.stderr.write("ice-archive-to-lat: no feature; pass one, or add 'Feature: <name>' under Connections in intent.md\n")
+        return 2
+    what = first_paragraph(section(intent, "What is wanted")) or first_paragraph(section(proposal, "What Changes"))
+    why = first_paragraph(section(proposal, "Why")) or first_paragraph(section(intent, "Caller's view"))
+    where = change_files(tasks)
+    specs = spec_names(archive)
+    body = "%s\n\n- Why: %s\n- Where: %s\n- Specs: %s\n- Feature: [[features#%s]]\n- Archive: %s\n" % (
+        clip(what or "No summary in intent.md or proposal.md."),
+        clip(why or "not recorded", 400),
+        ", ".join(where) or "not recorded in tasks.md",
+        ", ".join(specs) or "none",
+        feature,
+        os.path.relpath(archive, root),
+    )
+    upsert_change(os.path.join(lat_dir, "changes.md"), name, body)
+    link_feature(os.path.join(lat_dir, "features.md"), feature, name)
+    ensure_index(lat_dir)
+    print("ice-archive-to-lat: filed %s under feature %s" % (name, feature))
+    return subprocess.call(["lat", "check"], cwd=root)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

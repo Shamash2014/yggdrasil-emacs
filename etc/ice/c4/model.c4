@@ -1,0 +1,16 @@
+model {
+  user = person 'TODO user' {
+    description 'TODO who uses this system and why'
+  }
+  product = system 'TODO system' {
+    description 'TODO what this system does'
+    main = container 'TODO container' {
+      description 'TODO what runs here'
+      metadata {
+        code './'
+        lat 'lat.md/features#Features'
+      }
+    }
+  }
+  user -> product.main 'TODO uses'
+}

@@ -516,7 +516,8 @@ on every row of a list of thirty is a second of nothing."
 (defun ygg-projects--docker-tick ()
   "Ask docker again while the sidebar is on screen: stacks come and go."
   (when (ygg-projects--window)
-    (ygg-projects--scan-docker)))
+    (ygg-projects--scan-docker)
+    (ygg-projects--scan-context)))
 
 (unless (timerp ygg-projects--docker-timer)
   (setq ygg-projects--docker-timer
@@ -577,6 +578,34 @@ scan already learned not to do."
                      (puthash root now ygg-projects--worktrees-cache)
                      (unless (equal was now) (ygg-projects-refresh))))))
           (puthash root t ygg-projects--worktrees-pending))))))
+
+(declare-function ygg-ice-context-scan "ygg-ice" (root))
+(declare-function ygg-ice-context-present-p "ygg-ice" (root))
+(declare-function ygg-ice-context-count "ygg-ice" (root))
+(declare-function ygg-ice-context-entries "ygg-ice" (root))
+(declare-function ygg-ice-visit-item "ygg-ice" (item))
+(declare-function ygg-ice-changes-list "ygg-ice" ())
+(declare-function ygg-ice-send-quickfix "ygg-ice" (items))
+(declare-function ygg-ice-send-context "ygg-ice" (items))
+
+(defun ygg-projects--scan-context ()
+  "Ask for the projects' ICE docs to be read again when stat says they moved.
+The read is queued on a timer and starts no process; the cache it fills
+is all the drawing ever looks at."
+  (when (fboundp 'ygg-ice-context-scan)
+    (dolist (root (ygg-projects--roots))
+      (unless (file-remote-p root)
+        (ygg-ice-context-scan root)))))
+
+(defun ygg-projects--context-spec (root)
+  "ROOT's Context row, or nil where it has no changes, lat.md, ADRs,
+glossary or C4 model: a row of zeros in every project says nothing."
+  (when (and (fboundp 'ygg-ice-context-present-p)
+             (not (file-remote-p root))
+             (ygg-ice-context-present-p root))
+    (let ((n (ygg-ice-context-count root)))
+      (list 'context (ygg-projects--icon "nf-md-book_open_outline" "C")
+            "Context" (ygg-projects--counts n n)))))
 
 (defun ygg-projects--worktrees (root)
   "Worktrees ROOT has besides the checkout itself, as last scanned."
@@ -862,6 +891,8 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
                                        d))
                       (ygg-projects--folders root)))
     ('worktrees (ygg-projects--worktree-entries root))
+    ('context (and (fboundp 'ygg-ice-context-entries)
+                   (ygg-ice-context-entries root)))
     (_ nil)))
 
 (defun ygg-projects--ago (ts)
@@ -901,6 +932,8 @@ by when, not by that they were all today."
          "archived")
         ((and (consp payload) (eq (car payload) 'docker))
          (ygg-projects--docker-status (plist-get (cdr payload) :status)))
+        ((and (consp payload) (proper-list-p payload) (plist-get payload :ice))
+         (or (plist-get payload :badge) ""))
         ((and (consp payload) (proper-list-p payload)
               (plist-member payload :acp-id))
          (or (ygg-projects--ago (plist-get payload :ts))
@@ -1142,8 +1175,10 @@ cannot spill past the text area and mark every line truncated."
         (wts (ygg-projects--worktrees root)))
     ;; the same family as the rows under it: one text glyph among four
     ;; icons is the one that looks wrong, whatever its width says
+    (delq nil
     (list (list 'agents (ygg-projects--icon "nf-md-triangle_outline" "▲")
                 "Sessions" (ygg-projects--counts (car agents) (cdr agents)))
+          (ygg-projects--context-spec root)
           (list 'commands (ygg-projects--icon "nf-md-console" ">")
                 "Commands" (ygg-projects--counts (car cmds) (cdr cmds)))
           (list 'processes (ygg-projects--icon "nf-md-console_line" "T")
@@ -1152,7 +1187,7 @@ cannot spill past the text area and mark every line truncated."
                 "Worktrees" (ygg-projects--counts (car wts) (cdr wts)))
           (let ((n (length (ygg-projects--folders root))))
             (list 'folders (ygg-projects--icon "nf-md-folder_multiple_outline" "F")
-                  "Folders" (ygg-projects--counts n n))))))
+                  "Folders" (ygg-projects--counts n n)))))))
 
 (defun ygg-projects--rows (root)
   "ROOT's rows, the opened one followed by what it holds."
@@ -1344,10 +1379,11 @@ name; anything else, and the folder picker takes over."
 (defun ygg-projects--selecting-p ()
   (and (bound-and-true-p ygg--visual-p) (mark t) t))
 
-(defun ygg-projects--selected-entries ()
+(defun ygg-projects--selected-entries (&optional kind)
   "The session rows between mark and point, each once, top first.
 A name's second line and a worktree note carry their row's entry, and
-project heads, row titles and the other rows carry none of a session's."
+project heads, row titles and the other rows carry none of a session's.
+With KIND, that row's entries instead of the sessions'."
   (let ((last (save-excursion (goto-char (max (point) (mark t)))
                               (line-beginning-position)))
         (out nil))
@@ -1355,7 +1391,7 @@ project heads, row titles and the other rows carry none of a session's."
       (goto-char (min (point) (mark t)))
       (beginning-of-line)
       (while (and (<= (point) last) (not (eobp)))
-        (when-let* (((eq (get-text-property (point) 'ygg-row) 'agents))
+        (when-let* (((eq (get-text-property (point) 'ygg-row) (or kind 'agents)))
                     ((not (get-text-property (point) 'ygg-cont)))
                     (entry (get-text-property (point) 'ygg-entry))
                     ((not (symbolp entry))))
@@ -1485,6 +1521,33 @@ rest are pinned after them."
       (ygg-projects-refresh)
       (message "projects: %s %s" (if unpin "unpinned" "pinned")
                (mapconcat #'aob-session-name targets ", ")))))
+
+(defun ygg-projects--context-targets ()
+  "The Context entries selected, or the one on this line."
+  (if (ygg-projects--selecting-p)
+      (ygg-projects--selected-entries 'context)
+    (when-let* (((eq (get-text-property (line-beginning-position) 'ygg-row) 'context))
+                (entry (get-text-property (line-beginning-position) 'ygg-entry))
+                ((consp entry)))
+      (list entry))))
+
+(defun ygg-projects--send-context (send what)
+  "Hand the Context entries selected, or the one here, to SEND.
+WHAT names where they go, for when there is nothing to hand over."
+  (let ((items (ygg-projects--context-targets)))
+    (when (ygg-projects--in-sidebar-p) (ygg-projects--leave-selection))
+    (unless items (user-error "projects: no Context entry here for %s" what))
+    (funcall send items)))
+
+(defun ygg-projects-context-quickfix ()
+  "Send the Context entries selected, or the one here, to the quickfix."
+  (interactive)
+  (ygg-projects--send-context #'ygg-ice-send-quickfix "the quickfix"))
+
+(defun ygg-projects-context-to-agent ()
+  "Add the Context entries selected, or the one here, to the agent context."
+  (interactive)
+  (ygg-projects--send-context #'ygg-ice-send-context "the agent context"))
 
 (defun ygg-projects-delete ()
   "Remove what this line stands for: a session for good, or a project.
@@ -1710,7 +1773,8 @@ going on, not the history of the project."
   (ygg-projects-refresh)
   (ygg-projects--scan-commands)
   (ygg-projects--scan-worktrees)
-  (ygg-projects--scan-docker))
+  (ygg-projects--scan-docker)
+  (ygg-projects--scan-context))
 
 (defun ygg-projects-first ()
   "Go to the first row."
@@ -1873,7 +1937,8 @@ row was picked from."
              (pop-to-buffer entry)))
           ('worktrees (if (fboundp 'ygg-space-open)
                           (ygg-space-open entry)
-                        (dired entry))))
+                        (dired entry)))
+          ('context (ygg-ice-visit-item entry)))
       (pcase row
       ('project (ygg-projects-open))
       ('agents
@@ -1901,7 +1966,8 @@ row was picked from."
                     (cond ((fboundp 'ygg-wt-list) (call-interactively #'ygg-wt-list))
                           ((fboundp 'magit-worktree)
                            (call-interactively #'magit-worktree))
-                          (t (user-error "projects: no worktree list"))))))))))
+                          (t (user-error "projects: no worktree list")))))
+      ('context (let ((default-directory root)) (ygg-ice-changes-list))))))))
 
 (defvar ygg-projects-map
   (let ((map (make-sparse-keymap)))
@@ -1943,6 +2009,8 @@ row was picked from."
     (define-key map "a" #'ygg-projects-say)
     (define-key map "p" #'ygg-projects-toggle-pin)
     (define-key map "V" #'ygg-toggle-visual)
+    (define-key map "Q" #'ygg-projects-context-quickfix)
+    (define-key map "c" #'ygg-projects-context-to-agent)
     (define-key map "q" #'ygg-projects-close)
     map)
   "The sidebar's own verbs, ahead of yggdrasil's normal state.")
@@ -2101,6 +2169,9 @@ turns while nobody is typing."
   (add-hook 'aob-subagent-progress-functions #'ygg-projects--redraw-soon))
 (with-eval-after-load 'ygg-todo
   (add-hook 'ygg-todo-changed-functions #'ygg-projects--redraw-soon))
+(defvar ygg-ice-context-changed-functions)
+(with-eval-after-load 'ygg-ice
+  (add-hook 'ygg-ice-context-changed-functions #'ygg-projects--redraw-soon))
 
 (defun ygg-projects-close ()
   "Close the sidebar, and mean it: it stays closed until you open it."
@@ -2191,6 +2262,7 @@ windows around, the width it was opened at is the width it keeps."
       (ygg-projects--scan-commands)
       (ygg-projects--scan-worktrees)
       (ygg-projects--scan-docker)
+      (ygg-projects--scan-context)
       (setq ygg-projects--wanted t)
       (let ((win (ygg-projects--display buf)))
         ;; dedicated: whatever the sidebar opens goes to the main area,

@@ -966,7 +966,11 @@ ATTACHMENTS are image file paths riding along with the first prompt.")
 It floats small under the line POS is on in WINDOW, and its send hands
 the words and attachments to HOLD instead of sending them.")
 
-(defcustom aob-compose-anchored-max-height 12
+(defcustom aob-compose-anchored-height 4
+  "How many lines an anchored draft shows when it is short."
+  :type 'natnum :group 'aob)
+
+(defcustom aob-compose-anchored-max-height 16
   "How many lines an anchored draft may grow to."
   :type 'natnum :group 'aob)
 
@@ -1038,11 +1042,11 @@ Off, which is the default, or without a display that can, it is a window
 placed by aob-compose-display-action, a box at the bottom."
   :type 'boolean :group 'aob)
 
-(defcustom aob-compose-float-width 0.7
+(defcustom aob-compose-float-width 0.75
   "How wide the floating box is, as a share of the frame's columns."
   :type 'number :group 'aob)
 
-(defcustom aob-compose-float-height 6
+(defcustom aob-compose-float-height 8
   "How many lines the floating box shows when the draft is short."
   :type 'natnum :group 'aob)
 
@@ -1461,7 +1465,7 @@ completes `@file' and `/skill' against the wrong tree."
       (setq header-line-format '((:eval (aob-compose--header))))
       (when anchor
         (setq aob-compose--anchor anchor)
-        (setq-local aob-compose-float-height 3
+        (setq-local aob-compose-float-height aob-compose-anchored-height
                     aob-compose-float-max-height aob-compose-anchored-max-height))
       (when initial (insert initial) (goto-char (point-max))))
     (aob-compose-show buf)

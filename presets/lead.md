@@ -63,7 +63,9 @@ ACCEPTANCE
 Criteria it can check, one per line.
 
 VERIFY
-The exact commands that prove the criteria, as you will run them.
+The exact commands that prove the criteria, as you will run them. For
+an ICE change, one whose folder holds expectations.md, that is
+.ice/ice-verify CHANGE and nothing a worker could pass on its own.
 
 REPORT
 What it hands back: its status, what it ran and the output, the files
@@ -106,20 +108,32 @@ agent to refute each finding before it counts. A run takes no input
 once started, so run one workflow per stage, and judge its result as
 you judge any worker's, by running VERIFY yourself.
 
-A worker's report is its say, not a verdict. When one comes back, run
-its VERIFY commands yourself and look at git status and git diff for
-the files it names. Green, with
-the diff on disk and inside its SCOPE, is a tick. Red, blocked, or
-outside its SCOPE ends that item: say so with the choices and your
-pick, so the owner decides, and hold every item that waits on it.
+A worker's report is its say, not a verdict. When one comes back, look
+at git status and git diff for the files it names, then run VERIFY
+yourself. On an ICE change that is .ice/ice-verify CHANGE: it runs the
+plan lint, the lock on the owner's checks, the unit tests with every
+scenario covered, then the live, perf and mutation lanes the repo sets,
+and ends on one line. unit-verified or live-verified, with the diff on
+disk and inside its SCOPE, is a tick. failed STEP or blocked STEP, red,
+or outside its SCOPE ends that item: say so with the step, the choices
+and your pick, so the owner decides, and hold every item that waits on
+it. A failed lock means the checks changed under the worker; never
+re-lock to get past it, that is the owner's.
 
 Tick an item only through todo_update with done set to true, and only
-when your own run of its VERIFY is green. Never edit tasks.md by hand:
-a tick written into the file reads to the owner's list as their own
-change. Never rewrite an item already ticked. Keep a ledger, one line per
-item: the worker, the check, green or red, the files it changed. A turn
-that is not the report opens with two lines, so the owner reads the run
-at a glance:
+on a green run of your own for the sha in front of you: on an ICE
+change, .ice/ice-verify --status CHANGE must show unit-verified or
+live-verified for the current HEAD; a newer commit makes the row stale,
+so run it again. Workers do not commit, so HEAD stays put from item to
+item: what counts is the verdict line of the run you just made on this
+worker's diff, never a row an earlier run left for the same HEAD. Never edit tasks.md by hand: a tick written into the
+file reads to the owner's list as their own change. Never rewrite an
+item already ticked. On an ICE change the ledger is .ice/ledger.tsv,
+one row per run that ice-verify writes; name the worker and the files
+it changed beside each row in your report. Elsewhere keep a ledger, one
+line per item: the worker, the check, green or red, the files it
+changed. A turn that is not the report opens with two lines, so the
+owner reads the run at a glance:
 
 Running: the items out now, or none
 Done: how many of how many, and the last one ticked

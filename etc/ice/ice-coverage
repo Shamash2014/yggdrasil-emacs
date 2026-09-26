@@ -1,0 +1,102 @@
+#!/usr/bin/env python3
+import argparse
+import importlib.machinery
+import importlib.util
+import json
+import os
+import sys
+import xml.etree.ElementTree as ET
+
+sys.dont_write_bytecode = True
+_loader = importlib.machinery.SourceFileLoader("ice_scenarios", os.path.join(os.path.dirname(os.path.realpath(__file__)), "ice-scenarios"))
+ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scenarios", _loader))
+_loader.exec_module(ice)
+
+DESCRIPTION = """Every scenario id must name a test that passed in the report.
+
+The report is JUnit XML (the default), pytest-json-report JSON, or vitest
+or jest JSON; the kind is read from the file. A test names a scenario when
+its name or class holds the id or its slug, or when it is the test whose
+docstring or title names the id in the source. A scenario passes when at
+least one such test passed and none failed, errored or was skipped.
+Exit 1 listing each scenario that is missing, skipped or failed.
+--report defaults to report_path in .ice/config."""
+
+OUTCOMES = {"passed": "passed", "pass": "passed", "failed": "failed", "fail": "failed", "error": "failed",
+            "skipped": "skipped", "pending": "skipped", "todo": "skipped", "disabled": "skipped",
+            "xfailed": "skipped", "xpassed": "failed"}
+
+
+def junit_cases(root):
+    cases = []
+    for case in root.iter("testcase"):
+        kids = {child.tag for child in case}
+        outcome = "failed" if kids & {"failure", "error"} else "skipped" if "skipped" in kids else "passed"
+        cases.append(("%s %s %s" % (case.get("classname", ""), case.get("name", ""), case.get("file", "")), outcome))
+    return cases
+
+
+def json_cases(data):
+    cases = []
+    for test in data.get("tests", []) if isinstance(data, dict) else []:
+        cases.append((test.get("nodeid", ""), OUTCOMES.get(test.get("outcome"), "failed")))
+    for suite in data.get("testResults", []) if isinstance(data, dict) else []:
+        for test in suite.get("assertionResults", []):
+            title = test.get("fullName") or " ".join(test.get("ancestorTitles", []) + [test.get("title", "")])
+            label = "%s %s" % (suite.get("name", ""), title)
+            cases.append((label, OUTCOMES.get(test.get("status"), "failed")))
+    return cases
+
+
+def names_test(label, sources):
+    tokens = [t.rsplit("::", 1)[-1] for t in label.split()]
+    return any(os.path.splitext(os.path.basename(rel))[0] in label and (t == name or t.startswith(name + "["))
+               for t in tokens for rel, name in sources)
+
+
+def read_report(path):
+    with open(path, encoding="utf-8") as f:
+        text = f.read()
+    if text.lstrip().startswith("<"):
+        return junit_cases(ET.fromstring(text))
+    return json_cases(json.loads(text))
+
+
+def main():
+    parser = argparse.ArgumentParser(prog="ice-coverage", description=DESCRIPTION,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("change")
+    parser.add_argument("--report", metavar="FILE")
+    args = parser.parse_args()
+    root = ice.repo_root()
+    change = ice.change_dir(root, args.change)
+    report = args.report or ice.read_config(root).get("report_path")
+    if not report:
+        ice.die("ice-coverage: no --report and no report_path in .ice/config")
+    report = report if os.path.isabs(report) else os.path.join(root, report)
+    if not os.path.isfile(report):
+        ice.die("ice-coverage: no report at %s" % report)
+    cases = read_report(report)
+    ids = ice.scenario_ids(change)
+    sources = ice.find_tests(root, ids)
+    gaps, failing = [], set()
+    for sid in ids:
+        named = {(rel, name.rsplit("::", 1)[-1]) for rel, name in sources[sid]}
+        hits = [(label, outcome) for label, outcome in cases if ice.names_scenario(label, sid) or names_test(label, named)]
+        bad = [(label, outcome) for label, outcome in hits if outcome != "passed"]
+        if not hits:
+            gaps.append("MISSING %s: no test in the report names it" % sid)
+        gaps.extend("%s %s: %s" % (outcome.upper(), sid, label.strip()) for label, outcome in bad)
+        if hits and not bad:
+            print("ok %s: %s" % (sid, "; ".join(label.strip() for label, _ in hits)))
+        else:
+            failing.add(sid)
+    for line in gaps:
+        print(line)
+    print("coverage %s: %d of %d scenarios passed (%s)" % (
+        ice.change_name(change), len(ids) - len(failing), len(ids), os.path.relpath(report, root)))
+    return 1 if gaps else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
