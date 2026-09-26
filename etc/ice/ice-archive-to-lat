@@ -228,8 +228,9 @@ def main(argv):
     ensure_index(lat_dir)
     print("ice-archive-to-lat: filed %s under feature %s" % (name, feature))
     print("ice-archive-to-lat: %d learnings line(s) moved to lat.md/learnings.md" % learned)
-    for folder in remove_prototypes(root, slug):
-        print("ice-archive-to-lat: deleted %s/" % folder)
+    if not os.environ.get("ICE_KEEP_PROTOTYPES"):
+        for folder in remove_prototypes(root, slug):
+            print("ice-archive-to-lat: deleted %s/" % folder)
     return subprocess.call(["lat", "check"], cwd=root)
 
 

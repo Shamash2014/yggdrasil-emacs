@@ -56,6 +56,14 @@
   "The ice-c4-drift script: C4 elements whose code paths are gone."
   :type 'file)
 
+(defcustom ygg-ice-compact-script (locate-user-emacs-file "etc/ice/ice-compact")
+  "The ice-compact script: file archived changes into lat.md, remove old ones."
+  :type 'file)
+
+(defcustom ygg-ice-compact-days 30
+  "Archived changes older than this many days are offered for removal."
+  :type 'natnum)
+
 (defcustom ygg-ice-arch-dirs '("docs/arch" "doc/arch")
   "Where a repository keeps its LikeC4 model, first found wins."
   :type '(repeat string))
@@ -1136,18 +1144,40 @@ A plan's expect gaps are in expectations.md."
   (setq-local compilation-error-regexp-alist-alist
               (append ygg-ice-compile-error-regexps compilation-error-regexp-alist-alist))
   (setq-local compilation-error-regexp-alist
-              (append (mapcar #'car ygg-ice-compile-error-regexps) '(gnu))))
+              (append (mapcar #'car ygg-ice-compile-error-regexps) '(gnu)))
+  (setq truncate-lines nil word-wrap t))
 
-(defun ygg-ice--compile (root command what &optional codex)
+(defun ygg-ice--compile (root command what &optional codex quiet)
   "Run COMMAND in ROOT in the ICE compilation buffer named for WHAT.
-With CODEX, CODEX_HOME points at an empty folder of its own."
+With CODEX, CODEX_HOME points at an empty folder of its own.  QUIET keeps
+the buffer out of sight and says in one line how it ended."
   (let ((default-directory root)
+        (display-buffer-overriding-action
+         (if quiet '(display-buffer-no-window (allow-no-window . t))
+           display-buffer-overriding-action))
         (compilation-environment (if codex
                                      (cons (car (ygg-ice--codex-environment))
                                            compilation-environment)
                                    compilation-environment)))
-    (compilation-start command 'ygg-ice-compile-mode
-                       (lambda (_) (format "*ice: %s*" what)))))
+    (let ((buf (compilation-start command 'ygg-ice-compile-mode
+                                  (lambda (_) (format "*ice: %s*" what)))))
+      (when quiet
+        (with-current-buffer buf
+          (add-hook 'compilation-finish-functions #'ygg-ice--say-finished nil t)))
+      buf)))
+
+(defun ygg-ice--say-finished (buf how)
+  "One line on how the hidden ICE run in BUF ended, and where to read it."
+  (let ((fresh (with-current-buffer buf
+                 (save-excursion
+                   (goto-char (point-min))
+                   (when (re-search-forward "^Owner decides.*\n" nil t)
+                     (let ((n 0))
+                       (while (looking-at "- \\[ \\]") (setq n (1+ n)) (forward-line 1))
+                       n))))))
+    (message "ice: %s %s%s (%s)" (buffer-name buf) (string-trim how)
+             (if (and fresh (> fresh 0)) (format ", %d new decision%s" fresh (if (= fresh 1) "" "s")) "")
+             "C-x b to read it")))
 
 (defun ygg-ice--script (script)
   "SCRIPT expanded: a quoted leading tilde never reaches the shell as home."
@@ -1168,7 +1198,11 @@ imported with SPC p i is offered this as the import's ice step."
 (defun ygg-ice-import-step (root)
   "The ice extra of importing ROOT: wire it, or refresh a wired one's
 scripts, skills and baseline.  It runs only when the import picked it."
-  (ygg-ice-wire root (file-directory-p (expand-file-name ".ice" root)))
+  (let ((root (or root (ygg-ice-root))))
+    (ygg-ice--compile root (format "%s %s%s" (shell-quote-argument (ygg-ice--script ygg-ice-wire-script))
+                                   (if (file-directory-p (expand-file-name ".ice" root)) "--rebaseline " "")
+                                   (shell-quote-argument (directory-file-name (expand-file-name root))))
+                      "wire" t t))
   t)
 
 (defun ygg-ice-check (kind change)
@@ -1208,6 +1242,43 @@ scripts, skills and baseline.  It runs only when the import picked it."
     (ygg-ice--compile root (format "%s %s" (shell-quote-argument (ygg-ice--script ygg-ice-c4-drift-script))
                                    (shell-quote-argument (directory-file-name arch)))
                       "c4 drift")))
+
+(defun ygg-ice--compact-command (root &optional apply)
+  "The ice-compact command line for ROOT, a dry run unless APPLY."
+  (format "%s --older-than %d%s %s" (shell-quote-argument (ygg-ice--script ygg-ice-compact-script))
+          ygg-ice-compact-days (if apply " --apply" "")
+          (shell-quote-argument (directory-file-name (expand-file-name root)))))
+
+(defvar-local ygg-ice--compact-root nil
+  "The repository a dry-run ice-compact buffer belongs to.")
+
+(defun ygg-ice-compact (&optional root)
+  "Dry-run ice-compact on ROOT, then offer to remove what it would remove.
+Archived changes are filed into lat.md either way; only those older than
+ygg-ice-compact-days are removed, and nothing is committed."
+  (interactive)
+  (let* ((root (or root (ygg-ice-root)))
+         (buf (ygg-ice--compile root (ygg-ice--compact-command root) "compact")))
+    (with-current-buffer buf
+      (setq ygg-ice--compact-root root)
+      (add-hook 'compilation-finish-functions #'ygg-ice--compact-finished nil t))
+    buf))
+
+(defun ygg-ice--compact-finished (buf how)
+  "After the dry run in BUF ended as HOW, offer the removal it planned."
+  (let ((root (buffer-local-value 'ygg-ice--compact-root buf))
+        (n (with-current-buffer buf
+             (save-excursion
+               (goto-char (point-min))
+               (how-many "^to remove: ")))))
+    (when (and root (string-prefix-p "finished" how) (> n 0) (not noninteractive))
+      ;; out of the process sentinel before prompting
+      (run-at-time 0 nil #'ygg-ice--compact-offer root n))))
+
+(defun ygg-ice--compact-offer (root n)
+  "Ask to remove N archived changes of ROOT; on yes rerun ice-compact --apply."
+  (when (y-or-n-p (format "Remove %d archived changes older than %d days? " n ygg-ice-compact-days))
+    (ygg-ice--compile root (ygg-ice--compact-command root t) "compact")))
 
 (defun ygg-ice--likec4-rows (json root)
   "likec4 validate JSON as FILE:LINE:COL: error: MESSAGE rows, lines one-based."
@@ -1277,8 +1348,11 @@ scripts, skills and baseline.  It runs only when the import picked it."
                          (user-error "ice: likec4 is not installed")))
              (default-directory root)
              (cell (cons nil nil))
-             (buf (get-buffer-create (format "*ice: likec4 start %s*"
-                                             (file-name-nondirectory (directory-file-name root))))))
+             (buf (with-current-buffer
+                      (get-buffer-create (format "*ice: likec4 start %s*"
+                                                 (file-name-nondirectory (directory-file-name root))))
+                    (unless (derived-mode-p 'ygg-ice-view-mode) (ygg-ice-view-mode))
+                    (current-buffer))))
         (puthash root cell ygg-ice--previews)
         (setcar cell
                 (make-process
@@ -1287,8 +1361,9 @@ scripts, skills and baseline.  It runs only when the import picked it."
                  :filter (lambda (proc text)
                            (when (buffer-live-p (process-buffer proc))
                              (with-current-buffer (process-buffer proc)
-                               (goto-char (point-max))
-                               (insert (ansi-color-filter-apply text))))
+                               (let ((inhibit-read-only t))
+                                 (goto-char (point-max))
+                                 (insert (ansi-color-filter-apply text)))))
                            (when (and (null (cdr cell))
                                       (string-match "https?://\\(?:localhost\\|127\\.0\\.0\\.1\\)[:0-9]*/?"
                                                     (ansi-color-filter-apply text)))
@@ -1811,7 +1886,8 @@ ice-check intent fails until the line holds a date and a matching hash."
     (let* ((shown (get-buffer-create (format "*ice: restated %s*" name)))
            (win (progn
                   (with-current-buffer shown
-                    (special-mode)
+                    (ygg-ice-view-mode)
+                    (setq truncate-lines nil)
                     (let ((inhibit-read-only t))
                       (erase-buffer)
                       (insert text "\n")
@@ -1857,7 +1933,8 @@ fails until the line holds a date and a matching hash."
     (let* ((shown (get-buffer-create (format "*ice: checkpoints %s*" name)))
            (win (progn
                   (with-current-buffer shown
-                    (special-mode)
+                    (ygg-ice-view-mode)
+                    (setq truncate-lines nil)
                     (let ((inhibit-read-only t))
                       (erase-buffer)
                       (insert text "\n")

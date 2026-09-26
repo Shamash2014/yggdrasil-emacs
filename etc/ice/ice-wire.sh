@@ -9,8 +9,9 @@ agents=${ICE_AGENTS:-claude,codex,pi}
 wired=""
 decide=""
 
-note() { wired="$wired
-- [$1] $2"; }
+kept=0
+note() { case "$2" in *"(already"*) kept=$((kept + 1)) ;; *) wired="$wired
+- [$1] $2" ;; esac; }
 ask() { decide="$decide
 - [ ] $1"; }
 resolve() { mise which "$1" 2>/dev/null || command -v "$1" || { echo "ice-wire: $1 not found" >&2; exit 1; }; }
@@ -99,7 +100,7 @@ else
   note x "$arch C4 skeleton created (TODO titles) and README.md generated"
 fi
 
-for tool in ice-check ice-archive-to-lat ice-c4-drift ice-scenarios ice-fail-on-base ice-lock ice-coverage ice-verify; do
+for tool in ice-check ice-archive-to-lat ice-c4-drift ice-scenarios ice-fail-on-base ice-lock ice-coverage ice-verify ice-compact; do
   if copy_if_changed "$ice_dir/$tool" ".ice/$tool"; then chmod +x ".ice/$tool"; note x ".ice/$tool installed"; else note x ".ice/$tool (already current)"; fi
 done
 runner() {
@@ -301,4 +302,15 @@ ask "expectations.md is owner-only by instruction; once the owner confirms a cha
 ask "rerunning ice-wire after etc/ice changes updates the .ice scripts, so every locked change fails its lock until the owner re-locks it (ICE_LOCK_OWNER=1 .ice/ice-lock CHANGE lock --force)"
 ask ".ice/state and .ice/evidence hold per-run reports and logs; gitignore them or keep them. .ice/locks and .ice/ledger.tsv are the lock copy and the verdicts"
 
-printf 'ICE wiring for %s\n\nWired:%s\n\nOwner decides:%s\n' "$root" "$wired" "$decide"
+# decisions repeat every run; print only the ones the last run did not list
+previous=""
+[ -f .ice/decisions.md ] && previous=$(cat .ice/decisions.md)
+printf '# ICE decisions for the owner\n%s\n' "$decide" > .ice/decisions.md
+fresh=$(printf '%s\n' "$decide" | while IFS= read -r line; do
+  [ -n "$line" ] || continue
+  printf '%s\n' "$previous" | grep -Fqx -- "$line" || printf '%s\n' "$line"
+done)
+[ -n "$wired" ] || wired="
+- nothing new"
+printf 'ICE wiring for %s\n\nWired:%s\n- %d already current\n\nOwner decides (new since the last run; all in .ice/decisions.md):\n%s\n' \
+  "$root" "$wired" "$kept" "${fresh:-- nothing new}"

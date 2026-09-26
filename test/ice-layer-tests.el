@@ -589,6 +589,55 @@ real ones, and every cache starts empty."
                                    command)))
       (delete-directory change t))))
 
+;;; ice-compact from Emacs
+
+(defmacro ice-tests--with-compact (planned &rest body)
+  (declare (indent 1))
+  `(let* ((ygg-ice-compact-script (expand-file-name "ice-compact"
+                                                    (file-name-directory ice-tests--check-script)))
+          (ygg-ice-compact-days 45)
+          (commands nil)
+          (buf (generate-new-buffer " *ice-compact-test*")))
+     (unwind-protect
+         (cl-letf (((symbol-function 'ygg-ice--compile)
+                    (lambda (root command what &rest _)
+                      (push (list root command what) commands)
+                      (with-current-buffer buf (erase-buffer) (insert ,planned))
+                      buf)))
+           ,@body)
+       (kill-buffer buf))))
+
+(ert-deftest ice-compact-dry-runs-with-the-days-and-applies-on-yes ()
+  (ice-tests--with-compact "to remove: 2026-07-28-a (60 days)\nkept: b (too recent, 10 days)\nto remove: 2026-06-01-c (117 days)\n"
+    (let ((noninteractive nil) (prompt nil))
+      (cl-letf (((symbol-function 'run-at-time) (lambda (_ _ f &rest args) (apply f args)))
+                ((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t)))
+        (ygg-ice-compact "/tmp/cart/")
+        (should (equal (caar commands) "/tmp/cart/"))
+        (should (equal (nth 2 (car commands)) "compact"))
+        (should (equal (nth 1 (car commands))
+                       (format "%s --older-than 45 /tmp/cart" (shell-quote-argument ygg-ice-compact-script))))
+        (should (memq #'ygg-ice--compact-finished
+                      (buffer-local-value 'compilation-finish-functions buf)))
+        (ygg-ice--compact-finished buf "finished\n")
+        (should (equal prompt "Remove 2 archived changes older than 45 days? "))
+        (should (= (length commands) 2))
+        (should (equal (nth 1 (car commands))
+                       (format "%s --older-than 45 --apply /tmp/cart" (shell-quote-argument ygg-ice-compact-script))))))))
+
+(ert-deftest ice-compact-never-prompts-in-batch-on-failure-or-with-nothing-to-remove ()
+  (ice-tests--with-compact "to remove: 2026-07-28-a (60 days)\n"
+    (cl-letf (((symbol-function 'run-at-time) (lambda (&rest _) (error "Scheduled a prompt")))
+              ((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Prompted"))))
+      (ygg-ice-compact "/tmp/cart/")
+      (should noninteractive)
+      (ygg-ice--compact-finished buf "finished\n")
+      (let ((noninteractive nil))
+        (ygg-ice--compact-finished buf "exited abnormally with code 1\n")
+        (with-current-buffer buf (erase-buffer) (insert "kept: b (too recent, 10 days)\n"))
+        (ygg-ice--compact-finished buf "finished\n"))
+      (should (= (length commands) 1)))))
+
 ;;; Connections never wait on lat
 
 (ert-deftest ice-connections-draw-without-synchronous-lat-and-resolve-late ()
@@ -1381,14 +1430,25 @@ Presets come from PRESETS only; the preset path is layer-aob's own."
 
 ;;; Import: skills and ice are extras
 
-(ert-deftest ice-import-step-wires-or-rewires ()
+(ert-deftest ice-import-step-wires-or-rewires-out-of-sight ()
   (dolist (wired (list t nil))
     (ice-tests--with-repo root (if wired '((".ice/config" . "test_cmd = x\n")) '(("README.md" . "x\n")))
       (let (calls)
-        (cl-letf (((symbol-function 'ygg-ice-wire)
-                   (lambda (&optional dir rebaseline) (push (list dir rebaseline) calls))))
+        (cl-letf (((symbol-function 'ygg-ice--script) #'identity)
+                  ((symbol-function 'ygg-ice--compile)
+                   (lambda (dir command what &optional codex quiet)
+                     (push (list dir (and (string-search "--rebaseline" command) t) what codex quiet) calls))))
           (should (ygg-ice-import-step root))
-          (should (equal calls (list (list root wired)))))))))
+          (should (equal calls (list (list root wired "wire" t t)))))))))
+
+(ert-deftest ice-quiet-run-says-how-it-ended-and-counts-new-decisions ()
+  (with-temp-buffer
+    (rename-buffer "*ice: wire*" t)
+    (insert "Owner decides (new since the last run):\n- [ ] one\n- [ ] two\n\nCompilation finished\n")
+    (let (said)
+      (cl-letf (((symbol-function 'message) (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+        (ygg-ice--say-finished (current-buffer) "finished\n"))
+      (should (string-match-p "finished, 2 new decisions" said)))))
 
 (ert-deftest ice-import-runs-extras-only-when-picked ()
   (require 'ygg-project-scan)

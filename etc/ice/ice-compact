@@ -1,0 +1,194 @@
+#!/usr/bin/env python3
+import argparse
+import datetime
+import importlib.machinery
+import importlib.util
+import os
+import re
+import shutil
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+HERE = os.path.dirname(os.path.realpath(__file__))
+_loader = importlib.machinery.SourceFileLoader("ice_scenarios", os.path.join(HERE, "ice-scenarios"))
+ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scenarios", _loader))
+_loader.exec_module(ice)
+
+DESCRIPTION = """Keep OpenSpec small: file every archived change into lat.md, then
+remove the long-completed ones.
+
+Each folder openspec/changes/archive/DATE-NAME is filed with
+ice-archive-to-lat (idempotent; prototypes are left alone). A change is
+removable when its lat.md/changes.md section exists, its DATE is more
+than DAYS days old, and lat check reports nothing against it or outside
+the change sections. Without --apply nothing is removed; the filing
+still happens. With --apply the removable folders go (git rm when
+tracked); nothing is committed. openspec/specs and open changes are
+never touched."""
+
+DATED = re.compile(r"^(\d{4}-\d{2}-\d{2})-(.+)$")
+LAT_ERROR = re.compile(r"^- (\S+?):(\d+):")
+
+
+def change_sections(root):
+    path = os.path.join(root, "lat.md", "changes.md")
+    if not os.path.isfile(path):
+        return {}
+    spans, name, start = {}, None, 0
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    for number, line in enumerate(lines, 1):
+        if line.startswith("## "):
+            if name:
+                spans[name] = (start, number - 1)
+            name, start = line[3:].strip(), number
+    if name:
+        spans[name] = (start, len(lines))
+    return spans
+
+
+def lat_check(root, lat):
+    out = subprocess.run([lat, "check"], cwd=root, capture_output=True, text=True)
+    return out.returncode, out.stdout + out.stderr
+
+
+def failing_changes(output, spans):
+    failing = set()
+    errors = [l for l in output.splitlines() if l.startswith("- ")]
+    if not errors:
+        return None
+    for line in errors:
+        m = LAT_ERROR.match(line)
+        if not m or os.path.normpath(m.group(1)) != os.path.join("lat.md", "changes.md"):
+            return None
+        number = int(m.group(2))
+        owner = [n for n, (a, b) in spans.items() if a <= number <= b]
+        if not owner:
+            return None
+        failing.add(owner[0])
+    return failing
+
+
+def tracked(root, rel):
+    out = subprocess.run(["git", "ls-files", "--", rel], cwd=root, capture_output=True, text=True)
+    return out.returncode == 0 and bool(out.stdout.strip())
+
+
+def remove(root, archive_dir, name):
+    folder = os.path.join(archive_dir, name)
+    if os.path.dirname(os.path.realpath(folder)) != os.path.realpath(archive_dir):
+        return "refused %s: not directly under openspec/changes/archive" % name
+    rel = os.path.relpath(folder, root)
+    if tracked(root, rel):
+        out = subprocess.run(["git", "rm", "-r", "--quiet", "--", rel], cwd=root, capture_output=True, text=True)
+        if out.returncode != 0:
+            return "git rm %s: %s" % (rel, out.stderr.strip())
+    if os.path.isdir(folder):
+        shutil.rmtree(folder)
+    return None
+
+
+def main(argv):
+    parser = argparse.ArgumentParser(prog="ice-compact", description=DESCRIPTION,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("root", nargs="?", default=None)
+    parser.add_argument("--older-than", type=int, default=30, metavar="DAYS")
+    parser.add_argument("--apply", action="store_true")
+    args = parser.parse_args(argv)
+    if args.older_than < 0:
+        ice.die("ice-compact: --older-than must be 0 or more")
+    root = os.path.realpath(args.root or ice.repo_root())
+    archive_dir = os.path.join(root, "openspec", "changes", "archive")
+    if not os.path.isdir(os.path.join(root, "lat.md")):
+        ice.die("ice-compact: no lat.md/ in %s; run ice-wire first" % root)
+    lat = shutil.which("lat")
+    if not lat:
+        ice.die("ice-compact: lat not found on PATH")
+    names = sorted(os.listdir(archive_dir)) if os.path.isdir(archive_dir) else []
+    names = [n for n in names if os.path.isdir(os.path.join(archive_dir, n))]
+    today = datetime.date.today()
+    errors, changes = [], []
+    for name in names:
+        m = DATED.match(name)
+        if not ice.CHANGE_NAME.match(name) or not name.strip("."):
+            errors.append("refused change name %r: use letters, digits, dot, underscore and dash only" % name)
+            continue
+        if not m:
+            errors.append("%s is not DATE-NAME with DATE as YYYY-MM-DD" % name)
+            continue
+        try:
+            date = datetime.date.fromisoformat(m.group(1))
+        except ValueError:
+            errors.append("%s: %s is not a date" % (name, m.group(1)))
+            continue
+        changes.append((name, (today - date).days))
+
+    before = change_sections(root)
+    env = dict(os.environ, ICE_KEEP_PROTOTYPES="1")
+    filing_notes = {}
+    for name, _ in changes:
+        out = subprocess.run([os.path.join(HERE, "ice-archive-to-lat"), os.path.join(archive_dir, name)],
+                             cwd=root, env=env, capture_output=True, text=True)
+        said = (out.stderr.strip() or out.stdout.strip()).splitlines()
+        filing_notes[name] = said[-1] if out.returncode and said else ""
+    spans = change_sections(root)
+    code, output = lat_check(root, lat)
+    failing = set() if code == 0 else failing_changes(output, spans)
+
+    mode = "apply" if args.apply else "dry run"
+    print("ice-compact: %s, older than %d days, %s" % (root, args.older_than, mode))
+    filed = removable = 0
+    plan = []
+    for name, age in changes:
+        if name in spans and name not in before:
+            filed += 1
+            print("filed now: %s -> lat.md/changes.md#%s" % (name, name))
+        elif name in spans:
+            print("already filed: %s" % name)
+        if name not in spans:
+            why = "not filed" + (": " + filing_notes[name] if filing_notes[name] else "")
+        elif age <= args.older_than:
+            why = "too recent, %d days" % age
+        elif failing is None or name in failing:
+            why = "lat check failing"
+        else:
+            why = None
+        plan.append((name, age, why))
+
+    kept = removed = 0
+    for name, age, why in plan:
+        if why:
+            kept += 1
+            print("kept: %s (%s)" % (name, why))
+        else:
+            removable += 1
+            print("to remove: %s (%d days)" % (name, age))
+    if failing is None:
+        print("lat check:\n" + output.strip())
+
+    for message in errors:
+        print("ice-compact: " + message, file=sys.stderr)
+    if args.apply and not errors:
+        for name, age, why in plan:
+            if why:
+                continue
+            problem = remove(root, archive_dir, name)
+            if problem:
+                errors.append(problem)
+                print("ice-compact: " + problem, file=sys.stderr)
+            else:
+                removed += 1
+                print("removed: %s" % name)
+        if removed:
+            print("nothing committed; the owner reviews git status and commits")
+    elif args.apply and removable:
+        print("ice-compact: removed nothing, fix the errors above first", file=sys.stderr)
+
+    print("filed %d, removed %d, kept %d%s" % (filed, removed, kept,
+                                             "" if args.apply else "; %d to remove with --apply" % removable))
+    return 1 if errors else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv[1:]))
