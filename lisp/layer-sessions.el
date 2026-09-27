@@ -244,12 +244,12 @@ signs and nobody reads a path that way."
                    (file (expand-file-name name easysession-directory)))
               (format "  %-40s %s"
                       (propertize (string-replace "%" "/" (string-replace "%%" " @ " name))
-                                  'face 'font-lock-comment-face)
+                                  'face 'shadow)
                       (propertize
                        (format-time-string
                         "%Y-%m-%d %H:%M"
                         (file-attribute-modification-time (file-attributes file)))
-                       'face 'font-lock-comment-face)))))
+                       'face 'shadow)))))
          (table (lambda (str pred action)
                   (if (eq action 'metadata)
                       `(metadata (annotation-function . ,annotate)

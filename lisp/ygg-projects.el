@@ -131,11 +131,11 @@ quiet around it, and the one filled thing on screen should be the line
 you are on." :group 'ygg-projects)
 
 (defface ygg-projects-current
-  '((((background dark)) :background "#1c1c1c" :extend t)
-    (t :background "#e4dfd3" :extend t))
+  '((((background dark)) :background "#332f29" :extend t)
+    (t :background "#d5cebe" :extend t))
   "Face behind the line point is on: the only fill in the sidebar.
-The paper's own hue, and a full step off the ground — a shade nudged by
-less than #0a reads as a rendering artefact rather than a choice."
+The paper's own hue, two full steps off the ground — one step read as a
+faint wash rather than the line you are on."
   :group 'ygg-projects)
 
 (defface ygg-projects-on-screen '((t :inherit default :weight bold))
@@ -227,6 +227,7 @@ as its tools last said."
                                       (expand-file-name (if (consp r) (car r) r))))
                          (ygg-projects--roots))))
       (seq-filter (lambda (s) (and (not (ygg-projects--ended-subagent-p s))
+                                   (not (aob-session-ref s :hidden))
                                    (equal (ygg-projects--session-root s roots) root)))
                   (aob-sessions)))))
 

@@ -37,14 +37,10 @@ Re-run on theme change so a later theme never clobbers the bold."
 (add-hook 'enable-theme-functions #'ygg-editing--style-paren)
 (show-paren-mode 1)
 
-;;; 2. rainbow-delimiters — nested delimiters colored by depth
+;;; 2. rainbow-delimiters — off by default, a toggle only
 
 (when (fboundp 'elpaca)
-  (elpaca rainbow-delimiters
-    (add-hook 'prog-mode-hook #'rainbow-delimiters-mode)
-    (dolist (buf (buffer-list))
-      (with-current-buffer buf
-        (when (derived-mode-p 'prog-mode) (rainbow-delimiters-mode 1))))))
+  (elpaca rainbow-delimiters))
 
 ;;; 3. colorful-mode — inline swatch on hex / named color literals
 

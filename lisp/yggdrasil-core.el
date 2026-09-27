@@ -227,10 +227,10 @@ mode change drops them, so a mode hook is the place to call this."
 (put 'ygg--macro-tag 'risky-local-variable t)
 
 (defface ygg-state-normal '((t :inherit ygg-modeline-pill)) "Normal tag.")
-(defface ygg-state-visual '((t :inherit ygg-modeline-pill :inverse-video t :slant italic))
-  "Visual tag: reversed out of the bar, and leaning, to tell it from insert.")
-(defface ygg-state-insert '((t :inherit ygg-modeline-pill :inverse-video t))
-  "Insert tag: reversed out of the bar.")
+(defface ygg-state-visual '((t :inherit ygg-modeline-pill :slant italic))
+  "Visual tag: bold, and leaning, to tell it from insert.")
+(defface ygg-state-insert '((t :inherit ygg-modeline-pill))
+  "Insert tag: bold, like the word it is.")
 
 (defconst ygg--tags
   `((normal . ,(propertize " NORMAL " 'face 'ygg-state-normal))

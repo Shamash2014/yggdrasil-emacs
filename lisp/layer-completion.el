@@ -4,7 +4,6 @@
 
 (require 'yggdrasil-leader)
 
-(declare-function ygg-hlsearch-clear "yggdrasil-motions")
 
 (declare-function vertico-mode "vertico")
 (declare-function vertico-next "vertico")
@@ -23,9 +22,6 @@
 (declare-function consult-buffer "consult")
 (declare-function consult-line "consult")
 (declare-function consult-ripgrep "consult")
-(declare-function ygg-cm-show "ygg-context-manager" (&optional budget ask))
-(declare-function ygg-cm-build "ygg-context-manager"
-                  (&optional root callback forget))
 (autoload 'ygg-qf-from-selection "layer-quickfix" nil t)
 (declare-function consult-recent-file "consult")
 (declare-function consult-imenu "consult")
@@ -315,7 +311,6 @@ is missing; all of it renders in the vertico posframe."
 (yggdrasil-leader-def "f f" #'ygg-files-picker "files (fuzzy)")
 (yggdrasil-leader-def "f e" #'ygg-find-file-here "edit path")
 (yggdrasil-leader-def "f r" #'consult-recent-file "recent file")
-(yggdrasil-leader-def "b b" #'consult-buffer "switch buffer")
 (yggdrasil-leader-def "f /" #'consult-line "search buffer")
 (yggdrasil-leader-def "f i" #'consult-imenu "imenu")
 (when (executable-find "fd")
@@ -333,16 +328,13 @@ is missing; all of it renders in the vertico posframe."
 (defvar ygg-leader-search-map (make-sparse-keymap))
 (yggdrasil-define-keys 'ygg-leader-search-map
   "s" #'consult-line :label "search buffer"
-  "p" #'ygg-cm-show :label "repo map"
-  "P" #'ygg-cm-build :label "build the map"
   "g" (if (executable-find "rg") #'consult-ripgrep #'project-find-regexp)
   :label "grep project (ripgrep)"
   "w" #'ygg-search-word-at-point :label "grep word"
   "i" #'consult-imenu :label "imenu"
   "x" #'ygg-qf-from-selection :label "selection to quickfix"
   "m" #'consult-mark :label "marks"
-  "o" #'consult-outline :label "outline"
-  "c" #'ygg-hlsearch-clear :label "clear highlight")
+  "o" #'consult-outline :label "outline")
 (yggdrasil-leader-def "s" ygg-leader-search-map "search")
 
 ;;; Resume the last picker, under the search prefix the finders share

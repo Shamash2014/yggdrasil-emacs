@@ -1306,7 +1306,6 @@ With a RANGE and no ARGS the places those lines name become rows."
 
 ;;; Keys
 
-;; loclist keys are quickfix aliases — one list, no vim distinction
 (declare-function ygg-next-error-any "yggdrasil-motions")
 (declare-function ygg-prev-error-any "yggdrasil-motions")
 (declare-function ygg-quickfix-toggle "yggdrasil-leader")
@@ -1397,7 +1396,7 @@ list is what it said, read for paths the checkout holds."
   "e" #'ygg-qf-from-comint :label "buffer errors → quickfix"
   "p" #'ygg-qf-from-process :label "process output → quickfix"
   "b" #'ygg-qf-from-buffer :label "a buffer → quickfix"
-  "a" #'ygg-qf-from-session :label "agent said → quickfix"
+  "A" #'ygg-qf-from-session :label "agent said → quickfix"
   "v" #'ygg-qf-from-selection :label "selection → quickfix"
   "D" #'ygg-qf-diagnostics :label "diagnostics → quickfix")
 

@@ -13,19 +13,6 @@
 (require 'treesit nil t)
 (require 'ygg-ast)
 (require 'ygg-jdk)
-(autoload 'ygg-cm-show "ygg-context-manager" nil t)
-(autoload 'ygg-cm-show-buffer "ygg-context-manager" nil t)
-(autoload 'ygg-cm-text "ygg-context-manager")
-(autoload 'ygg-cm-files-for "ygg-context-manager")
-(autoload 'ygg-cm-rank-async "ygg-context-manager")
-(autoload 'ygg-ex--cmd-context "ygg-context-manager")
-(autoload 'ygg-ex--cmd-repomap "ygg-context-manager")
-(with-eval-after-load 'yggdrasil-ex
-  (defvar ygg-ex--commands)
-  (unless (assoc "context" ygg-ex--commands)
-    (push (cons "context" #'ygg-ex--cmd-context) ygg-ex--commands))
-  (unless (assoc "repomap" ygg-ex--commands)
-    (push (cons "repomap" #'ygg-ex--cmd-repomap) ygg-ex--commands)))
 
 (declare-function ygg-qf-buffer-create "layer-quickfix" (&optional list))
 
@@ -113,7 +100,7 @@ by hand in a window keeps the one it had."
 (defvar eglot-report-progress)
 (defvar eglot-ignored-server-capabilities)
 
-(declare-function flymake-show-buffer-diagnostics "flymake")
+(autoload 'flymake-show-buffer-diagnostics "flymake" nil t)
 (declare-function consult-flymake "consult-flymake")
 (defvar ygg-qf--header)  ; defined in layer-quickfix; used by the *quickfix* dumps
 
@@ -299,7 +286,6 @@ whichever completes last re-modes the stragglers."
     ("dart" . "Dart")
     ("sourcekit-lsp" . "Swift")
     ("emmet-language-server" . "Emmet")
-    ("astro-ls" . "Astro")
     ("ngserver" . "Angular"))
   "Server binaries probed with `ygg-lsp--executable'; missing ones only warn.")
 
@@ -323,6 +309,32 @@ whichever completes last re-modes the stragglers."
 
 (unless ygg-lsp--python-server
   (message "yggdrasil-lsp: Python (basedpyright/pyright/uvx) server not runnable"))
+
+(defun ygg-lsp--angular-root ()
+  (locate-dominating-file default-directory "angular.json"))
+
+(defun ygg-lsp-html-contact (&rest _)
+  "Eglot contact for HTML: ngserver in an Angular project, else a full
+HTML server, else Emmet."
+  (let ((angular (and (ygg-lsp--executable "ngserver") (ygg-lsp--angular-root))))
+    (cond (angular
+           (let ((modules (expand-file-name "node_modules" angular)))
+             (list "ngserver" "--stdio"
+                   "--tsProbeLocations" modules "--ngProbeLocations" modules)))
+          ((ygg-lsp--executable "vscode-html-language-server")
+           '("vscode-html-language-server" "--stdio"))
+          ((ygg-lsp--executable "emmet-language-server")
+           '("emmet-language-server" "--stdio"))
+          (t (user-error "No HTML language server runnable")))))
+
+(defconst ygg-lsp--html-servers-p
+  (or (ygg-lsp--executable "ngserver") (ygg-lsp--executable "emmet-language-server"))
+  "Whether HTML has a server beyond the one eglot knows by default.")
+
+;; Emmet takes CSS only where no full CSS server would be displaced
+(defconst ygg-lsp--emmet-css-p
+  (and (ygg-lsp--executable "emmet-language-server")
+       (not (ygg-lsp--executable "vscode-css-language-server"))))
 
 (defcustom ygg-lsp-ts-server 'tsls
   "The TypeScript/JavaScript language server.
@@ -708,6 +720,12 @@ the common prefix of several results, is left to the default handlers."
   (when (ygg-lsp--executable "sourcekit-lsp")
     (add-to-list 'eglot-server-programs
                  '((swift-mode swift-ts-mode) . ("sourcekit-lsp"))))
+  (when ygg-lsp--html-servers-p
+    (add-to-list 'eglot-server-programs
+                 '((html-mode html-ts-mode) . ygg-lsp-html-contact)))
+  (when ygg-lsp--emmet-css-p
+    (add-to-list 'eglot-server-programs
+                 '((css-mode css-ts-mode) . ("emmet-language-server" "--stdio"))))
   (when ygg-lsp--kotlin-lsp
     (add-to-list 'eglot-server-programs
                  '((kotlin-mode kotlin-ts-mode) . ygg-lsp--kotlin-lsp-contact)))
@@ -757,6 +775,18 @@ the common prefix of several results, is left to the default handlers."
 (ygg-lsp--hook-when "lua-language-server" '(lua-mode-hook lua-ts-mode-hook))
 (ygg-lsp--hook-when "dart" '(dart-mode-hook dart-ts-mode-hook))
 (ygg-lsp--hook-when "sourcekit-lsp" '(swift-mode-hook swift-ts-mode-hook))
+(ygg-lsp--hook-when "clangd" '(c-mode-hook c-ts-mode-hook c++-mode-hook c++-ts-mode-hook))
+(defun ygg-lsp--html-ensure ()
+  "Start eglot in HTML only where the contact has a server to give."
+  (when (or (ygg-lsp--executable "vscode-html-language-server")
+            (ygg-lsp--executable "emmet-language-server")
+            (ygg-lsp--angular-root))
+    (eglot-ensure)))
+
+(when ygg-lsp--html-servers-p
+  (dolist (h '(html-mode-hook html-ts-mode-hook)) (add-hook h #'ygg-lsp--html-ensure)))
+(when ygg-lsp--emmet-css-p
+  (dolist (h '(css-mode-hook css-ts-mode-hook)) (add-hook h #'eglot-ensure)))
 (when ygg-lsp--kotlin-lsp
   (dolist (h '(kotlin-mode-hook kotlin-ts-mode-hook)) (add-hook h #'eglot-ensure)))
 (when ygg-lsp--jdtls
@@ -1120,8 +1150,8 @@ TYPE-RE (and whose text matches TEXT-RE when given)."
   "[ T" #'ygg-prev-test :label "prev test"
   "] e" #'ygg-next-entry :label "next entry"
   "[ e" #'ygg-prev-entry :label "prev entry"
-  "] l" #'ygg-next-loop :label "next loop"
-  "[ l" #'ygg-prev-loop :label "prev loop"
+  "] L" #'ygg-next-loop :label "next loop"
+  "[ L" #'ygg-prev-loop :label "prev loop"
   "] X" #'ygg-next-xml-element :label "next element"
   "[ X" #'ygg-prev-xml-element :label "prev element")
 
@@ -1150,21 +1180,15 @@ A degenerate (zero-width) selection formats the whole buffer instead."
       (eglot-inlay-hints-mode 'toggle)
     (message "yggdrasil-lsp: eglot not loaded in this buffer")))
 
-;;; 5. Leader — replace the LSP placeholder stubs, same keys
-
-;; "s" is layer-completion.el's search submap (already carries imenu at "s i");
-;; leave it alone rather than race its load order for the top-level key.
-(yggdrasil-leader-def "d" #'consult-flymake "diagnostics")
-
 ;;; 7. Diagnostics polish
 
 ;;; Leader: SPC c code submap
 
 (defvar ygg-leader-code-map (make-sparse-keymap) "The c prefix: code actions.")
 
-(declare-function eglot-find-declaration "eglot")
-(declare-function eglot-find-implementation "eglot")
-(declare-function eglot-find-typeDefinition "eglot")
+(autoload 'eglot-find-declaration "eglot" nil t)
+(autoload 'eglot-find-implementation "eglot" nil t)
+(autoload 'eglot-find-typeDefinition "eglot" nil t)
 (declare-function eglot-format-buffer "eglot")
 (declare-function apheleia--get-formatters "apheleia")
 (declare-function apheleia-format-buffer "apheleia")
@@ -1496,6 +1520,14 @@ A degenerate (zero-width) selection formats the whole buffer instead."
 (yggdrasil-define-keys 'ygg-leader-code-map
   "d" #'ygg-diag-hover-mode :label "hover diagnostics")
 
+(autoload 'ygg-lsp-call-hierarchy "ygg-lsp-calls" nil t)
+(autoload 'ygg-lsp-type-hierarchy "ygg-lsp-calls" nil t)
+(autoload 'ygg-lsp-calls-qf "ygg-lsp-calls" nil t)
+
+(yggdrasil-define-keys 'ygg-leader-code-map
+  "I" #'ygg-lsp-call-hierarchy :label "call hierarchy"
+  "Y" #'ygg-lsp-type-hierarchy :label "type hierarchy")
+
 ;;; Symbols: snacks-style pickers + multibuffer dump
 
 (declare-function consult-eglot-symbols "consult-eglot")
@@ -1555,7 +1587,8 @@ A degenerate (zero-width) selection formats the whole buffer instead."
     (select-window (display-buffer buf '((display-buffer-at-bottom))))))
 
 (yggdrasil-define-keys 'ygg-leader-quit-map
-  "y" #'ygg-symbols-qf :label "symbols → quickfix")
+  "y" #'ygg-symbols-qf :label "symbols → quickfix"
+  "h" #'ygg-lsp-calls-qf :label "calls → quickfix")
 
 (provide 'layer-lsp)
 ;;; layer-lsp.el ends here

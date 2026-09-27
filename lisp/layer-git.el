@@ -699,7 +699,6 @@ LABEL is the worktree's name, branch and path."
   "p" #'magit-push :label "push"
   "f" #'magit-pull :label "pull/fetch"
   "B" #'magit-branch :label "branch menu"
-  "w" #'magit-worktree :label "worktrees"
   "W" #'ygg-git-worktree-status :label "worktree status"
   "x" ygg-git-conflict-map :label "conflicts"
   "y" #'ygg-git-yank-branch :label "yank branch"
@@ -837,7 +836,9 @@ With a prefix arg, prompt for the target branch."
 (defvar ygg-leader-worktree-map (make-sparse-keymap)
   "The g w prefix: worktrees via worktrunk.")
 
-(when (executable-find "wt")
+(if (not (executable-find "wt"))
+    (yggdrasil-define-keys 'ygg-leader-git-map
+      "w" #'magit-worktree :label "worktrees")
   (yggdrasil-define-keys 'ygg-leader-worktree-map
     "w" #'ygg-wt-switch :label "switch/create (wt)"
     "l" #'ygg-wt-list :label "list (wt)"

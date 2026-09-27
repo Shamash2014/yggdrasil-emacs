@@ -8,7 +8,6 @@
 (require 'project)
 (require 'cl-lib)
 
-(declare-function ygg-ex "yggdrasil-ex" ())
 (declare-function ghostel "ghostel" (&optional arg))
 (declare-function ghostel-semi-char-mode "ghostel")
 (declare-function ghostel-emacs-mode "ghostel")
@@ -497,7 +496,6 @@ The side it lands on becomes the default for the next terminal."
 (yggdrasil-define-keys 'ygg-leader-open-map
   "t" ygg-leader-terminal-map :label "terminal"
   "j" ygg-leader-jobs-map :label "jobs"
-  "c" #'ygg-ex :label "command line"
   "u" #'vundo :label "undo tree"
   "d" #'eldoc-doc-buffer :label "hover docs"
   "H" #'ygg-tutor :label "tutor"

@@ -4,8 +4,8 @@
 
 
 (declare-function jinx-correct "jinx")
-(declare-function jinx-next "jinx")
-(declare-function jinx-previous "jinx")
+(autoload 'jinx-next "jinx" nil t)
+(autoload 'jinx-previous "jinx" nil t)
 (declare-function jinx-mode "jinx")
 (declare-function jinx--word-valid-p "jinx")
 

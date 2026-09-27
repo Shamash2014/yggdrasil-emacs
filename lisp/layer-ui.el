@@ -178,13 +178,24 @@
                   2))
         (frame-char-height)))
 
-(defun ygg--vertico-posframe-size (_buffer)
+(defun ygg--vertico-posframe-prompt-lines (buffer)
+  "Lines the minibuffer prompt of BUFFER takes beyond its first."
+  (if (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (seq-count (lambda (c) (eq c ?\n))
+                   (buffer-substring-no-properties (point-min) (minibuffer-prompt-end))))
+    0))
+
+(defun ygg--vertico-posframe-size (buffer)
   "Compute vertico-posframe dimensions as ratios of the parent frame.
-vscode preset: width 0.4 (min 80), height 0.4 (min 8)."
+vscode preset: width 0.4 (min 80), height 0.4 (min 8), grown by the
+extra lines of a multi-line prompt up to 0.8 of the frame."
   (let* ((frame-cols (frame-width))
          (frame-lines (frame-height))
          (width (max 80 (round (* 0.4 frame-cols))))
-         (height (max 8 (round (* 0.4 frame-lines)))))
+         (base (max 8 (round (* 0.4 frame-lines))))
+         (height (max base (min (round (* 0.8 frame-lines))
+                                (+ base (ygg--vertico-posframe-prompt-lines buffer))))))
     (list :height height
           :width width
           :min-height height
@@ -499,6 +510,7 @@ vscode preset: width 0.4 (min 80), height 0.4 (min 8)."
 (defvar doom-modeline-buffer-file-name-style)
 (defvar doom-modeline-buffer-encoding)
 (defvar doom-modeline-modal)
+(defvar doom-modeline-bar-width)
 (defvar doom-modeline-check-simple-format)
 (defvar ygg--modeline-tag)
 (defvar ygg--macro-tag)
@@ -508,6 +520,7 @@ vscode preset: width 0.4 (min 80), height 0.4 (min 8)."
     (setq doom-modeline-icon nil
           doom-modeline-buffer-file-name-style 'relative-to-project
           doom-modeline-buffer-encoding nil
+          doom-modeline-bar-width 1
           doom-modeline-check-simple-format t
           doom-modeline-modal nil)
     (doom-modeline-mode 1)

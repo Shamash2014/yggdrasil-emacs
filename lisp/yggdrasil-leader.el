@@ -1,8 +1,8 @@
 ;;; yggdrasil-leader.el --- Leader key layer -*- lexical-binding: t; -*-
 
-;; Built-ins wrapped: keymaps, which-key label conses, project.el, recentf,
+;; Built-ins wrapped: keymaps, which-key label conses, project.el,
 ;; windmove, restart-emacs, help-command.
-;; Custom: leader map, extension API, LSP placeholder stub factory.
+;; Custom: leader map, extension API.
 
 ;;; Code:
 
@@ -27,12 +27,6 @@
 (defun yggdrasil-leader-def (key def &optional label)
   "Bind KEY (kbd string like \"f f\") in the leader map; LABEL feeds which-key."
   (define-key ygg-leader-map (kbd key) (if label (cons label def) def)))
-
-(defun yggdrasil-leader--lsp-stub (feature)
-  "Return a command that messages FEATURE is reserved for the LSP layer."
-  (lambda ()
-    (interactive)
-    (message "%s: reserved for the LSP layer" feature)))
 
 (defun yggdrasil-leader--split-below ()
   "Split window below and select the new one."
@@ -77,9 +71,7 @@
     (user-error "Buffer visits no file")))
 
 (yggdrasil-define-keys 'ygg-leader-file-map
-  "f" #'find-file :label "find file"
   "s" #'save-buffer :label "save"
-  "r" #'recentf-open :label "recent"
   "y" #'yggdrasil-leader--yank-file-path :label "yank path"
   "p" #'project-find-file :label "project file")
 
@@ -122,16 +114,8 @@ kill it outright, detaching any process; otherwise kill with the usual prompts."
 (yggdrasil-define-keys 'ygg-leader-buffer-map
   "d" #'yggdrasil-leader--kill-buffer :label "kill"
   "k" #'yggdrasil-leader--kill-choose :label "kill (choose)"
-  "D" #'yggdrasil-leader--kill-buffer-force :label "force kill"
   "n" #'next-buffer :label "next"
   "p" #'previous-buffer :label "previous")
-
-;; global switching is the fallback until a layer claims the key: the
-;; scoped switcher `layer-sessions' puts here is the one the space wants,
-;; and binding unconditionally takes it back every time this file reloads
-(unless (lookup-key ygg-leader-buffer-map "b")
-  (yggdrasil-define-keys 'ygg-leader-buffer-map
-    "b" #'switch-to-buffer :label "switch"))
 
 (yggdrasil-define-keys 'ygg-leader-window-map
   "s" #'yggdrasil-leader--split-below :label "split below"
@@ -159,7 +143,7 @@ kill it outright, detaching any process; otherwise kill with the usual prompts."
 Always the canonical *quickfix* buffer that SPC q c / D / t / v / e feed —
 so opening is predictable, never whatever compile or task last ran (push
 those in with SPC q e).  Created empty on first open; never refuses.
-Stepping through errors is separate: ] l / [ l follow the next-error list."
+Stepping through errors is separate: ] q / [ q follow the next-error list."
   (interactive)
   (let* ((buf (if (fboundp 'ygg-qf-ensure-buffer)
                   (ygg-qf-ensure-buffer)
@@ -232,7 +216,7 @@ instead of flooding the list with foreign bindings."
                  (propertize (or label
                                  (and (symbolp cmd) (symbol-name cmd))
                                  "anonymous command")
-                             'face 'font-lock-comment-face)
+                             'face 'shadow)
                  (when (and label (symbolp cmd) cmd)
                    (propertize (format "  %s" cmd) 'face 'shadow))))))
            (table (lambda (str pred action)
@@ -277,17 +261,5 @@ Practice directly in the buffer; edits never touch the source file."
 (yggdrasil-leader-def "w" ygg-leader-window-map "windows")
 (yggdrasil-leader-def "q" ygg-leader-quit-map "quit")
 (yggdrasil-leader-def "h" #'help-command "help")
-(defun yggdrasil-leader--reserve (key feature label)
-  "Hold KEY for FEATURE, unless a layer has already claimed it.
-Reserving unconditionally means reloading this file takes the key back
-from whichever layer was given it, which is how `SPC a\' stopped being
-the agent prefix and started saying it was reserved for LSP."
-  (unless (lookup-key ygg-leader-map (kbd key))
-    (yggdrasil-leader-def key (yggdrasil-leader--lsp-stub feature) label)))
-
-(yggdrasil-leader--reserve "s" "symbols" "symbols (later)")
-(yggdrasil-leader--reserve "d" "diagnostics" "diagnostics (later)")
-(yggdrasil-leader--reserve "a" "code action" "code action (later)")
-
 (provide 'yggdrasil-leader)
 ;;; yggdrasil-leader.el ends here

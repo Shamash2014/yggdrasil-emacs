@@ -1408,7 +1408,6 @@ A yank register (list of texts) plays as vim does: its text as keys."
 ;;; Folds, vim keys on built-in hideshow
 
 (declare-function hs-toggle-hiding "hideshow")
-(declare-function ygg-daemon-stage-composed "ygg-daemon")
 (declare-function hs-hide-block "hideshow")
 (declare-function hs-show-block "hideshow")
 (declare-function hs-hide-all "hideshow")
@@ -1503,8 +1502,7 @@ active in normal state, which would silently scope undo to it)."
 
 (yggdrasil-define-keys 'ygg-z-cap-map
   "Z" #'ygg-save-and-kill-buffer :label "save & quit"
-  "Q" #'ygg-kill-buffer-no-save :label "quit!"
-  "S" #'ygg-daemon-stage-composed :label "stage")
+  "Q" #'ygg-kill-buffer-no-save :label "quit!")
 
 (yggdrasil-define-keys 'normal
   "[ SPC" #'ygg-add-newline-above :label "add line above"

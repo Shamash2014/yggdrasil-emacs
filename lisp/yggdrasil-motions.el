@@ -888,24 +888,6 @@ in a normal buffer just widen."
   (ygg--record-bracket-motion -1 "i")
   (ygg--bracketed-goto (lambda () (ygg--find-indent-line -1))))
 
-(defun ygg--find-conflict (dir)
-  (save-excursion
-    (forward-line dir)
-    (when (if (> dir 0)
-              (re-search-forward "^<\\{7\\}" nil t)
-            (re-search-backward "^<\\{7\\}" nil t))
-      (line-beginning-position))))
-
-(defun ygg-next-conflict ()
-  (interactive)
-  (ygg--record-bracket-motion 1 "x")
-  (ygg--bracketed-goto (lambda () (ygg--find-conflict 1))))
-
-(defun ygg-prev-conflict ()
-  (interactive)
-  (ygg--record-bracket-motion -1 "x")
-  (ygg--bracketed-goto (lambda () (ygg--find-conflict -1))))
-
 (defun ygg--sibling-file (dir)
   (let ((cur (buffer-file-name)))
     (unless cur (user-error "Buffer visits no file"))
@@ -1109,8 +1091,6 @@ in a normal buffer just widen."
   "#" #'ygg-search-word-backward
   "] b" #'ygg-goto-next-buffer
   "[ b" #'ygg-goto-prev-buffer
-  "] e" #'ygg-next-error
-  "[ e" #'ygg-prev-error
   "] d" #'ygg-next-error
   "[ d" #'ygg-prev-error
   "] D" #'ygg-goto-last-diagnostic
@@ -1126,9 +1106,7 @@ in a normal buffer just widen."
   "] f" #'ygg-next-file
   "[ f" #'ygg-prev-file
   "] w" #'ygg-next-window
-  "[ w" #'ygg-prev-window
-  "] x" #'ygg-next-conflict
-  "[ x" #'ygg-prev-conflict)
+  "[ w" #'ygg-prev-window)
 
 (yggdrasil-define-keys 'ygg-goto-map
   "g" #'ygg-goto-first :label "buffer start"
