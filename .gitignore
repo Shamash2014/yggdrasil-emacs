@@ -21,3 +21,4 @@ places.eld
 projects.eld
 /dape-breakpoints
 __pycache__/
+.claude/settings.local.json

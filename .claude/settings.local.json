@@ -1,7 +1,0 @@
-{
-  "permissions": {
-    "allow": [
-      "Read(//Users/shamash/emacs-31/test/**)"
-    ]
-  }
-}
