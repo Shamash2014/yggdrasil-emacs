@@ -1,6 +1,6 @@
 ---
 name: triage
-description: Write the agent brief posted on a GitHub issue when it moves to ready-for-agent, the durable, behavioural specification an AFK agent works from. Use when triaging an issue for an agent or writing an agent brief.
+description: Write the agent brief for a GitHub issue moving to ready-for-agent. Use when triaging an issue for an agent or writing an agent brief.
 ---
 
 # Writing Agent Briefs

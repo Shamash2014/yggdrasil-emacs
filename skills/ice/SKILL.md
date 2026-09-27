@@ -1,6 +1,6 @@
 ---
 name: ice
-description: "Run a change the ICE way (Intent, Context, Expectation): turn a free-form ask or an open OpenSpec change into a confirmed intent, owner-locked checks and tracer-bullet tasks, then verify every item with ice-verify. Apply in a repo wired for ICE (it has .ice/ and openspec/ with the ice schema), or when the owner asks for ICE; a lead running workers applies it before any code."
+description: Run a change the ICE way (Intent, Context, Expectation). Apply in a repo wired for ICE (.ice/, openspec/), when the owner asks for ICE, or as a lead.
 ---
 
 # ICE

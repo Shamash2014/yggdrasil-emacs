@@ -1,6 +1,6 @@
 ---
 name: explain-change
-description: Show what one change does to the structure of a codebase, as a before/after Mermaid diagram and shape diffs, then check every new or renamed name against the CONTEXT.md glossary. Use when the user asks to explain, visualise or name-check a diff, commit range, branch or PR.
+description: 'Explain, visualise or name-check a diff, commit range, branch or PR: before/after structure diagram and a glossary check of new names.'
 ---
 
 # Explain Change

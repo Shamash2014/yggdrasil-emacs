@@ -1,6 +1,6 @@
 ---
 name: ice-ui-review
-description: "The UI review gate of ICE: a read-only reviewer compares screenshots of what a checkpoint built with the reference in the same state, lists every difference with a severity and a place on screen, and ends on approve, blockers or INVALID. Apply to every item of an ICE change that changes something a user sees, after its checks pass; the ui worker level runs under this body as its whole prompt."
+description: 'ICE UI review gate: compare screenshots to the reference. Apply to every ICE item that changes something a user sees, after its checks pass.'
 ---
 
 # ICE UI review

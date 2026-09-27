@@ -1,6 +1,6 @@
 ---
 name: ice-review-loop
-description: "The adversarial code review gate of ICE: two context-isolated reviewers check one item's diff against the repo's written do-not rules, a build worker fixes every finding, and the loop repeats until both approve or three rounds pass. Apply after an item's checks pass and before the owner sees it; the review worker level runs under this body as its whole prompt."
+description: 'ICE adversarial review gate: two isolated reviewers check a diff against do-not rules. Apply after an item passes its checks, before owner review.'
 ---
 
 # ICE review loop

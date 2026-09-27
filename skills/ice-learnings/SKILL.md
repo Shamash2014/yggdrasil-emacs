@@ -1,6 +1,6 @@
 ---
 name: ice-learnings
-description: "Keep what an ICE change learns: owner feedback and review findings that recur become dated lines in CHANGE/learnings.md and lat.md/learnings.md, the lines that apply go into every later brief's CONTEXT, and a line that keeps holding graduates into a rule in lat.md/rules.md or a check. Apply whenever the owner gives feedback on a checkpoint, a review finding repeats, or a lead writes a brief."
+description: Keep what an ICE change learns. Apply whenever the owner gives checkpoint feedback, a review finding repeats, or a lead writes a brief.
 ---
 
 # ICE learnings

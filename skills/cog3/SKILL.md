@@ -1,6 +1,6 @@
 ---
 name: cog3
-description: "Provider-agnostic Socratic spec-to-code workflow that fuses Cog2's discipline with the autoresearch (property-as-metric) loop. It resolves the plan by questioning, explores the codebase, decomposes work into atomic two-file handoffs — each carrying a property-based acceptance metric plus seed examples — then drives every handoff to green with an autonomous generate-test-score-mutate loop that freezes each property counterexample into a permanent example test, stabilizes across seeds, and refactors; finally it simplifies touched code and reviews the touched architecture. Enforces goal mode and, for bugs, the Debug Mantra. Use when the user mentions cog3, or wants a plan or bug turned into property-tested code with assumptions surfaced first, atomic handoffs, autonomous test-driven implementation, and a final architecture review."
+description: 'Use for cog3, or to turn a plan or bug into property-tested code: assumptions surfaced first, atomic handoffs, autonomous TDD loop, arch review.'
 ---
 
 # Cog3

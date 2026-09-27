@@ -1,6 +1,6 @@
 ---
 name: automation-builder
-description: Generates project automations, build scripts, and task integrations. Use when the user wants to create or wire reusable scripts, custom tasks, or ACP-discoverable automations.
+description: 'Create or wire project automations: reusable scripts, build scripts, custom tasks, or ACP-discoverable automations.'
 ---
 
 # Automation Builder

@@ -1,6 +1,6 @@
 ---
 name: ice-checks
-description: "The Expectation step of ICE: turn a change's confirmed intent into checks that can tell right code from wrong. Apply after exploration and a confirmed intent, whenever a check or test is written for an ICE change, and in any session that drafts tests for code it did not write. Contract first, expected values from the spec never from the code, corrected behaviour over observed behaviour, property tests where a law holds, and a fixed list of things a check is never bent into."
+description: 'ICE Expectation step: checks from confirmed intent. Apply whenever a check or test is written for an ICE change, or tests for code you did not write.'
 ---
 
 # ICE checks

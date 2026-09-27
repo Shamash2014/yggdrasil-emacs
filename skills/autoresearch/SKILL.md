@@ -1,15 +1,6 @@
 ---
 name: autoresearch
-description: >-
-  General-purpose autonomous software-writing loop using the Karpathy
-  autoresearch pattern. Given a software goal, it defines property-based tests
-  as the acceptance metric, seeds example-based tests, then runs a self-improving
-  generate-test-score-mutate loop over the implementation — freezing every
-  property counterexample into a growing example-test suite — until the
-  properties are green, then stabilizes and refactors. Use when the user wants to
-  autonomously implement, fix, or refactor software toward a spec with tests as
-  the fitness function. For UI, data/ML, external I/O, concurrency, performance,
-  generative, or numerical work, see the reference files for domain adjustments.
+description: Autonomously implement, fix or refactor software toward a spec, with property-based tests as the fitness function (Karpathy autoresearch loop).
 ---
 
 # Autoresearch — Software Synthesis Loop

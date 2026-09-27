@@ -1,6 +1,6 @@
 ---
 name: structure
-description: Use after design-decision has locked a concept — to translate the concept into an ordered, dependency-sequenced outline of code changes plus the complete affected-modules table. The human reviews the outline and can reorder, drop, add, or rewrite any step before any code is touched. Implementation only starts when the human explicitly locks the outline.
+description: 'Use after design-decision locks a concept: turn it into an ordered, dependency-sequenced outline of code changes for the human to lock before coding.'
 ---
 
 # Overview

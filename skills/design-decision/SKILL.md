@@ -1,6 +1,6 @@
 ---
 name: design-decision
-description: Use after grilling has pinned the user's intent AND research has mapped the relevant codebase — to produce 2–3 concrete design concepts that answer the final question — what gets built, and where does it live? User picks one before any code is written. If grilling or research is missing, defer to those upstream steps first.
+description: Use after grilling and research, to produce 2-3 concrete design concepts (what gets built, where it lives) for the user to pick before any code.
 ---
 
 # Overview

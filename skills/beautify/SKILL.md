@@ -1,6 +1,6 @@
 ---
 name: beautify 
-description: Find deepening opportunities in a codebase, informed by the domain language in CONTEXT.md and the decisions in docs/adr/. Use when the user wants to improve architecture, find refactoring opportunities, consolidate tightly-coupled modules, or make a codebase more testable and AI-navigable.
+description: Find deepening opportunities via CONTEXT.md and docs/adr/. Use to improve architecture, find refactors, decouple modules, or make code more testable.
 ---
 
 # Improve Codebase Architecture

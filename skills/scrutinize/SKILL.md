@@ -1,6 +1,6 @@
 ---
 name: scrutinize
-description: Outsider-perspective end-to-end review of a plan, PR, or code change, then simplification driven by what the review found. First questions intent and whether a simpler/more elegant approach would achieve the same goal, traces the actual code path (not just the diff) to verify the change does what it claims, reports findings — then applies the simplifications those findings justify, preserving behavior exactly. Trigger on /scrutinize and proactively whenever the user asks to review, audit, sanity-check, or get a second opinion on a plan, PR, diff, design doc, or proposed code change, or asks to simplify, clean up, or refine recently written code.
+description: Use on /scrutinize or to review, audit, sanity-check or second-opinion a plan, PR, diff or design doc, or to simplify or clean up recent code.
 model: opus
 ---
 

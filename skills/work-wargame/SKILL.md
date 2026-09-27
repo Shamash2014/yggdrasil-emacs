@@ -1,6 +1,6 @@
 ---
 name: work-wargame
-description: How a WORK plan is attacked before anyone agrees to it — subagents on one angle each, and what survives comes back as a question with variants rather than a review. Read this when asked to attack a plan.
+description: How to attack a WORK plan before anyone agrees to it, with subagents on one angle each. Read when asked to attack a plan.
 ---
 
 # work-wargame

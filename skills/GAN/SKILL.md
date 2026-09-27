@@ -1,6 +1,6 @@
 ---
 name: GAN
-description: "Use when building a new application or significant feature from a short prompt. Adversarial pipeline: grill requirements, generate tests first, build with subagents, evaluate with fresh eyes. Always tracks progress."
+description: 'Use when building a new app or significant feature from a short prompt: adversarial pipeline of grilling, tests first, subagent builds, fresh review.'
 ---
 
 # GAN - Generator/Adversarial-evaluator Network

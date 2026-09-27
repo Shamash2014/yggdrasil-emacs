@@ -1,6 +1,6 @@
 ---
 name: explain-architecture
-description: Explain how a codebase, or a named part of it, is put together for a reader new to it, with small Mermaid diagrams and a module table in the project's own domain words from CONTEXT.md. Use when the user asks for an overview, a map, or "how does this fit together"; use how for tracing one runtime path or deciding where code should live.
+description: Explain how a codebase or part of it fits together, for a new reader. Use for an overview, a map, or "how does this fit together".
 ---
 
 # Explain Architecture

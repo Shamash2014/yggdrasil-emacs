@@ -1,6 +1,6 @@
 ---
 name: design-loop
-description: Turn a goal that names a direction into criteria a shell command can prove. Use when the goal says "reduce", "no more", "stop using", "migrate off", "raise coverage", or any target the codebase drifts toward rather than reaches in one change.
+description: Turn a directional goal into shell-provable criteria. Use for goals like "reduce", "no more", "stop using", "migrate off", "raise coverage".
 ---
 
 A goal like "reduce the old pattern" cannot be graded, so nothing can

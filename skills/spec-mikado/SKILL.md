@@ -1,6 +1,6 @@
 ---
 name: spec-mikado
-description: Use when a change's prerequisites are unknown until you attempt it - legacy refactors, cross-cutting migrations, "I changed X and six unrelated things broke", dependency untangling, or work that keeps growing once started. Also use when the user mentions the Mikado method, asks to map prerequisites before refactoring, or wants a spec that survives discovery instead of freezing before implementation. Not for greenfield features whose steps are already known - those go to gsd or writing-plans.
+description: 'Use when prerequisites of a change surface only on attempt: legacy refactors, migrations, "changed X and six things broke", or the Mikado method.'
 ---
 
 # Spec-Mikado

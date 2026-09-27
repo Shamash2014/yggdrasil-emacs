@@ -1,6 +1,6 @@
 ---
 name: test-behavior-not-implementation
-description: Write tests that assert what the code does for its caller, through its public surface, never how it does it, so a refactor that keeps behaviour keeps the tests green. Trigger on /test-behavior-not-implementation and proactively whenever a test is written or changed in a build.
+description: Test what code does for its caller via its public surface, not how. Use on /test-behavior-not-implementation or whenever a test is written or changed.
 ---
 
 # Test behaviour, not implementation

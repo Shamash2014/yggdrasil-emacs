@@ -1,6 +1,6 @@
 ---
 name: tcr
-description: Implement code under TCR (test && commit || revert) discipline — every change ships test+implementation together; tests pass → auto-commit, tests fail → auto-revert. Use when the user says "use TCR", "test commit revert", "implement with TCR", or wants forced-small atomic changes with no failing-code checkpoints. Pairs well with AI codegen — validate each suggestion immediately instead of letting it pile up. Trigger on /tcr.
+description: Implement under TCR (test && commit || revert). Use on /tcr, "use TCR", "test commit revert", or for forced-small atomic changes.
 ---
 
 # TCR — Test && Commit || Revert

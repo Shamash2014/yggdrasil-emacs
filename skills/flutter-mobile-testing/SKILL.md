@@ -1,6 +1,6 @@
 ---
 name: flutter-mobile-testing
-description: Use when testing a Flutter mobile app interactively — taking screenshots, tapping, typing, swiping on iOS Simulator or Android emulator to verify app behavior visually or via UI tree.
+description: 'Use when testing a Flutter mobile app interactively on iOS Simulator or Android emulator: screenshots, taps, typing, swipes, UI tree checks.'
 ---
 
 # Flutter Mobile Testing

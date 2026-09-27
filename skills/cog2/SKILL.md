@@ -1,6 +1,6 @@
 ---
 name: cog2
-description: "Runs a provider-agnostic Socratic spec-to-code workflow that resolves a plan, explores the target codebase, decomposes work into atomic two-file handoffs, tracks the goal, implements each behavior with observed red-green-refactor TDD, then simplifies touched code and reviews the touched architecture for deepening opportunities. For bugs and debugging, it also enforces the Debug Mantra: reproduce, trace the fail path, falsify hypotheses, and cross-reference an experiment ledger. Use when the user mentions cog2, asks to turn a plan or bug report into tested code, wants assumptions surfaced before implementation, or requests repository-grounded Gherkin, task handoffs, debugging evidence, final code refinement, architecture review, and TDD execution across any agent provider."
+description: 'Use for cog2, or to turn a plan or bug report into tested code: assumptions surfaced, Gherkin, two-file handoffs, TDD, debug evidence, arch review.'
 ---
 
 # Cog2

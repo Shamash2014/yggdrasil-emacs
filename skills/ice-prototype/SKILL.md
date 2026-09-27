@@ -1,6 +1,6 @@
 ---
 name: ice-prototype
-description: "Build a throwaway visual prototype when an ICE change has user-visible UI and nothing to compare it with: static HTML and CSS under docs/prototypes/CHANGE/, one file per screen and state, no backend. The owner approves it and it becomes the UI review gate's reference. Apply when planning the checkpoints of such a change; skip it for a logic-only change or when a design, a reference app or design.md exists."
+description: Throwaway static HTML prototype for an ICE change with user-visible UI and no reference. Apply when planning its checkpoints; skip if a design exists.
 ---
 
 # ICE prototype
