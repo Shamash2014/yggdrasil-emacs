@@ -137,19 +137,55 @@
       (aob-context--render))
     (pop-to-buffer buf)))
 
+(defun aob-context--block (item)
+  (format "<context %s>\n%s\n</context>"
+          (aob-context--label item) (plist-get item :text)))
+
+(defun aob-context--join (items)
+  "ITEMS as one block of text, cut at aob-context-max-chars."
+  (let ((all (string-join (mapcar #'aob-context--block items) "\n\n")))
+    (if (<= (length all) aob-context-max-chars)
+        all
+      (concat (substring all 0 aob-context-max-chars)
+              (format "\n… %d chars left off"
+                      (- (length all) aob-context-max-chars))))))
+
 (defun aob-context-text ()
   "The context as one block of text to send, or nil when empty."
   (when aob-context--items
-    (let* ((parts (mapcar (lambda (i)
-                            (format "<context %s>\n%s\n</context>"
-                                    (aob-context--label i) (plist-get i :text)))
-                          (reverse aob-context--items)))
-           (all (string-join parts "\n\n")))
-      (if (<= (length all) aob-context-max-chars)
-          all
-        (concat (substring all 0 aob-context-max-chars)
-                (format "\n… %d chars left off"
-                        (- (length all) aob-context-max-chars)))))))
+    (aob-context--join (reverse aob-context--items))))
+
+(defun aob-context--prints (label items)
+  (mapcar (lambda (i) (secure-hash 'sha1 (plist-get i :text)))
+          (seq-filter (lambda (i) (equal (aob-context--label i) label)) items)))
+
+(defun aob-context-untold (s)
+  "The context S has not yet been told, as (TEXT . PENDING).
+TEXT is nil when S knows it all.  PENDING is what to note on S once the
+prompt carrying TEXT lands, as aob-told-pending holds it; an entry the
+cut left off is not in it, so it goes again next time.  With
+aob-dedupe-context off, the whole context and nothing to note."
+  (if (not (and s aob-dedupe-context))
+      (list (aob-context-text))
+    (let* ((items (reverse aob-context--items))
+           (fresh (seq-remove
+                   (lambda (label)
+                     (aob-told-p s :context-told label
+                                 (aob-context--prints label items)))
+                   (delete-dups (mapcar #'aob-context--label items))))
+           (send (seq-filter (lambda (i) (member (aob-context--label i) fresh))
+                             items)))
+      (when send
+        (let ((end 0) (cut nil))
+          (dolist (i send)
+            (setq end (+ end (length (aob-context--block i))))
+            (when (> end aob-context-max-chars)
+              (push (aob-context--label i) cut))
+            (setq end (+ end 2)))
+          (cons (aob-context--join send)
+                (mapcar (lambda (label)
+                          (list :context-told label (aob-context--prints label items)))
+                        (seq-remove (lambda (label) (member label cut)) fresh))))))))
 
 (provide 'aob-context)
 ;;; aob-context.el ends here

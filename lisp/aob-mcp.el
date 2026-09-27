@@ -44,6 +44,17 @@
   "Seconds a question put to the editing Emacs may take."
   :type 'number :group 'aob-mcp)
 
+(defcustom aob-mcp-output-max-lines 2000
+  "Lines of a tool result sent back before the middle is cut to a file."
+  :type 'natnum :group 'aob-mcp)
+
+(defcustom aob-mcp-output-max-bytes 51200
+  "Bytes of a tool result sent back before the middle is cut to a file."
+  :type 'natnum :group 'aob-mcp)
+
+(defconst aob-mcp--output-keep-days 7
+  "Days a cut result's full text is kept before the next cut deletes it.")
+
 (defconst aob-mcp-protocol-versions '("2025-06-18" "2025-03-26" "2024-11-05")
   "Protocol versions this server speaks, newest first.
 A client that asks for one it knows gets that one back.  Answering
@@ -180,8 +191,63 @@ pays for in tokens and reads around."
              (error nil)))
       (format "%s" text)))
 
+(defun aob-mcp--output-dir ()
+  (expand-file-name "aob-mcp-output" temporary-file-directory))
+
+(defun aob-mcp--spill (text)
+  "Write TEXT to a fresh file, first deleting spilled files gone stale."
+  (let ((dir (aob-mcp--output-dir))
+        (cutoff (time-subtract nil (days-to-time aob-mcp--output-keep-days)))
+        (coding-system-for-write 'utf-8-unix))
+    (make-directory dir t)
+    (dolist (file (directory-files dir t directory-files-no-dot-files-regexp))
+      (when (time-less-p (file-attribute-modification-time (file-attributes file))
+                         cutoff)
+        (ignore-errors (delete-file file))))
+    (make-temp-file (expand-file-name "out-" dir) nil ".txt" text)))
+
+(defun aob-mcp--fit (lines max-lines max-bytes)
+  "The leading LINES that fit in MAX-LINES and MAX-BYTES."
+  (cl-loop for line in lines
+           for count from 1
+           sum (1+ (string-bytes line)) into bytes
+           while (and (<= count max-lines) (<= bytes max-bytes))
+           collect line))
+
+(defun aob-mcp--clip (line max-bytes from-end)
+  "LINE cut to at most MAX-BYTES, keeping its start, or its end with FROM-END."
+  (let* ((piece (lambda (chars)
+                  (if from-end (substring line (- (length line) chars))
+                    (substring line 0 chars))))
+         (chars (min (length line) max-bytes))
+         (over (- (string-bytes (funcall piece chars)) max-bytes)))
+    (while (> over 0)
+      (setq chars (max 0 (- chars over))
+            over (- (string-bytes (funcall piece chars)) max-bytes)))
+    (funcall piece chars)))
+
+(defun aob-mcp--cap (text)
+  "TEXT, or its head and tail around a line naming the file with all of it."
+  (let* ((lines (split-string text "\n"))
+         (total (length lines)))
+    (if (and (<= total aob-mcp-output-max-lines)
+             (<= (string-bytes text) aob-mcp-output-max-bytes))
+        text
+      (let* ((max-lines (/ aob-mcp-output-max-lines 2))
+             (max-bytes (/ aob-mcp-output-max-bytes 2))
+             (head (aob-mcp--fit lines max-lines max-bytes))
+             (tail (nreverse (aob-mcp--fit (reverse lines) max-lines max-bytes)))
+             (cut (- total (length head) (length tail)))
+             (file (aob-mcp--spill text)))
+        ;; a line longer than the whole half-budget still shows its ends
+        (string-join
+         (append (or head (list (aob-mcp--clip (car lines) max-bytes nil)))
+                 (list (format "[... %d lines cut; full output in %s ...]" cut file))
+                 (or tail (list (aob-mcp--clip (car (last lines)) max-bytes t))))
+         "\n")))))
+
 (defun aob-mcp--content (text)
-  `(:content [(:type "text" :text ,(aob-mcp--lines text))]))
+  `(:content [(:type "text" :text ,(aob-mcp--cap (aob-mcp--lines text)))]))
 
 (defun aob-mcp-defer (conn id &optional timeout)
   "Park CONN and ID under a fresh key for `aob-mcp-complete' to answer.

@@ -2420,7 +2420,8 @@ a failed turn has left the queue held, the whole queue goes out now."
     (aob-session-put s :queued (delq entry (aob-session-ref s :queued)))
     (setf (aob-session-events s) (delq ev (aob-session-events s)))
     (run-hook-with-args 'aob-queue-change-hook s)
-    (let ((aob-prompt-typed (plist-get ev :typed)))
+    (let ((aob-prompt-typed (plist-get ev :typed))
+          (aob-told-pending (plist-get ev :told)))
       (aob-interject s (car entry)))))
 
 (defun aob-trace--queue-move (by)
@@ -2609,14 +2610,18 @@ While the agent waits on a question or a plan, this answers it instead."
           (delete-region start (point-max)))
         (when (fboundp 'ygg-normal-state) (ygg-normal-state))
         (aob-session-put s :comments nil)
-        (aob-trace--say s (string-trim
-                           (string-join
-                            (delq nil (list (and (fboundp 'aob-context-text)
-                                                 (aob-context-text))
-                                            (car held)
-                                            (unless (string-empty-p text) text)))
-                            "\n\n"))
-                          (cdr held))))))
+        (let* ((untold (and (fboundp 'aob-context-untold)
+                            ;; a slash command must stay first to be one
+                            (not (string-match-p "\\`/[^/[:space:]]+\\(?:[[:space:]]\\|\\'\\)" text))
+                            (aob-context-untold s)))
+               (aob-told-pending (cdr untold)))
+          (aob-trace--say s (string-trim
+                             (string-join
+                              (delq nil (list (car untold)
+                                              (car held)
+                                              (unless (string-empty-p text) text)))
+                              "\n\n"))
+                          (cdr held)))))))
 
 (defface aob-trace-anchor
   '((((background dark)) :background "#1c1c1c" :underline "#707070")
@@ -2726,7 +2731,9 @@ with the next message, ZZ at the end of the trace."
       (let ((d (aob-trace--pending s seq)))
         (unless d (user-error "aob: this plan is no longer waiting"))
         (aob--call s :resolve d plan-option)
-        (aob-trace--render t)))
+        (aob-trace--render t)
+        (when (aob--rejects-p d plan-option)
+          (aob-ask-reject-reason s))))
      ((and option s)
       (let* ((multi (get-text-property (line-beginning-position) 'aob-multi))
              (choices (get-text-property (line-beginning-position) 'aob-choices))
@@ -2947,8 +2954,9 @@ plan stays a plan.  With nothing waiting, ZQ does what it does elsewhere."
                (call-interactively 'ygg-kill-buffer-no-save)
              (quit-window)))
           ((eq (plist-get d :kind) 'plan)
-           (aob-reject s d)
-           (aob-trace--render t))
+           (let ((refused (aob-reject s d)))
+             (aob-trace--render t)
+             (when refused (aob-ask-reject-reason s))))
           (t
            (let ((seq (plist-get d :seq)))
              (aob-session-put s :comments

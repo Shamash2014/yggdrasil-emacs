@@ -1,0 +1,272 @@
+;;; aob-btw-tests.el --- side questions asked of a hidden fork -*- lexical-binding: t; -*-
+
+;;; Code:
+
+(require 'ert)
+(require 'cl-lib)
+(require 'aob)
+(require 'aob-acp)
+(require 'aob-btw)
+(require 'aob-mcp-tools)
+
+(setq aob-acp-persist-file (make-temp-file "aob-btw-sessions-" nil ".eld"))
+
+(defconst aob-btw-tests--file (or load-file-name buffer-file-name))
+
+(defvar aob-btw-tests--moved nil
+  "Transcripts put away, newest first, as (ACP-ID WHERE).")
+
+(defvar aob-btw-tests--requests nil
+  "Requests the fork would have sent, newest first, as (METHOD PARAMS CALLBACK).")
+
+(defun aob-btw-tests--fake-fork (_source)
+  (let ((fork (aob-create-session :id "acp:btw-fork" :backend 'acp
+                                  :name "btw-fork" :project "/tmp/proj/"
+                                  :dir "/tmp/proj/" :state 'starting
+                                  :refs aob-acp-session-refs)))
+    (aob-session-put fork :acp-id "fork-acp")
+    fork))
+
+(defmacro aob-btw-tests--with (vars &rest body)
+  "Bind (SOURCE) in VARS to a live session around BODY, fork and wire stubbed."
+  (declare (indent 1))
+  (let ((src (car vars)))
+    `(let* ((aob-acp--opened-any t)
+            (aob-acp-persist-file (make-temp-file "aob-btw-persist-" nil ".eld"))
+            (aob-btw-tests--requests nil)
+            (aob-btw-tests--moved nil)
+            (,src (aob-create-session :id "acp:btw-src" :backend 'acp
+                                      :name "src" :project "/tmp/proj/"
+                                      :dir "/tmp/proj/" :state 'idle)))
+       (aob-session-put ,src :acp-id "src-acp")
+       (aob-session-put ,src :agent "claude")
+       (unwind-protect
+           (cl-letf (((symbol-function 'aob-acp-fork) #'aob-btw-tests--fake-fork)
+                     ((symbol-function 'aob-acp--request)
+                      (lambda (_s method params cb)
+                        (push (list method params cb) aob-btw-tests--requests)))
+                     ((symbol-function 'aob-acp--auto-name) #'ignore)
+                     ((symbol-function 'aob-transcript-move)
+                      (lambda (entry where)
+                        (push (list (plist-get entry :acp-id) where)
+                              aob-btw-tests--moved)))
+                     ((symbol-function 'message) #'ignore))
+             ,@body)
+         (dolist (id '("acp:btw-src" "acp:btw-fork"))
+           (when-let* ((s (aob-session-get id))) (aob-remove-session s)))
+         (when-let* ((buf (get-buffer aob-btw-buffer-name)))
+           (kill-buffer buf))
+         (delete-file aob-acp-persist-file)))))
+
+(defun aob-btw-tests--open (fork)
+  "Let FORK finish opening, as the adapter's answer to session/fork does."
+  (aob-set-state fork 'idle)
+  (aob-acp--flush-queue fork))
+
+(defun aob-btw-tests--popup ()
+  (when-let* ((buf (get-buffer aob-btw-buffer-name)))
+    (with-current-buffer buf (buffer-string))))
+
+(defun aob-btw-tests--persisted-ids ()
+  (mapcar (lambda (e) (plist-get e :acp-id)) (aob-acp--persisted-entries)))
+
+(ert-deftest aob-btw-question-goes-to-the-fork ()
+  (aob-btw-tests--with (src)
+    (let ((before (copy-sequence (aob-session-events src)))
+          (fork (aob-btw-ask src "what is the plan?")))
+      (should (aob-session-ref fork :hidden))
+      (should (equal (plist-get (aob-session-ref fork :btw) :question) "what is the plan?"))
+      (should-not (aob-session-ref src :queued))
+      (aob-btw-tests--open fork)
+      (let ((req (car aob-btw-tests--requests)))
+        (should (equal (car req) "session/prompt"))
+        (should (equal (plist-get (cadr req) :sessionId) "fork-acp")))
+      (should (equal (aob-session-events src) before))
+      (should (eq (aob-session-state src) 'idle)))))
+
+(ert-deftest aob-btw-popup-shows-the-last-message-and-drops-the-fork ()
+  (aob-btw-tests--with (src)
+    (let* ((before (copy-sequence (aob-session-events src)))
+           (fork (aob-btw-ask src "why?")))
+      (aob-event fork 'message :text "inherited history")
+      (aob-acp--persist)
+      (should (member "src-acp" (aob-btw-tests--persisted-ids)))
+      (should-not (member "fork-acp" (aob-btw-tests--persisted-ids)))
+      ;; an earlier write that did record it must be undone too
+      (with-temp-file aob-acp-persist-file
+        (prin1 (append (aob-acp--persisted-entries)
+                       (list (list :acp-id "fork-acp" :dir "/tmp/")))
+               (current-buffer)))
+      (should-not (memq fork (aob-live-sessions)))
+      (aob-btw-tests--open fork)
+      (aob-event fork 'message :text "first thought")
+      (aob-event fork 'message :text "because it is.")
+      (funcall (nth 2 (car aob-btw-tests--requests)) '(:stopReason "end_turn") nil)
+      (let ((popup (aob-btw-tests--popup)))
+        (should popup)
+        (should (string-match-p "because it is\\." popup))
+        (should-not (string-match-p "first thought\\|inherited" popup))
+        (should (string-match-p "> why\\?" popup)))
+      (with-current-buffer aob-btw-buffer-name
+        (should (derived-mode-p 'special-mode))
+        (should buffer-read-only))
+      (should-not (aob-session-get "acp:btw-fork"))
+      (should (equal aob-btw-tests--moved '(("fork-acp" "discarded"))))
+      (should (eq (aob-session-state fork) 'dead))
+      (should-not (member "fork-acp" (aob-btw-tests--persisted-ids)))
+      (should (member "src-acp" (aob-btw-tests--persisted-ids)))
+      (should (eq (aob-session-get "acp:btw-src") src))
+      (should (equal (aob-session-events src) before)))))
+
+(ert-deftest aob-btw-a-failed-turn-shows-its-error-and-cleans-up ()
+  (aob-btw-tests--with (src)
+    (let ((fork (aob-btw-ask src "and?")))
+      (aob-btw-tests--open fork)
+      (funcall (nth 2 (car aob-btw-tests--requests)) nil '(:message "rate limited"))
+      (let ((popup (aob-btw-tests--popup)))
+        (should (string-match-p "failed" popup))
+        (should (string-match-p "rate limited" popup)))
+      (should (equal aob-btw-tests--moved '(("fork-acp" "discarded"))))
+      (should-not (aob-session-get "acp:btw-fork"))
+      (should-not (member "fork-acp" (aob-btw-tests--persisted-ids))))))
+
+(ert-deftest aob-btw-a-fork-that-fails-to-open-says-why ()
+  (aob-btw-tests--with (src)
+    (let ((fork (aob-btw-ask src "and?")))
+      (aob-acp--fail fork '(:message "session/fork unsupported"))
+      (should (string-match-p "session/fork unsupported" (aob-btw-tests--popup)))
+      (should-not (aob-session-get "acp:btw-fork")))))
+
+(ert-deftest aob-btw-a-fork-that-signals-shows-it ()
+  (aob-btw-tests--with (src)
+    (cl-letf (((symbol-function 'aob-acp-fork)
+               (lambda (_s) (error "No fork here"))))
+      (should-not (aob-btw-ask src "and?"))
+      (should (string-match-p "No fork here" (aob-btw-tests--popup))))))
+
+(ert-deftest aob-btw-a-permission-is-refused ()
+  (aob-btw-tests--with (src)
+    (let ((fork (aob-btw-ask src "and?"))
+          said)
+      (aob-btw-tests--open fork)
+      (cl-letf (((symbol-function 'aob-acp--resolve)
+                 (lambda (s d answer)
+                   (setq said answer)
+                   (setf (aob-session-decisions s) (delq d (aob-session-decisions s)))
+                   (aob-set-state s 'working))))
+        (push (list :reply-id 9 :title "Edit"
+                    :options '((:optionId "yes" :kind "allow_once")
+                               (:optionId "no" :kind "reject_once")))
+              (aob-session-decisions fork))
+        (aob-set-state fork 'blocked)
+        (accept-process-output nil 0.05)
+        (should (equal said "no"))
+        (aob-event fork 'message :text "did not edit")
+        (funcall (nth 2 (car aob-btw-tests--requests)) '(:stopReason "end_turn") nil)
+        (should (string-match-p "did not edit" (aob-btw-tests--popup)))
+        (should-not (aob-session-get "acp:btw-fork"))))))
+
+(ert-deftest aob-btw-the-transcript-moves-once-the-close-is-answered ()
+  (aob-btw-tests--with (src)
+    (let* ((proc (make-process :name "aob-btw-cat" :command '("cat")
+                               :connection-type 'pipe :noquery t))
+           (fork (aob-btw-ask src "and?")))
+      (unwind-protect
+          (progn
+            (process-put proc 'aob-sessions (make-hash-table :test #'equal))
+            (process-put proc 'aob-pending (make-hash-table :test #'eql))
+            (process-put proc 'aob-init
+                         '(done (:agentCapabilities (:sessionCapabilities (:close nil)))))
+            (setf (aob-session-conn fork) proc)
+            (aob-btw-tests--open fork)
+            (aob-event fork 'message :text "yes")
+            (funcall (nth 2 (car aob-btw-tests--requests)) '(:stopReason "end_turn") nil)
+            (should-not (aob-session-get "acp:btw-fork"))
+            (let ((close (seq-find (lambda (r) (equal (car r) "session/close"))
+                                   aob-btw-tests--requests)))
+              (should close)
+              (should (equal (plist-get (cadr close) :sessionId) "fork-acp"))
+              (should-not aob-btw-tests--moved)
+              (funcall (nth 2 close) nil nil)
+              (should (equal aob-btw-tests--moved '(("fork-acp" "discarded"))))
+              (funcall (nth 2 close) nil nil)
+              (should (= (length aob-btw-tests--moved) 1))))
+        (ignore-errors (delete-process proc))))))
+
+(ert-deftest aob-btw-a-live-fork-is-out-of-the-mcp-tools-and-the-modeline ()
+  (aob-btw-tests--with (src)
+    (aob--modeline-refresh)
+    (let ((line aob-modeline-string)
+          (fork (aob-btw-ask src "and?"))
+          (handler (plist-get (gethash "session_list" aob-mcp--tools) :handler)))
+      (aob-btw-tests--open fork)
+      (should (eq (aob-session-state fork) 'working))
+      (aob--modeline-refresh)
+      (should (equal aob-modeline-string line))
+      (cl-letf (((symbol-function 'aob-mcp-relay)
+                 (lambda (_conn _id form) (eval form t))))
+        (let ((rows (funcall handler nil nil nil)))
+          (should (seq-find (lambda (r) (string-match-p "btw-src" r)) rows))
+          (should-not (seq-find (lambda (r) (string-match-p "btw-fork" r)) rows))))
+      (dolist (who '("acp:btw-fork" "btw-fork"))
+        (should (equal (eval (aob-mcp-tools--session-form who '(list "reached")) t)
+                       (list (format "no session called %s" who)))))
+      (should (equal (eval (aob-mcp-tools--session-form "src" '(list "reached")) t)
+                     '("reached"))))))
+
+(ert-deftest aob-btw-the-real-fork-carries-the-hidden-mark-into-creation ()
+  (let* ((src (aob-create-session :id "acp:btw-real" :backend 'acp :name "real"
+                                  :project "/tmp/proj/" :dir "/tmp/proj/"
+                                  :state 'idle))
+         (seen 'unset)
+         (watch (lambda (s) (setq seen (aob-session-ref s :hidden))))
+         fork)
+    (aob-session-put src :acp-id "real-acp")
+    (aob-session-put src :agent "claude")
+    (add-hook 'aob-session-created-hook watch)
+    (unwind-protect
+        (cl-letf (((symbol-function 'aob-acp--connect) #'ignore)
+                  ((symbol-function 'aob-acp--init-of)
+                   (lambda (_s) '(:agentCapabilities (:sessionCapabilities (:fork nil)))))
+                  ((symbol-function 'message) #'ignore))
+          (let ((aob-acp-session-refs '(:hidden t)))
+            (setq fork (aob-acp-fork src)))
+          (should (eq seen t))
+          (should (aob-session-ref fork :hidden))
+          (should-not (aob-acp--entry fork)))
+      (remove-hook 'aob-session-created-hook watch)
+      (aob-remove-session src)
+      (when fork (aob-remove-session fork)))))
+
+(ert-deftest aob-btw-q-on-the-trace-asks-and-q-closes-the-popup ()
+  (unless (and (locate-library "yggdrasil") (locate-library "layer-aob"))
+    (ert-skip "no modal layer on the load path"))
+  (let ((code (format "%S"
+                      '(progn
+                         (setq load-prefer-newer t)
+                         (defvar ygg-space-state-functions nil)
+                         (defvar ygg-space-detail-functions nil)
+                         (require 'yggdrasil)
+                         (require 'layer-aob)
+                         (with-temp-buffer
+                           (aob-trace-mode)
+                           (ygg-normal-state)
+                           (unless (eq (key-binding "Q") #'aob-btw)
+                             (error "Q is %S" (key-binding "Q"))))
+                         (with-temp-buffer
+                           (aob-btw-mode)
+                           (unless (eq (key-binding "q") #'quit-window)
+                             (error "q is %S" (key-binding "q"))))))))
+    (with-temp-buffer
+      (unless (eq 0 (call-process (expand-file-name invocation-name invocation-directory)
+                                  nil t nil "-Q" "--batch"
+                                  "--eval" "(setq kill-emacs-hook nil)"
+                                  "--eval" (format "(setq aob-acp-persist-file %S)"
+                                                   (make-temp-file "aob-btw-child-" nil ".eld"))
+                                  "-L" (file-name-directory (locate-library "layer-aob"))
+                                  "-L" (file-name-directory (locate-library "aob"))
+                                  "--eval" code))
+        (ert-fail (buffer-string))))))
+
+(provide 'aob-btw-tests)
+;;; aob-btw-tests.el ends here

@@ -106,14 +106,11 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "xref_references"
- :description "References to a symbol, as file:line:text, at most 200 of them.
-The major mode of FILE picks the xref backend, so name the file the symbol
-belongs to.  Costs a project-wide search in the user's Emacs and can take
-seconds; it opens FILE if no buffer has it already."
+ :description "References to a symbol across the project, as file:line:text."
  :args '((:name "file" :type string
-          :description "Absolute path of a file in the project, whose major mode picks the backend.")
+          :description "Absolute path of a file the symbol belongs to; its mode picks the backend.")
          (:name "symbol" :type string
-          :description "The identifier to find references to, spelled as it appears in the code."))
+          :description "Identifier as spelled in the code."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
@@ -124,14 +121,11 @@ seconds; it opens FILE if no buffer has it already."
 
 (aob-mcp-deftool
  :name "xref_apropos"
- :description "Definitions across the project whose names match a pattern, as
-file:line:text, at most 200 of them.  The major mode of FILE picks the xref
-backend.  Costs a project-wide search in the user's Emacs and can take seconds;
-it opens FILE if no buffer has it already."
+ :description "Definitions across the project whose names match a pattern, as file:line:text."
  :args '((:name "file" :type string
-          :description "Absolute path of a file in the project, whose major mode picks the backend.")
+          :description "Absolute path of a project file; its mode picks the backend.")
          (:name "pattern" :type string
-          :description "Words matched against definition names; the backend decides how loosely."))
+          :description "Words matched against definition names."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
@@ -144,12 +138,9 @@ it opens FILE if no buffer has it already."
 
 (aob-mcp-deftool
  :name "imenu_symbols"
- :description "The symbol outline of one file from imenu, a line each as
-\"kind: name:line\", nested kinds joined with a slash.  At most 200.  Works on a
-file nobody has open, which costs opening it and running its major mode; a file
-already open costs almost nothing."
+ :description "A file's symbol outline from imenu, one \"kind: name:line\" per line."
  :args '((:name "file" :type string
-          :description "Absolute path of the file to outline."))
+          :description "Absolute path."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
@@ -243,18 +234,13 @@ already open costs almost nothing."
 
 (aob-mcp-deftool
  :name "treesit_info"
- :description "What tree-sitter makes of a file.  With no LINE: the parsers, the
-root node and the top-level nodes with their lines.  With a LINE, and optionally
-a COLUMN: the node at that position, whether it is named, its byte range, its
-line range, every ancestor up to the root, and its immediate children.  Says so
-plainly when this Emacs has no tree-sitter or the buffer has no parser.  Opens
-the file if nobody has it open."
+ :description "Tree-sitter parse of a file: without line, parsers and top-level nodes; with line, the node there, its ancestors and children."
  :args '((:name "file" :type string
-          :description "Absolute path of the file to parse.")
+          :description "Absolute path.")
          (:name "line" :type integer :optional t
-          :description "1-based line; without it the answer is a whole-file summary.")
+          :description "1-based line.")
          (:name "column" :type integer :optional t
-          :description "0-based column on LINE, counted in characters.  Default 0."))
+          :description "0-based column in characters; default 0."))
  :handler
  (lambda (args conn id)
    (let ((line (aob-mcp-tools--int (plist-get args :line)))
@@ -274,15 +260,11 @@ the file if nobody has it open."
 
 (aob-mcp-deftool
  :name "diagnostics"
- :description "What a checker has to say about one file, a line each as
-\"severity line:column message\", at most 200.  Reads whichever of flymake or
-flycheck is turned on in that buffer, and names both states when neither is.
-The file must already be open: nothing has checked a file nobody opened, so this
-never opens one, and it is cheap."
+ :description "Flymake or flycheck diagnostics for a file open in the editor, one \"severity line:column message\" per line."
  :args '((:name "file" :type string
-          :description "Absolute path of a file already open in the user's Emacs.")
+          :description "Absolute path of an open file.")
          (:name "checker" :type string :optional t
-          :description "Which checker to read; auto takes whichever one is on."
+          :description "auto takes whichever is on."
           :enum ["auto" "flymake" "flycheck"]))
  :handler
  (lambda (args conn id)
@@ -326,11 +308,9 @@ never opens one, and it is cheap."
 
 (aob-mcp-deftool
  :name "tool_names"
- :description "The names of the tools this server offers, one to a line, for
-building an allowed-tools list.  Answered in the sidecar, so it costs nothing
-and never reaches the user's Emacs."
+ :description "Names of this server's tools, one per line."
  :args '((:name "prefix" :type string :optional t
-          :description "Only the names starting with this."))
+          :description "Only names starting with this."))
  :handler
  (lambda (args _conn _id)
    (let ((names (aob-mcp-tool-names (plist-get args :prefix))))
@@ -352,9 +332,7 @@ and never reaches the user's Emacs."
 
 (aob-mcp-deftool
  :name "session_list"
- :description "Every conversation open in this editor, yours and everyone
-else's: id, state, name and folder. The ids are what session_say and
-session_read take."
+ :description "Every conversation open in this editor: id, state, name, folder."
  :args nil
  :handler
  (lambda (_args conn id)
@@ -368,14 +346,18 @@ session_read take."
                              (aob-session-state s)
                              (aob-session-name s)
                              (or (aob-session-dir s) (aob-session-project s) "")))
-                   (aob-sessions))
+                   (seq-remove (lambda (s) (aob-session-ref s :hidden))
+                               (aob-sessions)))
            (list "none open"))))))
 
 (defun aob-mcp-tools--session-form (who found)
   "A form finding the session WHO names, by id or by a name only one carries.
 FOUND is the form answering once it is found, with it bound to s."
   `(let* ((who ,who)
-          (by-id (and (fboundp 'aob-session-get) (aob-session-get who)))
+          (by-id (when-let* (((fboundp 'aob-session-get))
+                             (x (aob-session-get who))
+                             ((not (aob-session-ref x :hidden))))
+                   x))
           ;; a name is what a person reads off a list, and what an
           ;; agent will send back — but two conversations can carry
           ;; one name, and guessing which is how a message goes to
@@ -383,7 +365,8 @@ FOUND is the form answering once it is found, with it bound to s."
           (by-name (unless by-id
                      (and (fboundp 'aob-sessions)
                           (seq-filter (lambda (x)
-                                        (equal (aob-session-name x) who))
+                                        (and (equal (aob-session-name x) who)
+                                             (not (aob-session-ref x :hidden))))
                                       (aob-sessions)))))
           (s (or by-id (and (= (length by-name) 1) (car by-name)))))
      (cond
@@ -398,15 +381,11 @@ FOUND is the form answering once it is found, with it bound to s."
 
 (aob-mcp-deftool
  :name "session_say"
- :description "Say something to another conversation in this editor.
-It lands in that conversation's
-turn where its agent takes steering, and is queued for its next turn
-where it does not. Returns which of the two happened. Use session_list
-for the id."
+ :description "Send text to another conversation: into its running turn if it takes steering, else queued for its next."
  :args '((:name "id" :type string
-          :description "the session id or name, as session_list prints it")
+          :description "Id or name from session_list.")
          (:name "text" :type string
-          :description "what to say to it"))
+          :description "What to say."))
  :handler
  (lambda (args conn id)
    (let ((text (plist-get args :text))
@@ -446,14 +425,9 @@ for the id."
 
 (aob-mcp-deftool
  :name "session_read"
- :description "The latest of another conversation's events as text: what it
-was told, said and ran, newest last, at most 16384 characters, each tool
-result cut to its first and last 2048, reasoning left out.  For diagnosing a conversation
-that seems stuck or wrong, not for polling one: to wait on it, end your turn
-instead of reading it again.  Takes the id or a name only one conversation
-carries, as session_list prints them."
+ :description "Tail of another conversation, newest last, to diagnose one stuck or wrong. Not for polling: to wait, end your turn."
  :args '((:name "id" :type string
-          :description "the session id or name, as session_list prints it"))
+          :description "Id or name from session_list."))
  :handler
  (lambda (args conn id)
    (let ((who (plist-get args :id)))
@@ -471,15 +445,15 @@ carries, as session_list prints them."
 
 (aob-mcp-deftool
  :name "todo_write"
- :description "Make a todo list this session's current list and return it: a new tasks.md, or with file an existing one such as a spec's."
+ :description "Set this session's todo list and return it: a new tasks.md, or an existing one given file."
  :args '((:name "file" :type string :optional t
-          :description "An existing tasks.md inside the project to bind instead of creating one; title, slug and sections are then ignored.")
+          :description "Existing tasks.md in the project to bind; title, slug and sections are then ignored.")
          (:name "title" :type string :optional t
-          :description "Title for the list; defaults to blank.")
+          :description "List title.")
          (:name "slug" :type string :optional t
-          :description "Short name, used in the path; defaults from the title.")
+          :description "Path name; defaults from the title.")
          (:name "sections" :type string :optional t
-          :description "JSON array of {name, items: [text]}, e.g. [{\"name\": \"Now\", \"items\": [\"item 1\"]}]"))
+          :description "JSON [{\"name\": \"Now\", \"items\": [\"text\"]}]."))
  :handler
  (lambda (args conn id)
    (let* ((title (let ((v (plist-get args :title))) (and v (not (string-empty-p v)) v)))
@@ -525,11 +499,11 @@ carries, as session_list prints them."
 
 (aob-mcp-deftool
  :name "todo_list"
- :description "The current todo list of this session with each item's id, section and state; call it before changing items."
+ :description "This session's todo list with item ids, sections and states; read it before changing items."
  :args '((:name "file" :type string :optional t
-          :description "Absolute path of another list to read; the session's current list if not given.")
+          :description "Absolute path of another list.")
          (:name "all" :type string :optional t
-          :description "\"true\" to spell out finished items; otherwise they are listed by id only."))
+          :description "\"true\" to show finished items' text."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
@@ -546,13 +520,13 @@ carries, as session_list prints them."
 
 (aob-mcp-deftool
  :name "todo_add"
- :description "Add an item to a list and return it as [done] id text plus the list's path."
+ :description "Add an item to a todo list; returns its id."
  :args '((:name "text" :type string
-          :description "The item text.")
+          :description "Item text.")
          (:name "section" :type string :optional t
-          :description "The section name; the default section if not given.")
+          :description "Section name; default section if omitted.")
          (:name "file" :type string :optional t
-          :description "Absolute path of the list; the session's current list if not given."))
+          :description "List path; the session's list if omitted."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
@@ -572,17 +546,17 @@ carries, as session_list prints them."
 
 (aob-mcp-deftool
  :name "todo_update"
- :description "Update an item: mark it done or rewrite its text. At least one of done or text is required. Answers the updated item line."
+ :description "Mark a todo item done or undone, or rewrite it; pass done or text."
  :args '((:name "id" :type string
-          :description "The item id (e.g., S.1).")
+          :description "Item id, e.g. S.1.")
          (:name "done" :type string :optional t
-          :description "\"true\" to mark done, \"false\" to mark undone.")
+          :description "\"true\" or \"false\".")
          (:name "text" :type string :optional t
-          :description "New item text; the old text if not given.")
+          :description "New item text.")
          (:name "expect" :type string :optional t
-          :description "The item text you last saw, for safety.")
+          :description "Item text you last saw; finds the item if ids moved.")
          (:name "file" :type string :optional t
-          :description "Absolute path of the list; the session's current list if not given."))
+          :description "List path; the session's list if omitted."))
  :handler
  (lambda (args conn id)
    (let ((done-str (plist-get args :done))
@@ -610,13 +584,13 @@ carries, as session_list prints them."
 
 (aob-mcp-deftool
  :name "todo_remove"
- :description "Remove an item from a list. Answers removed ID."
+ :description "Remove a todo item."
  :args '((:name "id" :type string
-          :description "The item id (e.g., S.1).")
+          :description "Item id, e.g. S.1.")
          (:name "expect" :type string :optional t
-          :description "The item text you last saw, for safety.")
+          :description "Item text you last saw; finds the item if ids moved.")
          (:name "file" :type string :optional t
-          :description "Absolute path of the list; the session's current list if not given."))
+          :description "List path; the session's list if omitted."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay

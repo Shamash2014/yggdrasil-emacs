@@ -8,6 +8,9 @@
 (require 'ygg-projects)
 (require 'aob-context)
 (require 'aob-deliver)
+(require 'aob-btw)
+(require 'aob-handoff)
+(require 'aob-answer)
 (require 'ygg-agent-skills)
 (require 'aob-subagent)
 (require 'aob-transcript)
@@ -30,6 +33,7 @@
 (define-key aob-object-map (kbd "C-o") #'ygg-jump-back)
 (define-key aob-trace-mode-map (kbd "<tab>") #'aob-trace-tab)
 (define-key aob-trace-mode-map (kbd "C-i") #'ygg-jump-forward)
+(define-key aob-trace-mode-map "Q" #'aob-btw)
 
 ;; ...and something for them to jump between: opening an agent's view is a
 ;; jump, but nothing was recording where you left, so C-o from a trace had
@@ -172,6 +176,8 @@
 (yggdrasil-localleader-def 'aob-trace-mode "K" #'aob-trace-queue-earlier "queued: move earlier")
 (yggdrasil-localleader-def 'aob-trace-mode "J" #'aob-trace-queue-later "queued: move later")
 (yggdrasil-localleader-def 'aob-trace-mode "u" #'aob-trace-usage "usage: time, tokens, cost")
+(yggdrasil-localleader-def 'aob-trace-mode "A" #'aob-answer "answer its questions")
+(yggdrasil-localleader-def 'aob-trace-mode "H" #'aob-handoff "hand off to a fresh session")
 
 (autoload 'ygg-projects-toggle-pin "ygg-projects" nil t)
 (dolist (mode '(aob-trace-mode aob-plan-mode))
@@ -719,6 +725,7 @@ you out of that one."
     (aob-session-put s :space space))
   (when (and ygg-aob-space-per-agent
              (not (ygg-aob--subagent-p s))
+             (not (aob-session-ref s :hidden))
              (fboundp 'ygg-space--spawn)
              (fboundp 'ygg-space-rename)
              ;; a session that is created already finished is a
@@ -903,7 +910,8 @@ buffer-local that says where the words were going."
 
 (defun ygg-aob--show-new-trace (s)
   "Show a new session's trace; a subagent its agent runs opens only when asked."
-  (unless (or (aob-session-ref s :native-tool-id) (aob-session-ref s :workflow-agent))
+  (unless (or (aob-session-ref s :native-tool-id) (aob-session-ref s :workflow-agent)
+              (aob-session-ref s :hidden))
     (ygg-aob--show-trace s)))
 
 (add-hook 'aob-session-created-hook #'ygg-aob--show-new-trace 95)
@@ -1587,7 +1595,7 @@ layer stays quiet rather than dying inside a state-change hook."
 
 (defun ygg-aob--notify (s old new)
   (let ((name (aob-session-name s)))
-    (pcase new
+    (pcase (and (not (aob-session-ref s :hidden)) new)
       ('blocked (ygg-aob--say (format "%s needs input" name) 'warn))
       ((and 'idle (guard (eq old 'working)))
        (ygg-aob--say (format "%s done" name))))))
@@ -1605,7 +1613,6 @@ layer stays quiet rather than dying inside a state-change hook."
 
 (declare-function aob-session-at-point "aob")
 (declare-function aob-session-id "aob")
-(declare-function ygg-task-adopt "ygg-task-adopt" (session &optional brief))
 (defvar ygg-aob-agent-map
   (let ((map (make-sparse-keymap)))
     (define-key map "f" #'aob-acp-fork)
@@ -1615,15 +1622,8 @@ layer stays quiet rather than dying inside a state-change hook."
     (define-key map "g" #'aob-acp-goal)
     (define-key map "M" #'aob-acp-model)
     (define-key map "k" #'aob-kill-session)
-    (define-key map "t" #'ygg-task-adopt)
-    (define-key map "S" #'ygg-share-session)
-    (define-key map "Q" #'ygg-pending-show)
     map)
   "What you can do to the agent under point.")
-
-(autoload 'ygg-share-session "ygg-share" nil t)
-(autoload 'ygg-share-open "ygg-share" nil t)
-(autoload 'ygg-pending-show "ygg-pending" nil t)
 
 (defun ygg-aob--embark-agent ()
   "Tell embark the cursor is on an agent, when it is."
@@ -1649,10 +1649,6 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   (yggdrasil-define-keys 'ygg-leader-buffer-map
     "D" #'ygg-aob-force-kill-or-delete :label "force kill · delete agent"))
 
-(declare-function ygg-daemon-inspect "ygg-daemon" (task))
-(declare-function ygg-qa-compose "ygg-qa" (task &optional note))
-(autoload 'ygg-qa-compose "ygg-qa" nil t)
-(autoload 'ygg-daemon-inspect "ygg-daemon" nil t)
 (defvar ygg-leader-acp-map (make-sparse-keymap) "The a c prefix: ACP sessions.")
 
 ;; Starting, reaching and ending an agent.  Fork, restart, config, prompt
@@ -1665,7 +1661,6 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "o" #'ygg-aob-pick :label "go to"
   "j" #'ygg-aob-switch :label "switch session, any project"
   "r" #'ygg-aob-resolve-next :label "resolve"
-  "t" #'ygg-task-adopt :label "task from this chat"
   "q" #'aob-kill-session :label "kill")
 
 (declare-function ygg-transient-acp "ygg-transient")
@@ -1705,26 +1700,7 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 (yggdrasil-define-keys 'ygg-leader-agent-map
   "c" ygg-leader-acp-map :label "sessions")
 
-(declare-function ygg-qa-compose "ygg-qa" (task &optional note))
-(declare-function ygg-qa-score "ygg-qa" (task callback))
-(declare-function ygg-qa-show "ygg-qa" (task &optional text))
 (defvar ygg-leader-quit-map)
-
-(defun ygg-qa-score-here ()
-  "Score the mutants the last QA proposed for the task at hand."
-  (interactive)
-  (require 'ygg-qa)
-  (ygg-qa-score (ygg-task-here-or-read)
-                (lambda (score)
-                  (message "qa: %s" (if (consp score)
-                                        (format "%s killed of %s" (car score) (cdr score))
-                                      score)))))
-
-(defun ygg-qa-show-here ()
-  "Open the last QA report of the task at hand."
-  (interactive)
-  (require 'ygg-qa)
-  (ygg-ui-show (ygg-qa-show (ygg-task-here-or-read))))
 
 (with-eval-after-load 'yggdrasil-leader
   (yggdrasil-define-keys 'ygg-leader-quit-map
@@ -1965,6 +1941,8 @@ message from compose is one."
     (cons (concat (car held) "\n\n" text) (cdr held))))
 
 (add-hook 'aob-compose-before-send-functions #'ygg-aob--comments-compose)
+(require 'aob-diag-push)
+(require 'aob-bang)
 
 (defun ygg-aob--todo-note-say (args)
   "ARGS of a message sent from a trace, the todo note after its text."

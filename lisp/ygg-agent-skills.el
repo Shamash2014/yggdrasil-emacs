@@ -102,11 +102,14 @@ or edited since.  The installer copies, so a change here reaches no one
 until it runs again."
   (seq-filter
    (lambda (name)
-     (let ((src (expand-file-name "SKILL.md" (expand-file-name name ygg-agent-skills-root)))
-           (dst (expand-file-name (concat name "/SKILL.md") ygg-agent--shared-skills)))
+     (let* ((dir (expand-file-name name ygg-agent-skills-root))
+            (src (expand-file-name "SKILL.md" dir))
+            (dst (expand-file-name (concat name "/SKILL.md") ygg-agent--shared-skills)))
        (and (file-readable-p src)
             (or (not (file-exists-p dst))
-                (file-newer-than-file-p src dst)))))
+                ;; a skill's side files are read on demand, so they go stale too
+                (seq-some (lambda (f) (file-newer-than-file-p f dst))
+                          (directory-files-recursively dir ""))))))
    (ygg-agent--skill-names)))
 
 (defun ygg-agent-skills-ensure ()

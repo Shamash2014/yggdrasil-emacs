@@ -40,11 +40,13 @@
   (delq nil (mapcar (lambda (id) (gethash id aob--sessions)) aob--order)))
 
 (defun aob-live-sessions ()
-  "Every session still to be reached for; a subagent only while it runs."
-  (seq-remove (lambda (s) (memq (aob-session-state s)
-                                (if (aob-session-ref s :parent-session)
-                                    '(dead failed done)
-                                  '(dead failed))))
+  "Every session still to be reached for; a subagent only while it runs.
+A session marked :hidden is never one: it runs for a caller, not for you."
+  (seq-remove (lambda (s) (or (aob-session-ref s :hidden)
+                              (memq (aob-session-state s)
+                                    (if (aob-session-ref s :parent-session)
+                                        '(dead failed done)
+                                      '(dead failed)))))
               (aob-sessions)))
 
 (defun aob-session-get (id)
@@ -102,6 +104,40 @@ session taking the first one's key is a session that disappears."
 
 (defun aob-session-ref (s key)
   (plist-get (aob-session-extra s) key))
+
+(defcustom aob-dedupe-context t
+  "Non-nil tells each session a context entry or an @file only once.
+Held context goes out again only when it is new or changed, and a file
+mentioned again unchanged goes as a link.  A compact or clear forgets
+what was told, so the next message tells it again."
+  :type 'boolean :group 'aob)
+
+(defun aob-told (s key)
+  "Alist of NAME to fingerprint that S was told under KEY.
+Kept with the conversation id it was told in, so a session that now
+talks to another conversation starts from nothing."
+  (let ((rec (aob-session-ref s key)))
+    (and (equal (car rec) (aob-session-ref s :acp-id)) (cdr rec))))
+
+(defun aob-told-p (s key name print)
+  "Non-nil when S was last told NAME under KEY as PRINT."
+  (equal (cdr (assoc name (aob-told s key))) print))
+
+(defun aob-tell (s key name print)
+  "Note that S has now been told NAME under KEY as PRINT."
+  (let ((told (copy-alist (aob-told s key))))
+    (setf (alist-get name told nil nil #'equal) print)
+    (aob-session-put s key (cons (aob-session-ref s :acp-id) told))))
+
+(defvar aob-told-pending nil
+  "What the prompt now being sent tells: a list of (KEY NAME PRINT).
+A backend notes it on the session once the prompt lands, and carries it
+with the prompt while it waits in the queue.")
+
+(defun aob-tell-all (s pending)
+  "Note on S every (KEY NAME PRINT) in PENDING."
+  (pcase-dolist (`(,key ,name ,print) pending)
+    (aob-tell s key name print)))
 
 (defun aob-session-queued-p (s)
   "Non-nil when S has prompts waiting to go out when this turn settles.
@@ -817,25 +853,46 @@ keeps writing into the trace it was already writing into."
                             (if-let* ((detail (plist-get d :detail)))
                                 (format "  [%s]" detail)
                               ""))
-                    (mapcar #'car opts) nil t)))
-        (aob--call s :resolve d (cdr (assoc pick opts)))))))
+                    (mapcar #'car opts) nil t))
+             (id (cdr (assoc pick opts))))
+        (aob--call s :resolve d id)
+        (when (aob--rejects-p d id)
+          (aob-ask-reject-reason s))))))
 
 (defconst aob-other-choice "Other…"
   "The last of every question's choices: it reads an answer of your own.")
 
-(defun aob--choice-table (labels)
-  "LABELS then aob-other-choice, kept in the order the agent gave them."
-  (let ((all (append labels (list aob-other-choice))))
+(defun aob--choice-note (label notes)
+  "What NOTES say about LABEL beside it, or nil: its description, else a
+title that is not the label itself."
+  (when-let* ((note (cdr (assoc label notes)))
+              (said (or (plist-get note :description)
+                        (and (not (equal (plist-get note :title) label))
+                             (plist-get note :title))))
+              ((not (string-empty-p said))))
+    (concat "  " (propertize (string-join (split-string said "\n" t " +") " ")
+                             'face 'shadow))))
+
+(defun aob--choice-table (labels &optional notes)
+  "LABELS then aob-other-choice, kept in the order the agent gave them,
+each annotated with what NOTES, as (LABEL :title :description), say of it."
+  (let ((all (append labels (list aob-other-choice)))
+        (metadata `(metadata (display-sort-function . identity)
+                             (cycle-sort-function . identity)
+                             ,@(when notes
+                                 (list (cons 'annotation-function
+                                             (lambda (label)
+                                               (aob--choice-note label notes))))))))
     (lambda (str pred action)
       (if (eq action 'metadata)
-          '(metadata (display-sort-function . identity)
-                     (cycle-sort-function . identity))
+          metadata
         (complete-with-action action all str pred)))))
 
-(defun aob--read-choices (prompt labels multi)
+(defun aob--read-choices (prompt labels multi &optional notes)
   "Read an answer to PROMPT from LABELS, as (PICKS . TYPED).
-Picking aob-other-choice reads TYPED, and so does typing past LABELS."
-  (let* ((table (aob--choice-table labels))
+Picking aob-other-choice reads TYPED, and so does typing past LABELS.
+NOTES annotate LABELS, see aob--choice-table."
+  (let* ((table (aob--choice-table labels notes))
          (said (if multi
                    (completing-read-multiple prompt table)
                  (list (completing-read prompt table))))
@@ -897,19 +954,44 @@ the next message instead, so the words still reach the agent."
                       (plist-get d :questions))
           "\n")))))
 
+(defun aob--wrap-line (line width)
+  "LINE broken at spaces into lines no wider than WIDTH, where words allow."
+  (let (lines current)
+    (dolist (word (split-string line " +" t))
+      (if (and current (> (+ (string-width current) 1 (string-width word)) width))
+          (progn (push current lines) (setq current word))
+        (setq current (if current (concat current " " word) word))))
+    (nreverse (cons (or current "") lines))))
+
+(defun aob--question-prompt (text &optional width)
+  "TEXT whole, every line kept and wrapped to WIDTH, with the answer
+read on a line of its own below it."
+  (let ((width (or width
+                   ;; vertico draws its count before the first line
+                   (max 20 (min 72 (- (window-width (minibuffer-window)) 8))))))
+    (concat (mapconcat (lambda (line) (string-join (aob--wrap-line line width) "\n"))
+                       (split-string (string-trim (or text "")) "\n")
+                       "\n")
+            "\n> ")))
+
 (defun aob--resolve-question (s d)
   "Walk D's questions; each with options ends in aob-other-choice."
-  (let (content)
+  (let ((max-mini-window-height 1.0)
+        content)
     (dolist (q (plist-get d :questions))
-      (let ((prompt (format "%s: " (aob--first-line
-                                    (or (plist-get q :text)
-                                        (plist-get d :title) "answer")
-                                    72)))
-            (labels (plist-get q :options)))
+      (let* ((text (or (plist-get q :text) (plist-get d :title) "answer"))
+             (header (plist-get q :header))
+             (prompt (aob--question-prompt
+                      (if (and (stringp header) (not (string-empty-p header))
+                               (not (equal (string-trim header) (string-trim text))))
+                          (concat header "\n" text)
+                        text)))
+             (labels (plist-get q :options)))
         (setq content
               (append content
                       (if labels
-                          (let ((said (aob--read-choices prompt labels (plist-get q :multi))))
+                          (let ((said (aob--read-choices prompt labels (plist-get q :multi)
+                                                         (plist-get q :notes))))
                             (aob--question-content q (car said) (cdr said)))
                         (list (cons (plist-get q :key)
                                     (if (plist-get q :multi)
@@ -940,6 +1022,43 @@ a refusal.  Returns the option id sent, nil when nothing was."
                    aob--reject-kinds)))
     (aob--call s :resolve d id)
     id))
+
+(defcustom aob-reject-asks-reason t
+  "Whether refusing a permission opens the compose box for the reason.
+What is written there is said to the agent the way any prompt is, into
+the running turn where it takes steering and queued otherwise, so a no
+becomes something it can adjust to.  Closing the box empty says nothing."
+  :type 'boolean :group 'aob)
+
+(defconst aob-reject-reason-placeholder
+  "Why you refused — the agent reads this and adjusts; close empty to say nothing"
+  "What the compose box asks for when it opens after a refusal.")
+
+(defvar-local aob-compose--purpose nil
+  "What this draft answers, when it is more than a prompt: reject-reason.")
+
+(defvar aob-compose--tags)
+(defvar aob-compose-placeholder)
+
+(defun aob--rejects-p (d id)
+  "Non-nil when option ID of permission D is one that refuses it."
+  (member (plist-get (seq-find (lambda (o) (equal (plist-get o :optionId) id))
+                               (plist-get d :options))
+                     :kind)
+          aob--reject-kinds))
+
+(defun aob-ask-reject-reason (s)
+  "Open S's compose box for why a call was just refused.
+The draft is an ordinary prompt to S, only labelled as the reason; see
+aob-reject-asks-reason.  Returns the compose buffer, nil when not asked."
+  (when aob-reject-asks-reason
+    (let ((buf (aob-compose s)))
+      (with-current-buffer buf
+        (setq aob-compose--purpose 'reject-reason
+              aob-compose--tags (cons "reason for the rejection" aob-compose--tags))
+        (setq-local aob-compose-placeholder aob-reject-reason-placeholder)
+        (aob-compose--placeholder-refresh))
+      buf)))
 
 (defun aob-dired (s)
   "Open S's working directory (its worktree when isolated)."
@@ -986,20 +1105,24 @@ Where a host turns what was written into what it means, a mention of a
 path into a file the turn carries, while the words are still on screen.
 A function that returns a string hands back the text the turn sends
 instead; one that returns (TEXT . FILES) also hands the turn FILES to
-carry; any other return leaves the text as it was.")
+carry; one that returns :consumed has dealt with the draft itself, so
+nothing is sent, the later functions never run, and the draft closes;
+any other return leaves the text as it was.")
 
 (defun aob-compose--rewritten (text)
-  "(TEXT . FILES) once every before-send function has had its say."
-  (let (files)
+  "(TEXT . FILES) once every before-send function has had its say.
+Nil when one of them consumed the draft."
+  (let (files consumed)
     (run-hook-wrapped 'aob-compose-before-send-functions
                       (lambda (fn)
                         (let ((out (funcall fn text)))
-                          (cond ((stringp out) (setq text out))
+                          (cond ((eq out :consumed) (setq consumed t))
+                                ((stringp out) (setq text out))
                                 ((stringp (car-safe out))
                                  (setq text (car out)
                                        files (append files (cdr out))))))
-                        nil))
-    (cons text files)))
+                        consumed))
+    (unless consumed (cons text files))))
 
 (defface aob-compose-title
   '((t :inherit default :weight bold))
@@ -1559,7 +1682,7 @@ attachments whose [[ImageN]] survived the user's editing ride along."
                (raw (buffer-substring-no-properties (point-min) (point-max)))
                ;; a held comment is not a turn: what rides a turn joins it later
                (rewritten (if hold (list raw) (aob-compose--rewritten raw)))
-               (`(,text . ,atts) (aob-compose--harvest (car rewritten)))
+               (`(,text . ,atts) (aob-compose--harvest (or (car rewritten) raw)))
                (atts (append atts (cdr rewritten)))
                (tgt aob-compose--target)
                (session (and (stringp tgt) (aob-session-get tgt))))
@@ -1573,7 +1696,8 @@ attachments whose [[ImageN]] survived the user's editing ride along."
     ;; whatever the draft goes to — a session, a spawn, a caller — it is
     ;; words the owner typed, and a spawn queues its first turn right here
     (let ((aob-prompt-typed t))
-      (cond (hold (funcall hold text atts))
+      (cond ((null rewritten))
+            (hold (funcall hold text atts))
             ((and session (null atts)
                   (or aob-compose--steer
                       ;; a turn that takes words mid-way gets them now: a
@@ -1594,7 +1718,7 @@ attachments whose [[ImageN]] survived the user's editing ride along."
             (t (user-error "aob: no session and no spawn function"))))
     ;; read after the send: a refused send leaves you in the draft, and a
     ;; spawn function is free to say where this one should land
-    (let ((after aob-compose-after-send))
+    (let ((after (and rewritten aob-compose-after-send)))
       (aob-compose-close draft)
       (when after (funcall after)))))
 
@@ -1962,7 +2086,7 @@ Proceed based on it."
 
 (defun aob--modeline-refresh (&rest _)
   (let ((blocked 0) (working 0) (queued 0) (subs 0) (quietest nil))
-    (dolist (s (aob-sessions))
+    (dolist (s (seq-remove (lambda (s) (aob-session-ref s :hidden)) (aob-sessions)))
       (cl-incf queued (length (aob-session-ref s :queued)))
       (when-let* ((label (aob-session-quiet s))
                   ((or (null quietest)

@@ -655,7 +655,9 @@ A child process, so the glue's advice and keys never reach the other tests."
         (should-not fired)
         ;; disabled entirely
         (aob-session-put s :queued nil)
-        (let ((aob-acp-autocompact-ratio nil))
+        (aob-session-put s :ctx-used 990000)
+        (let ((aob-acp-autocompact-ratio nil)
+              (aob-acp-autocompact-reserve nil))
           (aob-acp--autocompact-check s)
           (should-not fired))))))
 
@@ -3336,6 +3338,7 @@ the host weighs it at, and no keys."
     (should (string-match-p "\"elicitation\":{\"form\":{}}" json))
     (should (equal json (concat "{\"fs\":{\"readTextFile\":false,\"writeTextFile\":false},"
                                 "\"elicitation\":{\"form\":{}},"
+                                "\"session\":{\"configOptions\":{\"boolean\":{}}},"
                                 "\"_meta\":{\"subagent-transcript\":true}}")))))
 
 (ert-deftest aob-trace-answers-claude-ask-user-question ()
@@ -5252,7 +5255,7 @@ something already."
 (ert-deftest aob-add-folder-resumes-with-it-and-keeps-limits ()
   (let ((init '(:agentInfo (:name "@agentclientprotocol/claude-agent-acp")
                 :agentCapabilities (:loadSession t :sessionCapabilities
-                                    (:additionalDirectories nil :resume nil)))))
+                                    (:additionalDirectories nil :resume nil :close nil)))))
     (aob-tests--add-folder s init
       (aob-acp-add-folder s extra)
       (let* ((resume (cdr (assoc "session/resume" sent)))

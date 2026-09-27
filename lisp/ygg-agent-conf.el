@@ -5,21 +5,108 @@
 (require 'json)
 (require 'subr-x)
 
-(defun ygg-agent--plugin-mcp-servers ()
-  "Remote MCP servers the installed plugins define, as (NAME . URL).
-Read from the plugin caches rather than the CLI: these are the servers a
-plugin brings, which is not the same set the CLI will hand to a session."
-  (let (out)
-    (dolist (file (file-expand-wildcards
-                   (expand-file-name "~/.claude/plugins/cache/*/*/*/.mcp.json")))
-      (when-let* ((json (ygg-agent--read-json file))
-                  (servers (gethash "mcpServers" json)))
-        (maphash (lambda (name spec)
-                   (when-let* (((hash-table-p spec))
-                               (url (gethash "url" spec)))
-                     (push (cons name url) out)))
-                 servers)))
-    (seq-uniq (nreverse out))))
+(defun ygg-agent--plugins-root (spec)
+  "The directory SPEC's CLI keeps its plugin cache and install record in."
+  (let ((env (getenv "CLAUDE_CODE_PLUGIN_CACHE_DIR")))
+    (if (and env (not (string-empty-p env)))
+        (expand-file-name env)
+      (expand-file-name "plugins" (expand-file-name (plist-get spec :home))))))
+
+(defun ygg-agent--mcp-file-urls (file)
+  "Remote servers the plugin server file FILE declares, as (NAME . URL).
+The file may wrap its servers in mcpServers or list them bare."
+  (when-let* ((json (ygg-agent--read-json file)))
+    (let ((inner (gethash "mcpServers" json))
+          out)
+      (maphash (lambda (name spec)
+                 (when-let* (((hash-table-p spec))
+                             (url (gethash "url" spec))
+                             ((stringp url)))
+                   (push (cons name url) out)))
+               (if (hash-table-p inner) inner json))
+      (nreverse out))))
+
+(defun ygg-agent--plugin-caches (root)
+  "Every plugin cached under ROOT, as (ID . VERSION-DIRS).
+ID is plugin@marketplace, the form enabledPlugins keys take."
+  (let ((cache (expand-file-name "cache" root))
+        out)
+    (dolist (market (and (file-directory-p cache)
+                         (directory-files cache t directory-files-no-dot-files-regexp)))
+      (when (file-directory-p market)
+        (dolist (plugin (directory-files market t directory-files-no-dot-files-regexp))
+          (when (file-directory-p plugin)
+            (push (cons (format "%s@%s" (file-name-nondirectory plugin)
+                                (file-name-nondirectory market))
+                        (seq-filter #'file-directory-p
+                                    (directory-files plugin t
+                                                     directory-files-no-dot-files-regexp)))
+                  out)))))
+    (nreverse out)))
+
+(defun ygg-agent--plugin-installs (root)
+  "Version directory names ROOT's install record gives each plugin id.
+A record is taken alone or from a list, the user-scoped one first; its
+installPath names the directory, its version is the fallback."
+  (let ((table (make-hash-table :test #'equal)))
+    (when-let* ((json (ygg-agent--read-json (expand-file-name "installed_plugins.json" root)))
+                (plugins (let ((inner (gethash "plugins" json)))
+                           (if (hash-table-p inner) inner json))))
+      (maphash
+       (lambda (id value)
+         (let* ((records (seq-filter #'hash-table-p
+                                     (if (hash-table-p value) (list value) (append value nil))))
+                (record (or (seq-find (lambda (r) (equal (gethash "scope" r) "user")) records)
+                            (car records))))
+           (when record
+             (puthash id
+                      (delq nil
+                            (list (when-let* ((path (gethash "installPath" record))
+                                              ((stringp path)))
+                                    (file-name-nondirectory (directory-file-name path)))
+                                  (let ((version (gethash "version" record)))
+                                    (and (stringp version) version))))
+                      table))))
+       plugins))
+    table))
+
+(defun ygg-agent--plugin-current-dir (dirs recorded)
+  "The one of DIRS a plugin is on: the name RECORDED says, else the newest.
+A directory the CLI marked orphaned is an old version waiting to go."
+  (let ((live (seq-remove (lambda (dir) (file-exists-p (expand-file-name ".orphaned_at" dir)))
+                          dirs)))
+    (or (seq-find (lambda (dir) (member (file-name-nondirectory dir) recorded)) live)
+        (car (if (seq-every-p (lambda (dir)
+                                (ignore-errors (version-to-list (file-name-nondirectory dir))))
+                              live)
+                 (sort live (lambda (a b)
+                              (version< (file-name-nondirectory b)
+                                        (file-name-nondirectory a))))
+               (sort live (lambda (a b)
+                            (time-less-p (file-attribute-modification-time (file-attributes b))
+                                         (file-attribute-modification-time (file-attributes a))))))))))
+
+(defun ygg-agent--enabled-plugins (spec dir)
+  "DIR\\='s enabledPlugins table, empty when unset.
+Nil when the settings file cannot be read."
+  (when-let* ((name (plist-get spec :settings))
+              (json (ygg-agent--read-json (expand-file-name name dir))))
+    (let ((table (gethash "enabledPlugins" json)))
+      (if (hash-table-p table) table (make-hash-table :test #'equal)))))
+
+(defun ygg-agent--plugin-mcp-servers (root enabled)
+  "Remote MCP servers of the plugins ENABLED turns on, as (NAME . URL).
+Read from the plugin cache under ROOT, at each plugin\\='s current version
+only: these are the servers a plugin brings, which is not the same set
+the CLI will hand to a session."
+  (let ((installs (ygg-agent--plugin-installs root))
+        out)
+    (pcase-dolist (`(,id . ,dirs) (ygg-agent--plugin-caches root))
+      (when-let* (((eq t (gethash id enabled)))
+                  (current (ygg-agent--plugin-current-dir dirs (gethash id installs))))
+        (setq out (append out (ygg-agent--mcp-file-urls
+                               (expand-file-name ".mcp.json" current))))))
+    out))
 
 ;;;###autoload
 
@@ -150,26 +237,19 @@ is started by hand."
 (defcustom ygg-agent-instructions
   "## This editor (aob)
 
-You are running inside Emacs. Plan and delegate with your own built-in
-tools: your todo or plan tool, and your subagent tool (Task or Agent).
-The editor mirrors both. Your plan becomes this session's tasks.md, and
-each subagent gets a trace of its own. When the user changes that list,
-the changes reach you as a note with the next message.
+You run inside Emacs. Plan and delegate with your own todo or plan tool
+and subagent tool (Task or Agent). The editor mirrors both: your plan
+becomes this session's tasks.md, each subagent gets its own trace, and
+the user's edits to the list reach you as a note with the next message.
 
 When you ask the user a question with choices (AskUserQuestion or a
-form), keep the set open: the user can always answer in their own words,
-so never phrase the options as exhaustive, and take a typed answer as
-the answer.
+form), keep the set open: they can always answer in their own words, so
+never phrase the options as exhaustive, and take a typed answer as the
+answer.
 
-Use the aob MCP server only for what your own tools cannot do:
-
-- Code questions: xref_references and xref_apropos for who calls what,
-  imenu_symbols for a file's shape, treesit_info for the parse,
-  diagnostics for what a checker says about an open file.
-- Other conversations: session_list gives every conversation open here
-  with its id; session_say puts words into one; session_read shows the
-  tail of one when you need to diagnose it. Address it by its id.
-- tool_names lists everything the server offers."
+Use the aob MCP server only for what your own tools cannot do: code
+references, symbol outlines, tree-sitter parses, diagnostics, and other
+conversations open in this editor."
   "What every session started from here is told about this editor.
 It goes out in the request that opens the session, appended to the
 agent's own system prompt, so a session hears it whichever config home
@@ -328,29 +408,80 @@ is looking at."
         (insert (json-serialize table :null-object nil :false-object :false) "\n")))
     t))
 
+(defconst ygg-agent--adopted-mcp-file ".ygg-adopted-mcp.json"
+  "Ledger in a config home of the MCP entries adoption wrote, name to URL.")
+
 (defun ygg-agent--adopt-plugin-mcp (spec dir)
-  "Copy the plugin-defined MCP servers into DIR as user-scoped ones.
+  "Copy the MCP servers of DIR\\='s enabled plugins into DIR as user-scoped ones.
 A plugin-scoped server is invisible to any agent started through the
 SDK — every ACP session — while the same URL configured in the home is
-not.  Written straight into the home's config: `claude mcp add' does
-exactly this and costs a process per launch."
-  (when (plist-get spec :adopt-plugin-mcp)
-    (when-let* ((servers (ygg-agent--plugin-mcp-servers))
-                (path (expand-file-name ".claude.json" dir)))
-      (let* ((conf (or (ygg-agent--read-json path) (make-hash-table :test #'equal)))
-             (mcp (or (gethash "mcpServers" conf) (make-hash-table :test #'equal)))
-             added)
-        (pcase-dolist (`(,name . ,url) servers)
-          (let ((key (format "%s-mcp" name)))
-            (when (eq 'missing (gethash key mcp 'missing))
-              (let ((entry (make-hash-table :test #'equal)))
-                (puthash "type" "http" entry)
-                (puthash "url" url entry)
-                (puthash key entry mcp))
-              (push key added))))
-        (when added
-          (puthash "mcpServers" mcp conf)
-          (and (ygg-agent--write-json path conf) (nreverse added)))))))
+not.  Written straight into the home\\='s config: claude mcp add does
+exactly this and costs a process per launch.
+
+Every server costs every session its tool list, so only a plugin DIR
+turns on counts, at its current version, and never a URL the home
+already has.  An entry adopted before that no longer qualifies goes;
+adopted means named in the ledger beside the config, or, for one
+written before the ledger, named and pointed exactly as a cached plugin
+server would have been.  Settings or a config that cannot be read
+change nothing."
+  (when-let* (((plist-get spec :adopt-plugin-mcp))
+              (enabled (ygg-agent--enabled-plugins spec dir))
+              (path (expand-file-name ".claude.json" dir))
+              (conf (if (file-exists-p path)
+                        (ygg-agent--read-json path)
+                      (make-hash-table :test #'equal))))
+    (let* ((root (ygg-agent--plugins-root spec))
+           (ledger-path (expand-file-name ygg-agent--adopted-mcp-file dir))
+           (ledger (or (ygg-agent--read-json ledger-path) (make-hash-table :test #'equal)))
+           (mcp (let ((table (gethash "mcpServers" conf)))
+                  (if (hash-table-p table) table (make-hash-table :test #'equal))))
+           (cached (seq-mapcat
+                    (lambda (cell)
+                      (seq-mapcat (lambda (version)
+                                    (ygg-agent--mcp-file-urls
+                                     (expand-file-name ".mcp.json" version)))
+                                  (cdr cell)))
+                    (ygg-agent--plugin-caches root)))
+           (fresh (make-hash-table :test #'equal))
+           ours own-urls want added removed)
+      (maphash (lambda (key entry)
+                 (let ((url (and (hash-table-p entry) (gethash "url" entry))))
+                   (cond
+                    ((and (stringp url)
+                          (or (equal url (gethash key ledger))
+                              (and (string-suffix-p "-mcp" key)
+                                   (member (cons (string-remove-suffix "-mcp" key) url)
+                                           cached))))
+                     (push (cons key url) ours))
+                    ((stringp url) (push url own-urls)))))
+               mcp)
+      (pcase-dolist (`(,name . ,url) (ygg-agent--plugin-mcp-servers root enabled))
+        (unless (or (member url own-urls) (rassoc url want))
+          (push (cons (format "%s-mcp" name) url) want)))
+      (setq want (nreverse want))
+      (pcase-dolist (`(,key . ,url) ours)
+        (if (member (cons key url) want)
+            (puthash key url fresh)
+          (remhash key mcp)
+          (push key removed)))
+      (pcase-dolist (`(,key . ,url) want)
+        (when (eq 'missing (gethash key mcp 'missing))
+          (let ((entry (make-hash-table :test #'equal)))
+            (puthash "type" "http" entry)
+            (puthash "url" url entry)
+            (puthash key entry mcp))
+          (puthash key url fresh)
+          (push key added)))
+      (when (or added removed)
+        (puthash "mcpServers" mcp conf)
+        (ygg-agent--write-json path conf))
+      (unless (and (= (hash-table-count fresh) (hash-table-count ledger))
+                   (seq-every-p (lambda (key) (equal (gethash key fresh)
+                                                     (gethash key ledger)))
+                                (hash-table-keys fresh)))
+        (ygg-agent--write-json ledger-path fresh))
+      (nreverse added))))
 
 (defconst ygg-agent--credential-service "Claude Code-credentials"
   "Keychain service Claude Code keeps a config home's tokens under.
