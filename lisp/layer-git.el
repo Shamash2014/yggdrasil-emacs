@@ -187,6 +187,16 @@
                                         magit-buffer-diff-files)))))
     (and (> (cdr size) ygg-magit-diff-line-limit) size)))
 
+(defmacro ygg-magit--insert-diff (large &rest args)
+  "Insert the diff git ARGS give, deferred until shown when LARGE."
+  `(if ,large
+       (magit-insert-section-body
+         ;; a deferred wash runs outside magit-insert-section, which is
+         ;; what catches an empty diff's cancel-section
+         (catch 'cancel-section
+           (magit--insert-diff nil ,@args)))
+     (magit--insert-diff nil ,@args)))
+
 (defun ygg-magit-insert-unstaged-changes ()
   "Insert the unstaged section, deferring a diff that is too large to wash."
   (let ((large (ygg-magit--diff-large-p)))
@@ -197,10 +207,9 @@
           (magit-insert-heading
             (format "Unstaged changes (%d files, %d lines)" (car large) (cdr large)))
         (magit-insert-heading t "Unstaged changes"))
-      (magit-insert-section-body
-        (magit--insert-diff nil
-          "diff" magit-buffer-diff-args "--no-prefix"
-          "--" magit-buffer-diff-files)))))
+      (ygg-magit--insert-diff large
+        "diff" magit-buffer-diff-args "--no-prefix"
+        "--" magit-buffer-diff-files))))
 
 (defun ygg-magit-insert-staged-changes ()
   "Insert the staged section, deferring a diff that is too large to wash."
@@ -213,10 +222,9 @@
             (magit-insert-heading
               (format "Staged changes (%d files, %d lines)" (car large) (cdr large)))
           (magit-insert-heading t "Staged changes"))
-        (magit-insert-section-body
-          (magit--insert-diff nil
-            "diff" "--cached" magit-buffer-diff-args "--no-prefix"
-            "--" magit-buffer-diff-files))))))
+        (ygg-magit--insert-diff large
+          "diff" "--cached" magit-buffer-diff-args "--no-prefix"
+          "--" magit-buffer-diff-files)))))
 
 (with-eval-after-load 'magit-diff
   (advice-add 'magit-insert-unstaged-changes :override
