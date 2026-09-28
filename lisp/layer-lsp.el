@@ -1523,10 +1523,12 @@ A degenerate (zero-width) selection formats the whole buffer instead."
 (autoload 'ygg-lsp-call-hierarchy "ygg-lsp-calls" nil t)
 (autoload 'ygg-lsp-type-hierarchy "ygg-lsp-calls" nil t)
 (autoload 'ygg-lsp-calls-qf "ygg-lsp-calls" nil t)
+(autoload 'ygg-call-graph "ygg-call-graph" nil t)
 
 (yggdrasil-define-keys 'ygg-leader-code-map
   "I" #'ygg-lsp-call-hierarchy :label "call hierarchy"
-  "Y" #'ygg-lsp-type-hierarchy :label "type hierarchy")
+  "Y" #'ygg-lsp-type-hierarchy :label "type hierarchy"
+  "G" #'ygg-call-graph :label "call graph")
 
 ;;; Symbols: snacks-style pickers + multibuffer dump
 
