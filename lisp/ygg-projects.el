@@ -688,6 +688,31 @@ From the cache, asking git without waiting — safe on a drawing path."
     (gethash (file-name-as-directory (expand-file-name dir))
              ygg-projects--tree-mains)))
 
+(defun ygg-projects--entry-root (e roots)
+  "The one of ROOTS ended conversation E goes under, found the way a
+running session's is: a linked worktree under its main checkout."
+  (let ((dir (or (plist-get e :dir) (plist-get e :project))))
+    (or (when-let* ((dir) ((not (file-remote-p dir))))
+          (ygg-projects--session-tree dir)
+          (ygg-projects--root-of
+           (gethash (file-name-as-directory (expand-file-name dir))
+                    ygg-projects--tree-mains)
+           roots))
+        (ygg-projects--root-of (or (plist-get e :project) dir) roots))))
+
+(defun ygg-projects--pinned-ended (root)
+  "ROOT's pinned conversations no session is holding, from any of its
+worktrees: a pin outlasts the session, so the row does too."
+  (when-let* ((pins (ygg-projects--pins))
+              ((fboundp 'aob-acp-resumable-entries)))
+    (let ((roots (mapcar (lambda (r) (file-name-as-directory
+                                      (expand-file-name (if (consp r) (car r) r))))
+                         (ygg-projects--roots))))
+      (seq-filter (lambda (e)
+                    (and (member (plist-get e :acp-id) pins)
+                         (equal (ygg-projects--entry-root e roots) root)))
+                  (ignore-errors (aob-acp-resumable-entries))))))
+
 (declare-function aob-subagent-live-count "aob-subagent" (s))
 (declare-function aob-subagent-parent "aob-subagent" (s))
 
@@ -844,7 +869,12 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
                                      (aob-subagent-p x)))
                               (ygg-projects--sessions root)))
             (ended (ygg-projects--past root))
+            (kept (ygg-projects--pinned-ended root))
+            (kept-ids (mapcar (lambda (e) (plist-get e :acp-id)) kept))
+            (ended (seq-remove (lambda (e) (member (plist-get e :acp-id) kept-ids))
+                               ended))
             (pinned (sort (append (seq-filter #'ygg-projects--pinned-p live)
+                                  kept
                                   (seq-filter #'ygg-projects--pinned-p ended))
                           (lambda (a b)
                             (< (ygg-projects--pin-rank a) (ygg-projects--pin-rank b)))))

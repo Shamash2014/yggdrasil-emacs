@@ -571,6 +571,24 @@ resume and to unpin, even with ended conversations otherwise hidden."
         (should-not (ygg-projects--pins))
         (should (equal (ygg-projects-tests--names root) '("new")))))))
 
+(ert-deftest ygg-projects-every-pinned-conversation-stays-worktrees-too ()
+  "Every pin outlasts its session, one made in a linked worktree under
+the main checkout's project as a running session would be."
+  (ygg-projects-tests--with-tree (("new" nil 3))
+    (let* ((tree (file-name-as-directory (make-temp-file "ygg-wt" t)))
+           (ygg-projects--tree-mains (make-hash-table :test #'equal))
+           (entries (list (list :acp-id "c1" :name "here" :dir root)
+                          (list :acp-id "c2" :name "in-tree" :dir tree)
+                          (list :acp-id "c3" :name "loose" :dir root))))
+      (unwind-protect
+          (progn
+            (puthash tree root ygg-projects--tree-mains)
+            (setq ygg-projects--pin-list (list "c2" "c1"))
+            (cl-letf (((symbol-function 'aob-acp-resumable-entries) (lambda () entries))
+                      ((symbol-function 'ygg-projects--session-tree) #'ignore))
+              (should (equal (ygg-projects-tests--names root) '("in-tree" "here" "new")))))
+        (delete-directory tree)))))
+
 (ert-deftest ygg-projects-tree-nests-three-levels-by-recency ()
   (ygg-projects-tests--with-tree (("lead" nil 5)
                                   ("a" "lead" 1) ("b" "lead" 2)
