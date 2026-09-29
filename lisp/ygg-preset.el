@@ -459,8 +459,11 @@ session, and an entry that parses as neither is dropped."
 
 (defcustom ygg-preset-worker-levels '(("quick" :preset "search" :read-only t)
                                       ("gaps" :preset "gaps")
+                                      ("build" :skill "build")
+                                      ("deep" :skill "build")
                                       ("review" :skill "ice-review-loop" :read-only t)
-                                      ("ui" :skill "ice-ui-review" :read-only t))
+                                      ("ui" :skill "ice-ui-review" :read-only t)
+                                      ("verify" :skill "regrade"))
   "What a worker level is beyond its model and effort, by level name.
 :preset names the preset whose body the level runs under in place of the
 carried one, :skill names a skill whose body it runs under instead, and

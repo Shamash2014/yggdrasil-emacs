@@ -326,7 +326,7 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
   "l" #'ygg-space-next-sibling :label "next sibling"
   "o" #'ygg-space-open :label "space for a place, here or on a host"
   "d" #'ygg-space-close :label "close subtree"
-  "z" #'ygg-space-pick :label "pick/jump"
+  "z" #'ygg-space-pick :label "pick zone or agent"
   "t" #'ygg-space-tree :label "tree sidebar"
   "p" #'project-switch-project :label "switch project"
   "i" #'ygg-project-import :label "import / re-import project"

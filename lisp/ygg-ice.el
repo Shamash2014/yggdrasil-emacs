@@ -1844,8 +1844,10 @@ It covers What is wanted and Restated, as ice-check intent reads them."
   "The Restated section's words in this buffer, its Confirmed line left out."
   (when-let* ((bounds (ygg-ice--restated-bounds)))
     (string-trim
-     (replace-regexp-in-string ygg-ice--confirmed-re ""
-                               (buffer-substring-no-properties (car bounds) (cdr bounds))))))
+     (replace-regexp-in-string
+      "^[ \t]*\\(?:Goals\\|Problem\\|Not the goal\\|Unsure\\):[ \t]*$" ""
+      (replace-regexp-in-string ygg-ice--confirmed-re ""
+                                (buffer-substring-no-properties (car bounds) (cdr bounds)))))))
 
 (defun ygg-ice--write-confirmed (date)
   "Set the Confirmed line under Restated to DATE and the intent's hash.

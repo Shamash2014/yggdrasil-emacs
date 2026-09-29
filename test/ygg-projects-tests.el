@@ -551,6 +551,26 @@ key is written; a pin taken early moves onto the conversation once it exists."
     (setq ygg-projects--pin-list 'unread)
     (should (equal (ygg-projects--pins) '("conv-9")))))
 
+(ert-deftest ygg-projects-pinned-conversation-stays-on-top-after-a-restart ()
+  "Ended by a restart, a pinned conversation still leads its project, to
+resume and to unpin, even with ended conversations otherwise hidden."
+  (ygg-projects-tests--with-tree (("old" nil 1) ("new" nil 3))
+    (aob-session-put (aob-session-get "old") :acp-id "conv-1")
+    (ygg-projects-tests--pin "old")
+    (aob-remove-session (aob-session-get "old"))
+    (setq ygg-projects--pin-list 'unread)
+    (let ((ended (list :acp-id "conv-1" :name "old" :dir root)))
+      (cl-letf (((symbol-function 'ygg-projects--past) (lambda (_) (list ended))))
+        (should (equal (ygg-projects-tests--names root) '("old" "new")))
+        (should (eq (cdar (ygg-projects--entries root 'agents)) ended))
+        (cl-letf (((symbol-function 'ygg-projects--in-sidebar-p) (lambda () t))
+                  ((symbol-function 'ygg-projects--selecting-p) #'ignore)
+                  ((symbol-function 'ygg-projects--entry-at-point) (lambda () ended))
+                  ((symbol-function 'ygg-projects--leave-selection) #'ignore))
+          (ygg-projects-toggle-pin))
+        (should-not (ygg-projects--pins))
+        (should (equal (ygg-projects-tests--names root) '("new")))))))
+
 (ert-deftest ygg-projects-tree-nests-three-levels-by-recency ()
   (ygg-projects-tests--with-tree (("lead" nil 5)
                                   ("a" "lead" 1) ("b" "lead" 2)

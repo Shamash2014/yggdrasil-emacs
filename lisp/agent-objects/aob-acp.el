@@ -3370,7 +3370,7 @@ about what it takes; the choice is kept and put to it when it wakes."
 
 (defcustom aob-acp-models
   '(("claude" "opus" "sonnet" "haiku")
-    ("codex" "gpt-5-codex" "gpt-5"))
+    ("codex" "gpt-6-astra" "gpt-6-sol" "gpt-6-luna" "gpt-5.6-sol" "gpt-5.6-terra" "gpt-5.6-luna" "gpt-5.5"))
   "Models to offer per agent before a session is up to ask.
 Keyed by the adapter, not by the preset: which models exist is a fact
 about the agent, and every preset over it inherits them.

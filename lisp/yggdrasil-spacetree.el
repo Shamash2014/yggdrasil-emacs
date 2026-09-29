@@ -764,18 +764,59 @@ space.  No key: this is the colon line and M-x."
       (dolist (root (ygg-space--roots)) (walk root 0)))
     (nreverse acc)))
 
+(defvar ygg-space-pick-rows-functions nil
+  "Abnormal hook: each is called with a space id, or nil for no space,
+and returns rows (LABEL . ACTION) the picker lists under that space.
+Picking a row switches to its space, then calls ACTION with no arguments.")
+
+(defun ygg-space--pick-rows (id)
+  "The rows every function on ygg-space-pick-rows-functions gives for ID."
+  (let ((rows nil))
+    (run-hook-wrapped 'ygg-space-pick-rows-functions
+                      (lambda (fn)
+                        (setq rows (append rows (funcall fn id)))
+                        nil))
+    rows))
+
+(defun ygg-space--pick-lines ()
+  "The picker's (LABEL . PICK) lines: the tree, each space's hook rows one
+level under it, then the rows for no space under a heading of their own.
+PICK is a space id, (ID . ACTION) for a hook row, or nil for the heading."
+  (let ((acc nil) (seen (make-hash-table :test #'equal)))
+    (cl-flet ((add (label pick)
+                (let ((unique label) (n 1))
+                  (while (gethash unique seen)
+                    (setq unique (format "%s %d" label (cl-incf n))))
+                  (puthash unique t seen)
+                  (push (cons unique pick) acc))))
+      (dolist (line (ygg-space--tree-lines))
+        (puthash (car line) t seen)
+        (push line acc)
+        (let ((indent (make-string (+ 2 (string-match-p "[^ ]" (car line))) ?\s)))
+          (dolist (row (ygg-space--pick-rows (cdr line)))
+            (add (concat indent (car row)) (cons (cdr line) (cdr row))))))
+      (when-let* ((rows (ygg-space--pick-rows nil)))
+        (add (propertize "no zone" 'face 'shadow) nil)
+        (dolist (row rows)
+          (add (concat "  " (car row)) (cons nil (cdr row))))))
+    (nreverse acc)))
+
 ;;;###autoload
 (defun ygg-space-pick ()
-  "Pick any space from an indented tree and switch to it."
+  "Pick any space from an indented tree and switch to it.
+Rows other layers hang under a space go there after the switch."
   (interactive)
-  (let* ((lines (ygg-space--tree-lines))
+  (let* ((lines (ygg-space--pick-lines))
          (table (lambda (str pred action)
                   (if (eq action 'metadata)
                       '(metadata (display-sort-function . identity))
                     (complete-with-action action (mapcar #'car lines) str pred))))
-         (choice (completing-read "Space: " table nil t)))
-    (when-let* ((id (cdr (assoc choice lines))))
-      (ygg-space--goto-id id))))
+         (choice (completing-read "Space: " table nil t))
+         (pick (cdr (assoc choice lines))))
+    (if (consp pick)
+        (progn (when (car pick) (ygg-space--goto-id (car pick)))
+               (funcall (cdr pick)))
+      (when pick (ygg-space--goto-id pick)))))
 
 ;;; Reconciliation for tabs created/closed outside these commands
 

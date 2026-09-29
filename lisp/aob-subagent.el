@@ -285,6 +285,14 @@ the last the adapter says of a subagent sent in the background."
                   (aob-session-name p)
                 "the agent that sent it")))
 
+(defun aob-subagent--native-cancel (s &rest args)
+  "Stop the turn of the agent that runs S; a subagent has no turn of its own."
+  (let ((root (or (aob-session-get (aob-session-ref s :native-root))
+                  (aob-subagent-parent s))))
+    (unless root
+      (user-error "aob: %s has no agent left to stop" (aob-session-name s)))
+    (apply #'aob--call root :cancel args)))
+
 (defun aob-subagent--native-forget (s &rest _)
   (when-let* ((root (aob-session-get (aob-session-ref s :native-root)))
               (kids (aob-session-ref root :native-kids)))
@@ -298,7 +306,7 @@ the last the adapter says of a subagent sent in the background."
  'native-subagent
  (list :prompt #'aob-subagent--native-refuse
        :interject #'aob-subagent--native-refuse
-       :cancel #'aob-subagent--native-refuse
+       :cancel #'aob-subagent--native-cancel
        :flush #'ignore
        :kill #'aob-subagent--native-forget
        :focus #'aob-subagent--native-focus))

@@ -2408,6 +2408,20 @@ a failed turn has left the queue held, the whole queue goes out now."
         (aob--call s :flush)
       (aob-trace--queue-steer-1 s))))
 
+(defun aob-trace-queue-send-now ()
+  "Send the queue now, the prompt on this line first: the running turn
+is stopped, and the queue goes out as it settles, as after any turn.
+Idle with the queue held, it goes out straight away."
+  (interactive)
+  (let* ((s (or (aob-session-get aob-trace--session-id) (user-error "aob: no session here")))
+         (q (or (aob-session-ref s :queued) (user-error "aob: nothing is queued"))))
+    (when-let* ((entry (aob-trace--queued-at-point)))
+      (aob-queue-move s entry (- (length q))))
+    (if (memq (aob-session-state s) '(working blocked))
+        (aob--call s :cancel)
+      (aob--call s :flush))
+    (message "aob: %s: queue sent now" (aob-session-name s))))
+
 (defun aob-trace--queue-steer-1 (s)
   (let* ((entry (or (aob-trace--queued-at-point)
                     (car (aob-session-ref s :queued))

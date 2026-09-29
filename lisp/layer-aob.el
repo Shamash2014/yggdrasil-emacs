@@ -148,7 +148,7 @@
 ;; is set from its own buffer: the localleader already knows which
 ;; session that is, where the global leader has to ask
 (dolist (mode '(aob-trace-mode aob-plan-mode aob-subagents-mode))
-  (yggdrasil-localleader-def mode "C" #'aob-cancel "cancel turn (twice: drop queue)")
+  (yggdrasil-localleader-def mode "S" #'aob-cancel "stop turn (twice: drop queue)")
   (yggdrasil-localleader-def mode "k" #'aob-kill-session "kill session")
   (yggdrasil-localleader-def mode "x" #'aob-acp-command "command")
   (yggdrasil-localleader-def mode "d" #'aob-todo "todo list")
@@ -173,12 +173,12 @@
 (yggdrasil-localleader-def 'aob-trace-mode "e" #'aob-trace-queue-edit "queued: rewrite")
 (yggdrasil-localleader-def 'aob-trace-mode "X" #'aob-trace-queue-drop "queued: drop")
 (yggdrasil-localleader-def 'aob-trace-mode "s" #'aob-trace-queue-steer "queued: say it now (idle: send held)")
+(yggdrasil-localleader-def 'aob-trace-mode "RET" #'aob-trace-queue-send-now "queued: send now (stops the turn)")
 (yggdrasil-localleader-def 'aob-trace-mode "K" #'aob-trace-queue-earlier "queued: move earlier")
 (yggdrasil-localleader-def 'aob-trace-mode "J" #'aob-trace-queue-later "queued: move later")
 (yggdrasil-localleader-def 'aob-trace-mode "u" #'aob-trace-usage "usage: time, tokens, cost")
 (yggdrasil-localleader-def 'aob-trace-mode "A" #'aob-answer "answer its questions")
 (yggdrasil-localleader-def 'aob-trace-mode "H" #'aob-handoff "hand off to a fresh session")
-
 (autoload 'ygg-projects-toggle-pin "ygg-projects" nil t)
 (dolist (mode '(aob-trace-mode aob-plan-mode))
   (yggdrasil-localleader-def mode "P" #'ygg-projects-toggle-pin "pin session")
@@ -1453,20 +1453,7 @@ a name two projects share is told apart by where it is."
   (interactive)
   (let* ((live (seq-sort-by #'ygg-aob--score #'>
                             (seq-remove #'ygg-aob--put-down-p (aob-live-sessions))))
-         (cands (mapcar (lambda (s)
-                          (cons (format "%-28s %-8s %s %s"
-                                        (truncate-string-to-width (aob-session-name s) 28 nil nil "…")
-                                        (aob-session-state s)
-                                        (propertize (format "%-12s %-8s"
-                                                            (or (aob-session-clock s t) "")
-                                                            (or (aob-session-spend s) ""))
-                                                    'face 'shadow)
-                                        (or (aob-subagent-of s)
-                                            (abbreviate-file-name
-                                             (directory-file-name
-                                              (or (aob-session-project s) (aob-session-dir s) "")))))
-                                s))
-                        live)))
+         (cands (mapcar (lambda (s) (cons (ygg-aob--switch-label s) s)) live)))
     (unless cands (user-error "no live sessions"))
     (ygg-aob--goto
      (cdr (assoc (completing-read "Session: "
@@ -1476,6 +1463,116 @@ a name two projects share is told apart by where it is."
                                       (complete-with-action action cands str pred)))
                                   nil t)
                  cands)))))
+
+(defun ygg-aob--switch-label (s)
+  "S as one picker row: name, state, clock and spend, then whose it is."
+  (format "%-28s %-8s %s %s"
+          (truncate-string-to-width (aob-session-name s) 28 nil nil "…")
+          (aob-session-state s)
+          (propertize (format "%-12s %-8s"
+                              (or (aob-session-clock s t) "")
+                              (or (aob-session-spend s) ""))
+                      'face 'shadow)
+          (or (aob-subagent-of s)
+              (abbreviate-file-name
+               (directory-file-name
+                (or (aob-session-project s) (aob-session-dir s) ""))))))
+
+;;; Agents in the zone picker — SPC p z lists each space's agents under it
+
+(defun ygg-aob--pick-sessions (space)
+  "Live agents filed under SPACE, or under no live space when SPACE is nil.
+A subagent is filed where its lead is, since that is where it works."
+  (seq-filter (lambda (s)
+                (and (not (ygg-aob--put-down-p s))
+                     (let ((id (ygg-aob--space-of s)))
+                       (if space
+                           (eql id space)
+                         (not (ygg-aob--space-live-p id))))))
+              (aob-live-sessions)))
+
+(defun ygg-aob--entry-space (e)
+  "The space for the longest folder holding persisted entry E's, or nil."
+  (let ((dirs (mapcar (lambda (d) (file-name-as-directory (expand-file-name d)))
+                      (delq nil (list (plist-get e :dir) (plist-get e :project)))))
+        (best nil)
+        (best-length -1))
+    (dolist (tab (ygg-space--tabs))
+      (when-let* ((root (ygg-space-dir tab))
+                  (root (file-name-as-directory (expand-file-name root)))
+                  ((> (length root) best-length))
+                  ((seq-some (lambda (d) (string-prefix-p root d)) dirs)))
+        (setq best (ygg-space--id-of tab)
+              best-length (length root))))
+    best))
+
+(defun ygg-aob--pinned-ended ()
+  "Pinned conversations no session is holding, as (RANK . ENTRY)."
+  (when-let* ((pins (ygg-projects--pins)))
+    (delq nil (mapcar (lambda (e)
+                        (when-let* ((rank (seq-position pins (plist-get e :acp-id))))
+                          (cons rank e)))
+                      (ignore-errors (aob-acp-resumable-entries))))))
+
+(defun ygg-aob--pick-agent-row (s mark)
+  (cons (concat mark (ygg-aob--switch-label s))
+        (lambda () (ygg-aob--goto s))))
+
+(defun ygg-aob--pick-entry-row (e mark)
+  (cons (concat mark
+                (format "%-28s %-8s %s"
+                        (truncate-string-to-width
+                         (or (plist-get e :name) (plist-get e :agent) "session")
+                         28 nil nil "…")
+                        (propertize "⟲" 'face 'shadow)
+                        (abbreviate-file-name
+                         (directory-file-name
+                          (or (plist-get e :project) (plist-get e :dir) "")))))
+        (lambda () (aob-acp-resume-entry e))))
+
+(defun ygg-aob--pick-rows (space)
+  "Rows for the agents in SPACE: the pinned first in pin order, ended
+pinned conversations among them to resume, then the rest most in need
+first, each with what it sent under it, a level deeper per sending."
+  (let* ((pin (propertize "⊤ " 'face 'shadow))
+         (here (ygg-aob--pick-sessions space))
+         (tops (seq-filter (lambda (s) (ygg-aob--pick-top-p s here)) here))
+         (pinned (seq-filter #'ygg-projects--pinned-p tops))
+         (ended (seq-filter (lambda (p) (eql (ygg-aob--entry-space (cdr p)) space))
+                            (ygg-aob--pinned-ended)))
+         (seen nil))
+    (cl-labels ((tree (s mark depth)
+                  (unless (memq s seen)
+                    (push s seen)
+                    (cons (ygg-aob--pick-agent-row
+                           s (concat mark (make-string (* 2 depth) ?\s)))
+                          (mapcan (lambda (kid) (tree kid "  " (1+ depth)))
+                                  (seq-filter (lambda (kid)
+                                                (eq (aob-subagent-parent kid) s))
+                                              here))))))
+      (append
+       (mapcan (lambda (p)
+                 (if (aob-session-p (cdr p))
+                     (tree (cdr p) pin 0)
+                   (list (ygg-aob--pick-entry-row (cdr p) pin))))
+               (sort (append (mapcar (lambda (s) (cons (ygg-projects--pin-rank s) s)) pinned)
+                             ended)
+                     (lambda (a b) (< (car a) (car b)))))
+       (mapcan (lambda (s) (tree s "  " 0))
+               (seq-sort-by #'ygg-aob--score #'> (seq-difference tops pinned #'eq)))))))
+
+(defun ygg-aob--pick-top-p (s here)
+  "Whether S heads a tree among HERE: nothing in HERE sent it, or the
+chain that sent it loops back to S, which must not hide the whole loop."
+  (let ((parent (aob-subagent-parent s)))
+    (or (not (memq parent here))
+        (let ((p parent) (seen nil))
+          (while (and p (memq p here) (not (eq p s)) (not (memq p seen)))
+            (push p seen)
+            (setq p (aob-subagent-parent p)))
+          (eq p s)))))
+
+(add-hook 'ygg-space-pick-rows-functions #'ygg-aob--pick-rows)
 
 (defun ygg-aob-pick ()
   "Go to an agent IN THE CURRENT SPACE, flash-style: labeled hints in the
@@ -1659,7 +1756,6 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "C" #'ygg-aob-talk-existing :label "talk existing"
   "R" #'ygg-aob-resume-pick :label "resume a folder"
   "o" #'ygg-aob-pick :label "go to"
-  "j" #'ygg-aob-switch :label "switch session, any project"
   "r" #'ygg-aob-resolve-next :label "resolve"
   "q" #'aob-kill-session :label "kill")
 
@@ -1905,6 +2001,9 @@ As session refs; the first preset settling each one decides it."
   (add-hook 'aob-capf-mention-functions #'ygg-aob--diff-mention)
   (add-hook 'aob-compose-before-send-functions #'ygg-aob--expand-presets)
   (add-hook 'aob-compose-before-send-functions #'ygg-aob--expand-diff))
+
+(with-eval-after-load 'magit
+  (require 'ygg-magit-review))
 
 ;;; A session's todo list: its plan carried in, your edits told back
 

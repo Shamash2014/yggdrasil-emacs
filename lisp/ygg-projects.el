@@ -778,17 +778,20 @@ are handed out again from 1 after a restart and would pin a stranger."
 (defun ygg-projects--pin-keys (s)
   "Every key S may have been pinned under: one pinned while starting has
 no conversation yet."
-  (delq nil (list (aob-session-ref s :acp-id) (aob-session-id s))))
+  (if (ygg-projects--ended-p s)
+      (list (plist-get s :acp-id))
+    (delq nil (list (aob-session-ref s :acp-id) (aob-session-id s)))))
 
 (defun ygg-projects--pin-rank (s)
   "S's place among the pins, or nil when it is not pinned.
-A pin taken before S had a conversation moves onto it once it has one."
+A pin taken before S had a conversation moves onto it once it has one.
+S may be an ended conversation, kept pinned across a restart."
   (when-let* ((pins (ygg-projects--pins))
-              ((ygg-projects--session-p s))
+              ((ygg-projects--conversation-p s))
               (ranks (delq nil (mapcar (lambda (k) (seq-position pins k))
                                        (ygg-projects--pin-keys s)))))
     (let ((rank (apply #'min ranks))
-          (conv (aob-session-ref s :acp-id)))
+          (conv (and (ygg-projects--session-p s) (aob-session-ref s :acp-id))))
       (when (and conv (equal (nth rank pins) (aob-session-id s)))
         (ygg-projects--save-pins
          (seq-uniq (mapcar (lambda (k) (if (equal k (aob-session-id s)) conv k)) pins))))
@@ -840,14 +843,21 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
                                 (and (fboundp 'aob-subagent-p)
                                      (aob-subagent-p x)))
                               (ygg-projects--sessions root)))
-            (pinned (sort (seq-filter #'ygg-projects--pinned-p live)
+            (ended (ygg-projects--past root))
+            (pinned (sort (append (seq-filter #'ygg-projects--pinned-p live)
+                                  (seq-filter #'ygg-projects--pinned-p ended))
                           (lambda (a b)
                             (< (ygg-projects--pin-rank a) (ygg-projects--pin-rank b)))))
+            (label (lambda (s)
+                     (if (ygg-projects--ended-p s)
+                         (or (plist-get s :name) (plist-get s :agent) "session")
+                       (aob-session-name s))))
             (rows (lambda (s)
                     ;; what it sent goes under it, two columns a level:
                     ;; a row this narrow has no more to spare
-                    (cons (cons (aob-session-name s) s)
-                          (and (ygg-projects--expanded-p s)
+                    (cons (cons (funcall label s) s)
+                          (and (ygg-projects--session-p s)
+                               (ygg-projects--expanded-p s)
                                (ygg-projects--descendant-rows s 0 (list s))))))
             (groups (mapcar (lambda (s) (cons (ygg-projects--session-ts s)
                                               (funcall rows s)))
@@ -860,7 +870,7 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
                                                   (plist-get e :agent)
                                                   "session")
                                               e))))
-                          (ygg-projects--past root)))))
+                          (seq-difference ended pinned #'eq)))))
        ;; running first, newest started first, then ended, with air
        ;; between: what is alive is told from what is kept without
        ;; reading a single badge, and a session's own rows go with it
@@ -869,7 +879,7 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
                               (mapcar #'cdr (sort cells (lambda (a b) (> (car a) (car b)))))))))
          (append (mapcan rows pinned)
                  (funcall newest groups)
-                 (and live past (list (cons "" 'ygg-projects-gap)))
+                 (and (or live pinned) past (list (cons "" 'ygg-projects-gap)))
                  (funcall newest past)))))
     ('commands (mapcar (lambda (c)
                          (cons (format "%s  %s" (plist-get c :name)
@@ -1496,9 +1506,10 @@ session the buffer shows."
                       (aob-session-get aob-buffer-session-id)))))
         (out nil))
     (dolist (entry picked)
-      (when (ygg-projects--session-p entry)
-        (let ((top (ygg-projects--sender entry)))
-          (unless (memq top out) (push top out)))))
+      (when-let* ((top (cond ((ygg-projects--session-p entry)
+                              (ygg-projects--sender entry))
+                             ((ygg-projects--ended-p entry) entry))))
+        (unless (memq top out) (push top out))))
     (nreverse out)))
 
 (defun ygg-projects-toggle-pin ()
@@ -1521,7 +1532,11 @@ rest are pinned after them."
       (when (ygg-projects--in-sidebar-p) (ygg-projects--leave-selection))
       (ygg-projects-refresh)
       (message "projects: %s %s" (if unpin "unpinned" "pinned")
-               (mapconcat #'aob-session-name targets ", ")))))
+               (mapconcat (lambda (s)
+                            (if (ygg-projects--ended-p s)
+                                (or (plist-get s :name) (plist-get s :agent) "session")
+                              (aob-session-name s)))
+                          targets ", ")))))
 
 (defun ygg-projects--context-targets ()
   "The Context entries selected, or the one on this line."
