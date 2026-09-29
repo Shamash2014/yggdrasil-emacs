@@ -4,8 +4,10 @@ import json
 import os
 import re
 import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 
 HELP = """usage: ice-scenarios CHANGE [--tests]
 
@@ -21,7 +23,9 @@ underscore and dash only. The other ice tools load this file for the
 shared parts."""
 
 SCENARIO_HEADING = re.compile(r"^##\s+Scenario:\s*(\S+)")
-CONFIG_KEYS = ("test_cmd", "report_path", "lock_paths", "live_cmd", "perf_cmd", "mutate_cmd")
+CONFIG_KEYS = ("test_cmd", "report_path", "lock_paths", "sec_cmd", "live_cmd", "perf_cmd", "mutate_cmd", "commit_gate")
+LEDGER_COLUMNS = ("ts", "change", "branch", "sha", "verdict", "evidence", "hash")
+ICE_BOOKKEEPING = (".ice/state", ".ice/evidence", ".ice/ledger.tsv")
 TEST_FILE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*_test\.go|[^/]*[._-](test|spec)s?\.[cm]?[jt]sx?|[^/]*-tests?\.el|[^/]*_spec\.rb|[^/]*Tests?\.(swift|kt|java))$")
 TEST_SUPPORT = re.compile(r"(^|/)(conftest\.py|__snapshots__/|__fixtures__/|fixtures/|testdata/|test-data/|test_helper[^/]*|test-helper[^/]*)")
 CHANGE_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
@@ -54,6 +58,79 @@ def git(*args, cwd=None, check=True):
 
 def repo_root():
     return git("rev-parse", "--show-toplevel")
+
+
+def ledger_path(root):
+    return os.path.join(root, ".ice", "ledger.tsv")
+
+
+def read_ledger(root):
+    path = ledger_path(root)
+    if not os.path.isfile(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        rows = [line.rstrip("\n").split("\t") for line in f if line.strip()]
+    return [dict(zip(LEDGER_COLUMNS, row)) for row in rows if row and row[0] != "ts"]
+
+
+def append_ledger(root, row):
+    path = ledger_path(root)
+    fresh = not os.path.isfile(path)
+    with open(path, "a", encoding="utf-8") as f:
+        if fresh:
+            f.write("\t".join(LEDGER_COLUMNS) + "\n")
+        f.write("\t".join(row.get(c, "") for c in LEDGER_COLUMNS) + "\n")
+
+
+def _write_tree_excluding_bookkeeping(root, index_file):
+    env = dict(os.environ, GIT_INDEX_FILE=index_file)
+    subprocess.run(["git", "rm", "--cached", "-r", "-q", "--ignore-unmatch", *ICE_BOOKKEEPING],
+                   cwd=root, env=env, capture_output=True, text=True)
+    out = subprocess.run(["git", "write-tree"], cwd=root, env=env, capture_output=True, text=True)
+    if out.returncode != 0:
+        die("ice: git write-tree failed: %s" % out.stderr.strip())
+    return out.stdout.strip()
+
+
+def _real_index_path(root, given=None):
+    path = given or os.environ.get("GIT_INDEX_FILE")
+    if path:
+        return path
+    return git("rev-parse", "--path-format=absolute", "--git-path", "index", cwd=root)
+
+
+def working_tree_hash(root):
+    """Tree hash of the working tree (tracked and untracked, respecting
+    .gitignore) minus the ice bookkeeping paths: the content ice-verify
+    actually tested, independent of HEAD or the index."""
+    real_index = _real_index_path(root)
+    fd, tmp = tempfile.mkstemp(prefix="ice-index-")
+    os.close(fd)
+    try:
+        if os.path.isfile(real_index):
+            shutil.copyfile(real_index, tmp)
+        env = dict(os.environ, GIT_INDEX_FILE=tmp)
+        out = subprocess.run(["git", "add", "-A"], cwd=root, env=env, capture_output=True, text=True)
+        if out.returncode != 0:
+            die("ice: git add -A into a temp index failed: %s" % out.stderr.strip())
+        return _write_tree_excluding_bookkeeping(root, tmp)
+    finally:
+        os.unlink(tmp)
+
+
+def staged_tree_hash(root):
+    """Tree hash of the index git is about to commit (GIT_INDEX_FILE when
+    a hook is given one, else the repo's own index) minus the ice
+    bookkeeping paths: the content a commit is about to record."""
+    real_index = _real_index_path(root)
+    fd, tmp = tempfile.mkstemp(prefix="ice-index-")
+    os.close(fd)
+    try:
+        if os.path.isfile(real_index):
+            shutil.copyfile(real_index, tmp)
+        return _write_tree_excluding_bookkeeping(root, tmp)
+    finally:
+        os.unlink(tmp)
 
 
 def default_branch(root):

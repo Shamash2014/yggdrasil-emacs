@@ -37,7 +37,7 @@ Launch all reviewers in a single message using the Task tool. Use the `interroga
 
 | Subagent | Default model |
 |----------|---------------|
-| Reviewer A | `claude-fable-5-thinking-max` |
+| Reviewer A | `claude-sonnet-5` |
 | Reviewer B | `gpt-5.6-sol-max` |
 | Reviewer C | `grok-4.6-fast-xhigh` |
 | Reviewer D | `claude-opus-5-thinking-xhigh` |
@@ -46,6 +46,7 @@ For each reviewer:
 - `subagent_type`: `general-purpose`
 - `model`: the configured `interrogate reviewers` entry, or the table default with no configured line
 - `readonly`: `true`
+- Never use a Fable model, whatever the configured list says; replace one with the next reviewer.
 
 If a model slug is rejected as unresolvable when you try to spawn the subagent, check the valid slugs in the Task tool's error message, pick the closest equivalent (prefer the highest-reasoning tier of the same family), spawn with the valid slug, and open a separate PR to update the configured value or default table. Do not block the review on the slug issue. If the configured value is `inherit-parent` or `auto`, omit `model` instead; never treat those aliases as broken slugs or enter this fallback for them.
 

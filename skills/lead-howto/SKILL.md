@@ -18,3 +18,4 @@ this file.
 - [asking.md](asking.md): putting a pick to the owner, and ICE
 - [decision-memo.md](decision-memo.md): a choice the work will be built on
 - [rationale.md](rationale.md): why the lead stays quiet and delegates
+- [holds.md](holds.md): owner holds, and reconciling on resume

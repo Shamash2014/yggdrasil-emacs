@@ -13,8 +13,10 @@ artifacts:
       Order, and no step starts before the one above it ends:
       1. Explore first (opsx explore). Read the code at the places the change
          will touch, the specs under openspec/specs, CONTEXT.md and lat.md.
-      2. Settle by probe or prototype whatever running something can answer.
-         Run it; do not ask the owner a question the machine can answer.
+      2. Settle by probe whatever running something can answer, or
+         prototype it through skill prototype (ice-prototype for UI)
+         under docs/prototypes/CHANGE/. Run it; do not ask the owner a
+         question the machine can answer.
       3. Draft every section of intent.md. Check each term against CONTEXT.md
          when the repo has one, and use its words.
       4. Run the gap detector: a separate read-only session under the gaps
@@ -23,13 +25,16 @@ artifacts:
          the gaps yourself in this session. If you cannot start that
          session, stop, ask the owner to run it, and wait for gaps.md.
       5. Settle every gaps.md item marked "settle by probe/prototype" by
-         running it. Ask the owner only the "ask owner" items still open, all
+         running it through skill prototype (ice-prototype for UI). Ask
+         the owner only the "ask owner" items still open, all
          at once, in one message, each with its default. When gaps.md says
          none are open, ask nothing.
       6. Fold the answers into intent.md.
-      7. Restate the intent in your own words, in a few lines, under
-         Restated, and say it to the owner. Wait. If the owner corrects you,
-         fix intent.md and restate again.
+      7. Restate the intent with the restate skill, in your own words, under
+         Restated: Goals, Problem, Not the goal, Unsure (each guess as a
+         question with your default). Say it to the owner. Wait. If the owner
+         corrects you or answers an Unsure item, fix intent.md and restate
+         again.
 
       Never, whatever the owner seems to have said:
       - write, fill, change or delete the Confirmed line under Restated. The
@@ -58,8 +63,9 @@ artifacts:
       - Out of scope: what this change will not do.
       - Alternatives refused: at least one list item, each an approach
         considered and the reason it was refused.
-      - Restated: the intent in your own words, a few lines, the caller's
-        view first. The Confirmed line below it is the owner's, with the
+      - Restated: the intent in your own words, in the restate skill's
+        shape (Goals, Problem, Not the goal, Unsure), the caller's view
+        first; Unsure is empty once the owner has answered it. The Confirmed line below it is the owner's, with the
         date and the sha1 of What is wanted and Restated.
 
       Expectations are not written here. They come next, in expectations.md,
@@ -305,9 +311,11 @@ artifacts:
 
       tasks.md opens with "## Checkpoints", its first h2: one line per
       slice, "N. few words", numbered 1..n in order, at most 8 words each,
-      never a checkbox. When the change has user-visible UI and nothing to
-      compare it with (the ice-prototype skill), checkpoint 1 is the
-      prototype. Below the list keeps an empty "Approved:" line that only
+      never a checkbox. When the shape or feasibility is uncertain, or
+      the change has user-visible UI and nothing to compare it with,
+      checkpoint 1 is the prototype: ice-prototype for the UI case,
+      skill prototype otherwise. Below the list keeps an empty
+      "Approved:" line that only
       the owner fills: ygg-ice-approve-checkpoints (SPC a k A) writes
       "Approved: YYYY-MM-DD sha1:XXXXXXXX" over the list, so any edit to a
       checkpoint after that fails ice-check plan until the owner approves

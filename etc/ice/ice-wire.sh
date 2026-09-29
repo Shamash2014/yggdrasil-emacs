@@ -100,7 +100,7 @@ else
   note x "$arch C4 skeleton created (TODO titles) and README.md generated"
 fi
 
-for tool in ice-check ice-archive-to-lat ice-c4-drift ice-scenarios ice-fail-on-base ice-lock ice-coverage ice-verify ice-compact; do
+for tool in ice-check ice-archive-to-lat ice-c4-drift ice-scenarios ice-fail-on-base ice-lock ice-coverage ice-verify ice-compact ice-commit-gate; do
   if copy_if_changed "$ice_dir/$tool" ".ice/$tool"; then chmod +x ".ice/$tool"; note x ".ice/$tool installed"; else note x ".ice/$tool (already current)"; fi
 done
 runner() {
@@ -187,8 +187,10 @@ if [ -f CONTEXT.md ]; then note x "CONTEXT.md linked from lat.md/lat.md"; else a
 if [ -d "$docs/adr" ]; then note x "$docs/adr linked from lat.md/lat.md"; else ask "$docs/adr: none yet; the first decision that is hard to reverse, surprising and a real trade-off creates it"; fi
 ask "$arch: replace the TODO titles and each container's metadata code and lat paths; rerun ice-wire after adding views so lat.md/architecture.md links them"
 
-marker="ice-wire: C4, lat check and ice-check"
-check_lines="likec4 validate --no-layout --json $arch
+marker="ice-wire: commit gate, C4, lat check and ice-check"
+gate_line=".ice/ice-commit-gate"
+check_lines="$gate_line
+likec4 validate --no-layout --json $arch
 likec4 format --check $arch
 .ice/ice-c4-drift $arch
 likec4 export markdown $arch && git add $arch/README.md
@@ -204,6 +206,11 @@ elif [ -f .pre-commit-config.yaml ]; then
   if append_once .pre-commit-config.yaml "id: ice-check" "$(sed "$pc_strip" <<PRECOMMIT
   - repo: local
     hooks:
+      - id: ice-commit-gate
+        name: ice commit gate
+        entry: $gate_line
+        language: system
+        pass_filenames: false
       - id: likec4-validate
         name: likec4 validate
         entry: likec4 validate --no-layout --json $arch
@@ -235,13 +242,24 @@ elif [ -f .pre-commit-config.yaml ]; then
         language: system
         pass_filenames: false
 PRECOMMIT
-)"; then note x ".pre-commit-config.yaml: C4, lat check and ice-check hooks added"
-  else note x ".pre-commit-config.yaml: hooks (already present)"; fi
+)"; then note x ".pre-commit-config.yaml: commit gate, C4, lat check and ice-check hooks added"
+  else
+    note x ".pre-commit-config.yaml: hooks (already present)"
+    grep -q "id: ice-commit-gate" .pre-commit-config.yaml \
+      || ask ".pre-commit-config.yaml already has ice-wire's hooks from an earlier run, without the commit gate; add by hand: - id: ice-commit-gate, entry: $gate_line, language: system, pass_filenames: false"
+  fi
   placed=yes
 fi
 if [ -f .husky/pre-commit ]; then
-  if append_once .husky/pre-commit "$marker" "# $marker
-$check_lines"; then note x ".husky/pre-commit: lines added"; else note x ".husky/pre-commit: lines (already present)"; fi
+  if grep -q "ice-wire:" .husky/pre-commit; then
+    if grep -qxF "$gate_line" .husky/pre-commit; then
+      note x ".husky/pre-commit: lines (already present)"
+    else
+      ask ".husky/pre-commit already has ice-wire's lines from an earlier run, without the commit gate; add by hand: $gate_line"
+    fi
+  elif append_once .husky/pre-commit "$marker" "# $marker
+$check_lines"; then note x ".husky/pre-commit: lines added"
+  else note x ".husky/pre-commit: lines (already present)"; fi
   placed=yes
 fi
 if [ -d .github/workflows ]; then
@@ -273,22 +291,14 @@ if [ -f lefthook.yml ] || [ -f lefthook.yaml ]; then
   placed=yes
 fi
 if [ "$placed" = no ]; then
-  hook=$(git rev-parse --git-path hooks/pre-commit)
-  case "$hook" in /*) ;; *) hook="$root/$hook" ;; esac
-  common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
-  # a linked worktree's hooks live in the shared .git; the hook skips checkouts not wired
-  case "$hook" in "$root"/*|"$common"/*) hook_inside=yes ;; *) hook_inside=no ;; esac
-  if [ "$hook_inside" = no ]; then
-    ask "git hooks live outside the repo ($hook, core.hooksPath); ice-wire left them alone; add, in order: $(echo "$check_lines" | tr '\n' ';')"
-  elif [ ! -f "$hook" ]; then
-    mkdir -p "$(dirname "$hook")"
-    printf '%s\n' "#!/bin/sh" "# $marker" "set -e" "[ -x .ice/ice-check ] || exit 0" "$check_lines" > "$hook" && chmod +x "$hook"
-    note x "$hook created"
-  elif grep -q "$marker" "$hook"; then
-    note x "$hook (already present)"
-  else
-    ask "$hook exists and was left alone; add, in order: $(echo "$check_lines" | tr '\n' ';')"
-  fi
+  while IFS= read -r line; do
+    case "$line" in
+      "note: "*) note x "${line#note: }" ;;
+      "ask: "*) ask "${line#ask: }" ;;
+    esac
+  done <<HOOKOUT
+$(printf '%s\n' "$check_lines" | "$ice_dir/ice-hook-install" "$root" "$marker" "$gate_line")
+HOOKOUT
 fi
 
 runner baseline $rebaseline
@@ -298,7 +308,7 @@ ask "lat hooks and MCP call 'lat' from PATH; confirm each agent's environment (E
 ask "semantic search uses lat's local model; set LAT_LLM_KEY for hosted embeddings, or leave it"
 ask "who writes the scenario checks: you, or a spec-only session you approve and lock"
 ask ".ice/ice-check repo in pre-commit blocks every commit while an active change has an incomplete intent.md, expectations.md or tasks.md; keep that gate or drop the line"
-ask "expectations.md is owner-only by instruction; once the owner confirms a change's checks, the owner runs .ice/ice-lock CHANGE lock, which tags them (signed when user.signingkey is set) with the .ice scripts, .ice/config, intent.md, conftest.py and runner configs; a re-lock needs ICE_LOCK_OWNER=1 and --force. The lead's ice-verify CHANGE checks the lock; neither is in pre-commit or CI (tests are slow for a hook, and CI checkouts lack the tag); add them there or leave them to the lead"
+ask "expectations.md is owner-only by instruction; once the owner confirms a change's checks, the owner runs .ice/ice-lock CHANGE lock, which tags them (signed when user.signingkey is set) with the .ice scripts, .ice/config, intent.md, conftest.py and runner configs; a re-lock needs ICE_LOCK_OWNER=1 and --force. Running ice-verify itself is not in pre-commit or CI (tests are slow for a hook, and CI checkouts lack the tag); it stays the lead's. .ice/ice-commit-gate is in pre-commit (installed above): it reads .ice/ledger.tsv and refuses a commit touching a locked change's files with no unit-verified or live-verified row for that exact content; set commit_gate = off in .ice/config to turn it off, or --no-verify to bypass one commit"
 ask "rerunning ice-wire after etc/ice changes updates the .ice scripts, so every locked change fails its lock until the owner re-locks it (ICE_LOCK_OWNER=1 .ice/ice-lock CHANGE lock --force)"
 ask ".ice/state and .ice/evidence hold per-run reports and logs; gitignore them or keep them. .ice/locks and .ice/ledger.tsv are the lock copy and the verdicts"
 

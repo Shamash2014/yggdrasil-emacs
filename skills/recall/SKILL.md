@@ -1,35 +1,47 @@
 ---
 name: recall
-description: "Reconstruct your recent working context from your own chat history, live state, and the shared record (user reports, prior fixes, incidents), then hand back a tight current-state brief. Use for 'recall my work on X', 'catch me up', 'what have I been working on', 'where did I leave off', before starting or resuming work."
+description: "Rebuild working context for a topic or a time period (yesterday, today, this week, since a date) from chats, git and shared records. Use on /recall."
 disable-model-invocation: true
 ---
 
 # Recall
 
-**Before you start or resume work, you rebuild the user's recent working context and hand back a tight capsule of where things stand now and what to do next.** Use for "recall my work on X", "catch me up", "what have I been working on", or "where did I leave off".
+**Before you start or resume work, rebuild what happened and hand back a tight brief of where things stand and what to do next.** Use for "recall my work on X", "what did I do yesterday", "catch me up on this week", "where did I leave off".
 
-Keep it tight and on-topic. Read only what the in-scope threads need, then stop. The heavy reading fans out to parallel subagents. The main thread keeps only their findings and the final brief.
+Keep it tight. The heavy reading fans out to parallel subagents on the Sonnet model (the sonnet alias; never a larger one for this grunt work). The main thread keeps only their findings and the brief.
 
-Your context lives in two records. Your own chat history holds what you did and decided. The shared record holds everything that happened around the same code under other names: the symptoms users keep reporting, the fixes that shipped and got reverted, the errors still firing in prod. That second record is what the **why** skill searches, across source control, the issue tracker, chat and issue channels, long-form docs, and error tracking. A feature with a long bug tail keeps most of its story there, so don't reconstruct it from your transcripts alone.
+## 1. Lock the scope
 
-Transcripts live at `~/.cursor/projects/<slug>/agent-transcripts/<uuid>/<uuid>.jsonl`, where `<slug>` is the workspace path with the leading slash dropped and each "/" turned into "-" (so `/Users/you/proj` becomes `Users-you-proj`). Every line is one chat message.
+A recall has two axes. Pin both and state them back before searching.
 
-1. Classify, then route. One specific prior chat to resume is the `session-pickup` playbook, not this. Turning habits into a durable skill is `automate-me`. A human-readable summary of your work is a different task. Recall loads working context across recent chats before you act. If the user already gave you a full state capsule (paths, branch, the change), use it and skip the mining.
-2. Lock the scope before searching. Pin the window ("recent" is a real range, default the last 7 days), the topic if named, and the workspace (default the active one; never read another project's transcripts without being asked). State the scope back. Never quietly turn "all" into "recent N".
-3. Fan out across your chat history. Spawn parallel subagents on a fast, cheap model, each taking a slice of the corpus, since searching transcripts is grunt work. Tell every subagent to order candidates by real modification time (`ls -t`) and never by UUID name, grep the topic first and then read only the matching chats and only their relevant regions, and skip the current chat plus obvious noise (subagent, eval, and test chats). Each returns the same schema, one block per chat: topic, the user's goal, decisions, open threads, struggles and corrections, and artifacts (PRs, tickets, branches), each citing the chat UUID. For one or two chats, skip the fan-out and search directly. The raw transcripts stay in the subagents. The main thread gets only their findings.
-4. Sweep the shared record whenever the topic names a feature, file, subsystem, area, or bug. This is the default, not a judgment call, and "my work on X" does not exempt it. A named target carries history you never see in your own transcripts, and that history is the point of the sweep. Hand it to the **why** skill's source investigators, but steer their question from "why was this built this way" to "what's the current state, what's been tried and didn't hold, and what are users still reporting". Reuse its per-source playbooks so you don't reinvent each query vocabulary, run the investigators in parallel with the chat-history mining, and inherit its posture: one investigator per source, null results are findings, skip an unavailable MCP and say so. Fold what comes back into the brief. Skip this step only for pure activity recall with no named target ("what did I do this week"), where your own history and live state are the entire answer.
-5. Verify against live state. A transcript or a stale ticket is history, not current truth, so take the PRs, branches, and tickets that the mining and the sweep surfaced and check them with `git` and `gh`. When the answer hinges on what an agent actually did (the tools it ran, files it read, errors it hit), read the full transcript, not just a trimmed local copy.
-6. Write the brief to the contract below. Group by thread. Stay on the named topic.
+- **Window.** Turn the words into dates in local time: "yesterday" is the previous calendar day; "today" since midnight; "this week" since Monday; "since Tuesday", "last 3 days", a date or a range as said. With no window and a topic, default to the last 7 days. With no window and no topic, default to the last working day. Never quietly shrink "all" to "recent".
+- **Topic.** A feature, file, subsystem, bug or repo, or none. With no topic the recall is by time: everything in the window, grouped by project.
+- **Where.** With a topic, the active workspace unless the owner names more. With only a window, every project touched in the window, since that is the question.
 
-## Output contract
+If the owner gave a full state capsule (paths, branch, the change), use it and skip the mining. One specific chat to resume is a pickup, not a recall.
 
-Lead with the capsule, then the thread status, then the problems, then the next move. Deeper detail goes below or gets cut.
+## 2. Mine the records in the window
 
-- **Capsule.** At most 5 bullets. What this work is and where it stands overall.
-- **Threads.** One line each, prefixed with exactly one status tag: `[merged #N]`, `[open PR #N]`, `[in flight <branch>]`, `[verified, uncommitted]`, `[reverted #N]`, or `[planned, not started]`. A thread with no tag is not done yet, so tag it.
-- **Problems.** At most 5, the recurring ones. Include the symptoms users keep reporting and any fix that shipped and was reverted, so the next attempt starts where the last one failed.
+Fan out one subagent per source below (Sonnet), in parallel. Each selects by real modification time or date inside the window (find -newermt START ! -newermt END, or date directories), never by file name order; greps the topic first when there is one; reads only matching regions; skips the current chat and obvious noise (subagent, eval and test chats). Each returns one block per item: date, project, topic, the owner's goal, decisions, open threads, struggles and corrections, artifacts (commits, branches, PRs, tickets, changes), each with its source path or id.
+
+- **Agent chats.** Claude Code transcripts under each config home: ~/.agents-conf/FAMILY/claude/projects/SLUG/*.jsonl and ~/.claude/projects/SLUG/*.jsonl (SLUG is the workspace path with each "/" turned into "-"). Codex sessions under ~/.codex/sessions/YYYY/MM/DD/. Each jsonl line is one message; its cwd field names the project.
+- **Git.** For each project the chats name, plus the active one: git log --all --since START --until END with author, subject and branch; git reflog for the same window catches branch switches and resets; open branches and uncommitted work now.
+- **Editor records.** The repo's .aob/ worklogs and task notes, .ice/ledger.tsv rows and openspec/changes touched in the window, lat.md sections changed.
+- **Shared record.** When a topic names a feature, file, subsystem or bug, hand the question "what is the current state, what was tried and did not hold, what are users still reporting" to the why skill's source investigators, in the same window widened as needed. Skip this for pure time recall with no topic.
+
+Two or fewer items in a source: read directly, no subagent.
+
+## 3. Verify against live state
+
+A transcript is history. Check each commit, branch, PR, ticket or change it names against git and gh now: merged, open, reverted, or gone.
+
+## 4. Write the brief
+
+- **Window.** The dates and projects covered, and any source that was empty or unreadable.
+- **Timeline.** For a window longer than a day, one line per day: date, project, what moved. Skip for a single day.
+- **Capsule.** At most 5 bullets: what the work is and where it stands.
+- **Threads.** One line each with exactly one tag: [merged #N], [open PR #N], [in flight BRANCH], [verified, uncommitted], [reverted #N], [planned, not started].
+- **Problems.** At most 5 recurring ones, including reverted fixes and symptoms still reported.
 - **Next move.** The single most useful next action, concrete.
 
-An adjacent feature or ticket stays out unless it blocks this one. When the capsule and thread lines outgrow a screen, cut detail before you cut threads. Write the brief through the **unslop** skill, cite chat findings by UUID and shared-record findings by their source (PR #, ticket ID, chat permalink, error-tracker issue), and sanitize private context before any public output.
-
-**Reply:** the brief, to the contract above.
+Cite chat findings by transcript path or session id and shared-record findings by their source (commit, PR, ticket, permalink). Cut detail before cutting threads. Sanitize private context before any public output.

@@ -22,4 +22,12 @@ Feature:
 
 ## Restated
 
+Goals:
+
+Problem:
+
+Not the goal:
+
+Unsure:
+
 Confirmed: YYYY-MM-DD sha1:XXXXXXXX

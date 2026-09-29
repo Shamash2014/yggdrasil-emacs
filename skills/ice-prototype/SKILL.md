@@ -1,6 +1,6 @@
 ---
 name: ice-prototype
-description: Throwaway static HTML prototype for an ICE change with user-visible UI and no reference. Apply when planning its checkpoints; skip if a design exists.
+description: UI-only throwaway HTML prototype for an ICE change with no reference. Apply when planning its checkpoints; non-UI uncertainty uses skill prototype.
 ---
 
 # ICE prototype
@@ -26,7 +26,9 @@ Build one when all three hold:
 
 Skip it for a logic-only change, a change whose UI already has a
 reference, and a one-sentence diff. When a reference covers some screens
-and not others, prototype only the others.
+and not others, prototype only the others. This skill is the UI
+specialist; a spike, a mock, a data dry run or any non-UI uncertainty
+goes through skill prototype instead, even inside an ICE change.
 
 ## What it is
 

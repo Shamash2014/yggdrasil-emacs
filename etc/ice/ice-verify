@@ -28,11 +28,12 @@ Steps, in order; the first that fails or cannot run stops the rest:
   unit      test_cmd over the whole suite ({file} and {filter} dropped,
             {report} filled with report_path), then
   coverage  ice-coverage on that report
+  sec       sec_cmd, when set: the verify skill's security step
   live      live_cmd, when .ice/config sets it
   perf      perf_cmd, when set
   mutate    mutate_cmd, when set ({base} is the locked base, else the
             merge-base)
-live_cmd, perf_cmd and mutate_cmd run through sh with ICE_CHANGE,
+sec_cmd, live_cmd, perf_cmd and mutate_cmd run through sh with ICE_CHANGE,
 ICE_CHANGE_DIR, ICE_SHA, ICE_BASE (the base in the lock record when the
 change is locked, else the merge-base) and ICE_EVIDENCE set; {base}, {change}
 and {sha} are shell-quoted; exit 75 means blocked rather than failed.
@@ -47,10 +48,13 @@ Prints one verdict line:
 and appends ts, change, branch, sha, verdict, evidence to .ice/ledger.tsv;
 each step's output is kept under .ice/evidence/CHANGE/SHA/RUN/, one folder per run.
 
---status CHANGE prints the ledger row for the current branch and HEAD
-only; rows for an older sha are stale. Exit 0 only for a verified row."""
+--status CHANGE prints the newest ledger row for the current branch
+whose hash matches the working tree's content hash right now; workers
+never commit, so HEAD alone cannot tell one item's diff from the next.
+A row for the same change and branch but a different hash is stale.
+Exit 0 only for a verified row matching the current content."""
 
-LEDGER_COLUMNS = ("ts", "change", "branch", "sha", "verdict", "evidence")
+LEDGER_COLUMNS = ice.LEDGER_COLUMNS
 BLOCKED_EXIT = 75
 
 
@@ -60,44 +64,24 @@ class Stop(Exception):
         self.verdict = "%s %s" % (kind, step)
 
 
-def ledger_path(root):
-    return os.path.join(root, ".ice", "ledger.tsv")
-
-
-def read_ledger(root):
-    path = ledger_path(root)
-    if not os.path.isfile(path):
-        return []
-    with open(path, encoding="utf-8") as f:
-        rows = [line.rstrip("\n").split("\t") for line in f if line.strip()]
-    return [dict(zip(LEDGER_COLUMNS, row)) for row in rows if row and row[0] != "ts"]
-
-
-def append_ledger(root, row):
-    path = ledger_path(root)
-    fresh = not os.path.isfile(path)
-    with open(path, "a", encoding="utf-8") as f:
-        if fresh:
-            f.write("\t".join(LEDGER_COLUMNS) + "\n")
-        f.write("\t".join(row[c] for c in LEDGER_COLUMNS) + "\n")
-
-
 def branch_of(root):
     return ice.git("rev-parse", "--abbrev-ref", "HEAD", cwd=root)
 
 
 def status(root, name):
-    head, branch = ice.git("rev-parse", "HEAD", cwd=root), branch_of(root)
-    rows = [r for r in read_ledger(root) if r.get("change") == name and r.get("branch") == branch]
-    current = [r for r in rows if r.get("sha") == head]
-    if current:
-        row = current[-1]
+    branch = branch_of(root)
+    current_hash = ice.working_tree_hash(root)
+    rows = [r for r in ice.read_ledger(root) if r.get("change") == name and r.get("branch") == branch]
+    matching = [r for r in rows if r.get("hash") == current_hash]
+    if matching:
+        row = matching[-1]
         print("\t".join(LEDGER_COLUMNS))
-        print("\t".join(row[c] for c in LEDGER_COLUMNS))
+        print("\t".join(row.get(c, "") for c in LEDGER_COLUMNS))
         return 0 if row["verdict"] in ("unit-verified", "live-verified") else 1
     if rows:
-        print("stale: no verdict for %s at HEAD %s; %d older row(s), latest %s at %s"
-              % (name, head[:7], len(rows), rows[-1]["verdict"], rows[-1]["sha"][:7]))
+        latest = rows[-1]
+        print("stale: no verdict for %s at the current content (%s); %d older row(s), latest %s at %s"
+              % (name, current_hash[:12], len(rows), latest["verdict"], (latest.get("hash") or latest["sha"])[:12]))
     else:
         print("none: no verdict for %s on %s" % (name, branch))
     return 1
@@ -148,6 +132,8 @@ def verify(root, change, name):
         print("note: %d path(s) differ from HEAD %s; the verdict covers the working tree, the ledger names HEAD" % (len(dirty), head[:7]))
         with open(os.path.join(evidence, "dirty.txt"), "w", encoding="utf-8") as f:
             f.write("\n".join(dirty) + "\n")
+    content_hash = ice.working_tree_hash(root)
+    print("note: working tree content hash %s" % content_hash[:12])
     try:
         checker = os.path.join(HERE, "ice-check")
         if not os.path.isfile(checker):
@@ -178,7 +164,7 @@ def verify(root, change, name):
             raise Stop("blocked", "coverage")
         run.step("coverage", [sys.executable, os.path.join(HERE, "ice-coverage"), change, "--report", report_abs])
 
-        for step, key in (("live", "live_cmd"), ("perf", "perf_cmd"), ("mutate", "mutate_cmd")):
+        for step, key in (("sec", "sec_cmd"), ("live", "live_cmd"), ("perf", "perf_cmd"), ("mutate", "mutate_cmd")):
             if config.get(key):
                 values = {"base": base, "change": name, "sha": head}
                 command = re.sub(r"\{(base|change|sha)\}", lambda m: shlex.quote(values[m.group(1)]), config[key])
@@ -190,8 +176,8 @@ def verify(root, change, name):
     except Stop as stop:
         verdict = stop.verdict
     ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
-    append_ledger(root, {"ts": ts, "change": name, "branch": branch, "sha": head, "verdict": verdict,
-                         "evidence": os.path.relpath(evidence, root)})
+    ice.append_ledger(root, {"ts": ts, "change": name, "branch": branch, "sha": head, "verdict": verdict,
+                             "evidence": os.path.relpath(evidence, root), "hash": content_hash})
     print("verdict: " + verdict)
     return 0 if verdict in ("unit-verified", "live-verified") else 1
 

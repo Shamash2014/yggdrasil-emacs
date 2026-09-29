@@ -36,3 +36,27 @@ behaviour or drop it.
 That is a finding about the code, not the test: the surface is too
 wide or the unit too entangled. Say so in the closing words rather than
 forcing a test through the internals.
+
+## Flake and isolation smells
+
+Spot these in a test you write or touch, and fix them rather than
+work around them:
+
+- **shared mutable state** between tests — give each test its own
+  fixture or instance.
+- **order dependence** — a test that only passes after another ran
+  first; make setup explicit instead.
+- **clock, timezone or locale dependence** — inject or freeze the
+  clock/locale rather than reading the system's.
+- **real network instead of a stub** — stub at the boundary the test
+  cannot cross.
+- **sleeps or timeouts as synchronisation** — wait on the actual
+  condition, not a duration.
+- **unordered-result assertions** — sort or compare as a set before
+  asserting.
+- **unseeded randomness** — seed it, or assert the invariant instead
+  of the value.
+- **external service with no fallback** — the test should not fail
+  when that service is merely slow or down.
+- **missing negative-path tests** — a smell in what's absent: every
+  behaviour with an error case or a rejection needs one covering it.

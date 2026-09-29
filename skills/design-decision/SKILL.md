@@ -31,7 +31,13 @@ Even with research input, read the actual files that will be touched:
 - Trace one caller → callee chain through each integration point to confirm data flow matches what you'll write into `API:` and `Flow:` fields
 - If a named research file doesn't exist or its signature differs from expected, surface it explicitly
 
+**Usage first.** Before drafting any concept, write 2–3 realistic call sites in the caller's own code: the actual lines that would invoke the new piece, with real names from files you opened. Derive each concept's `Location:` and `API:` from what those call sites need, not the reverse. If a later concept block disagrees with a call site, fix the block to match usage, not the other way round.
+
 Do not generate concepts until Location + API are grounded in files you've actually read.
+
+## 3. Write the rubric
+
+Before any concept exists, write 3–6 concrete, gradeable criteria for what a good answer to *this* decision looks like — derived from the intent and research constraints in step 1, not from the concepts you're about to draft. This rubric is the comparison tool for step 6 (screen and cross-judge) and step 7 (recommend). Candidates never see it while being generated; seeing the rubric first would let a concept be written to flatter it instead of to fit the constraints.
 
 ## 4. Generate 2–3 concepts
 
@@ -39,14 +45,14 @@ Each concept differs on a **load-bearing axis** — where the new code lives, wh
 
 A concept is **one coherent shape**: location + API + data flow + lifecycle, all fitting together. Two concepts differing only in cosmetics (names, formatting) are the same concept.
 
-**Always 2–3. Hard rule.** A single concept is a bundled yes/no — there's no "vs. what". If you find yourself writing one block, **you missed the load-bearing axis**. Force at least one alternative on each of these axes until you have 2–3 distinct concepts:
+**Always 2–3, and at least two structurally distinct.** A single concept is a bundled yes/no — there's no "vs. what". Structurally distinct means different modules, different data flow, or different ownership — not the same shape with different names. If you find yourself writing one block, **you missed the load-bearing axis**. Force at least one alternative on each of these axes until you have 2–3 distinct concepts:
 
 - A *different location* — same shape, different module/file
 - A *different abstraction* — extend an existing module vs. add a new one vs. inline at call sites
 - A *different owner* — who calls whom; pull vs. push; sync vs. async
 - A *different fit with constraints* — drop a soft constraint, satisfy a hard one differently
 
-Even if research strongly suggests one direction, render 2–3 to expose *what's being chosen*. Discarding alternatives is a Phase 5 (`Recommend`) decision, not a Phase 4 (`Generate`) decision.
+Even if research strongly suggests one direction, render 2–3 to expose *what's being chosen*. Discarding alternatives is a Phase 7 (`Recommend`) decision, not a Phase 4 (`Generate`) decision.
 
 ## 5. Render each concept — **use the block format, not prose**
 
@@ -65,17 +71,23 @@ Concept «short-name»
 
 Render all concepts in one message, in the same format, so the user sees the comparison side-by-side. If a field is "same as Concept A", say so explicitly — don't drop the field.
 
-## 6. Recommend + confirm
+## 6. Screen and cross-judge
 
-- Recommend one concept, tied verbatim to a stated input constraint.
+Screen every concept against `skills/architect/references/design-red-flags.md` (shallow module, information leakage, temporal decomposition, pass-through method). Revise or drop a concept that trips one before it goes to Recommend.
+
+Score the surviving concepts against the step-3 rubric yourself. Then hand the rubric and the concepts, by name only, to a fresh worker on a different model from the one that authored the concepts, and have it score them against the same rubric independently. Compare the two scorings: agreement on the strongest concept confirms the pick. Wild divergence means the rubric or the concepts were underspecified — go back to step 3 or step 4, don't average the disagreement away.
+
+## 7. Recommend + confirm
+
+- Recommend one concept, tied verbatim to a stated input constraint and to the step-6 scoring.
 - **"Which concept?" is the only allowed bundled question** — the alternatives are visible.
 - User rejects all → you missed a constraint or a research gap. Return to grilling or research, not to picking.
 
-## 7. Decisions inside the chosen concept
+## 8. Decisions inside the chosen concept
 
 Naming, surface-level tweaks, anything still ambiguous *inside* the chosen shape → ask **one at a time**.
 
-## 8. Edit + verify
+## 9. Edit + verify
 
 - Implement exactly the chosen concept at the named locations.
 - A new load-bearing decision surfaces during implementation? Pause. If it changes the shape, return to grilling. If it's local, ask one question.

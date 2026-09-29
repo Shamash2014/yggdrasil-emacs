@@ -1,0 +1,114 @@
+#!/usr/bin/env python3
+import importlib.machinery
+import importlib.util
+import os
+import re
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+_loader = importlib.machinery.SourceFileLoader("ice_scenarios", os.path.join(os.path.dirname(os.path.realpath(__file__)), "ice-scenarios"))
+ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scenarios", _loader))
+_loader.exec_module(ice)
+
+HELP = """usage: ice-commit-gate
+
+A pre-commit hook: refuses a commit that touches any file of a locked
+ICE change (openspec/changes/*, not archive, with an ice-expect tag)
+unless .ice/ledger.tsv already holds a unit-verified or live-verified
+row for that change whose hash matches the content about to be
+committed. Reads the ledger and hashes the staged tree; never runs
+tests, so it stays fast enough for a hook.
+
+A change's files are the union of: its own folder, every path the
+lock record covers, and every path named on a "Files:" line under
+tasks.md's Slices (the lock record excludes source beside a test, so
+the slice's own declared scope closes that gap).
+
+commit_gate = off in .ice/config, set by the owner, turns this off for
+the repo. git commit --no-verify skips this the way it skips every
+hook; this script does not try to stop that, the same way git does
+not."""
+
+FILES_LINE = re.compile(r"^\s*-\s*Files:\s*(.+)$")
+
+
+def slice_files(change_dir):
+    tasks = os.path.join(change_dir, "tasks.md")
+    files = set()
+    if not os.path.isfile(tasks):
+        return files
+    with open(tasks, encoding="utf-8") as f:
+        for line in f:
+            m = FILES_LINE.match(line)
+            if not m:
+                continue
+            for part in re.split(r"[,\s]+", m.group(1).strip()):
+                if part and part.lower() != "none":
+                    files.add(part)
+    return files
+
+
+def active_changes(root):
+    """(name, files) for every openspec/changes/* folder, not archive,
+    that carries an ice-expect tag (locked)."""
+    changes_root = os.path.join(root, "openspec", "changes")
+    out = []
+    if not os.path.isdir(changes_root):
+        return out
+    for entry in sorted(os.listdir(changes_root)):
+        path = os.path.join(changes_root, entry)
+        if entry == "archive" or not os.path.isdir(path):
+            continue
+        record, _ = ice.tag_record(root, entry)
+        if not record:
+            continue
+        rel = os.path.relpath(path, root)
+        files = set(record.get("files", {}).keys()) | slice_files(path)
+        files.add(rel)
+        out.append((entry, files))
+    return out
+
+
+def staged_paths(root):
+    out = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=root, capture_output=True, text=True)
+    return {p for p in out.stdout.splitlines() if p}
+
+
+def branch_of(root):
+    return ice.git("rev-parse", "--abbrev-ref", "HEAD", cwd=root)
+
+
+def main():
+    if "-h" in sys.argv or "--help" in sys.argv:
+        print(HELP)
+        return 0
+    root = ice.repo_root()
+    config = ice.read_config(root)
+    if (config.get("commit_gate") or "on").strip().lower() == "off":
+        return 0
+    staged = staged_paths(root)
+    if not staged:
+        return 0
+    branch = branch_of(root)
+    current_hash = None
+    for name, files in active_changes(root):
+        touched = sorted(staged & files)
+        if not touched:
+            continue
+        if current_hash is None:
+            current_hash = ice.staged_tree_hash(root)
+        rows = [r for r in ice.read_ledger(root) if r.get("change") == name and r.get("branch") == branch]
+        verified = [r for r in rows if r.get("hash") == current_hash and r.get("verdict") in ("unit-verified", "live-verified")]
+        if verified:
+            continue
+        print("ice-commit-gate: refused, %s touches locked change %s with no verified ice-verify row for this content"
+              % (", ".join(touched), name))
+        print("  run etc/ice/ice-verify %s from the Emacs checkout (a worker's own .ice/ice-verify copy can lie about"
+              " itself), or set commit_gate = off in .ice/config to turn this gate off" % name)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -11,3 +11,5 @@ and codex refuses a level on a forked spawn.
   changes.
 - worker-deep: hard changes, an item whose design is still open or whose
   failure is not understood.
+- worker-verify: a different model from build's, reruns VERIFY fresh
+  and grades the diff against SCOPE and ACCEPTANCE; edits nothing.

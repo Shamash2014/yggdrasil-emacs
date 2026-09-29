@@ -27,8 +27,9 @@ baseline ROOT   run the whole suite once through test_cmd, isolated, into
                 once recorded unless --force
 
 Runners, first match wins: pytest, vitest, jest, cargo test, go test,
-flutter test, Emacs ERT, then the repo's own test entry point (justfile,
-Makefile, package.json). Each line of output starts with note: or ask:."""
+flutter test, Gradle (Kotlin/JVM), Swift (SwiftPM), xcodebuild, Emacs ERT,
+then the repo's own test entry point (justfile, Makefile, package.json).
+Each line of output starts with note: or ask:."""
 
 TEMPLATE = """# ICE settings: key = value, one per line. Fill test_cmd before ice-verify can pass.
 # test_cmd runs one test with {file} and {filter}; the whole-suite run drops each token whose placeholders are empty, so keep a placeholder in one token with its flag. {report} is report_path.
@@ -94,6 +95,27 @@ def ert_folder(root):
     return None
 
 
+GRADLE_FILES = ("settings.gradle.kts", "settings.gradle", "build.gradle.kts", "build.gradle")
+
+
+def gradle_evidence(root):
+    for name in GRADLE_FILES:
+        if os.path.isfile(os.path.join(root, name)):
+            return name
+    return None
+
+
+def gradle_mentions_android(root):
+    return any("com.android." in (read(root, name) or "") for name in GRADLE_FILES)
+
+
+def xcode_project(root):
+    for name in sorted(os.listdir(root)):
+        if name.endswith(".xcodeproj") or name.endswith(".xcworkspace"):
+            return name
+    return None
+
+
 def detect(root):
     """The runner, its evidence, the config keys it fills and the asks it leaves."""
     pkg = package(root)
@@ -125,6 +147,43 @@ def detect(root):
         return {"runner": "flutter", "evidence": "pubspec.yaml", "lock_paths": "pubspec.yaml",
                 "test_cmd": "flutter test {file} --plain-name={filter}",
                 "asks": [NO_JUNIT % ("flutter test", "flutter test --machine piped through tojunit")]}
+    gradle_file = gradle_evidence(root)
+    if gradle_file:
+        wrapper = "./gradlew" if os.path.isfile(os.path.join(root, "gradlew")) else "gradle"
+        lock_paths = ", ".join(p for p in GRADLE_FILES + ("gradle/libs.versions.toml", "gradle.lockfile",
+                                                            "gradle/verification-metadata.xml")
+                                if os.path.isfile(os.path.join(root, p)))
+        asks = [NO_JUNIT % (wrapper + " test", "each class writes its own file under build/test-results/test/; "
+                             "point report_path at a single one or add a merge step"),
+                "--tests={filter} is the single-token form fill() needs; unconfirmed against gradle --help, "
+                "gradle is not installed on this machine"]
+        if gradle_mentions_android(root):
+            asks.append("build files mention an Android plugin: test is an aggregate lifecycle task there, the "
+                         "real task is likely testDebugUnitTest (or per variant), results land under "
+                         "app/build/test-results/testDebugUnitTest/; fill test_cmd yourself")
+        return {"runner": "gradle", "evidence": gradle_file, "lock_paths": lock_paths,
+                "test_cmd": wrapper + " test --tests={filter}", "asks": asks}
+    if os.path.isfile(os.path.join(root, "Package.swift")):
+        lock_paths = "Package.swift" + (", Package.resolved"
+                                         if os.path.isfile(os.path.join(root, "Package.resolved")) else "")
+        return {"runner": "swift", "evidence": "Package.swift", "lock_paths": lock_paths, "report_path": REPORT,
+                "test_cmd": "swift test --filter={filter} --xunit-output={report}",
+                "asks": ["a target using the newer Swift Testing framework (not XCTest) may write no report at "
+                         "{report} even though --xunit-output was given; unconfirmed, no Swift Testing target "
+                         "here to check (see swiftlang/swift-package-manager#8000) - verify the file lands "
+                         "at report_path after a run"]}
+    xc = xcode_project(root)
+    if xc:
+        scheme = os.path.splitext(xc)[0]
+        asks = ["xcodebuild test needs -scheme (guessed %s from %s, confirm it) and -destination naming a "
+                 "simulator; claim one through simbroker, never a device someone else holds" % (scheme, xc)]
+        if shutil.which("xcbeautify"):
+            asks.append(NO_JUNIT % ("xcodebuild test", "xcbeautify --report junit; that pipe needs sh, which "
+                                     "test_cmd does not run through, so wire it into sec_cmd or run it by hand"))
+        else:
+            asks.append(NO_JUNIT % ("xcodebuild test", "xcbeautify --report junit (not installed here)"))
+        return {"runner": "xcodebuild", "evidence": xc, "lock_paths": xc,
+                "test_cmd": "xcodebuild test -scheme %s -only-testing:{filter}" % scheme, "asks": asks}
     folder = ert_folder(root)
     if folder:
         return {"runner": "ert", "evidence": folder + "/*-tests.el", "asks": [], "report_path": REPORT,
@@ -153,9 +212,90 @@ def config_text(found):
     lines = TEMPLATE.splitlines()
     out = lines[:2] + ["# Detected: %s (%s)." % (found["runner"], found["evidence"])]
     for line in lines[2:]:
-        key = re.match(r"^# (test_cmd|report_path|lock_paths) = ", line)
+        key = re.match(r"^# (test_cmd|report_path|lock_paths|mutate_cmd)\s*=\s*", line)
         out.append("%s = %s" % (key.group(1), found[key.group(1)]) if key and found.get(key.group(1)) else line)
     return "\n".join(out) + "\n"
+
+
+MUTATE_INSTALL = {
+    "mutmut": "pip install mutmut",
+    "stryker": "npm install --save-dev @stryker-mutator/core",
+    "cargo-mutants": "cargo install cargo-mutants",
+    "gremlins": "go install github.com/go-gremlins/gremlins/cmd/gremlins@latest",
+    "mutation_test": "dart pub add --dev mutation_test",
+    "pitest": "declare id(\"info.solidsoft.pitest\") in build.gradle(.kts)",
+    "muter": "brew install muter-mutation-testing/formulae/muter",
+}
+
+
+def _node_bin(root, name):
+    local = os.path.join(root, "node_modules", ".bin", name)
+    return local if os.path.isfile(local) else None
+
+
+def _node_dep_present(root, dep):
+    pkg = package(root) or {}
+    return dep in {**pkg.get("dependencies", {}), **pkg.get("devDependencies", {})}
+
+
+def _pubspec_dep_present(root, dep):
+    text = read(root, "pubspec.yaml") or ""
+    return bool(re.search(r"^\s*%s\s*:" % dep, text, re.M))
+
+
+def _gradle_plugin_declared(root, plugin_id):
+    texts = [read(root, name) or "" for name in GRADLE_FILES]
+    texts.append(read(root, "gradle/libs.versions.toml") or "")
+    return any(plugin_id in t for t in texts)
+
+
+def mutate_plan(root, runner):
+    """(mutate_cmd, message) for RUNNER's language: mutate_cmd only when a
+    mutation tool is actually found on disk (never probed with npx, which
+    would download), scoped to files changed since {base} via a plain
+    git diff, run through sh (no process substitution). message is a
+    ready-to-print note: or ask: line for ice-wire to relay. Exact CLI
+    flags for cargo-mutants, gremlins, mutation_test and muter are
+    best-effort, unconfirmed against their own --help since none of
+    those four is installed here."""
+    if runner == "pytest":
+        name, found = "mutmut", shutil.which("mutmut")
+        cmd = ("files=$(git diff --name-only {base} -- '*.py' | tr '\\n' ','); files=${files%,}; "
+               "[ -z \"$files\" ] && exit 0; mutmut run --paths-to-mutate=\"$files\"")
+    elif runner in ("vitest", "jest"):
+        name = "stryker"
+        local = _node_bin(root, "stryker")
+        found = local or (shutil.which("stryker") if _node_dep_present(root, "@stryker-mutator/core") else None)
+        cmd = ("files=$(git diff --name-only {base} -- '*.js' '*.jsx' '*.ts' '*.tsx' | tr '\\n' ','); files=${files%,}; "
+               "[ -z \"$files\" ] && exit 0; %s run --mutate=\"$files\"" % (local or "stryker"))
+    elif runner == "cargo":
+        name, found = "cargo-mutants", shutil.which("cargo-mutants")
+        cmd = ("git diff {base} > .ice/state/mutate.diff && cargo mutants --in-diff .ice/state/mutate.diff")
+    elif runner == "go":
+        name = "gremlins"
+        found = shutil.which("gremlins") or shutil.which("go-mutesting")
+        tool = "gremlins unleash" if shutil.which("gremlins") else "go-mutesting"
+        cmd = ("files=$(git diff --name-only {base} -- '*.go' | tr '\\n' ' '); [ -z \"$files\" ] && exit 0; %s $files" % tool)
+    elif runner == "flutter":
+        name = "mutation_test"
+        found = bool(shutil.which("dart")) and _pubspec_dep_present(root, "mutation_test")
+        cmd = ("files=$(git diff --name-only {base} -- '*.dart' | tr '\\n' ' '); [ -z \"$files\" ] && exit 0; "
+               "dart run mutation_test --changed $files")
+    elif runner == "gradle":
+        name = "pitest"
+        found = _gradle_plugin_declared(root, "info.solidsoft.pitest") or _gradle_plugin_declared(root, "\"pitest\"")
+        wrapper = "./gradlew" if os.path.isfile(os.path.join(root, "gradlew")) else "gradle"
+        cmd = "%s pitest" % wrapper
+    elif runner in ("swift", "xcodebuild"):
+        name, found = "muter", shutil.which("muter")
+        cmd = ("files=$(git diff --name-only {base} -- '*.swift' | tr '\\n' ' '); [ -z \"$files\" ] && exit 0; "
+               "[ -f muter.conf.yaml ] || exit 75; muter --files-to-mutate $files")
+    else:
+        return None, None
+    if found:
+        return cmd, "note: mutate_cmd set to %s (found on this machine), scoped to files changed since the locked base" % name
+    return None, ("ask: mutation testing for %s has no installed tool; install %s (%s), "
+                   "then set mutate_cmd in .ice/config yourself" % (runner, name, MUTATE_INSTALL.get(name, name)))
 
 
 def main_checkout(root):
@@ -169,8 +309,14 @@ def main_checkout(root):
 def config(root):
     path = os.path.join(root, ".ice", "config")
     current = read(root, ".ice/config")
+    existing_keys = ice.read_config(root)
     if current is not None and current != TEMPLATE:
         print("note: .ice/config (already present, left alone)")
+        if "mutate_cmd" not in existing_keys:
+            detected = detect(root)
+            _, message = mutate_plan(root, detected["runner"]) if detected["runner"] else (None, None)
+            if message:
+                print(message)
         return 0
     main = main_checkout(root)
     shared = read(main, ".ice/config") if main else None
@@ -179,9 +325,14 @@ def config(root):
         print("note: .ice/config reused from the main checkout %s" % main)
         return 0
     found = detect(root)
+    mutate_cmd, mutate_message = mutate_plan(root, found["runner"]) if found["runner"] else (None, None)
+    if mutate_cmd:
+        found["mutate_cmd"] = mutate_cmd
     if found["runner"]:
         write(path, config_text(found))
         print("note: .ice/config filled for %s (%s): test_cmd = %s" % (found["runner"], found["evidence"], found["test_cmd"]))
+        if mutate_message:
+            print(mutate_message)
     elif current is None:
         write(path, TEMPLATE)
         print("note: .ice/config template written")

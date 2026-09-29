@@ -1,0 +1,43 @@
+#!/bin/sh
+# Installs or upgrades the repo's git pre-commit hook for ice-wire's
+# commit gate and check lines, without ever overwriting a foreign hook:
+# a hook this script did not write is chained as pre-commit.legacy and
+# run after ours, the pre-commit framework's own convention.
+#
+# usage: ice-hook-install ROOT MARKER GATE_LINE < CHECK_LINES
+# Prints note:/ask: lines the way ice-runner does, for ice-wire to relay.
+set -eu
+
+root=$1
+marker=$2
+gate_line=$3
+check_lines=$(cat)
+
+cd "$root"
+hook=$(git rev-parse --git-path hooks/pre-commit)
+case "$hook" in /*) ;; *) hook="$root/$hook" ;; esac
+common=$(cd "$(git rev-parse --git-common-dir)" && pwd)
+# a linked worktree's hooks live in the shared .git; skip checkouts not wired
+case "$hook" in "$root"/*|"$common"/*) hook_inside=yes ;; *) hook_inside=no ;; esac
+legacy="$(dirname "$hook")/pre-commit.legacy"
+chain_tail='[ -x "$(dirname "$0")/pre-commit.legacy" ] && exec "$(dirname "$0")/pre-commit.legacy" "$@"'
+
+if [ "$hook_inside" = no ]; then
+  echo "ask: git hooks live outside the repo ($hook, core.hooksPath); ice-wire left them alone; add, in order: $(echo "$check_lines" | tr '\n' ';')"
+elif [ ! -f "$hook" ]; then
+  mkdir -p "$(dirname "$hook")"
+  printf '%s\n' "#!/bin/sh" "# $marker" "set -e" "[ -x .ice/ice-check ] || exit 0" "$check_lines" "$chain_tail" "exit 0" > "$hook" && chmod +x "$hook"
+  echo "note: $hook created"
+elif grep -q "ice-wire:" "$hook" && grep -qxF "$gate_line" "$hook"; then
+  echo "note: $hook (already present)"
+elif grep -q "ice-wire:" "$hook"; then
+  # our earlier hook, from before the commit gate existed: add the gate line, leave the rest
+  awk -v gate="$gate_line" '{print} /^set -e$/ && !d {print gate; d=1}' "$hook" > "$hook.ice-wire-new" \
+    && mv "$hook.ice-wire-new" "$hook" && chmod +x "$hook"
+  echo "note: $hook: commit gate added"
+else
+  # a foreign hook: chain it after ours, never overwrite it
+  if [ ! -f "$legacy" ]; then cp "$hook" "$legacy" && chmod +x "$legacy"; fi
+  printf '%s\n' "#!/bin/sh" "# $marker" "set -e" "[ -x .ice/ice-check ] || exit 0" "$check_lines" "$chain_tail" "exit 0" > "$hook" && chmod +x "$hook"
+  echo "note: $hook installed, the existing hook chained as $(basename "$legacy")"
+fi

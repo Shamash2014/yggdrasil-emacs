@@ -76,6 +76,8 @@ flutter test integration_test/ -d <device_id>
 flutter drive --driver=test_driver/main.dart --target=integration_test/app_test.dart -d <device_id>
 ```
 
+For mutation testing and dependency/SAST scanning of the app under test, route through etc/ice/ice-runner (mutate_plan: dart mutation_test) and skills/security-scan (osv-scanner on pubspec.lock, semgrep, mobsfscan) rather than driving those here.
+
 ## Common Patterns
 
 **Find element by scrolling:**

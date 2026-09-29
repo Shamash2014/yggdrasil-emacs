@@ -34,8 +34,21 @@ Then, once per repo, you see to verification through workers:
   in .ice/state/verify-baseline.json beside the baseline.
 - Its entry command becomes live_cmd in .ice/config, and it is where the
   UI gate's screenshots come from.
-- perf_cmd and mutate_cmd are set only when the repo has tools for them:
-  a benchmark it already runs, a mutation tool for its language.
+- sec_cmd is the verify skill's security step, set only when it has one.
+- perf_cmd is set only when the repo has a benchmark it already runs.
+  mutate_cmd is filled automatically when wiring finds the language's
+  mutation tool installed (mutmut for pytest, Stryker for Vitest/Jest,
+  cargo-mutants for Cargo, gremlins or go-mutesting for Go), scoped to
+  the files changed since the locked base; when no tool is installed,
+  ice-wire prints the install command instead and leaves mutate_cmd
+  unset, the owner's call.
+- commit_gate = off in .ice/config, set by the owner only, turns off the
+  pre-commit hook ice-wire installs: it reads .ice/ledger.tsv and
+  refuses a commit touching a locked change's files (its folder, its
+  lock record, and every slice's Files: line in tasks.md) unless a
+  unit-verified or live-verified row exists for that exact content; it
+  never runs tests itself, only hashes the staged tree and reads the
+  ledger, and git --no-verify skips it the way it skips any hook.
 
 ## What the lead does, and what stays the owner's
 
@@ -60,14 +73,16 @@ Two acts are the owner's alone and never yours: confirming the intent
 
 1. Open the change: openspec new change SLUG. The ice schema is the
    default in a wired repo.
-2. Explore: read the code; probe and prototype, in a scratch folder,
-   whatever running something can settle.
+2. Explore: read the code; probe whatever running something can
+   settle, or prototype through skill prototype (ice-prototype for
+   UI) under docs/prototypes/CHANGE/, rather than asking the owner.
 3. Intent: draft intent.md from the ask and what exploration found. Then
    run the gap detector, a separate read-only pass under the gaps preset
    (worker-gaps when a lead runs workers) that writes only
    CHANGE/gaps.md. Settle what a probe can; ask the owner only what is
    left, each with its default.
-4. Restate: write the Restated section in your own words. The owner
+4. Restate: write the Restated section with the restate skill (Goals,
+   Problem, Not the goal, Unsure), in your own words. The owner
    confirms it (SPC a k R writes the Confirmed date and a sha1 of What is
    wanted and Restated). Never write the Confirmed line, and never take a
    chat reply as the confirmation. Wait until ice-check intent passes; an
@@ -83,8 +98,9 @@ Two acts are the owner's alone and never yours: confirming the intent
    owner. The full fail-on-base, each check failing on that locked base
    and passing on the working tree, runs inside ice-verify.
 6. Tasks: tasks.md opens with "## Checkpoints", one numbered line per
-   slice, "N. few words" (at most 8), never checkboxes. When
-   ice-prototype applies, checkpoint 1 is the prototype. The owner
+   slice, "N. few words" (at most 8), never checkboxes. When a
+   prototype applies, checkpoint 1 is the prototype: ice-prototype for
+   user-visible UI, skill prototype otherwise. The owner
    approves the list with SPC a k A, which writes "Approved: YYYY-MM-DD
    sha1:XXXXXXXX" under it. Never write that line, and never take a chat
    reply as approval; an edit to the list after it fails the plan check
@@ -100,8 +116,8 @@ copy in the Emacs checkout (etc/ice/ice-verify, run from the repo), since
 a worker can edit .ice/ice-verify. It runs the intent check, the plan
 lint, the lock on the owner's checks, the .ice scripts, the config and
 the test support, fail-on-base against the locked base, the unit tests
-with every scenario covered, then the live, perf and mutation lanes the
-repo sets, and ends on one line:
+with every scenario covered, then the sec, live, perf and mutation lanes
+the repo sets, and ends on one line:
 
 - unit-verified or live-verified, with the diff on disk and inside the
   item's scope: the item may be ticked;
