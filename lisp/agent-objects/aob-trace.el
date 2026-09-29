@@ -3210,10 +3210,12 @@ and what the header counts against — not the window the agent claims."
         (t (number-to-string n))))
 
 (defun aob-trace--header (s)
-  "S's header: name, state, clock, cost, context and todo, grey but the name.
+  "S's header: name, model, state, clock, cost, context and todo, grey but the name.
 A subagent's names the agent it works for instead of cost and context.
 The full account is \\ u; the header carries only what is looked at."
   (let* ((grey (lambda (str) (propertize (string-replace "%" "%%" str) 'face 'shadow)))
+         (model (or (aob-session-ref s :model-id)
+                    (aob-session-ref s :model-name)))
          (mode (aob-session-ref s :mode-id))
          (parent (and aob-trace--own-parent
                       (aob-session-get (aob-session-ref s :native-root))))
@@ -3243,7 +3245,7 @@ The full account is \\ u; the header carries only what is looked at."
                           "read-only"
                           (format "%s" (aob-session-state s))
                           clock)
-                  (list (format "%s" (aob-session-state s))
+                  (list model (format "%s" (aob-session-state s))
                         (aob-session-quiet s)
                         (and mode (not (member mode aob-trace-quiet-modes)) mode)
                         clock cost ctx todo goal wf))))
