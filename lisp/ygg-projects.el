@@ -1638,7 +1638,10 @@ state, every session selected, after one question."
 A conversation this Emacs started is marked archived in the file it
 keeps; one found on disk is not in that file at all, so marking it
 there archives nothing and the row comes back.  Its own file moves
-instead."
+instead.  A pin goes with it: what is filed away no longer leads."
+  (when-let* ((pins (ygg-projects--pins))
+              ((member (plist-get entry :acp-id) pins)))
+    (ygg-projects--save-pins (remove (plist-get entry :acp-id) pins)))
   (when (and (fboundp 'aob-acp-archive-entry)
              (not (plist-get entry :found)))
     (ignore-errors (aob-acp-archive-entry entry)))
