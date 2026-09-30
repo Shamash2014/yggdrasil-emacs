@@ -177,6 +177,9 @@ project remembered as ~/x is still there after forgetting /home/me/x."
         (when (fboundp 'project--write-project-list)
           (ignore-errors (project--write-project-list)))))))
 
+(defvar ygg-project--children (make-hash-table :test 'equal)
+  "Umbrella root to the repositories found under it.")
+
 (defvar ygg-project--importing nil
   "Non-nil while an import is putting a project on the list.")
 
@@ -355,14 +358,31 @@ Nothing here blocks."
          (pr (project-current nil dir)))
     (unless (file-directory-p dir)
       (user-error "ygg: %s is not a directory" (abbreviate-file-name dir)))
-    (unless pr
-      (user-error "ygg: %s is not a repository" (abbreviate-file-name dir)))
-    (let ((ygg-project--importing t)) (project-remember-project pr))
-    ;; no walk: an imported root is already one of the roots, and the
-    ;; scan that suggests the others is not what you are waiting for
-    (ygg-project-import dir)
+    (if (and pr (not (eq (car-safe pr) 'ygg-umbrella)))
+        (progn
+          (let ((ygg-project--importing t)) (project-remember-project pr))
+          ;; no walk: an imported root is already one of the roots, and the
+          ;; scan that suggests the others is not what you are waiting for
+          (ygg-project-import dir))
+      (let ((children (ygg-project--repos-under dir)))
+        (unless children
+          (user-error "ygg: %s is not a repository" (abbreviate-file-name dir)))
+        (remhash dir ygg-project--children)
+        (let ((ygg-project--importing t))
+          (project-remember-project (cons 'ygg-umbrella dir))
+          (dolist (child children)
+            (project-remember-project (project-current nil child))))
+        (ygg-project-import dir (ygg-project--import-each children))))
     (message "ygg: remembered %s" (abbreviate-file-name dir))
     dir))
+
+(defun ygg-project--import-each (roots)
+  "A callback importing ROOTS one after another, so an umbrella of
+twenty repos does not start twenty imports at once."
+  (lambda (&rest _)
+    (when roots
+      (ygg-project-import (car roots)
+                          (ygg-project--import-each (cdr roots))))))
 
 ;;;###autoload
 (defun ygg-project-remove (dir)
@@ -375,6 +395,7 @@ scan will offer it again next time you import one."
                           nil t)))
   (let ((dir (file-name-as-directory (expand-file-name dir))))
     (ygg-project--forget dir)
+    (remhash dir ygg-project--children)
     (remhash dir ygg-project-import--state)
     (run-hooks 'ygg-project-import-hook)
     (message "ygg: removed %s" (abbreviate-file-name dir))
@@ -390,6 +411,72 @@ scan will offer it again next time you import one."
 
 (defun ygg-project--key (dir)
   (file-name-as-directory (expand-file-name dir)))
+
+;;; An umbrella — a plain folder holding repositories
+
+(defun ygg-project--repos-under (dir)
+  "The repositories under DIR, stopping at the outermost of each nest,
+so a submodule stays part of the repository that carries it."
+  (let ((roots (mapcar #'ygg-project--key
+                       (ygg-project-scan--walk-1 (directory-file-name dir)))))
+    (seq-remove (lambda (r)
+                  (seq-some (lambda (o) (and (not (equal o r))
+                                             (string-prefix-p o r)))
+                            roots))
+                roots)))
+
+(defun ygg-project-umbrella-p (root)
+  "Non-nil when ROOT is a project on the list with no `.git' of its own.
+Such a folder only got on the list as an umbrella, so being on it and
+not being a repository is what registers one; removing the project
+unregisters it."
+  (let ((key (ygg-project--key root)))
+    (and (not (file-exists-p (expand-file-name ".git" key)))
+         (member key (ygg-project-roots)))))
+
+(defun ygg-project-children (root)
+  "The repositories directly under the umbrella ROOT, nil for any other
+project.  Found once per session and kept, since a walk is a `find'."
+  (let ((key (ygg-project--key root)))
+    (when (ygg-project-umbrella-p key)
+      (with-memoization (gethash key ygg-project--children)
+        (ygg-project--repos-under key)))))
+
+(defun ygg-project-try-umbrella (dir)
+  "The umbrella project DIR is in, for `project-find-functions'.
+It sits after `project-try-vc', so it answers only where no repository
+does: inside a child, the child is the project.  The project is
+\(ygg-umbrella . ROOT); `project-root' is ROOT and `project-files' is
+the umbrella's loose files plus each child's own list, so finding a
+file reaches every child and still honours its ignores."
+  (let ((dir (ygg-project--key dir)))
+    (when-let* ((root (seq-find (lambda (r) (and (string-prefix-p r dir)
+                                                 (ygg-project-umbrella-p r)))
+                                (sort (ygg-project-roots)
+                                      (lambda (a b) (> (length a) (length b)))))))
+      (cons 'ygg-umbrella root))))
+
+(cl-defmethod project-root ((project (head ygg-umbrella)))
+  (cdr project))
+
+(cl-defmethod project-ignores ((project (head ygg-umbrella)) dir)
+  (append (cl-call-next-method)
+          (and (equal (ygg-project--key dir) (cdr project))
+               (mapcar (lambda (child)
+                         (concat "./" (file-relative-name child (cdr project))))
+                       (ygg-project-children (cdr project))))))
+
+(cl-defmethod project-files ((project (head ygg-umbrella)) &optional dirs)
+  (let ((project-files-relative-names nil))
+    (append (cl-call-next-method)
+            (and (null dirs)
+                 (mapcan (lambda (child)
+                           (when-let* ((pr (project-try-vc child)))
+                             (project-files pr)))
+                         (ygg-project-children (cdr project)))))))
+
+(with-eval-after-load 'project
+  (add-hook 'project-find-functions #'ygg-project-try-umbrella 90))
 
 (defun ygg-project-folders (root)
   "The extra folders ROOT carries, those that still exist."
