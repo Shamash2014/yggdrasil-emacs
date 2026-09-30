@@ -46,7 +46,9 @@
       (when ygg-focus--dim-cookie
         (face-remap-remove-relative ygg-focus--dim-cookie)
         (setq ygg-focus--dim-cookie nil moved t))
-      (unless ygg-focus--border-cookie
+      ;; Trace fringes carry status marks, not a window border.
+      (unless (or ygg-focus--border-cookie
+                  (derived-mode-p 'aob-trace-mode))
         (setq ygg-focus--border-cookie
               (face-remap-add-relative 'fringe 'ygg-focus-border)
               moved t))
