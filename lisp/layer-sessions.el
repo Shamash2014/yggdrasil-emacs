@@ -329,6 +329,7 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
   "z" #'ygg-space-pick :label "pick zone or agent"
   "t" #'ygg-space-tree :label "tree sidebar"
   "p" #'project-switch-project :label "switch project"
+  "u" #'ygg-project-switch-child :label "switch repo in this umbrella"
   "i" #'ygg-project-import :label "import / re-import project"
   "P" #'ygg-projects-add :label "add project to the sidebar"
   "m" #'ygg-session-pick :label "session picker"

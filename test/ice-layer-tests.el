@@ -282,7 +282,6 @@ real ones, and every cache starts empty."
   `(cl-letf (((symbol-function 'ygg-projects--agents) (lambda (_) '(0 . 0)))
              ((symbol-function 'ygg-projects--commands) (lambda (_) '(0 . 0)))
              ((symbol-function 'ygg-projects--processes) (lambda (_) '(0 . 0)))
-             ((symbol-function 'ygg-projects--worktrees) (lambda (_) '(0 . 0)))
              ((symbol-function 'ygg-projects--folders) (lambda (r) (list r)))
              ((symbol-function 'ygg-projects--icon) (lambda (_ fallback) fallback)))
      ,@body))
@@ -293,7 +292,7 @@ real ones, and every cache starts empty."
      (ygg-ice-context-update root)
      (should (equal (ygg-projects--context-spec root) '(context "C" "Context" "1")))
      (should (equal (mapcar #'car (ygg-projects--row-specs root))
-                    '(agents context commands processes worktrees folders)))
+                    '(agents context commands processes folders)))
      (let ((entries (ygg-projects--entries root 'context)))
        (should (equal (mapcar #'car entries)
                       '("add-login" "Architecture" "Auth" "0001 use postgres"

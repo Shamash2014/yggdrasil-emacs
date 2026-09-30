@@ -24,6 +24,12 @@
 (declare-function ygg-project-roots "ygg-project-scan" (&optional refresh))
 (declare-function ygg-project-candidates "ygg-project-scan" (&optional refresh))
 (declare-function ygg-project-import-mark "ygg-project-scan" (root))
+(declare-function ygg-project-top-roots "ygg-project-scan" ())
+(declare-function ygg-project-children "ygg-project-scan" (root))
+(declare-function ygg-project-umbrella-of "ygg-project-scan" (root))
+(declare-function ygg-project-try-umbrella "ygg-project-scan" (dir))
+(declare-function ygg-project-move "ygg-project-scan" (root n))
+(declare-function ygg-project-move-child "ygg-project-scan" (child n))
 (defvar ygg-project-import-hook)
 (declare-function aob-sessions "aob")
 (declare-function aob-session-project "aob" (s))
@@ -41,6 +47,11 @@
 (declare-function aob-transcript-found "aob-transcript" (project &optional agent where))
 (declare-function aob-session-quiet "aob" (s))
 (declare-function aob-session-spend "aob" (s))
+(declare-function aob-schedule-for "aob-schedule" (acp-id))
+(declare-function aob-schedule-for-project "aob-schedule" (root))
+(declare-function aob-schedule-read "aob-schedule" (s))
+(declare-function aob-schedule "aob-schedule" (s prompt when))
+(declare-function aob-schedule-list "aob-schedule" ())
 (defvar aob-trace--session-id)
 
 (defvar ygg-projects--on-screen nil
@@ -333,27 +344,39 @@ when the project has nothing of its own running."
           (t 'ygg-projects-idle))))
 
 (defun ygg-projects--roots ()
-  "Every project root worth listing, in an order that does not move.
+  "The projects on show, each umbrella followed by its repositories.
+A repository is drawn in its umbrella's Folders row, not as a card, but
+its sessions, commands and worktrees are its own all the same."
+  (seq-mapcat (lambda (r) (cons r (ignore-errors (ygg-project-children r))))
+              (ygg-projects--shown)))
+
+(defun ygg-projects--shown ()
+  "Every project card worth listing, in an order that does not move.
 Neither opening a project nor an agent starting in one reorders the
 list: a row that changes place under the hand that reached for it is
 worse than a row in an inconvenient place.  The open project and the
 one the sidebar was opened from are kept whatever the cap, since a
 list that can drop the thing it is showing is a list that shows
-nothing."
+nothing.  An umbrella's repositories are not cards of their own."
   (let* ((scanned (seq-uniq (mapcar #'file-name-as-directory
-                                    (delq nil (ignore-errors (ygg-project-roots))))
+                                    (delq nil (ignore-errors (ygg-project-top-roots))))
                             #'equal))
          ;; only ones you imported: standing in a folder is not importing
          ;; it, and a row that appears because you opened a file there is
          ;; the row you removed yesterday coming back
          (pinned (seq-filter (lambda (r) (member r scanned))
-                             (delq nil (list ygg-projects--here
-                                             ygg-projects--open))))
+                             (mapcar (lambda (r) (or (ygg-projects--umbrella-of r) r))
+                                     (delq nil (list ygg-projects--here
+                                                     ygg-projects--open)))))
          (all (append scanned (seq-remove (lambda (r) (member r scanned)) pinned)))
          (picked (seq-take all (max 1 ygg-projects-limit))))
     (dolist (r pinned)
       (unless (member r picked) (setq picked (append picked (list r)))))
     picked))
+
+(defun ygg-projects--umbrella-of (root)
+  "The umbrella ROOT is a repository of, else nil."
+  (ignore-errors (ygg-project-umbrella-of root)))
 
 (defvar ygg-projects--buffers nil
   "Each root's buffers as (ROOT COMMANDS . TERMINALS), for one redraw.")
@@ -538,6 +561,7 @@ additionally given to see."
   (let ((root (file-name-as-directory (expand-file-name root))))
     (delete-dups
      (append (list root)
+             (ignore-errors (ygg-project-children root))
              (mapcar #'file-name-as-directory
                      (ignore-errors (ygg-project-folders root)))
              ;; a monorepo's members are folders of the project whether or
@@ -552,16 +576,28 @@ additionally given to see."
 (defvar ygg-projects--worktrees-pending (make-hash-table :test #'equal)
   "Roots with a worktree scan already out.")
 
+(defun ygg-projects--worktree-branch (block)
+  "The branch a git worktree list --porcelain BLOCK has out, a detached
+one its short sha."
+  (cond ((string-match "^branch \\(?:refs/heads/\\)?\\(.*\\)$" block)
+         (match-string 1 block))
+        ((string-match "^HEAD \\([0-9a-f]\\{7\\}\\)" block)
+         (match-string 1 block))
+        (t "detached")))
+
 (defun ygg-projects--worktrees-parse (out root)
-  "The worktrees OUT names, ROOT's own checkout left out."
+  "The worktrees OUT names as (LABEL . DIR), ROOT's own checkout left out.
+LABEL is the worktree's folder and, in brackets, its branch."
   (let ((own (file-name-as-directory (expand-file-name root)))
-        (start 0)
         dirs)
-    (while (string-match "^worktree \\(.*\\)$" out start)
-      (setq start (match-end 0))
-      (let ((dir (match-string 1 out)))
-        (unless (equal (file-name-as-directory (expand-file-name dir)) own)
-          (push (cons (file-name-nondirectory dir) dir) dirs))))
+    (dolist (block (split-string out "\n\n" t))
+      (when (string-match "^worktree \\(.*\\)$" block)
+        (let ((dir (match-string 1 block)))
+          (unless (equal (file-name-as-directory (expand-file-name dir)) own)
+            (push (cons (format "%s (%s)" (file-name-nondirectory dir)
+                                (ygg-projects--worktree-branch block))
+                        dir)
+                  dirs)))))
     (nreverse dirs)))
 
 (defun ygg-projects--worktree-entries (root)
@@ -615,10 +651,31 @@ glossary or C4 model: a row of zeros in every project says nothing."
       (list 'context (ygg-projects--icon "nf-md-book_open_outline" "C")
             "Context" (ygg-projects--counts n n)))))
 
-(defun ygg-projects--worktrees (root)
-  "Worktrees ROOT has besides the checkout itself, as last scanned."
-  (let ((n (length (ygg-projects--worktree-entries root))))
-    (cons n n)))
+(defvar ygg-projects--folder-flipped nil
+  "Folders in a Folders row shown the other way from their default.
+A checkout opens by default, so a project's worktrees are there the way
+they always were; an umbrella's repository starts folded.")
+
+(defun ygg-projects--folder-open-p (folder)
+  "Whether FOLDER, in a Folders row, shows what it holds."
+  (xor (not (ygg-projects--umbrella-of folder))
+       (member folder ygg-projects--folder-flipped)))
+
+(defun ygg-projects--folder-foldable-p (folder)
+  "Whether FOLDER opens: it has worktrees, or it is an umbrella's
+repository, which holds its sessions."
+  (or (ygg-projects--worktree-entries folder)
+      (ygg-projects--umbrella-of folder)))
+
+(defun ygg-projects--toggle-folder (entry)
+  "Fold or unfold the folder ENTRY stands for; nil when ENTRY is no
+folder with anything in it, so TAB keeps its other use."
+  (when (and (stringp entry) (ygg-projects--folder-foldable-p entry))
+    (setq ygg-projects--folder-flipped
+          (if (member entry ygg-projects--folder-flipped)
+              (remove entry ygg-projects--folder-flipped)
+            (cons entry ygg-projects--folder-flipped)))
+    t))
 
 (defvar ygg-projects--tree-notes (make-hash-table :test #'equal)
   "Each session folder's worktree line as (WHEN . NOTE), NOTE nil for none.")
@@ -648,11 +705,7 @@ the repository's first worktree, the main checkout, or outside them all."
       (let ((block (nth 2 best)))
         (format "⌥ %s · %s"
                 (file-name-nondirectory (directory-file-name (nth 1 best)))
-                (cond ((string-match "^branch \\(?:refs/heads/\\)?\\(.*\\)$" block)
-                       (match-string 1 block))
-                      ((string-match "^HEAD \\([0-9a-f]\\{7\\}\\)" block)
-                       (match-string 1 block))
-                      (t "detached")))))))
+                (ygg-projects--worktree-branch block))))))
 
 (defun ygg-projects--main-worktree (out)
   "The main checkout: git worktree list --porcelain OUT lists it first."
@@ -934,11 +987,8 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
                       (list 'docker :name (plist-get c :name)
                             :status (plist-get c :status))))
               (ygg-projects--containers root))))
-    ('folders (mapcar (lambda (d) (cons (abbreviate-file-name
-                                        (directory-file-name d))
-                                       d))
+    ('folders (mapcar (lambda (d) (cons (ygg-projects--folder-label d) d))
                       (ygg-projects--folders root)))
-    ('worktrees (ygg-projects--worktree-entries root))
     ('context (and (fboundp 'ygg-ice-context-entries)
                    (ygg-ice-context-entries root)))
     (_ nil)))
@@ -1003,6 +1053,43 @@ A subagent keeps no list, only its own plan, counted into :plan-progress."
                             (aob-session-ref s :plan-progress))))
     (format "%d/%d" (car progress) (cdr progress))))
 
+(defun ygg-projects--due (ts)
+  "TS, a time to come, said in a few columns.
+Within the hour in minutes, later today in hours, by tomorrow at its
+clock time, within the week by its day, and past that by its date."
+  (let ((secs (- ts (float-time))))
+    (cond ((<= secs 0) "due")
+          ((< secs 3600) (format "%dm" (max 1 (floor secs 60))))
+          ((equal (format-time-string "%F" ts) (format-time-string "%F"))
+           (format "%dh" (round secs 3600)))
+          ((< secs 86400) (format-time-string "%H:%M" ts))
+          ((< secs (* 6 86400)) (format-time-string "%a" ts))
+          (t (format-time-string "%b %-d" ts)))))
+
+(defun ygg-projects--schedule-face (schedules)
+  (if (seq-some (lambda (s) (plist-get s :error)) schedules)
+      'ygg-projects-waiting
+    'shadow))
+
+(defun ygg-projects--schedule-mark (acp-id)
+  "What is scheduled for the conversation ACP-ID, as (TEXT . FACE), or nil.
+The soonest that will run, and when; a failed one is said before it,
+and a paused mark only when nothing else is left to run."
+  (when-let* ((acp-id)
+              ((fboundp 'aob-schedule-for))
+              (all (aob-schedule-for acp-id)))
+    (let ((failed (seq-find (lambda (s) (plist-get s :error)) all))
+          (active (seq-remove (lambda (s) (plist-get s :paused)) all)))
+      (cons (cond (failed "◷ failed")
+                  (active (concat "◷ " (ygg-projects--due (plist-get (car active) :next))))
+                  (t (concat "⏸ " (ygg-projects--due (plist-get (car all) :next)))))
+            (ygg-projects--schedule-face all)))))
+
+(defun ygg-projects--acp-id (payload)
+  "The conversation id of PAYLOAD, a session or an ended conversation's plist."
+  (cond ((ygg-projects--session-p payload) (aob-session-ref payload :acp-id))
+        ((ygg-projects--ended-p payload) (plist-get payload :acp-id))))
+
 (defun ygg-projects--badge (payload &optional room)
   "PAYLOAD's badge, drawn: a session's meter muted beside its state.
 The state is the colour of the state: green at work, orange waiting on
@@ -1010,16 +1097,29 @@ you, grey once there is nothing to wait for.  Working and idle are said
 by the dot and the running clock already, so a meter stands in for them.
 Given ROOM columns, a session's badge sheds parts until it fits: its
 spend first, then its clock, then its progress, and its state last,
-since a session waiting on you is the one thing a glance must catch."
-  (if (not (and (fboundp 'aob-session-p) (aob-session-p payload)))
-      (propertize (ygg-projects--entry-badge payload) 'font-lock-face 'ygg-projects-count)
-    (let* ((state (format "%s" (aob-session-state payload)))
+since a session waiting on you is the one thing a glance must catch.
+What is scheduled for it goes before any of them, shed after the spend.
+A folder's badge is its own, `ygg-projects--folder-badge'."
+  (cond
+   ((stringp payload) (ygg-projects--folder-badge payload room))
+   ((not (and (fboundp 'aob-session-p) (aob-session-p payload)))
+      (let ((badge (propertize (ygg-projects--entry-badge payload)
+                               'font-lock-face 'ygg-projects-count))
+            (mark (ygg-projects--schedule-mark (ygg-projects--acp-id payload))))
+        (if (and mark (or (not room)
+                          (<= (+ (string-width (car mark)) 1 (string-width badge)) room)))
+            (concat (propertize (car mark) 'font-lock-face (cdr mark)) " " badge)
+          badge)))
+   (t
+    (let* ((mark (ygg-projects--schedule-mark (ygg-projects--acp-id payload)))
+           (state (format "%s" (aob-session-state payload)))
            (clock (and (fboundp 'aob-session-clock) (aob-session-clock payload)))
            (spend (and (fboundp 'aob-session-spend) (aob-session-spend payload)))
            (quiet (and (or clock spend) (member state '("working" "idle"))))
            (parts (seq-filter
                    #'car
-                   (list (list (and (fboundp 'aob-session-quiet)
+                   (list (list (car mark) (cdr mark) 1.5)
+                         (list (and (fboundp 'aob-session-quiet)
                                     (aob-session-quiet payload))
                                'shadow 3.5)
                          (list clock 'ygg-projects-count 2)
@@ -1027,13 +1127,38 @@ since a session waiting on you is the one thing a glance must catch."
                          (list (ygg-projects--session-progress payload)
                                'ygg-projects-count 3)
                          (list (unless quiet state)
-                               (ygg-projects--session-dot payload) 4))))
-           (width (lambda () (string-width (mapconcat #'car parts " ")))))
-      (while (and room (cdr parts) (> (funcall width) room))
-        (setq parts (delq (car (seq-sort-by (lambda (p) (nth 2 p)) #'< parts))
-                          parts)))
-      (mapconcat (lambda (p) (propertize (car p) 'font-lock-face (nth 1 p)))
-                 parts " "))))
+                               (ygg-projects--session-dot payload) 4)))))
+      (ygg-projects--fit parts room)))))
+
+(defun ygg-projects--fit (parts room)
+  "PARTS, each (TEXT FACE RANK), drawn in ROOM columns.
+The lowest rank goes first until the rest fit, the last one never."
+  (let ((width (lambda () (string-width (mapconcat #'car parts " ")))))
+    (while (and room (cdr parts) (> (funcall width) room))
+      (setq parts (delq (car (seq-sort-by (lambda (p) (nth 2 p)) #'< parts))
+                        parts)))
+    (mapconcat (lambda (p) (propertize (car p) 'font-lock-face (nth 1 p)))
+               parts " ")))
+
+(defun ygg-projects--folder-badge (folder room)
+  "FOLDER's worktrees, and as an umbrella's repository its live sessions,
+theirs counted in, and what is scheduled there, in ROOM columns.
+The schedule goes first, then the sessions, the worktrees last."
+  (let* ((child (ygg-projects--umbrella-of folder))
+         (wts (length (ygg-projects--worktree-entries folder)))
+         (live (and child
+                    (seq-count (lambda (s) (not (memq (aob-session-state s)
+                                                      ygg-projects-over-states)))
+                               (ygg-projects--sessions folder))))
+         (scheduled (and child (ygg-projects--project-schedules folder))))
+    (ygg-projects--fit
+     (seq-filter #'car
+                 (list (list (and (> wts 0) (format "⌥%d" wts)) 'ygg-projects-count 3)
+                       (list (and live (> live 0) (format "●%d" live))
+                             (ygg-projects--dot folder) 2)
+                       (list (and scheduled (format "◷%d" (length scheduled)))
+                             (ygg-projects--schedule-face scheduled) 1)))
+     room)))
 
 (defcustom ygg-projects-entry-indent 4
   "Columns an entry is set in from the left.
@@ -1119,7 +1244,43 @@ The same row to every command, but never a line point stops on."
                         (ygg-projects--pad))
                 'ygg-project root 'ygg-row kind 'ygg-entry payload 'ygg-cont t)))
 
-(defun ygg-projects--entry-nodes (root kind)
+(defun ygg-projects--folder-label (folder)
+  "FOLDER as its line in a Folders row: an umbrella's repository by its
+name, anything else by its path, each marked open or shut when it opens."
+  (concat (cond ((not (ygg-projects--folder-foldable-p folder)) "")
+                ((ygg-projects--folder-open-p folder) "▾ ")
+                (t "▸ "))
+          (if (ygg-projects--umbrella-of folder)
+              (file-name-nondirectory (directory-file-name folder))
+            (abbreviate-file-name (directory-file-name folder)))))
+
+(defun ygg-projects--folder-nodes (root)
+  "ROOT's Folders row: each folder, and under one that is open its
+worktrees and, for an umbrella's repository, its sessions, set in a
+step.  What is under a folder carries that folder as its project."
+  (mapcan (lambda (d)
+            (cons (vui-text (ygg-projects--entry-text
+                             (ygg-projects--folder-label d) root 'folders d))
+                  (when (ygg-projects--folder-open-p d)
+                    (let ((ygg-projects-entry-indent (+ 2 ygg-projects-entry-indent)))
+                      (append
+                       (mapcar (lambda (wt)
+                                 (vui-text (ygg-projects--entry-text
+                                            (concat "⌥ " (car wt)) d 'folders
+                                            (cons 'worktree (cdr wt)))))
+                               (ygg-projects--worktree-entries d))
+                       (when-let* (((ygg-projects--umbrella-of d))
+                                   (cells (ygg-projects--entries d 'agents)))
+                         (ygg-projects--entry-nodes d 'agents cells)))))))
+          (ygg-projects--folders root)))
+
+(defun ygg-projects--entry-nodes (root kind &optional cells)
+  "The lines of ROOT's KIND row, out of CELLS when they are known."
+  (if (and (eq kind 'folders) (not cells))
+      (ygg-projects--folder-nodes root)
+    (ygg-projects--cell-nodes root kind cells)))
+
+(defun ygg-projects--cell-nodes (root kind cells)
   (mapcan (lambda (cell)
             (if (eq (cdr cell) 'ygg-projects-gap)
                 (list (vui-text " "))
@@ -1132,7 +1293,8 @@ The same row to every command, but never a line point stops on."
                   (dolist (text texts)
                     (ygg-projects--mark-row text 'ygg-projects-on-screen)))
                 (mapcar #'vui-text texts))))
-          (or (ygg-projects--entries root kind)
+          (or cells
+              (ygg-projects--entries root kind)
               (list (cons "— none —" nil)))))
 
 ;;; Drawing
@@ -1186,6 +1348,20 @@ cannot spill past the text area and mark every line truncated."
                        (propertize count 'font-lock-face 'ygg-projects-count)))
               'ygg-project root 'ygg-row kind))
 
+(defun ygg-projects--project-schedules (root)
+  "The schedules that work in ROOT, and not in a project nested in it.
+Each goes under the deepest project holding its folder, the way a
+session does, so a parent does not count what its child already shows."
+  (when (fboundp 'aob-schedule-for-project)
+    (let ((roots (mapcar (lambda (r) (file-name-as-directory
+                                      (expand-file-name (if (consp r) (car r) r))))
+                         (ygg-projects--roots))))
+      (seq-filter (lambda (s)
+                    (equal (ygg-projects--root-of
+                            (plist-get (plist-get s :target) :project) roots)
+                           root))
+                  (aob-schedule-for-project root)))))
+
 (defun ygg-projects--head-text (root)
   "ROOT's own line."
   (let* ((raw (file-name-nondirectory (directory-file-name root)))
@@ -1201,9 +1377,16 @@ cannot spill past the text area and mark every line truncated."
          (avail (- (ygg-projects--width) 7))
          (name (if (<= (string-width raw) avail) raw
                  (truncate-string-to-width raw avail nil nil t)))
-         (room (- avail (string-width name) 2))
          (mark (and (fboundp 'ygg-project-import-mark)
                     (ygg-project-import-mark root)))
+         (scheduled (ygg-projects--project-schedules root))
+         (count (and scheduled
+                     (<= (+ 3 (string-width (number-to-string (length scheduled)))
+                            (if mark (1+ (string-width mark)) 0))
+                         (- avail (string-width name) 2))
+                     (propertize (format "◷ %d" (length scheduled))
+                                 'font-lock-face (ygg-projects--schedule-face scheduled))))
+         (room (- avail (string-width name) 2 (if count (1+ (string-width count)) 0)))
          (path (cond (mark (propertize mark 'font-lock-face 'ygg-projects-waiting))
                      ((<= (string-width full) room) full)
                      ((let ((short (concat "…/" (file-name-nondirectory full))))
@@ -1212,15 +1395,15 @@ cannot spill past the text area and mark every line truncated."
     (propertize (concat " " dot "  "
                         (propertize name 'font-lock-face 'ygg-projects-name)
                         (ygg-projects--right
-                         (propertize path 'font-lock-face 'ygg-projects-path)))
+                         (concat count (and count (not (string-empty-p path)) " ")
+                                 (propertize path 'font-lock-face 'ygg-projects-path))))
                 'ygg-project root 'ygg-row 'project)))
 
 (defun ygg-projects--row-specs (root)
   "ROOT's rows as (KIND ICON LABEL COUNT)."
   (let ((agents (ygg-projects--agents root))
         (cmds (ygg-projects--commands root))
-        (terms (ygg-projects--processes root))
-        (wts (ygg-projects--worktrees root)))
+        (terms (ygg-projects--processes root)))
     ;; the same family as the rows under it: one text glyph among four
     ;; icons is the one that looks wrong, whatever its width says
     (delq nil
@@ -1231,8 +1414,6 @@ cannot spill past the text area and mark every line truncated."
                 "Commands" (ygg-projects--counts (car cmds) (cdr cmds)))
           (list 'processes (ygg-projects--icon "nf-md-console_line" "T")
                 "Processes" (ygg-projects--counts (car terms) (cdr terms)))
-          (list 'worktrees (ygg-projects--icon "nf-md-source_branch" "W")
-                "Worktrees" (ygg-projects--counts (car wts) (cdr wts)))
           (let ((n (length (ygg-projects--folders root))))
             (list 'folders (ygg-projects--icon "nf-md-folder_multiple_outline" "F")
                   "Folders" (ygg-projects--counts n n)))))))
@@ -1338,7 +1519,7 @@ the sidebar moving on its own."
                (start (and (window-live-p win) (window-start win))))
           (ygg-projects--forget-buffers)
           (vui-update-props ygg-projects--instance
-                            (list :roots (ygg-projects--roots)
+                            (list :roots (ygg-projects--shown)
                                   :open ygg-projects--open))
           (ygg-projects--goto-row row)
           (ygg-projects--follow-point)
@@ -1734,6 +1915,24 @@ answers have changed underneath, or one of them was wrong."
         (ygg-project-import root)
       (user-error "projects: nothing to import with"))))
 
+(defun ygg-projects-schedule ()
+  "Schedule a prompt for the conversation on this line."
+  (interactive)
+  (let ((entry (ygg-projects--entry-at-point)))
+    (unless (fboundp 'aob-schedule-read)
+      (user-error "projects: nothing to schedule with"))
+    (unless (and (ygg-projects--conversation-p entry)
+                 (not (ygg-projects--subagent-entry-p entry)))
+      (user-error "projects: no conversation here to schedule"))
+    (apply #'aob-schedule (aob-schedule-read entry))))
+
+(defun ygg-projects-schedules ()
+  "List every scheduled prompt."
+  (interactive)
+  (if (fboundp 'aob-schedule-list)
+      (aob-schedule-list)
+    (user-error "projects: nothing to schedule with")))
+
 (defvar ygg-conversations--index (make-hash-table :test #'equal)
   "Candidate string to the conversation it stands for.")
 
@@ -1904,7 +2103,8 @@ ENTRY is no session, or a lead with none, so TAB keeps its other use."
     t))
 
 (defun ygg-projects-toggle ()
-  "Open what this line stands for: a project's rows, or a row's entries.
+  "Open what this line stands for: a project's rows, a row's entries, or
+what a folder holds.
 The line keeps its place on screen; what opens, opens below it."
   (interactive)
   (let* ((root (get-text-property (line-beginning-position) 'ygg-project))
@@ -1917,6 +2117,15 @@ The line keeps its place on screen; what opens, opens below it."
      ((null root) nil)
      ((ygg-projects--toggle-subagents
        (get-text-property (line-beginning-position) 'ygg-entry)))
+     ((ygg-projects--toggle-folder
+       (get-text-property (line-beginning-position) 'ygg-entry)))
+     ;; a line under an umbrella's repository folds that repository, and
+     ;; point goes back to its line, the one that stays
+     ((and (get-text-property (line-beginning-position) 'ygg-entry)
+           (ygg-projects--umbrella-of root)
+           (ygg-projects--toggle-folder root))
+      (when-let* ((pos (text-property-search-backward 'ygg-entry root #'equal)))
+        (goto-char (prop-match-beginning pos))))
      ((eq kind 'project)
       (setq ygg-projects--open (unless (equal root ygg-projects--open) root)))
      (t (let ((cell (cons root kind)))
@@ -1954,12 +2163,58 @@ row was picked from."
   (interactive)
   (let ((root (get-text-property (line-beginning-position) 'ygg-project)))
     (unless root (user-error "projects: no project on this line"))
-    (setq ygg-projects--open root)
-    (ygg-projects-refresh)
-    (ygg-projects--keeping
-      (if (fboundp 'ygg-space-open)
-          (ygg-space-open (directory-file-name root))
-        (dired root)))))
+    (ygg-projects--open-root root)))
+
+(defun ygg-projects--open-root (root)
+  "Open ROOT as its own space, and in the sidebar: an umbrella's
+repository opens its umbrella's card at its line."
+  (let ((umbrella (ygg-projects--umbrella-of root)))
+    (setq ygg-projects--open (or umbrella root))
+    (when umbrella
+      (cl-pushnew (cons umbrella 'folders) ygg-projects--open-row :test #'equal)
+      (unless (ygg-projects--folder-open-p root)
+        (ygg-projects--toggle-folder root))))
+  (ygg-projects-refresh)
+  (ygg-projects--keeping
+    (if (fboundp 'ygg-space-open)
+        (ygg-space-open (directory-file-name root))
+      (dired root))))
+
+;;;###autoload
+(defun ygg-project-switch-child (child)
+  "Open CHILD, one of the repositories of the umbrella you are in."
+  (interactive
+   (let* ((umbrella (or (cdr (ygg-project-try-umbrella default-directory))
+                        (user-error "projects: not inside an umbrella")))
+          (names (mapcar (lambda (c) (cons (directory-file-name
+                                            (file-relative-name c umbrella))
+                                           c))
+                         (ygg-project-children umbrella))))
+     (list (cdr (assoc (completing-read "Repository: " names nil t) names)))))
+  (ygg-projects--open-root child))
+
+(defun ygg-projects--move (n)
+  "Move the project on this line N places, among its umbrella's repositories
+when it is one of them, else down the list.  A repository's line in its
+umbrella's Folders row moves that repository."
+  (let* ((entry (ygg-projects--entry-at-point))
+         (root (or (and (stringp entry) (ygg-projects--umbrella-of entry) entry)
+                   (get-text-property (line-beginning-position) 'ygg-project)
+                   (user-error "projects: no project on this line"))))
+    (if (ygg-projects--umbrella-of root)
+        (ygg-project-move-child root n)
+      (ygg-project-move root n))
+    (ygg-projects-refresh)))
+
+(defun ygg-projects-move-down ()
+  "Move the project on this line one place down."
+  (interactive)
+  (ygg-projects--move 1))
+
+(defun ygg-projects-move-up ()
+  "Move the project on this line one place up."
+  (interactive)
+  (ygg-projects--move -1))
 
 (defun ygg-projects-visit ()
   "Act on the row under point, the one row even in visual state."
@@ -1986,14 +2241,17 @@ row was picked from."
                          (ygg-project-commands-run entry)
                        (let ((default-directory root))
                          (compile (format "just %s" entry)))))
-          ('folders (dired entry))
+          ('folders
+           (cond ((eq (car-safe entry) 'worktree)
+                  (if (fboundp 'ygg-space-open)
+                      (ygg-space-open (cdr entry))
+                    (dired (cdr entry))))
+                 ((ygg-projects--umbrella-of entry) (ygg-projects--open-root entry))
+                 (t (dired entry))))
           ('processes
            (if (and (consp entry) (eq (car entry) 'docker))
                (ygg-projects--docker-logs root (plist-get (cdr entry) :name))
              (pop-to-buffer entry)))
-          ('worktrees (if (fboundp 'ygg-space-open)
-                          (ygg-space-open entry)
-                        (dired entry)))
           ('context (ygg-ice-visit-item entry)))
       (pcase row
       ('project (ygg-projects-open))
@@ -2018,11 +2276,6 @@ row was picked from."
                 (call-interactively #'docker-compose))
                ((fboundp 'ghostel) (call-interactively #'ghostel))
                (t (user-error "projects: no terminal")))))
-      ('worktrees (let ((default-directory root))
-                    (cond ((fboundp 'ygg-wt-list) (call-interactively #'ygg-wt-list))
-                          ((fboundp 'magit-worktree)
-                           (call-interactively #'magit-worktree))
-                          (t (user-error "projects: no worktree list")))))
       ('context (let ((default-directory root)) (ygg-ice-changes-list))))))))
 
 (defvar ygg-projects-map
@@ -2050,6 +2303,9 @@ row was picked from."
     (define-key map "l" #'ygg-projects-open-row)
     (define-key map (kbd "C-d") #'ygg-projects-down-half)
     (define-key map (kbd "C-u") #'ygg-projects-up-half)
+    (define-key map (kbd "M-j") #'ygg-projects-move-down)
+    (define-key map (kbd "M-k") #'ygg-projects-move-up)
+    (define-key map "u" #'ygg-project-switch-child)
     (define-key map "}" #'ygg-projects-next-project)
     (define-key map "{" #'ygg-projects-prev-project)
     (define-key map "+" #'project-switch-project)
@@ -2064,6 +2320,8 @@ row was picked from."
     (define-key map "C" #'ygg-projects-cancel)
     (define-key map "a" #'ygg-projects-say)
     (define-key map "p" #'ygg-projects-toggle-pin)
+    (define-key map "s" #'ygg-projects-schedule)
+    (define-key map "S" #'ygg-projects-schedules)
     (define-key map "V" #'ygg-toggle-visual)
     (define-key map "Q" #'ygg-projects-context-quickfix)
     (define-key map "c" #'ygg-projects-context-to-agent)
@@ -2228,6 +2486,9 @@ turns while nobody is typing."
 (defvar ygg-ice-context-changed-functions)
 (with-eval-after-load 'ygg-ice
   (add-hook 'ygg-ice-context-changed-functions #'ygg-projects--redraw-soon))
+(defvar aob-schedule-changed-hook)
+(with-eval-after-load 'aob-schedule
+  (add-hook 'aob-schedule-changed-hook #'ygg-projects--redraw-soon))
 
 (defun ygg-projects-close ()
   "Close the sidebar, and mean it: it stays closed until you open it."
@@ -2298,8 +2559,8 @@ windows around, the width it was opened at is the width it keeps."
       ;; than opening a second one
       (ygg-projects-close)
     (when-let* ((pr (project-current nil)))
-      (setq ygg-projects--here
-            (file-name-as-directory (expand-file-name (project-root pr)))))
+      (let ((root (file-name-as-directory (expand-file-name (project-root pr)))))
+        (setq ygg-projects--here (or (ygg-projects--umbrella-of root) root))))
     (unless ygg-projects--open (setq ygg-projects--open ygg-projects--here))
     (let ((buf (get-buffer ygg-projects-buffer-name)))
       (unless (and buf (buffer-local-value 'ygg-projects--instance buf))
@@ -2308,7 +2569,7 @@ windows around, the width it was opened at is the width it keeps."
         (ygg-projects--forget-buffers)
         (let ((inst (save-window-excursion
                       (vui-mount (vui-component 'ygg-projects-view
-                                                :roots (ygg-projects--roots)
+                                                :roots (ygg-projects--shown)
                                                 :open ygg-projects--open)
                                  ygg-projects-buffer-name))))
           (setq buf (get-buffer ygg-projects-buffer-name))

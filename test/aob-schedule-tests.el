@@ -125,5 +125,34 @@
       (should (string-match-p "gone" (plist-get sched :error))))
     (should-not aob-schedule--timer)))
 
+(ert-deftest aob-schedule-found-by-conversation-and-by-project ()
+  "A conversation's schedules come soonest first; a project's include a new session's."
+  (aob-schedule-tests--with
+    (setq aob-schedule--list
+          (list (list :id 1 :next 200.0 :target '(:acp-id "c" :project "/tmp/p/"))
+                (list :id 2 :next 100.0 :target '(:acp-id "c" :project "/tmp/p/"))
+                (list :id 3 :next 300.0 :target '(:agent "claude" :project "/tmp/p/sub"))
+                (list :id 4 :next 300.0 :target '(:agent "claude" :project "/tmp/q/"))))
+    (should (equal (mapcar (lambda (s) (plist-get s :id)) (aob-schedule-for "c")) '(2 1)))
+    (should (equal (mapcar (lambda (s) (plist-get s :id)) (aob-schedule-for-project "/tmp/p"))
+                   '(1 2 3)))))
+
+(ert-deftest aob-schedule-takes-an-ended-conversation ()
+  "A persisted conversation's plist is a target as a session is, its folder kept."
+  (aob-schedule-tests--with
+    (cl-letf (((symbol-function 'read-string)
+               (lambda (prompt &rest _) (if (string-prefix-p "When" prompt) "in 2h" "hi"))))
+      (apply #'aob-schedule
+             (aob-schedule-read '(:acp-id "old" :agent "claude" :name "old" :project "/tmp/p/"))))
+    (should (equal (plist-get (car aob-schedule--list) :target)
+                   '(:acp-id "old" :agent "claude" :name "old" :project "/tmp/p/")))))
+
+(ert-deftest aob-schedule-change-runs-the-hook ()
+  (aob-schedule-tests--with
+    (let* ((ran 0)
+           (aob-schedule-changed-hook (list (lambda () (cl-incf ran)))))
+      (aob-schedule-create '(:agent "claude" :project "/tmp/") "hi" "in 2h")
+      (should (= ran 1)))))
+
 (provide 'aob-schedule-tests)
 ;;; aob-schedule-tests.el ends here

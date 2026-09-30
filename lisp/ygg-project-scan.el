@@ -414,15 +414,27 @@ scan will offer it again next time you import one."
 
 ;;; An umbrella — a plain folder holding repositories
 
+(defun ygg-project--worktree-main (root)
+  "The main checkout ROOT is a linked worktree of, as a true name, else nil."
+  (let ((git (expand-file-name ".git" root)))
+    (when (file-regular-p git)
+      (with-temp-buffer
+        (insert-file-contents git)
+        (when (re-search-forward "^gitdir: \\(.*\\)/\\.git/worktrees/[^/\n]+/?$" nil t)
+          (ygg-project--key (file-truename (expand-file-name (match-string 1) root))))))))
+
 (defun ygg-project--repos-under (dir)
   "The repositories under DIR, stopping at the outermost of each nest,
-so a submodule stays part of the repository that carries it."
-  (let ((roots (mapcar #'ygg-project--key
-                       (ygg-project-scan--walk-1 (directory-file-name dir)))))
+so a submodule stays part of the repository that carries it.  A linked
+worktree of one of them is that one's, not a repository of its own."
+  (let* ((roots (mapcar #'ygg-project--key
+                        (ygg-project-scan--walk-1 (directory-file-name dir))))
+         (true (mapcar #'file-truename roots)))
     (seq-remove (lambda (r)
-                  (seq-some (lambda (o) (and (not (equal o r))
-                                             (string-prefix-p o r)))
-                            roots))
+                  (or (seq-some (lambda (o) (and (not (equal o r))
+                                                 (string-prefix-p o r)))
+                                roots)
+                      (member (ygg-project--worktree-main r) true)))
                 roots)))
 
 (defun ygg-project-umbrella-p (root)
@@ -434,13 +446,79 @@ unregisters it."
     (and (not (file-exists-p (expand-file-name ".git" key)))
          (member key (ygg-project-roots)))))
 
+(defcustom ygg-project-order nil
+  "The order an umbrella's repositories are listed in, as (ROOT . CHILDREN).
+A repository not named here yet goes after the ones that are."
+  :type '(alist :key-type directory :value-type (repeat directory))
+  :group 'yggdrasil)
+
 (defun ygg-project-children (root)
   "The repositories directly under the umbrella ROOT, nil for any other
-project.  Found once per session and kept, since a walk is a `find'."
+project, in the order `ygg-project-order' gives them.  Found once per
+session and kept, since a walk is a `find'."
   (let ((key (ygg-project--key root)))
-    (when (ygg-project-umbrella-p key)
-      (with-memoization (gethash key ygg-project--children)
-        (ygg-project--repos-under key)))))
+    ;; asked on every redraw: never of a remote root, and never of a
+    ;; folder that is gone, where an empty walk is not remembered
+    (when (and (not (file-remote-p key)) (file-directory-p key)
+               (ygg-project-umbrella-p key))
+      (let ((found (with-memoization (gethash key ygg-project--children)
+                     (ygg-project--repos-under key)))
+            (order (mapcar #'ygg-project--key
+                           (cdr (assoc key ygg-project-order)))))
+        (append (seq-filter (lambda (c) (member c found)) order)
+                (seq-remove (lambda (c) (member c order)) found))))))
+
+(defun ygg-project-umbrellas ()
+  "The umbrellas on the project list; a remote root is never asked."
+  (seq-filter (lambda (r) (and (not (file-remote-p r))
+                               (not (file-exists-p (expand-file-name ".git" r)))))
+              (ygg-project-roots)))
+
+(defun ygg-project-umbrella-of (root)
+  "The umbrella on the project list ROOT is a repository of, else nil."
+  (let ((key (ygg-project--key root)))
+    (seq-find (lambda (u) (member key (ygg-project-children u)))
+              (ygg-project-umbrellas))))
+
+(defun ygg-project-top-roots ()
+  "The projects on the list, less the repositories of an umbrella on it."
+  (let ((nested (seq-mapcat #'ygg-project-children (ygg-project-umbrellas))))
+    (seq-remove (lambda (r) (member r nested)) (ygg-project-roots))))
+
+(defun ygg-project--moved (items item n)
+  "ITEMS with ITEM moved N places later, earlier when N is negative."
+  (let* ((rest (remove item items))
+         (at (max 0 (min (length rest) (+ n (seq-position items item))))))
+    (append (seq-take rest at) (list item) (seq-drop rest at))))
+
+(defun ygg-project-move-child (child n)
+  "Move CHILD N places down among its umbrella's repositories, and keep it."
+  (let* ((child (ygg-project--key child))
+         (umbrella (or (ygg-project-umbrella-of child)
+                       (user-error "ygg: %s is in no umbrella"
+                                   (abbreviate-file-name child)))))
+    (setf (alist-get umbrella ygg-project-order nil nil #'equal)
+          (ygg-project--moved (ygg-project-children umbrella) child n))
+    (customize-save-variable 'ygg-project-order ygg-project-order)))
+
+(defun ygg-project-move (root n)
+  "Move ROOT N places down the project list, and keep it.
+The list is `project\='s own, so its file holds the order; an umbrella's
+repositories are not counted, being listed under it."
+  (let* ((root (ygg-project--key root))
+         (top (ygg-project-top-roots)))
+    (unless (member root top)
+      (user-error "ygg: %s is not on the list" (abbreviate-file-name root)))
+    (let ((order (ygg-project--moved top root n)))
+      (setq project--list
+            (append (seq-mapcat (lambda (k)
+                                  (seq-filter (lambda (e) (equal k (ygg-project--key (car e))))
+                                              project--list))
+                                order)
+                    (seq-remove (lambda (e) (member (ygg-project--key (car e)) order))
+                                project--list)))
+      (when (fboundp 'project--write-project-list)
+        (project--write-project-list)))))
 
 (defun ygg-project-try-umbrella (dir)
   "The umbrella project DIR is in, for `project-find-functions'.

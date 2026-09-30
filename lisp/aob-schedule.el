@@ -29,6 +29,9 @@ is the float time it is due.")
 (defvar aob-schedule--timer nil
   "The one timer, set for whichever schedule is due first.")
 
+(defvar aob-schedule-changed-hook nil
+  "Run after any schedule is made, changed, sent or dropped.")
+
 (defconst aob-schedule--buffer "*aob-schedules*")
 
 (defconst aob-schedule--weekdays
@@ -148,7 +151,8 @@ would otherwise write an empty list over every schedule in it."
   (when-let* ((buf (get-buffer aob-schedule--buffer)))
     (with-current-buffer buf
       (aob-schedule--entries)
-      (tabulated-list-print t))))
+      (tabulated-list-print t)))
+  (run-hooks 'aob-schedule-changed-hook))
 
 ;;;###autoload
 (defun aob-schedule-start ()
@@ -156,7 +160,22 @@ would otherwise write an empty list over every schedule in it."
 Whatever came due while Emacs was closed is due now, so it goes out
 once, straight away, and a repeat then keeps its own cadence."
   (aob-schedule--load)
-  (aob-schedule--arm))
+  (aob-schedule--arm)
+  (run-hooks 'aob-schedule-changed-hook))
+
+(defun aob-schedule-for (acp-id)
+  "The schedules sent to the conversation ACP-ID, soonest first."
+  (sort (seq-filter (lambda (s) (equal (plist-get (plist-get s :target) :acp-id) acp-id))
+                    aob-schedule--list)
+        (lambda (a b) (< (plist-get a :next) (plist-get b :next)))))
+
+(defun aob-schedule-for-project (root)
+  "The schedules whose conversation or new session works in ROOT or below it."
+  (let ((root (file-name-as-directory (expand-file-name root))))
+    (seq-filter (lambda (s)
+                  (when-let* ((dir (plist-get (plist-get s :target) :project)))
+                    (string-prefix-p root (file-name-as-directory (expand-file-name dir)))))
+                aob-schedule--list)))
 
 ;;; Sending
 
@@ -205,12 +224,18 @@ A single run that fails stays, paused, so the failure is still there to see."
 ;;; Making one
 
 (defun aob-schedule--session-target (s)
-  (unless (aob-session-ref s :acp-id)
-    (user-error "aob: %s has no conversation to come back to yet"
-                (aob-session-name s)))
-  (list :acp-id (aob-session-ref s :acp-id)
-        :agent (aob-session-ref s :agent)
-        :name (aob-session-name s)))
+  "S as a target: a session, or a persisted conversation's plist."
+  (let ((target (if (aob-session-p s)
+                    (list :acp-id (aob-session-ref s :acp-id)
+                          :agent (aob-session-ref s :agent)
+                          :name (aob-session-name s)
+                          :project (aob-session-project s))
+                  (list :acp-id (plist-get s :acp-id) :agent (plist-get s :agent)
+                        :name (plist-get s :name) :project (plist-get s :project)))))
+    (unless (plist-get target :acp-id)
+      (user-error "aob: %s has no conversation to come back to yet"
+                  (plist-get target :name)))
+    target))
 
 (defun aob-schedule--read-target ()
   "Ask for a session to schedule into, or an agent and project to start one in."
@@ -241,14 +266,19 @@ A single run that fails stays, paused, so the failure is still there to see."
     (aob-schedule--changed)
     sched))
 
+(defun aob-schedule-read (s)
+  "Ask what to send S later and when, as the arguments `aob-schedule' takes."
+  (list s (read-string (format "%s later » " (plist-get (aob-schedule--session-target s)
+                                                         :name)))
+        (aob-schedule--read-when)))
+
 ;;;###autoload
 (defun aob-schedule (s prompt when)
   "Send PROMPT to session S at WHEN, a moment or a repeat.
-In 2h, tomorrow 9:00 or an ISO time; every 30m, daily 09:00,
-weekdays 09:00 or every mon,thu 09:00."
-  (interactive (let ((s (aob-target)))
-                 (list s (read-string (format "%s later » " (aob-session-name s)))
-                       (aob-schedule--read-when))))
+S may also be a persisted conversation's plist.  In 2h, tomorrow 9:00
+or an ISO time; every 30m, daily 09:00, weekdays 09:00 or every
+mon,thu 09:00."
+  (interactive (aob-schedule-read (aob-target)))
   (aob-schedule-create (aob-schedule--session-target s) prompt when))
 
 ;;; The list

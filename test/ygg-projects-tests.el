@@ -7,6 +7,9 @@
 (defvar ygg-projects-tests--state 'working
   "The state the stand-in session reports.")
 
+(defvar ygg-projects-tests--acp-id nil
+  "The conversation id the stand-in session reports.")
+
 (defmacro ygg-projects-tests--with-session (clock spend progress &rest body)
   "Run BODY with the symbol session standing for an agent session.
 It reports CLOCK, SPEND and todo PROGRESS as a (DONE . TOTAL) cons, and
@@ -15,6 +18,8 @@ ygg-projects-tests--state as its state."
   `(cl-letf (((symbol-function 'aob-session-p) (lambda (s) (eq s 'session)))
              ((symbol-value 'ygg-projects--pin-list) nil)
              ((symbol-function 'aob-session-state) (lambda (_) ygg-projects-tests--state))
+             ((symbol-function 'aob-session-ref)
+              (lambda (_ key) (and (eq key :acp-id) ygg-projects-tests--acp-id)))
              ((symbol-function 'aob-session-clock) (lambda (_) ,clock))
              ((symbol-function 'aob-session-quiet) #'ignore)
              ((symbol-function 'aob-session-spend) (lambda (_) ,spend))
@@ -87,6 +92,96 @@ ygg-projects-tests--state as its state."
     (should (string-search "…" row))
     (should (string-search "the-folder-name" row))
     (should (< (string-width (substring-no-properties row)) (+ 2 (ygg-projects--width))))))
+
+(defun ygg-projects-tests--schedule (target minutes &rest more)
+  "A schedule for TARGET due in MINUTES, with MORE of its plist."
+  (append (list :id minutes :prompt "hi" :target target :when nil
+                :next (+ (float-time) (* 60 minutes) 30))
+          more))
+
+(ert-deftest ygg-projects-row-marks-the-soonest-schedule ()
+  "A scheduled conversation says so, with when the soonest one runs."
+  (require 'aob-schedule)
+  (let ((ygg-projects-width 40)
+        (ygg-projects-tests--acp-id "sched-acp")
+        (aob-schedule--list
+         (list (ygg-projects-tests--schedule '(:acp-id "sched-acp") 45)
+               (ygg-projects-tests--schedule '(:acp-id "sched-acp") 20)
+               (ygg-projects-tests--schedule '(:acp-id "elsewhere") 5))))
+    (ygg-projects-tests--with-session nil nil '(1 . 2)
+      (let ((row (ygg-projects-tests--row "claude:9")))
+        (should (string-search "◷ 20m" row))
+        (should (ygg-projects-tests--fits row))))))
+
+(ert-deftest ygg-projects-row-keeps-the-schedule-over-spend ()
+  (require 'aob-schedule)
+  (let ((ygg-projects-width 40)
+        (ygg-projects-tests--acp-id "sched-acp")
+        (aob-schedule--list
+         (list (ygg-projects-tests--schedule '(:acp-id "sched-acp") 20))))
+    (ygg-projects-tests--with-session "3h15m…" "$160.85" '(18 . 20)
+      (let ((row (ygg-projects-tests--row "claude:9")))
+        (should (string-search "◷ 20m 3h15m… 18/20" row))
+        (should-not (string-search "$160.85" row))
+        (should (ygg-projects-tests--fits row))))))
+
+(ert-deftest ygg-projects-row-marks-a-paused-schedule-apart ()
+  (require 'aob-schedule)
+  (let ((ygg-projects-width 40)
+        (ygg-projects-tests--acp-id "sched-acp")
+        (aob-schedule--list
+         (list (ygg-projects-tests--schedule '(:acp-id "sched-acp") 20 :paused t))))
+    (ygg-projects-tests--with-session nil nil '(1 . 2)
+      (let ((row (ygg-projects-tests--row "claude:9")))
+        (should (string-search "⏸ 20m" row))
+        (should-not (string-search "◷" row))))))
+
+(ert-deftest ygg-projects-row-sheds-the-schedule-after-spend ()
+  "A row short of room gives up its spend, then its schedule mark, then its clock."
+  (require 'aob-schedule)
+  (let ((ygg-projects-width 30)
+        (ygg-projects-tests--acp-id "sched-acp")
+        (aob-schedule--list
+         (list (ygg-projects-tests--schedule '(:acp-id "sched-acp") 20))))
+    (ygg-projects-tests--with-session "3h15m…" "$160.85" '(18 . 20)
+      (let ((row (ygg-projects-tests--row "claude:9")))
+        (should (string-search "claude:9" row))
+        (should (string-search "18/20" row))
+        (should-not (string-search "◷" row))
+        (should (ygg-projects-tests--fits row))))))
+
+(ert-deftest ygg-projects-ended-row-marks-its-schedule-only-when-it-fits ()
+  (require 'aob-schedule)
+  (let ((entry (list :acp-id "sched-acp" :name "old" :ts (- (float-time) 7200)))
+        (aob-schedule--list
+         (list (ygg-projects-tests--schedule '(:acp-id "sched-acp") 20)))
+        (ygg-projects--pin-list nil))
+    (let ((ygg-projects-width 40))
+      (should (string-search "◷ 20m 2h" (ygg-projects--entry-text "old" "/tmp/p/" 'agents entry))))
+    (let* ((ygg-projects-width 24)
+           (row (ygg-projects--entry-text "a-long-conversation-name" "/tmp/p/" 'agents entry)))
+      (should-not (string-search "◷" row))
+      (should (string-search "a-long-c" row)))))
+
+(ert-deftest ygg-projects-head-counts-the-project-schedules ()
+  "A project's head counts its schedules, a new session's among them,
+and leaves those of a project nested in it to that project."
+  (require 'aob-schedule)
+  (let* ((tmp (file-name-as-directory (file-truename temporary-file-directory)))
+         (proj (concat tmp "proj/"))
+         (child (concat proj "child/"))
+         (ygg-projects-width 40)
+         (aob-schedule--list
+          (list (ygg-projects-tests--schedule (list :acp-id "a" :project proj) 20)
+                (ygg-projects-tests--schedule
+                 (list :agent "claude" :project (directory-file-name proj)) 30)
+                (ygg-projects-tests--schedule (list :agent "claude" :project child) 30)
+                (ygg-projects-tests--schedule (list :agent "claude" :project (concat tmp "other/")) 30))))
+    (cl-letf (((symbol-function 'ygg-projects--sessions) #'ignore)
+              ((symbol-function 'ygg-projects--roots) (lambda () (list proj child))))
+      (should (string-search "◷ 2" (ygg-projects--head-text proj)))
+      (should (string-search "◷ 1" (ygg-projects--head-text child)))
+      (should-not (string-search "◷" (ygg-projects--head-text (concat tmp "none/")))))))
 
 (defconst ygg-projects-tests--porcelain
   (concat "worktree /r/main\nHEAD 1111111aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\nbranch refs/heads/master\n\n"
