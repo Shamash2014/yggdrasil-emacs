@@ -571,8 +571,10 @@ answer can be drawn from without re-joining it ten times a second.
     ('prompt (concat "» " (aob-event-head ev 44)))
     ('permission (concat "■ " (or (plist-get ev :title) "permission")))
     ('plan (or (plist-get ev :title) "plan"))
-    ('stop (format "done (%s)%s"
-                   (or (plist-get ev :reason) "end")
+    ('stop (format "%s%s"
+                   (if-let* ((warning (plist-get ev :warning)))
+                       (concat "stopped: " warning)
+                     (format "done (%s)" (or (plist-get ev :reason) "end")))
                    (if-let* ((tk (aob-tokens-short (plist-get ev :tokens))))
                        (format " · %s ctx" tk)
                      "")))

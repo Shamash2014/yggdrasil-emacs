@@ -251,6 +251,7 @@ first."
                 :stderr stderr)))
     (process-put proc 'aob-conn-key (aob-acp--conn-key agent project))
     (process-put proc 'aob-remote (file-remote-p default-directory))
+    (process-put proc 'aob-env process-environment)
     (process-put proc 'aob-sessions (make-hash-table :test #'equal))
     (process-put proc 'aob-next-id (list 0))
     (process-put proc 'aob-pending (make-hash-table :test #'eql))
@@ -286,8 +287,8 @@ codex-acp both answer 1 whatever is offered, and codex-acp's unreleased
 main picks v2 from the offer.  Under v2 aob reads the init result, the
 session lifetime (resume with replayFrom, list, close, delete) and the
 subject-generic permission request; the rest of the v2 update vocabulary
-\(agent_message, state_update, tool_call_update as an upsert, notices,
-compaction) is not read, so offering 2 is an experiment.  Read when a
+\(agent_message, state_update, tool_call_update as an upsert) is not
+read, so offering 2 is an experiment.  Read when a
 connection starts."
   :type '(choice (const 1) (const 2)) :group 'aob)
 
@@ -387,20 +388,28 @@ connection is closed and every waiting session fails with the reason."
 Form elicitation is what turns on an agent's own questions: claude
 disallows AskUserQuestion and codex answers request_user_input empty
 without it.  The protocol reads the declaration as an object, and a bare
-true fails that schema and is dropped as though never sent.  Boolean
-config options are opt-in: an agent withholds its toggles until the
-client says it can show them.  Native subagents are asked for twice:
-the draft field, which released SDKs strip, and the AIR list the
-adapters accept in its place."
+true fails that schema and is dropped as though never sent.  URL
+elicitation is declared the same way; it is how an agent hands over a
+page to sign in on, and codex offers its device-code login only with it.
+Terminal auth, a plain boolean in the schema, is what makes claude list
+its own logins at all.  Boolean config options are opt-in: an agent
+withholds its toggles until the client says it can show them.  Native
+subagents are asked for twice: the draft field, which released SDKs
+strip, and the AIR list the adapters accept in its place.  Notices,
+compaction and command output are declared so each arrives as an update
+of its own, where an agent that is not told sends them as prose."
   (append
    (list :fs (list :readTextFile :false :writeTextFile :false)
-         :elicitation (list :form (make-hash-table))
-         :session (list :configOptions (list :boolean (make-hash-table))))
+         :elicitation (list :form (make-hash-table) :url (make-hash-table))
+         :auth (list :terminal t)
+         :session (list :configOptions (list :boolean (make-hash-table))
+                        :notices (make-hash-table)
+                        :compaction (make-hash-table)))
    (and aob-acp-native-subagents (list :subagents (make-hash-table)))
    ;; without subagent-transcript the adapter treats us as a client that
    ;; cannot nest, and strips every subagent's words before sending
    (list :_meta (append
-                 (list :subagent-transcript t)
+                 (list :subagent-transcript t :terminal_output_delta t)
                  (and aob-acp-native-subagents
                       (list :jetbrains
                             (list :air (list :version 1
@@ -540,14 +549,18 @@ lists the rest of the wire reads."
 (defun aob-acp--request-owner (proc params)
   "The session an agent request with PARAMS on PROC belongs to, or nil.
 A request scoped to one of ours names that request instead of a
-session, and goes to the session that sent it."
+session, and goes to the session that sent it.  One scoped to a request
+no session sent, such as the initialize, belongs to the connection, so
+it goes to a session on it rather than unanswered."
   (let ((sid (plist-get params :sessionId))
         (rid (plist-get params :requestId)))
     (aob-acp--tool-maker
      proc
      (or (and (not sid) rid
               (gethash rid (aob-acp--request-owners proc)))
-         (aob-acp--route proc sid))
+         (aob-acp--route proc sid)
+         (and (not sid) rid
+              (car (aob-acp--conn-sessions proc))))
      (plist-get (aob-acp--permission-tool-call params) :toolCallId))))
 
 (defun aob-acp--tool-maker (proc s tid)
@@ -576,7 +589,7 @@ Codex may ask a subagent's permission on the session that sent it."
                                  (list :code -32601 :message "Method not found")))
          ((and (equal method "elicitation/create")
                (plist-member params :mode)
-               (not (equal (plist-get params :mode) "form")))
+               (not (member (plist-get params :mode) '("form" "url"))))
           (aob-acp--respond-proc proc id nil
                                  (list :code -32602 :message "Invalid params")))
          ((setq s (aob-acp--request-owner proc params))
@@ -584,6 +597,10 @@ Codex may ask a subagent's permission on the session that sent it."
          (t (aob-acp--respond-proc proc id nil
                                    (list :code -32603
                                          :message "aob: unknown session"))))))
+     ((equal method "_auth/status_update")
+      (aob-acp--auth-status proc (plist-get params :authStatus)))
+     ((equal method "elicitation/complete")
+      (aob-acp--elicitation-complete proc (plist-get params :elicitationId)))
      (method (when-let* ((s (aob-acp--route proc (plist-get params :sessionId))))
                (aob-acp--on-notification s method params)))
      (id (remhash id (aob-acp--request-owners proc))
@@ -696,6 +713,8 @@ request, after its decision is pushed and its event recorded.")
        (dolist (fn aob-acp-request-functions)
          (condition-case err (funcall fn s d tc)
            (error (message "aob-acp-request-functions: %S" err))))))
+    ((and "elicitation/create" (guard (equal (plist-get params :mode) "url")))
+     (aob-acp--url-elicitation s id params))
     ;; AskUserQuestion (and MCP elicitations) arrive as a form request;
     ;; it becomes a Decision like permissions do — ■, then r answers
     ("elicitation/create"
@@ -853,6 +872,14 @@ before it is dispatched.")
           (aob-acp--tool-update s u))
          ("agent_message_chunk" (aob-acp--chunk s :msg-ev 'message u))
          ("agent_thought_chunk" (aob-acp--chunk s :thought-ev 'thought u))
+         ;; only a load or a replay speaks for you: a live turn's prompt is
+         ;; already in the trace, from when it was sent
+         ("user_message_chunk"
+          (when (eq (aob-session-state s) 'starting)
+            (aob-acp--chunk s :user-ev 'prompt u)))
+         ("notice" (aob-acp--notice s u))
+         ((or "compaction_update" "compaction_summary_chunk")
+          (aob-acp--compaction s u))
          ("available_commands_update"
           (aob-session-put s :commands (plist-get u :availableCommands)))
          ("current_mode_update"
@@ -887,12 +914,6 @@ before it is dispatched.")
             (aob--dirty s)))
          ("config_option_update"
           (aob-acp--config-apply s (plist-get u :configOptions)))
-         ("current_model_update"
-          (aob-session-put s :models
-                           (plist-put (aob-session-ref s :models)
-                                      :currentModelId
-                                      (plist-get u :currentModelId)))
-          (aob-acp--models-refresh s))
          ;; claude sends "plan"; codex/hermes stream "plan_update" (and
          ;; "plan_removed" to clear); entries sit flat or under plan
          ((or "plan" "plan_update")
@@ -945,10 +966,7 @@ routing its id: its agent is owed a reply either way."
               (proc (aob-session-ref s :acp-conn)))
     (dolist (d (aob-session-decisions s))
       (ignore-errors
-        (aob-acp--respond-proc proc (plist-get d :reply-id)
-                               (if (eq (plist-get d :kind) 'elicitation)
-                                   (list :action "cancel")
-                                 (list :outcome (list :outcome "cancelled"))))))
+        (aob-acp--cancel-held s d)))
     (aob-acp--deregister proc s)))
 
 (add-hook 'aob-session-removed-hook #'aob-acp--subagent-removed)
@@ -990,17 +1008,12 @@ routing its id: its agent is owed a reply either way."
                  (plist-get option :options))))
 
 (defun aob-acp--model-info (s)
-  "S's model picker as (CURRENT-ID . VALUES) from whichever source the
-agent speaks: claude's configOptions, or the spec's models field
-\(codex).  VALUES are plists with :value/:name/:description."
-  (if-let* ((opt (aob-acp--config-option s "model")))
-      (cons (plist-get opt :currentValue) (aob-acp--config-values opt))
-    (when-let* ((models (aob-session-ref s :models)))
-      (cons (plist-get models :currentModelId)
-            (mapcar (lambda (m) (list :value (plist-get m :modelId)
-                                      :name (plist-get m :name)
-                                      :description (plist-get m :description)))
-                    (plist-get models :availableModels))))))
+  "S's model picker as (CURRENT-ID . VALUES), from its model config option.
+Both adapters advertise one; the spec's models field and its
+session/set_model never stabilized, and no longer reach here.  VALUES
+are plists with :value/:name/:description."
+  (when-let* ((opt (aob-acp--config-option s "model")))
+    (cons (plist-get opt :currentValue) (aob-acp--config-values opt))))
 
 (defun aob-acp--models-refresh (s)
   "Recompute the ambient model reading; a change becomes a state event."
@@ -1074,9 +1087,7 @@ Non-nil when the request went out."
     t))
 
 (defun aob-acp--set-model (s model-id)
-  "Switch S to MODEL-ID through its model config option.
-The session/set_model fallback is for an adapter that only reports a
-models list; it never stabilized in the spec."
+  "Switch S to MODEL-ID through its model config option."
   (cond
    ((aob-acp--config-option s "model")
     (aob-session-put s :model-via "session/set_config_option")
@@ -1087,20 +1098,6 @@ models list; it never stabilized in the spec."
                       (lambda (_res err)
                         (when err (aob-session-put s :model-via nil)))))
         (unless sent (aob-session-put s :model-via nil)))))
-   ((plist-get (aob-session-ref s :models) :availableModels)
-    (aob-session-put s :model-via "session/set_model")
-    (aob-acp--request
-     s "session/set_model"
-     (list :sessionId (aob-acp--acp-id s) :modelId model-id)
-     (lambda (_res err)
-       (if err
-           (progn (aob-session-put s :model-via nil)
-                  (message "aob: %s" (plist-get err :message)))
-         (aob-session-put s :models
-                          (plist-put (aob-session-ref s :models)
-                                     :currentModelId model-id))
-         (aob-acp--models-refresh s)
-         (message "aob: model → %s" model-id)))))
    (t (message "aob: %s advertises no models" (aob-session-name s)))))
 
 (defun aob-acp--model-pick (s info)
@@ -1172,6 +1169,7 @@ configOptions in its response."
 (defun aob-acp--break-accum (s)
   (aob-session-put s :msg-ev nil)
   (aob-session-put s :thought-ev nil)
+  (aob-session-put s :user-ev nil)
   (dolist (slot (aob-session-ref s :sub-accums))
     (aob-session-put s slot nil))
   (aob-session-put s :sub-accums nil))
@@ -1190,30 +1188,106 @@ voices in the lead\='s transcript and no way to tell whose is whose."
         (plist-get meta :parentToolCallId)
         (plist-get meta :parentToolUseId))))
 
+(defun aob-acp--link (uri name)
+  "URI as a link named NAME, or by itself: RET visits a file, browses the rest."
+  (let* ((path (cond ((not (stringp uri)) nil)
+                     ((string-prefix-p "file://" uri)
+                      (url-unhex-string (substring uri (length "file://"))))
+                     ((file-name-absolute-p uri) uri)))
+         (label (format "[[%s]]" (or name (and path (abbreviate-file-name path))
+                                     uri "resource"))))
+    (cond (path (propertize label 'aob-file (list path nil nil)
+                            'font-lock-face 'link 'help-echo path))
+          ((stringp uri) (buttonize label #'browse-url uri uri))
+          (t label))))
+
+(defun aob-acp--block-text (block)
+  "BLOCK, a content block the agent sent, as the words a trace shows.
+Only text is words; a trace that dropped the rest would read as a gap.
+A picture or a sound is named where it stood, a link is one RET
+follows, an embedded resource shows its own text under its name, and a
+kind not known is named rather than lost."
+  (let ((type (plist-get block :type)))
+    (pcase type
+      ("text" (plist-get block :text))
+      ("image" "[[Image]]")
+      ("audio" "[[Audio]]")
+      ("resource_link"
+       (aob-acp--link (plist-get block :uri)
+                      (or (plist-get block :title) (plist-get block :name))))
+      ("resource"
+       (let* ((resource (plist-get block :resource))
+              (text (plist-get resource :text)))
+         (concat (aob-acp--link (plist-get resource :uri) nil)
+                 (when (stringp text)
+                   (concat "\n```\n" (string-trim-right text) "\n```\n")))))
+      (_ (format "[[%s]]" (or type "?"))))))
+
 (defun aob-acp--chunk (s slot type u)
-  "Fold U's text into S's running message or thought.
+  "Fold U's content into S's running message, thought or replayed prompt.
 A subagent speaks on the same stream as the agent that sent it, so each
 one accumulates under its own Task — otherwise five voices would land
-in one paragraph, and the trace would show them as the main agent's."
+in one paragraph, and the trace would show them as the main agent's.
+Your words and the agent's never share an event: a replay that goes
+from one to the other with no tool call between is still two turns.
+A picture keeps its data on the event, for a trace that can draw it."
   (let* ((content (plist-get u :content))
-         ;; an image block carries no text; it is still something the agent
-         ;; said, and a trace that dropped it would read as a gap
-         (text (or (plist-get content :text)
-                   (and (equal (plist-get content :type) "image") "[[Image]]")))
          (parent (aob-acp--parent-of u))
          (slot (if parent (intern (format "%s@%s" slot parent)) slot))
          (ev (aob-session-ref s slot)))
-    (if ev
-        (progn (aob-event-push-text ev text)
-               (aob-refresh-summary s ev))
-      (let ((ev (aob-event s type :parent parent)))
-        (when (eq type 'message) (aob-note-progress s))
-        (aob-event-push-text ev text)
-        (aob-refresh-summary s ev)
-        (aob-session-put s slot ev)
-        (when parent
-          (aob-session-put s :sub-accums
-                           (cons slot (aob-session-ref s :sub-accums))))))))
+    (if (eq type 'prompt)
+        (unless ev (aob-acp--break-accum s))
+      (aob-session-put s :user-ev nil))
+    (unless ev
+      (setq ev (apply #'aob-event s type :parent parent
+                      (and (eq type 'prompt) (list :typed t))))
+      (when (eq type 'message) (aob-note-progress s))
+      (aob-session-put s slot ev)
+      (when parent
+        (aob-session-put s :sub-accums
+                         (cons slot (aob-session-ref s :sub-accums)))))
+    (aob-event-push-text ev (aob-acp--block-text content))
+    (when (equal (plist-get content :type) "image")
+      (plist-put ev :image-data (append (plist-get ev :image-data) (list content))))
+    (aob-refresh-summary s ev)))
+
+(defun aob-acp--notice (s u)
+  "Put the notice U in S's trace as a status line, marked when it warns."
+  (let ((title (plist-get u :title))
+        (description (plist-get u :description)))
+    (aob-event s 'state
+               :title (if (and (stringp description) (not (string-empty-p description)))
+                          (format "%s: %s" title
+                                  (replace-regexp-in-string "[ \t]*\n[ \t\n]*" " "
+                                                            description))
+                        title)
+               :warning (and (member (plist-get u :severity) '("warning" "error")) t))))
+
+(defun aob-acp--compaction (s u)
+  "Show the compaction U speaks of as one status line in S's trace.
+Each compaction is a line of its own, rewritten as it moves on; the
+summary it keeps streams into the line's text, for TAB to open, and is
+never read as the agent's words."
+  (let* ((id (plist-get u :compactionId))
+         (ev (aob-session-ref s :compaction-ev)))
+    (unless (and ev (equal (plist-get ev :compaction-id) id))
+      (setq ev (aob-event s 'state :title "compacting context" :compaction-id id))
+      (aob-session-put s :compaction-ev ev))
+    (if (equal (plist-get u :sessionUpdate) "compaction_summary_chunk")
+        (aob-event-push-text ev (aob-acp--block-text (plist-get u :content)))
+      (seq-doseq (block (plist-get u :summary))
+        (aob-event-push-text ev (aob-acp--block-text block)))
+      (pcase (plist-get u :status)
+        ("completed" (plist-put ev :title "context compacted"))
+        ("cancelled" (plist-put ev :title "compaction cancelled"))
+        ("failed"
+         (let ((err (plist-get u :error)))
+           (plist-put ev :title (if (stringp err)
+                                    (format "compaction failed: %s" err)
+                                  "compaction failed"))
+           (plist-put ev :warning t)))))
+    (plist-put ev :line nil)
+    (aob-refresh-summary s ev)))
 
 (defun aob-acp--diff-stat (content)
   (let ((plus 0) (minus 0) (any nil))
@@ -1317,7 +1391,33 @@ never learns there was more than one."
                         :content (plist-get u :content)
                         :stat (aob-acp--diff-stat (plist-get u :content)))))
     (puthash (plist-get u :toolCallId) ev (aob-acp--tools s))
+    (aob-acp--terminal-note ev u)
     (aob-acp--child-note s ev nil)))
+
+(defconst aob-acp--terminal-output-max 65536
+  "Characters of what one command prints that its tool call keeps.")
+
+(defun aob-acp--terminal-note (ev u)
+  "Fold the command output U carries in its `_meta' into tool call EV.
+Declared terminal_output_delta, both adapters send what a command
+prints as chunks to append, and its exit status in terminal_exit, in
+place of the text block that would otherwise carry the output."
+  (let ((meta (plist-get u :_meta)))
+    (when-let* ((chunk (plist-get (or (plist-get meta :terminal_output_delta)
+                                      (plist-get meta :terminal_output))
+                                  :data))
+                ((stringp chunk))
+                (kept (or (plist-get ev :terminal-output) ""))
+                (room (- aob-acp--terminal-output-max (length kept)))
+                ((> room 0)))
+      (plist-put ev :terminal-output
+                 (if (<= (length chunk) room)
+                     (concat kept chunk)
+                   (concat kept (substring chunk 0 room)
+                           "\n[… output past this was not kept]"))))
+    (when-let* ((code (plist-get (plist-get meta :terminal_exit) :exit_code))
+                ((integerp code)))
+      (plist-put ev :terminal-exit code))))
 
 (defconst aob-acp-tool-detail-keys
   '(:command :pattern :query :url :file_path :path :filePath :description)
@@ -1366,6 +1466,7 @@ column of the word bash."
         (when-let* (((plist-get ev :codex-spawn))
                     (role (aob-acp--codex-role s (plist-get ev :raw))))
           (plist-put ev :subagent-type role))
+        (aob-acp--terminal-note ev u)
         (when-let* ((st (aob-acp--diff-stat (plist-get ev :content))))
           (plist-put ev :stat st))
         (when (and (member (plist-get ev :status) '("completed" "failed"))
@@ -1715,6 +1816,12 @@ the turn it actually opens."
          (list :traceparent (format "00-%s-%s-01" trace span))))
      (aob-session-ref s :prompt-meta))))
 
+(defconst aob-acp--stop-warnings
+  '(("refusal" . "the model refused")
+    ("max_tokens" . "hit the token limit")
+    ("max_turn_requests" . "hit the turn request limit"))
+  "Stop reasons that cut a turn short, with what the trace says of each.")
+
 (defvar aob-acp--overflow-retry nil
   "Non-nil while resending a prompt after an overflow compact.")
 
@@ -1735,6 +1842,7 @@ the turn it actually opens."
              (aob-session-name s)))
   (aob-session-put s :turn-fails nil)
   (aob-session-put s :turn-error nil)
+  (aob-session-put s :stop-warning nil)
   (unless queued
     ;; the tokens you wrote come back as tokens: what you sent is what the
     ;; trace shows, counted in the same [[Image]] the compose buffer used
@@ -1769,16 +1877,22 @@ the turn it actually opens."
                ;; advance) that must see this turn failed
                (aob-session-put s :turn-error t)
                (aob-set-state s 'idle)
-               (aob-event s 'error :title (plist-get err :message)))
+               (if (aob-acp--auth-error-p err)
+                   (aob-acp--auth-offer s err nil)
+                 (aob-event s 'error :title (plist-get err :message))))
            ;; a /compact turn reports totalTokens 0 — never clobber the last
            ;; real reading with it
-           (let ((usage (plist-get res :usage)))
+           (let ((usage (plist-get res :usage))
+                 (warning (cdr (assoc (plist-get res :stopReason)
+                                      aob-acp--stop-warnings))))
              (when (and usage (> (or (plist-get usage :totalTokens) 0) 0))
                (aob-session-put s :usage usage)
                (aob-session-put s :usage-latest usage)
                (aob-usage-note-turn s usage)
                (when (fboundp 'ygg-usage-note) (ygg-usage-note s usage)))
+             (aob-session-put s :stop-warning warning)
              (aob-event s 'stop :reason (plist-get res :stopReason)
+                        :warning warning
                         :tokens (let ((tk (plist-get usage :totalTokens)))
                                   (and tk (> tk 0) tk))
                         :usage usage :secs secs
@@ -2037,20 +2151,23 @@ held back; non-nil when it did."
 (defun aob-acp--cancel (s &optional drop-queue)
   ;; spec: pending permission requests must be answered `cancelled'
   ;; alongside session/cancel, or the agent waits forever
-  (dolist (d (aob-session-decisions s))
-    (aob-acp--respond s (plist-get d :reply-id)
-                      (if (eq (plist-get d :kind) 'elicitation)
-                          (list :action "cancel")
-                        (list :outcome (list :outcome "cancelled"))))
-    (when-let* ((ev (aob-acp--decision-event s d)))
-      (plist-put ev :line nil)))
-  (setf (aob-session-decisions s) nil)
-  ;; a plain cancel stops just the turn; the full cancel (cc) also drops the
-  ;; queue so nothing flushes back when the cancelled turn settles
-  (when drop-queue (aob-acp--drop-queue s))
-  (when (memq (aob-session-state s) '(working blocked))
-    (aob-set-state s 'working)
-    (aob-acp--notify s "session/cancel" (list :sessionId (aob-acp--acp-id s)))))
+  (let ((off-turn (and (eq (aob-session-state s) 'blocked)
+                         (seq-find (lambda (d) (memq (plist-get d :was) '(idle starting)))
+                                   (aob-session-decisions s)))))
+    (dolist (d (aob-session-decisions s))
+      (aob-acp--cancel-held s d)
+      (when-let* ((ev (aob-acp--decision-event s d)))
+        (plist-put ev :line nil)))
+    (setf (aob-session-decisions s) nil)
+    ;; a plain cancel stops just the turn; the full cancel (cc) also drops the
+    ;; queue so nothing flushes back when the cancelled turn settles
+    (when drop-queue (aob-acp--drop-queue s))
+    (cond
+     ((plist-get off-turn :then) (aob-acp--fail s '(:message "login cancelled")))
+     (off-turn (aob-set-state s (plist-get off-turn :was)))
+     ((memq (aob-session-state s) '(working blocked))
+      (aob-set-state s 'working)
+      (aob-acp--notify s "session/cancel" (list :sessionId (aob-acp--acp-id s)))))))
 
 (defun aob-acp--extension (s key)
   "What S's agent advertises for extension KEY, or nil.
@@ -2185,31 +2302,103 @@ one that matches no open decision was answered already and gets nothing."
         (setf (aob-session-decisions s) (delq d (aob-session-decisions s)))
         (unless (aob-session-decisions s)
           (when (eq (aob-session-state s) 'blocked)
-            (aob-set-state s 'working)))
+            (aob-set-state s (or (plist-get d :was) 'working))))
         (aob--dirty s)))
     (when (and open request-id)
       (aob-acp--respond-proc proc request-id nil
                              (list :code -32800 :message "Request cancelled")))))
 
+(defun aob-acp--cancel-held (s d)
+  "Answer the agent's request behind S's decision D as cancelled.
+A question or a page to open is cancelled as an elicitation, anything
+else as a permission; a login offer answers no request and owes nothing."
+  (when-let* ((id (plist-get d :reply-id)))
+    (aob-acp--respond s id
+                      (if (memq (plist-get d :kind) '(elicitation url))
+                          (list :action "cancel")
+                        (list :outcome (list :outcome "cancelled"))))))
+
+(defun aob-acp--url-elicitation (s id params)
+  "Hold the agent's request ID to open a page, PARAMS, as a Decision on S.
+The message is kept whole: codex puts the device code to type there.
+Accepting opens the page in a browser; what it asks is done there, and
+the agent says when it is through with `elicitation/complete'."
+  (let* ((url (plist-get params :url))
+         (text (or (plist-get params :message) "open a page"))
+         (d (list :reply-id id
+                  :kind 'url
+                  :was (if (eq (aob-session-state s) 'blocked)
+                           (or (seq-some (lambda (held) (plist-get held :was))
+                                         (aob-session-decisions s))
+                               'working)
+                         (aob-session-state s))
+                  :elicitation-id (plist-get params :elicitationId)
+                  :url url
+                  :title (car (split-string text "\n"))
+                  :detail url
+                  :options (list (list :optionId "accept" :name "Open in browser"
+                                       :kind "allow_once")
+                                 (list :optionId "decline" :name "Decline"
+                                       :kind "decline")))))
+    (push d (aob-session-decisions s))
+    (aob-set-state s 'blocked)
+    (let ((ev (aob-event s 'permission :title (plist-get d :title)
+                         :text (concat text "\n" url))))
+      (nconc d (list :seq (plist-get ev :seq))))
+    (dolist (fn aob-acp-request-functions)
+      (condition-case err (funcall fn s d nil)
+        (error (message "aob-acp-request-functions: %S" err))))))
+
+(defun aob-acp--url-answer (decision answer)
+  "The reply to the page DECISION offered, ANSWER being accept or not.
+Accepting opens it; the accept carries no content, since what the page
+asks is answered on the page."
+  (if (equal answer "accept")
+      (progn (browse-url (plist-get decision :url))
+             (list :action "accept"))
+    (list :action "decline")))
+
+(defun aob-acp--elicitation-complete (proc eid)
+  "Close the page the agent on PROC asked to open as EID, now it is done.
+The agent races the page against its own flow, so the request may still
+be unanswered; codex never withdraws it, so it gets its accept here."
+  (dolist (s (delete-dups (append (aob-acp--conn-sessions proc)
+                                  (hash-table-values (aob-acp--proc-sessions proc)))))
+    (when-let* ((d (and eid
+                        (seq-find (lambda (d) (equal (plist-get d :elicitation-id) eid))
+                                  (aob-session-decisions s)))))
+      (aob-acp--respond-proc proc (plist-get d :reply-id) (list :action "accept"))
+      (when-let* ((ev (aob-acp--decision-event s d)))
+        (plist-put ev :answer 'completed)
+        (plist-put ev :line nil))
+      (setf (aob-session-decisions s) (delq d (aob-session-decisions s)))
+      (unless (aob-session-decisions s)
+        (when (eq (aob-session-state s) 'blocked)
+          (aob-set-state s (or (plist-get d :was) 'working))))
+      (aob--dirty s))))
+
 (defun aob-acp--resolve (s decision answer)
   "Reply to DECISION with ANSWER: a permission's option id, or an
-elicitation's ((FIELD . VALUE)...) alist, or decline to leave it unanswered."
+elicitation's ((FIELD . VALUE)...) alist, or decline to leave it unanswered.
+A login offer is answered with the method to run, which replies to nothing."
   (unless (memq decision (aob-session-decisions s))
     (user-error "aob: %s no longer waits on that answer" (aob-session-name s)))
-  (aob-acp--respond
-   s (plist-get decision :reply-id)
-   (cond
-    ((not (eq (plist-get decision :kind) 'elicitation))
-     (list :outcome (list :outcome "selected" :optionId answer)))
-    ((eq answer 'decline) (list :action "decline"))
-    (t (list :action "accept"
-             :content (let (pl)
-                        (dolist (kv answer pl)
-                          (setq pl (plist-put
-                                    pl (intern (concat ":" (car kv)))
-                                    (if (listp (cdr kv))
-                                        (vconcat (cdr kv))
-                                      (cdr kv))))))))))
+  (unless (eq (plist-get decision :kind) 'auth)
+    (aob-acp--respond
+     s (plist-get decision :reply-id)
+     (cond
+      ((eq (plist-get decision :kind) 'url) (aob-acp--url-answer decision answer))
+      ((not (eq (plist-get decision :kind) 'elicitation))
+       (list :outcome (list :outcome "selected" :optionId answer)))
+      ((eq answer 'decline) (list :action "decline"))
+      (t (list :action "accept"
+               :content (let (pl)
+                          (dolist (kv answer pl)
+                            (setq pl (plist-put
+                                      pl (intern (concat ":" (car kv)))
+                                      (if (listp (cdr kv))
+                                          (vconcat (cdr kv))
+                                        (cdr kv)))))))))))
   (when-let* ((ev (aob-acp--decision-event s decision)))
     (plist-put ev :answer (if (eq (plist-get decision :kind) 'elicitation)
                               answer
@@ -2222,7 +2411,10 @@ elicitation's ((FIELD . VALUE)...) alist, or decline to leave it unanswered."
   (setf (aob-session-decisions s)
         (delq decision (aob-session-decisions s)))
   (unless (aob-session-decisions s)
-    (aob-set-state s 'working)))
+    (when (eq (aob-session-state s) 'blocked)
+      (aob-set-state s (or (plist-get decision :was) 'working))))
+  (when (eq (plist-get decision :kind) 'auth)
+    (aob-acp--auth-chosen s decision answer)))
 
 (defun aob-acp--reap-worktree (s)
   "Remove S's worktree and branch when they hold nothing the project lacks:
@@ -2269,10 +2461,7 @@ Runs entirely in the background — the kill that triggers it never waits."
     ;; answer held decisions, stop the turn, then let go
     (dolist (d (aob-session-decisions s))
       (ignore-errors
-        (aob-acp--respond s (plist-get d :reply-id)
-                          (if (eq (plist-get d :kind) 'elicitation)
-                              (list :action "cancel")
-                            (list :outcome (list :outcome "cancelled"))))))
+        (aob-acp--cancel-held s d)))
     (setf (aob-session-decisions s) nil)
     (when (and proc (process-live-p proc) (aob-session-ref s :acp-id))
       (when (memq (aob-session-state s) '(working blocked))
@@ -2642,9 +2831,12 @@ WANT is an id, or a name such as \"haiku\" that an offered model carries."
 (defun aob-acp--fail (s err)
   "Mark S failed with ERR\='s message, unless its process already died.
 A dead session was told why when it died; failing it again would bury
-that reason under whatever its unanswered requests say."
+that reason under whatever its unanswered requests say.  A refusal for
+want of a login says which agent and how to log it in."
   (unless (eq (aob-session-state s) 'dead)
-    (let ((why (or (and err (plist-get err :message)) "error")))
+    (let ((why (if (aob-acp--auth-error-p err)
+                   (aob-acp--auth-message s err)
+                 (or (and err (plist-get err :message)) "error"))))
       (aob-session-put s :fail-reason why)
       (aob-set-state s 'failed)
       (aob-event s 'error :title why)
@@ -2920,11 +3112,8 @@ session must not be poorer than a fresh one."
   (when-let* ((modes (plist-get res :modes)))
     (aob-session-put s :modes modes)
     (aob-session-put s :mode-id (plist-get modes :currentModeId)))
-  (when-let* ((models (plist-get res :models)))
-    (aob-session-put s :models models)
-    (aob-acp--models-refresh s))
-  ;; claude advertises model/effort/fast through configOptions, not a
-  ;; top-level models field
+  ;; model, effort and fast mode are configOptions; the models field is
+  ;; the unstable one they replaced
   (when-let* ((opts (plist-get res :configOptions)))
     (aob-acp--config-apply s opts))
   ;; before the queue flushes below — the wire is ordered, so even the
@@ -3349,6 +3538,200 @@ parameter outright rather than ignoring it."
     (when-let* ((dirs (aob-session-ref s :extra-dirs)))
       (vconcat (mapcar #'aob-acp--wire-dir dirs)))))
 
+;;; Auth — the agent's own login, run as the agent advertised it
+
+(defun aob-acp--auth-error-p (err)
+  "Whether ERR is the agent saying it needs a login first."
+  (eql (plist-get err :code) -32000))
+
+(defun aob-acp--auth-methods (proc)
+  "The logins PROC's agent advertised when it started, each as it sent it."
+  (plist-get (aob-acp--conn-init proc) :authMethods))
+
+(defun aob-acp--auth-message (s err)
+  "ERR, S's agent refusing for want of a login, as what to do next."
+  (let ((agent (or (aob-session-ref s :agent) "the agent"))
+        (why (plist-get err :message))
+        (names (mapcar (lambda (m) (plist-get m :name))
+                       (aob-acp--auth-methods (aob-acp--proc-of s)))))
+    (format "%s needs a login%s; %s"
+            agent
+            (if (and why (not (equal why "Authentication required")))
+                (format " (%s)" why)
+              "")
+            (if names
+                (format "log in with %s" (string-join names " or "))
+              (format "log in with %s's own CLI, then start the session again"
+                      agent)))))
+
+(defun aob-acp--auth-terminal-p (method)
+  "Whether METHOD is a login the client runs in a terminal."
+  (or (equal (plist-get method :type) "terminal")
+      (and (plist-get (plist-get method :_meta) :terminal-auth) t)))
+
+(defun aob-acp--auth-argv (s method)
+  "The command running S's agent's terminal login METHOD.
+A typed method is the agent's own program with its args on the end; the
+older `terminal-auth' extension names the whole command itself."
+  (let ((legacy (and (not (equal (plist-get method :type) "terminal"))
+                     (plist-get (plist-get method :_meta) :terminal-auth))))
+    (if legacy
+        (cons (plist-get legacy :command) (plist-get legacy :args))
+      (append (plist-get (cdr (assoc (aob-session-ref s :agent) aob-acp-agents))
+                         :command)
+              (plist-get method :args)))))
+
+(defun aob-acp--auth-env (method)
+  "METHOD's environment as \"VAR=VAL\" strings."
+  (let ((env (or (plist-get method :env)
+                 (plist-get (plist-get (plist-get method :_meta) :terminal-auth)
+                            :env)))
+        out)
+    (while env
+      (push (format "%s=%s" (substring (symbol-name (pop env)) 1) (pop env)) out))
+    (nreverse out)))
+
+(declare-function term-char-mode "term" ())
+
+(defun aob-acp--auth-terminal (s method done)
+  "Run S's agent's terminal login METHOD in a terminal buffer.
+DONE is called once with whether it exited 0.  It runs where and with
+the environment the connection was started with, METHOD's own on top:
+another environment is another config home, and a login there is one
+this connection never reads."
+  (require 'term)
+  (let* ((proc (aob-acp--proc-of s))
+         (argv (funcall aob-acp-command-function (aob-acp--auth-argv s method)))
+         (process-environment (append (aob-acp--auth-env method)
+                                      (or (process-get proc 'aob-env)
+                                          process-environment)))
+         (default-directory (aob-session-project s))
+         (buf (apply #'make-term (format "login %s" (aob-session-ref s :agent))
+                     (car argv) nil (cdr argv)))
+         (told nil))
+    (add-function :after (process-sentinel (get-buffer-process buf))
+                  (lambda (p _event)
+                    (unless (or told (process-live-p p))
+                      (setq told t)
+                      (funcall done (eql (process-exit-status p) 0)))))
+    (with-current-buffer buf (term-char-mode))
+    (unless noninteractive (pop-to-buffer buf))
+    buf))
+
+(defun aob-acp--auth-offer (s err then)
+  "Offer the logins S's agent advertised as a Decision, ERR having refused.
+THEN runs once a login went through; nil means S is past opening, and
+refused a turn.  An agent that advertised none leaves nothing to offer,
+and S is told how to log in instead."
+  (let ((methods (aob-acp--auth-methods (aob-acp--proc-of s)))
+        (why (aob-acp--auth-message s err)))
+    (if (null methods)
+        (aob-acp--auth-failed s then err)
+      (let ((d (list :kind 'auth :then then :error err
+                     :was (aob-session-state s)
+                     :title why
+                     :options (append
+                               (mapcar (lambda (m)
+                                         (list :optionId (plist-get m :id)
+                                               :name (plist-get m :name)
+                                               :kind "allow_once"
+                                               :method m))
+                                       methods)
+                               (list (list :optionId "decline" :name "Not now"
+                                           :kind "decline"))))))
+        (push d (aob-session-decisions s))
+        (aob-set-state s 'blocked)
+        (let ((ev (aob-event s 'permission :title why)))
+          (nconc d (list :seq (plist-get ev :seq))))
+        (message "aob: %s" why)
+        (dolist (fn aob-acp-request-functions)
+          (condition-case e (funcall fn s d nil)
+            (error (message "aob-acp-request-functions: %S" e))))))))
+
+(defun aob-acp--auth-chosen (s decision answer)
+  "Log S's agent in with the method ANSWER picks from DECISION.
+A terminal method is the agent's own login run in a terminal, and the
+schema forbids passing it to `authenticate' (claude-agent-acp answers
+Method not implemented); any other the agent carries out itself.  No
+method, a decline, fails S with what to do instead."
+  (let* ((method (plist-get (seq-find (lambda (o) (equal (plist-get o :optionId) answer))
+                                      (plist-get decision :options))
+                            :method))
+         (then (plist-get decision :then))
+         (agent (or (aob-session-ref s :agent) "the agent"))
+         (name (plist-get method :name)))
+    (cond
+     ((null method)
+      (aob-acp--auth-failed s then (plist-get decision :error)))
+     ((aob-acp--auth-terminal-p method)
+      (aob-event s 'state :title (format "logging in to %s: %s" agent name))
+      (aob-acp--auth-terminal
+       s method
+       (lambda (ok)
+         (cond ((not (aob-session-get (aob-session-id s))))
+               ((not ok)
+                (aob-acp--auth-failed
+                 s then (list :message
+                         (format "%s's login %s did not finish; run it again, or log in with %s's own CLI"
+                                 agent name agent))))
+               ((equal (plist-get method :type) "terminal")
+                (aob-acp--auth-done s name then))
+               (t (aob-acp--authenticate s method then))))))
+     (t (aob-acp--authenticate s method then)))))
+
+(defun aob-acp--authenticate (s method then)
+  "Ask S's agent to log in with METHOD itself, then run THEN.
+Sent on S's behalf, so a page the agent asks to open for it, scoped to
+this request rather than a session, finds its way back to S."
+  (let ((agent (or (aob-session-ref s :agent) "the agent"))
+        (name (plist-get method :name)))
+    (aob-acp--request
+     s "authenticate" (list :methodId (plist-get method :id))
+     (lambda (_res err)
+       (when (aob-session-get (aob-session-id s))
+         (if err
+             (aob-acp--auth-failed
+              s then (list :message
+                      (format "%s could not log in with %s (%s); pick another login, or log in with %s's own CLI"
+                              agent name (or (plist-get err :message) "error") agent)))
+           (aob-acp--auth-done s name then)))))))
+
+(defun aob-acp--auth-done (s name then)
+  "Note S's agent logged in with NAME, then run THEN."
+  (aob-event s 'state :title (format "logged in to %s: %s"
+                                    (or (aob-session-ref s :agent) "the agent") name))
+  (when then (funcall then)))
+
+(defun aob-acp--auth-failed (s opening err)
+  "Say ERR on S.  A session still OPENING fails with it; one already open
+keeps going, since only the turn was refused."
+  (if opening
+      (aob-acp--fail s err)
+    (aob-event s 'error :title (if (aob-acp--auth-error-p err)
+                                   (aob-acp--auth-message s err)
+                                 (plist-get err :message)))))
+
+(defun aob-acp--auth-label (status)
+  "STATUS, who an agent says it is logged in as, in a header's few words."
+  (when-let* ((label (plist-get status :label)))
+    (let ((who (or (plist-get (plist-get status :account) :email)
+                   (plist-get status :detail))))
+      (propertize (if who (format "%s (%s)" label who) label)
+                  'face (if (equal (plist-get status :kind) "none") 'warning 'shadow)))))
+
+(defun aob-acp--show-auth (s status)
+  "Show STATUS, the login of S's connection, on S."
+  (aob-session-put s :auth-label (aob-acp--auth-label status))
+  (aob--dirty s))
+
+(defun aob-acp--auth-status (proc status)
+  "Keep STATUS, who PROC's agent says it is logged in as, and show it.
+The update names no session: a login belongs to the connection, so each
+session on it shows it, and one attaching later reads it from PROC."
+  (process-put proc 'aob-auth-status status)
+  (dolist (s (aob-acp--conn-sessions proc))
+    (aob-acp--show-auth s status)))
+
 (defun aob-acp--connect (s open then)
   "Attach S to its agent's shared connection and open its ACP session."
   (let* ((agent (aob-session-ref s :agent))
@@ -3357,6 +3740,7 @@ parameter outright rather than ignoring it."
          (proc (or (aob-acp--live-conn agent project)
                    (aob-acp--start-conn agent project))))
     (setf (aob-session-conn s) proc)
+    (aob-acp--show-auth s (process-get proc 'aob-auth-status))
     (aob-acp--with-init
      proc
      (lambda (init err)
@@ -3374,11 +3758,24 @@ parameter outright rather than ignoring it."
                (setq params (plist-put (copy-sequence params)
                                        :additionalDirectories dirs)))
              (when pre-sid (aob-acp--register proc pre-sid s))
-             (aob-acp--request
-              s method params
-              (lambda (res err2)
-                (if err2 (aob-acp--fail s err2)
-                  (funcall then s res)))))))))))
+             (aob-acp--send-open s method params then t))))))))
+
+(defun aob-acp--send-open (s method params then retry)
+  "Send S's open METHOD with PARAMS, THEN taking S and the result.
+A refusal for want of a login offers the agent's own logins; RETRY
+says the open may go out once more after one succeeds, and a second
+refusal fails S rather than asking again."
+  (aob-acp--request
+   s method params
+   (lambda (res err)
+     (cond
+      ((not err) (funcall then s res))
+      ((and retry (aob-acp--auth-error-p err))
+       (aob-acp--auth-offer
+        s err (lambda ()
+                (when (aob-session-get (aob-session-id s))
+                  (aob-acp--send-open s method params then nil)))))
+      (t (aob-acp--fail s err))))))
 
 (defun aob-acp--open (agent name project dir open then &optional prepare)
   "Create a session for AGENT on the shared (AGENT . PROJECT) connection.
@@ -3711,8 +4108,7 @@ alternative without losing the original, compare with range-diff later."
                  ;; fork results may omit modes — inherit the source's
                  (unless (aob-session-ref new :modes)
                    (aob-session-put new :modes (aob-session-ref s :modes))
-                   (aob-session-put new :mode-id (aob-session-ref s :mode-id))
-                   (aob-session-put new :models (aob-session-ref s :models))))
+                   (aob-session-put new :mode-id (aob-session-ref s :mode-id))))
                (unless known
                  (lambda (new done)
                    (aob-acp--await-cap new :fork refusal done))))))

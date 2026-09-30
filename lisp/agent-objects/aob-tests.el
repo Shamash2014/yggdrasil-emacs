@@ -411,30 +411,52 @@ A child process, so the glue's advice and keys never reach the other tests."
                             (equal (plist-get ev :title) "model: Opus 4.8"))
                           (aob-session-events s)))))))
 
-(ert-deftest aob-model-via-models-field ()
-  ;; codex speaks the spec's models field + session/set_model, not
-  ;; configOptions — the same M verb must serve both
+(defun aob-tests--answer (s msg result)
+  "Feed S the response to MSG, a request it sent, with RESULT."
+  (aob-tests--feed s (json-serialize (list :jsonrpc "2.0" :id (plist-get msg :id)
+                                           :result result))))
+
+(defconst aob-tests--codex-model-option
+  '(:id "model" :name "Model" :category "model" :type "select"
+    :currentValue "gpt-5.2-codex"
+    :options [(:value "gpt-5.2-codex" :name "GPT-5.2 Codex")
+              (:value "gpt-5.2" :name "GPT-5.2")])
+  "The model option codex-acp 2.0.1 advertises among its configOptions.")
+
+(ert-deftest aob-model-changes-only-through-config-options ()
+  "Codex's model option is the picker, and nothing ever sends session/set_model:
+not with a models field beside the option, not with one alone, not when
+a current_model_update names another model."
   (aob-tests--with-session s
     (let ((aob-acp-persist-file nil))
-      (aob-acp--session-opened
-       s '(:sessionId "sess-test"
-           :models (:currentModelId "gpt-5.2-codex"
-                    :availableModels ((:modelId "gpt-5.2-codex" :name "GPT-5.2 Codex")
-                                      (:modelId "gpt-5.2" :name "GPT-5.2")))))
-      (should (equal (aob-session-ref s :model-name) "GPT-5.2 Codex"))
-      (should (equal (car (aob-acp--model-info s)) "gpt-5.2-codex"))
-      (let (wire)
-        (cl-letf (((symbol-function 'aob-acp--request)
-                   (lambda (_s method params cb)
-                     (setq wire (list method params))
-                     (funcall cb nil nil))))
-          (aob-acp--set-model s "gpt-5.2"))
-        (should (equal (car wire) "session/set_model"))
-        (should (equal (plist-get (cadr wire) :modelId) "gpt-5.2"))
+      (aob-tests--capturing sent
+        (aob-acp--session-opened
+         s '(:sessionId "sess-test"
+             :models (:currentModelId "gpt-5.2"
+                      :availableModels ((:modelId "gpt-5.2" :name "GPT-5.2")))))
+        (aob-tests--update s (list :sessionUpdate "config_option_update"
+                                   :configOptions (vector aob-tests--codex-model-option)))
+        (should (equal (aob-session-ref s :model-name) "GPT-5.2 Codex"))
+        (aob-tests--update s '(:sessionUpdate "current_model_update"
+                               :currentModelId "gpt-5.2"))
+        (should (equal (aob-session-ref s :model-id) "gpt-5.2-codex"))
+        (aob-acp--set-model s "gpt-5.2")
+        (let ((req (car sent)))
+          (should (equal (plist-get req :method) "session/set_config_option"))
+          (should (equal (plist-get (plist-get req :params) :configId) "model"))
+          (should (equal (plist-get (plist-get req :params) :value) "gpt-5.2"))
+          (aob-tests--answer
+           s req (list :configOptions
+                       (vector (plist-put (copy-sequence aob-tests--codex-model-option)
+                                          :currentValue "gpt-5.2")))))
         (should (equal (aob-session-ref s :model-name) "GPT-5.2"))
-        (should (seq-find (lambda (ev)
-                            (equal (plist-get ev :title) "model: GPT-5.2"))
-                          (aob-session-events s)))))))
+        (should (seq-find (lambda (ev) (equal (plist-get ev :title) "model: GPT-5.2"))
+                          (aob-session-events s)))
+        (aob-acp--config-apply s nil)
+        (should-not (aob-acp--model-info s))
+        (aob-acp--set-model s "gpt-5.2-codex")
+        (should-not (seq-find (lambda (m) (equal (plist-get m :method) "session/set_model"))
+                              sent))))))
 
 (ert-deftest aob-model-self-heals-via-mode-noop ()
   ;; a session with no stored options (opened before ingestion) fetches
@@ -1393,7 +1415,7 @@ leaves the connection announcing, and one that takes neither does not."
                (json (json-serialize caps)))
           (should (hash-table-p (plist-get caps :subagents)))
           (should (string-match-p "\"subagents\":{}" json))
-          (should (string-match-p (regexp-quote "\"subagent-transcript\":true,\"jetbrains\":{\"air\":{\"version\":1,\"capabilities\":[\"nativeSubagentSessions\"]}}")
+          (should (string-match-p (regexp-quote "\"subagent-transcript\":true,\"terminal_output_delta\":true,\"jetbrains\":{\"air\":{\"version\":1,\"capabilities\":[\"nativeSubagentSessions\"]}}")
                                   json))))
       (aob-tests--feed s (format "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"sessionCapabilities\":{\"subagents\":{}}},\"_meta\":{\"jetbrains\":{\"air\":{\"version\":1,\"capabilities\":[\"nativeSubagentSessions\"]}}}}}"
                                  (process-get proc 'aob-init-id)))
@@ -3759,11 +3781,14 @@ under it included, and not for any other."
 (ert-deftest aob-initialize-declares-form-elicitation-as-an-object ()
   (let* ((aob-acp-native-subagents nil)
          (json (json-serialize (aob-acp--client-capabilities))))
-    (should (string-match-p "\"elicitation\":{\"form\":{}}" json))
+    (should (string-match-p "\"elicitation\":{\"form\":{},\"url\":{}}" json))
     (should (equal json (concat "{\"fs\":{\"readTextFile\":false,\"writeTextFile\":false},"
-                                "\"elicitation\":{\"form\":{}},"
-                                "\"session\":{\"configOptions\":{\"boolean\":{}}},"
-                                "\"_meta\":{\"subagent-transcript\":true}}")))))
+                                "\"elicitation\":{\"form\":{},\"url\":{}},"
+                                "\"auth\":{\"terminal\":true},"
+                                "\"session\":{\"configOptions\":{\"boolean\":{}},"
+                                "\"notices\":{},\"compaction\":{}},"
+                                "\"_meta\":{\"subagent-transcript\":true,"
+                                "\"terminal_output_delta\":true}}")))))
 
 (ert-deftest aob-trace-answers-claude-ask-user-question ()
   (aob-tests--with-trace-session s
@@ -4883,6 +4908,82 @@ next chunk does not pull the page back down."
         (should (eq (aob-trace--comment-box trace 3 "why?" 1) a))
         (should (equal (with-current-buffer a (buffer-string))
                        "half a thought"))))))
+
+(defun aob-tests--commenting ()
+  "The spans lit as being commented on in this buffer, as (START . END)."
+  (mapcar (lambda (o) (cons (overlay-start o) (overlay-end o)))
+          (seq-filter (lambda (o) (eq (overlay-get o 'face) 'aob-trace-commenting))
+                      (overlays-in (point-min) (point-max)))))
+
+(defmacro aob-tests--commenting-on (s beg end &rest body)
+  "Say words in S's trace, with BEG and END bound around \"bravo\", and run BODY."
+  (declare (indent 3))
+  `(aob-tests--with-trace-session ,s
+     (save-window-excursion
+       (set-window-buffer (selected-window) (current-buffer))
+       (aob-tests--say ,s "alpha bravo charlie")
+       (aob-tests--goto "bravo")
+       (search-forward "bravo")
+       (let ((,beg (match-beginning 0))
+             (,end (match-end 0))
+             (aob-compose-float nil))
+         (unwind-protect
+             (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+                       ((symbol-function 'posframe-show)
+                        (lambda (&rest _) (selected-frame)))
+                       ((symbol-function 'select-frame-set-input-focus) #'ignore))
+               ,@body)
+           (dolist (b (buffer-list))
+             (when (string-prefix-p "compose:comment:" (buffer-name b))
+               (kill-buffer b))))))))
+
+(defun aob-tests--comment-draft ()
+  "The comment draft open now."
+  (seq-find (lambda (b) (string-prefix-p "compose:comment:" (buffer-name b)))
+            (buffer-list)))
+
+(ert-deftest aob-trace-comment-lights-what-it-is-on ()
+  (aob-tests--commenting-on s beg end
+    (aob-trace-comment beg end)
+    (should (equal (aob-tests--commenting) (list (cons beg end))))
+    (aob-trace-comment beg end)
+    (should (equal (aob-tests--commenting) (list (cons beg end))))))
+
+(ert-deftest aob-trace-comment-light-outlives-a-redraw ()
+  (aob-tests--commenting-on s beg end
+    (aob-trace-comment beg end)
+    (setq aob-trace--blocks nil)
+    (aob-trace--render t)
+    (should (equal (aob-tests--commenting) (list (cons beg end))))))
+
+(ert-deftest aob-trace-comment-light-goes-when-held-or-killed ()
+  (aob-tests--commenting-on s beg end
+    (aob-trace-comment beg end)
+    (let ((draft (aob-tests--comment-draft)))
+      (should (aob-tests--commenting))
+      (with-current-buffer draft
+        (funcall (nth 2 aob-compose--anchor) "fix this" nil))
+      (should (buffer-live-p draft))
+      (should-not (aob-tests--commenting))
+      (kill-buffer draft))
+    (aob-tests--goto "bravo")
+    (search-forward "bravo")
+    (aob-trace-comment (match-beginning 0) (match-end 0))
+    (should (aob-tests--commenting))
+    (kill-buffer (aob-tests--comment-draft))
+    (should-not (aob-tests--commenting))))
+
+(ert-deftest aob-trace-comment-lights-while-read-in-the-minibuffer ()
+  (aob-tests--commenting-on s beg end
+    (let (while-read)
+      (cl-letf (((symbol-function 'display-graphic-p) #'ignore)
+                ((symbol-function 'read-string)
+                 (lambda (&rest _)
+                   (setq while-read (aob-tests--commenting))
+                   "fix this")))
+        (aob-trace-comment beg end))
+      (should (equal while-read (list (cons beg end))))
+      (should-not (aob-tests--commenting)))))
 
 (ert-deftest aob-trace-comment-box-leaves-the-tail-alone ()
   (aob-tests--with-session s
@@ -6689,9 +6790,12 @@ the cap fails it and lets the workflow go."
         (should (equal (json-serialize (plist-get (car sent) :params))
                        (concat "{\"protocolVersion\":1,\"clientCapabilities\":"
                                "{\"fs\":{\"readTextFile\":false,\"writeTextFile\":false},"
-                               "\"elicitation\":{\"form\":{}},"
-                               "\"session\":{\"configOptions\":{\"boolean\":{}}},"
-                               "\"_meta\":{\"subagent-transcript\":true}},"
+                               "\"elicitation\":{\"form\":{},\"url\":{}},"
+                               "\"auth\":{\"terminal\":true},"
+                               "\"session\":{\"configOptions\":{\"boolean\":{}},"
+                               "\"notices\":{},\"compaction\":{}},"
+                               "\"_meta\":{\"subagent-transcript\":true,"
+                               "\"terminal_output_delta\":true}},"
                                "\"clientInfo\":{\"name\":\"aob.el\",\"version\":\"0.1\"}}"))))
       (aob-tests--init-reply s "{\"protocolVersion\":2,\"info\":{\"name\":\"x\"}}")
       (should (eq 'failed (car (process-get (aob-session-conn s) 'aob-init)))))))
@@ -6710,7 +6814,7 @@ close coming with the session capability itself."
           (should (eql 2 (plist-get params :protocolVersion)))
           (should (plist-get params :clientCapabilities))
           (should (equal (plist-get params :info) (plist-get params :clientInfo)))
-          (should (string-match-p "\"capabilities\":{\"elicitation\":{\"form\":{}}"
+          (should (string-match-p "\"capabilities\":{\"elicitation\":{\"form\":{},\"url\":{}}"
                                   (json-serialize params)))))
       (aob-tests--init-reply
        s "{\"protocolVersion\":1,\"agentCapabilities\":{\"loadSession\":true,\"sessionCapabilities\":{\"resume\":{}}}}")
@@ -7096,3 +7200,435 @@ An agent that never answers the delete is not waited on past
           (should (aob-acp-delete-entry
                    '(:agent "claude" :project "/tmp/proj/" :acp-id "other")))
           (should (equal (plist-get (car sent) :method) "session/delete")))))))
+
+;;; Auth and URL elicitation — the agent's own login, pages it asks to open
+
+(defconst aob-tests--auth-init
+  "{\"protocolVersion\":1,\"authMethods\":[{\"id\":\"sub-login\",\"name\":\"Subscription\",\"type\":\"terminal\",\"args\":[\"login\"],\"env\":{\"AOB_T\":\"yes\"}},{\"id\":\"api-key\",\"name\":\"API Key\",\"_meta\":{\"api-key\":{\"provider\":\"openai\"}}},{\"id\":\"old-login\",\"name\":\"Old Login\",\"_meta\":{\"terminal-auth\":{\"command\":\"true\",\"args\":[\"x\"],\"label\":\"L\"}}}]}"
+  "An initialize result offering a terminal login, an agent login and an
+older terminal-auth one, in the shapes claude-agent-acp and codex-acp send.")
+
+(defun aob-tests--auth-conn (s)
+  "Settle S's connection with `aob-tests--auth-init' as the wire does.
+S's project becomes a real directory, where a login terminal can start."
+  (aob-session-put s :agent "fake")
+  (setf (aob-session-project s) (file-name-as-directory temporary-file-directory))
+  (cl-letf (((symbol-function 'aob-acp--send-proc) #'ignore))
+    (aob-acp--initialize (aob-session-conn s)))
+  (aob-tests--init-reply s aob-tests--auth-init))
+
+(defun aob-tests--auth-refuse (s id)
+  "Refuse S's request ID for want of a login."
+  (aob-tests--feed s (format "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32000,\"message\":\"Authentication required\"}}" id)))
+
+(defun aob-tests--sent-method (sent method)
+  "The frames in SENT calling METHOD, newest first."
+  (seq-filter (lambda (m) (equal (plist-get m :method) method)) sent))
+
+(defun aob-tests--auth-open (s)
+  "Open S over its settled connection and return the session/new id."
+  (cl-letf (((symbol-function 'aob-acp--live-conn) (lambda (&rest _) (aob-session-conn s))))
+    (aob-acp--connect s (lambda (_init) (list "session/new" (list :cwd "/tmp/proj")))
+                      #'ignore)))
+
+(ert-deftest aob-auth-methods-are-kept-per-connection ()
+  (aob-tests--with-session s
+    (aob-tests--auth-conn s)
+    (let ((methods (aob-acp--auth-methods (aob-session-conn s)))
+          (aob-acp-agents '(("fake" :command ("fake-acp")))))
+      (should (equal (mapcar (lambda (m) (plist-get m :id)) methods)
+                     '("sub-login" "api-key" "old-login")))
+      (should (equal (aob-acp--auth-argv s (nth 0 methods)) '("fake-acp" "login")))
+      (should (equal (aob-acp--auth-env (nth 0 methods)) '("AOB_T=yes")))
+      (should (equal (aob-acp--auth-argv s (nth 2 methods)) '("true" "x")))
+      (should (aob-acp--auth-terminal-p (nth 2 methods)))
+      (should-not (aob-acp--auth-terminal-p (nth 1 methods))))))
+
+(ert-deftest aob-auth-required-on-session-new-offers-the-agent-logins ()
+  (aob-tests--with-session s
+    (aob-tests--auth-conn s)
+    (aob-tests--capturing sent
+      (aob-tests--auth-open s)
+      (aob-tests--auth-refuse s (plist-get (car (aob-tests--sent-method sent "session/new")) :id))
+      (let ((d (car (aob-session-decisions s))))
+        (should (eq (plist-get d :kind) 'auth))
+        (should (equal (mapcar (lambda (o) (plist-get o :name)) (plist-get d :options))
+                       '("Subscription" "API Key" "Old Login" "Not now")))
+        (should (eq (aob-session-state s) 'blocked))
+        (should (string-match-p "fake needs a login; log in with Subscription or API Key or Old Login"
+                                (plist-get (car (last (aob-session-events s))) :title)))))))
+
+(defun aob-tests--await (pred)
+  "Pump process output until PRED holds, failing after five seconds."
+  (with-timeout (5 (error "aob-tests--await: timed out"))
+    (while (not (funcall pred))
+      (accept-process-output nil 0.05))))
+
+(ert-deftest aob-auth-terminal-login-then-one-retry-of-session-new ()
+  "A terminal login runs the agent's program with the method's args and
+env, is never passed to authenticate, and session/new goes out once more;
+a second refusal fails the session, readably, instead of asking again."
+  (aob-tests--with-session s
+    (let ((aob-acp-command-function #'identity)
+          (aob-acp-agents
+           '(("fake" :command ("sh" "-c" "test \"$1\" = login && test \"$AOB_T\" = yes" "sh")))))
+      (aob-tests--auth-conn s)
+      (unwind-protect
+          (aob-tests--capturing sent
+            (aob-tests--auth-open s)
+            (aob-tests--auth-refuse s (plist-get (car sent) :id))
+            (aob-acp--resolve s (car (aob-session-decisions s)) "sub-login")
+            (aob-tests--await (lambda () (cdr (aob-tests--sent-method sent "session/new"))))
+            (should-not (aob-tests--sent-method sent "authenticate"))
+            (should (= 2 (length (aob-tests--sent-method sent "session/new"))))
+            (aob-tests--auth-refuse s (plist-get (car sent) :id))
+            (should (= 2 (length (aob-tests--sent-method sent "session/new"))))
+            (should-not (aob-session-decisions s))
+            (should (eq (aob-session-state s) 'failed))
+            (should (string-match-p "fake needs a login"
+                                    (aob-session-ref s :fail-reason))))
+        (ignore-errors (kill-buffer "*login fake*"))))))
+
+(ert-deftest aob-auth-terminal-login-that-fails-sends-nothing ()
+  (aob-tests--with-session s
+    (let ((aob-acp-command-function #'identity)
+          (aob-acp-agents '(("fake" :command ("false")))))
+      (aob-tests--auth-conn s)
+      (unwind-protect
+          (aob-tests--capturing sent
+            (aob-tests--auth-open s)
+            (aob-tests--auth-refuse s (plist-get (car sent) :id))
+            (aob-acp--resolve s (car (aob-session-decisions s)) "sub-login")
+            (aob-tests--await (lambda () (eq (aob-session-state s) 'failed)))
+            (should (= 1 (length (aob-tests--sent-method sent "session/new"))))
+            (should (string-match-p "fake's login Subscription did not finish"
+                                    (aob-session-ref s :fail-reason))))
+        (ignore-errors (kill-buffer "*login fake*"))))))
+
+(ert-deftest aob-auth-older-terminal-login-authenticates-then-retries ()
+  (aob-tests--with-session s
+    (let ((aob-acp-command-function #'identity))
+      (aob-tests--auth-conn s)
+      (unwind-protect
+          (aob-tests--capturing sent
+            (aob-tests--auth-open s)
+            (aob-tests--auth-refuse s (plist-get (car sent) :id))
+            (aob-acp--resolve s (car (aob-session-decisions s)) "old-login")
+            (aob-tests--await (lambda () (aob-tests--sent-method sent "authenticate")))
+            (should (equal (plist-get (car sent) :params) '(:methodId "old-login")))
+            (should (= 1 (length (aob-tests--sent-method sent "session/new"))))
+            (aob-tests--reply s nil)
+            (should (= 2 (length (aob-tests--sent-method sent "session/new")))))
+        (ignore-errors (kill-buffer "*login fake*"))))))
+
+(ert-deftest aob-auth-agent-login-authenticates-and-says-how-it-went ()
+  (aob-tests--with-session s
+    (aob-tests--auth-conn s)
+    (aob-tests--capturing sent
+      (aob-tests--auth-open s)
+      (aob-tests--auth-refuse s (plist-get (car sent) :id))
+      (aob-acp--resolve s (car (aob-session-decisions s)) "api-key")
+      (should (equal (plist-get (car sent) :method) "authenticate"))
+      (should (equal (plist-get (car sent) :params) '(:methodId "api-key")))
+      (aob-tests--feed s (format "{\"jsonrpc\":\"2.0\",\"id\":%d,\"error\":{\"code\":-32602,\"message\":\"Invalid params\"}}"
+                                 (plist-get (car sent) :id)))
+      (should (eq (aob-session-state s) 'failed))
+      (should (equal (aob-session-ref s :fail-reason)
+                     "fake could not log in with API Key (Invalid params); pick another login, or log in with fake's own CLI")))))
+
+(ert-deftest aob-auth-status-update-shows-on-every-session-of-the-connection ()
+  (aob-tests--with-session s
+    (let ((s2 (aob-create-session :id "acp:test:2" :backend 'acp :name "test:2"
+                                  :project "/tmp/proj/" :dir "/tmp/proj/" :state 'idle)))
+      (unwind-protect
+          (progn
+            (setf (aob-session-conn s2) (aob-session-conn s))
+            (aob-acp--register (aob-session-conn s) "sess-2" s2)
+            (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"_auth/status_update\",\"params\":{\"authStatus\":{\"kind\":\"account\",\"label\":\"Claude Max\",\"account\":{\"plan\":\"max\",\"email\":\"a@b.c\"}}}}")
+            (dolist (x (list s s2))
+              (should (equal (aob-session-ref x :auth-label) "Claude Max (a@b.c)")))
+            (should (string-match-p "Claude Max (a@b\\.c)" (aob-trace--header s)))
+            (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"_auth/status_update\",\"params\":{\"authStatus\":{\"kind\":\"none\",\"label\":\"Not logged in\"}}}")
+            (should (eq (get-text-property 0 'face (aob-session-ref s2 :auth-label)) 'warning)))
+        (aob-remove-session s2)))))
+
+(defconst aob-tests--url-ask
+  '(:sessionId "sess-test" :mode "url" :elicitationId "e1"
+    :url "https://example.test/device"
+    :message "Sign in to ChatGPT and enter this code: ABCD-1234")
+  "A url elicitation as codex-acp sends it for its device-code login.")
+
+(ert-deftest aob-url-elicitation-accept-opens-the-page ()
+  (aob-tests--with-session s
+    (let (opened)
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened))))
+        (aob-tests--capturing sent
+          (aob-tests--request s 71 "elicitation/create" aob-tests--url-ask)
+          (let ((d (car (aob-session-decisions s))))
+            (should (eq (plist-get d :kind) 'url))
+            (should (equal (plist-get d :title) "Sign in to ChatGPT and enter this code: ABCD-1234"))
+            (aob-acp--resolve s d "accept"))
+          (should (equal opened '("https://example.test/device")))
+          (should (equal (aob-tests--replies sent)
+                         '("{\"jsonrpc\":\"2.0\",\"id\":71,\"result\":{\"action\":\"accept\"}}"))))))))
+
+(ert-deftest aob-url-elicitation-decline-opens-nothing ()
+  (aob-tests--with-session s
+    (let (opened)
+      (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened))))
+        (aob-tests--capturing sent
+          (aob-tests--request s 72 "elicitation/create" aob-tests--url-ask)
+          (aob-acp--resolve s (car (aob-session-decisions s)) 'decline)
+          (should-not opened)
+          (should (equal (aob-tests--replies sent)
+                         '("{\"jsonrpc\":\"2.0\",\"id\":72,\"result\":{\"action\":\"decline\"}}"))))))))
+
+(ert-deftest aob-elicitation-complete-closes-the-pending-page ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--capturing sent
+      (aob-tests--request s 73 "elicitation/create" aob-tests--url-ask)
+      (should (eq (aob-session-state s) 'blocked))
+      (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"elicitation/complete\",\"params\":{\"elicitationId\":\"e1\"}}")
+      (should-not (aob-session-decisions s))
+      (should (eq (aob-session-state s) 'working))
+      (should (equal (aob-tests--replies sent)
+                     '("{\"jsonrpc\":\"2.0\",\"id\":73,\"result\":{\"action\":\"accept\"}}"))))))
+
+(defmacro aob-tests--recording-states (var &rest body)
+  "Run BODY with each state change of a session kept in VAR as (OLD NEW),
+oldest first."
+  (declare (indent 1))
+  `(let ((,var nil)
+         (aob-state-change-hook nil))
+     (add-hook 'aob-state-change-hook
+               (lambda (_s old new) (setq ,var (append ,var (list (list old new))))))
+     ,@body))
+
+(ert-deftest aob-url-elicitation-on-an-idle-session-leaves-it-idle ()
+  "A page asked for outside a turn, as codex's device-code login does,
+returns the session to idle when answered or completed, never to working."
+  (cl-letf (((symbol-function 'browse-url) #'ignore))
+    (dolist (finish (list (lambda (s) (aob-acp--resolve s (car (aob-session-decisions s)) "accept"))
+                          (lambda (s) (aob-acp--resolve s (car (aob-session-decisions s)) 'decline))
+                          (lambda (s) (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"elicitation/complete\",\"params\":{\"elicitationId\":\"e1\"}}"))))
+      (aob-tests--with-session s
+        (aob-set-state s 'idle)
+        (aob-tests--capturing _sent
+          (aob-tests--recording-states states
+            (aob-tests--request s 75 "elicitation/create" aob-tests--url-ask)
+            (funcall finish s)
+            (should (equal states '((idle blocked) (blocked idle))))))))))
+
+(ert-deftest aob-auth-cancel-while-opening-fails-the-open ()
+  "Cancelling the login offered while session/new waits fails the session
+with why, and sends no session/cancel for a session the agent never opened."
+  (aob-tests--with-session s
+    (aob-tests--auth-conn s)
+    (aob-tests--capturing sent
+      (aob-tests--auth-open s)
+      (aob-tests--auth-refuse s (plist-get (car (aob-tests--sent-method sent "session/new")) :id))
+      (should (eq (aob-session-state s) 'blocked))
+      (aob-tests--recording-states states
+        (aob-acp--cancel s)
+        (should (equal states '((blocked failed)))))
+      (should-not (aob-session-decisions s))
+      (should (equal (aob-session-ref s :fail-reason) "login cancelled"))
+      (should-not (aob-tests--sent-method sent "session/cancel")))))
+
+(ert-deftest aob-auth-cancel-after-a-refused-turn-goes-back-to-idle ()
+  (aob-tests--with-session s
+    (aob-tests--auth-conn s)
+    (aob-set-state s 'idle)
+    (aob-tests--capturing sent
+      (aob-tests--recording-states states
+        (aob-acp--auth-offer s '(:code -32000 :message "Authentication required") nil)
+        (aob-acp--cancel s)
+        (should (equal states '((idle blocked) (blocked idle)))))
+      (should-not (aob-session-decisions s))
+      (should-not (aob-tests--sent-method sent "session/cancel")))))
+
+(ert-deftest aob-auth-login-after-a-refused-turn-never-passes-through-working ()
+  "No turn runs while the agent logs in, so the session goes back to idle
+once and stays there; a working → idle pair would end a turn twice."
+  (aob-tests--with-session s
+    (aob-tests--auth-conn s)
+    (aob-set-state s 'idle)
+    (aob-tests--capturing sent
+      (aob-tests--recording-states states
+        (aob-acp--auth-offer s '(:code -32000 :message "Authentication required") nil)
+        (aob-acp--resolve s (car (aob-session-decisions s)) "api-key")
+        (should (aob-tests--sent-method sent "authenticate"))
+        (aob-tests--reply s nil)
+        (should (equal states '((idle blocked) (blocked idle))))))))
+
+(ert-deftest aob-request-scoped-elicitation-finds-a-session ()
+  "A form scoped to a request no session sent, with two sessions on the
+connection, is asked on one of them rather than refused as unknown."
+  (aob-tests--with-session s
+    (let ((s2 (aob-create-session :id "acp:test:2" :backend 'acp :name "test:2"
+                                  :project "/tmp/proj/" :dir "/tmp/proj/" :state 'idle)))
+      (unwind-protect
+          (aob-tests--capturing sent
+            (setf (aob-session-conn s2) (aob-session-conn s))
+            (aob-acp--register (aob-session-conn s) "sess-2" s2)
+            (aob-tests--request s 74 "elicitation/create"
+                                '(:requestId 99 :mode "form" :message "Which org?"
+                                  :requestedSchema (:type "object"
+                                                    :properties (:org (:type "string")))))
+            (should-not (seq-filter (lambda (m) (plist-member m :error)) sent))
+            (should (seq-find (lambda (x)
+                                (equal (plist-get (car (aob-session-decisions x)) :reply-id) 74))
+                              (list s s2))))
+        (aob-remove-session s2)))))
+
+(defun aob-tests--sent-initialize (s)
+  "The clientCapabilities S's connection declares in the initialize it sends."
+  (aob-tests--capturing sent
+    (aob-acp--initialize (aob-session-conn s))
+    (plist-get (plist-get (seq-find (lambda (m) (equal (plist-get m :method) "initialize"))
+                                    sent)
+                          :params)
+               :clientCapabilities)))
+
+(defun aob-tests--events-of (s type)
+  "S's events of TYPE, oldest first."
+  (reverse (seq-filter (lambda (e) (eq (plist-get e :type) type))
+                       (aob-session-events s))))
+
+(ert-deftest aob-acp-terminal-output-streams-into-the-tool-call ()
+  "Declared terminal_output_delta, a command's output is appended to its
+tool call as it streams, and a final update that repeats it as content
+is not shown twice."
+  (aob-tests--with-session s
+    (should (eq t (plist-get (plist-get (aob-tests--sent-initialize s) :_meta)
+                             :terminal_output_delta)))
+    (aob-tests--update s '(:sessionUpdate "tool_call" :toolCallId "t1" :kind "execute"
+                           :title "ls" :status "in_progress" :rawInput (:command "ls")
+                           :_meta (:terminal_info (:terminal_id "t1"))))
+    (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "t1"
+                           :_meta (:terminal_output_delta (:terminal_id "t1" :data "a.txt\n"))))
+    (let ((ev (car (aob-tests--events-of s 'tool))))
+      (should (equal (aob-trace--shell-output ev) '("a.txt")))
+      (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "t1"
+                             :_meta (:terminal_output_delta (:terminal_id "t1" :data "b.txt\n"))))
+      (should (equal (aob-trace--shell-output ev) '("a.txt" "b.txt")))
+      (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "t1" :status "completed"
+                             :content [(:type "content"
+                                        :content (:type "text"
+                                                  :text "```console\na.txt\nb.txt\n```"))]
+                             :_meta (:terminal_exit (:terminal_id "t1" :exit_code 2))))
+      (should (equal (aob-trace--shell-output ev) '("a.txt" "b.txt")))
+      (should (= (aob-trace--exit-code ev (aob-trace--shell-output ev)) 2))
+      (should (= 1 (with-temp-buffer
+                     (insert (aob-trace--tail-block ev))
+                     (count-matches "a\\.txt" (point-min) (point-max)))))
+      (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "t1"
+                             :content [(:type "terminal" :terminalId "t1")]))
+      (should (equal (aob-trace--shell-output ev) '("a.txt" "b.txt"))))))
+
+(ert-deftest aob-acp-replayed-user-chunks-become-prompts ()
+  "A load's user_message_chunk is your prompt again, a turn of its own;
+the echo of a prompt sent live is not a second one."
+  (aob-tests--with-session s
+    (dolist (u '((:sessionUpdate "user_message_chunk" :content (:type "text" :text "hello "))
+                 (:sessionUpdate "user_message_chunk" :content (:type "text" :text "there"))
+                 (:sessionUpdate "agent_message_chunk" :content (:type "text" :text "hi"))
+                 (:sessionUpdate "user_message_chunk" :content (:type "text" :text "again"))
+                 (:sessionUpdate "agent_message_chunk" :content (:type "text" :text "ok"))))
+      (aob-tests--update s u))
+    (let ((prompts (aob-tests--events-of s 'prompt)))
+      (should (equal (mapcar #'aob-event-text prompts) '("hello there" "again")))
+      (should (seq-every-p (lambda (p) (plist-get p :typed)) prompts)))
+    (should (equal (mapcar #'aob-event-text (aob-tests--events-of s 'message))
+                   '("hi" "ok")))
+    (aob-set-state s 'idle)
+    (aob-tests--capturing _sent
+      (aob-acp--prompt-1 s "live words"))
+    (aob-tests--update s '(:sessionUpdate "user_message_chunk"
+                           :content (:type "text" :text "live words")))
+    (should (equal (mapcar #'aob-event-text (aob-tests--events-of s 'prompt))
+                   '("hello there" "again" "live words")))))
+
+(ert-deftest aob-acp-short-stops-warn ()
+  "refusal, max_tokens and max_turn_requests end a turn as a warning in the
+trace and the header; a turn that ends as usual clears it."
+  (aob-tests--with-session s
+    (dolist (reason '("refusal" "max_tokens" "max_turn_requests" "end_turn"))
+      (aob-set-state s 'idle)
+      (aob-tests--capturing sent
+        (aob-acp--prompt-1 s "go")
+        (aob-tests--answer s (car sent) (list :stopReason reason)))
+      (let* ((stop (car (last (aob-tests--events-of s 'stop))))
+             (summary (aob-event-summary stop))
+             (header (aob-trace--header s))
+             (warning (aob-session-ref s :stop-warning)))
+        (if (equal reason "end_turn")
+            (progn (should (equal summary "done (end_turn)"))
+                   (should-not warning)
+                   (should-not (text-property-any 0 (length header) 'face 'warning header)))
+          (should (string-prefix-p "stopped: " summary))
+          (should (equal (plist-get stop :warning) warning))
+          (should (string-search warning header))
+          (should (eq 'warning (get-text-property (string-search warning header)
+                                                  'face header))))))
+    (with-current-buffer (aob-trace-buffer s)
+      (unwind-protect
+          (progn (aob-trace--render t)
+                 (goto-char (point-min))
+                 (search-forward "stopped: the model refused")
+                 (should (memq 'warning (ensure-list (get-text-property (match-beginning 0)
+                                                                        'font-lock-face)))))
+        (kill-buffer)))))
+
+(ert-deftest aob-acp-content-blocks-render-or-say-so ()
+  "Every kind of block an agent sends is shown or named: a picture is
+drawn where it can be, a link follows, a resource shows its text."
+  (aob-tests--with-session s
+    (dolist (block '((:type "text" :text "see ")
+                     (:type "image" :mimeType "image/png" :data "iVBORw0KGgo=")
+                     (:type "resource_link" :uri "file:///tmp/proj/a.el" :name "a.el")
+                     (:type "resource_link" :uri "https://example.com/x" :name "x")
+                     (:type "resource" :resource (:uri "file:///tmp/proj/b.txt" :text "body"))
+                     (:type "audio" :mimeType "audio/wav" :data "AAAA")
+                     (:type "hologram")))
+      (aob-tests--update s (list :sessionUpdate "agent_message_chunk" :content block)))
+    (let* ((msg (car (aob-tests--events-of s 'message)))
+           (text (aob-event-text msg)))
+      (should (= 1 (length (aob-tests--events-of s 'message))))
+      (dolist (shown '("see " "[[Image]]" "[[a.el]]" "[[x]]" "[[/tmp/proj/b.txt]]" "body"
+                       "[[Audio]]" "[[hologram]]"))
+        (should (string-search shown text)))
+      (should (equal (get-text-property (string-search "[[a.el]]" text) 'aob-file text)
+                     '("/tmp/proj/a.el" nil nil)))
+      (should (get-text-property (string-search "[[x]]" text) 'button text))
+      (should (= 1 (length (plist-get msg :image-data))))
+      (should (string-empty-p (aob-trace--images-of msg)))
+      (cl-letf (((symbol-function 'display-graphic-p) #'always)
+                ((symbol-function 'create-image) (lambda (&rest _) '(image :type png))))
+        (let ((aob-trace-icons t))
+          (should (equal (get-text-property 1 'display (aob-trace--images-of msg))
+                         '(image :type png))))))))
+
+(ert-deftest aob-acp-notices-and-compaction-are-status ()
+  "A notice and a compaction are status lines, never the agent's words, and
+initialize declares both."
+  (aob-tests--with-session s
+    (let ((session (plist-get (aob-tests--sent-initialize s) :session)))
+      (should (hash-table-p (plist-get session :notices)))
+      (should (hash-table-p (plist-get session :compaction))))
+    (aob-tests--update s '(:sessionUpdate "notice" :severity "warning"
+                           :title "Model fallback" :description "Using sonnet"))
+    (aob-tests--update s '(:sessionUpdate "compaction_update" :compactionId "c1"
+                           :status "in_progress"))
+    (aob-tests--update s '(:sessionUpdate "compaction_summary_chunk" :compactionId "c1"
+                           :content (:type "text" :text "Summary here")))
+    (aob-tests--update s '(:sessionUpdate "compaction_update" :compactionId "c1"
+                           :status "completed"))
+    (should-not (aob-tests--events-of s 'message))
+    (let ((states (aob-tests--events-of s 'state)))
+      (should (= 2 (length states)))
+      (should (equal (plist-get (car states) :title) "Model fallback: Using sonnet"))
+      (should (plist-get (car states) :warning))
+      (should (equal (plist-get (cadr states) :title) "context compacted"))
+      (should (equal (aob-event-text (cadr states)) "Summary here")))))

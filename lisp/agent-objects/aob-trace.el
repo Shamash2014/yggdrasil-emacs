@@ -927,8 +927,13 @@ its locations goes after it."
           title))))
 
 (defun aob-trace--shell-output (ev)
-  "What EV's command printed, without the fence an adapter wraps it in."
-  (let* ((text (aob-trace--content-text ev))
+  "What EV's command printed, without the fence an adapter wraps it in.
+Output streamed as it was printed is the output: a final update that
+carries it again as content is not shown a second time."
+  (let* ((streamed (plist-get ev :terminal-output))
+         (text (if (and (stringp streamed) (not (string-empty-p streamed)))
+                   streamed
+                 (aob-trace--content-text ev)))
          (raw (plist-get ev :rawOutput))
          (text (if (string-empty-p (string-trim text))
                    (cond ((stringp raw) raw)
@@ -1007,7 +1012,8 @@ whoever reads why S is stuck reads what it did and said."
   "The exit status EV's command reported, or nil when it said none."
   (let* ((raw (plist-get ev :rawOutput))
          (plist (and (consp raw) (keywordp (car raw)) raw)))
-    (or (seq-some (lambda (p)
+    (or (plist-get ev :terminal-exit)
+        (seq-some (lambda (p)
                     (and p (seq-some (lambda (k) (let ((v (plist-get p k))) (and (integerp v) v)))
                                      '(:exit_code :exitCode :exit :returnCode))))
                   (list plist (plist-get plist :metadata)))
@@ -1535,15 +1541,32 @@ remap such as `ygg-focus-dim' cannot outrank it."
           (when img (propertize "[[Image]]" 'display img))))
       (and (stringp file) (format "[[%s]]" (file-name-nondirectory file)))))
 
+(defun aob-trace--image-block (block)
+  "The picture an image content BLOCK carries, or nil where none can be drawn.
+Its words already hold the [[Image]] that names it."
+  (when-let* (((and aob-trace-icons (display-graphic-p)))
+              (data (plist-get block :data))
+              ((stringp data))
+              (img (ignore-errors
+                     (create-image (base64-decode-string data) nil t
+                                   :max-height aob-trace-image-height
+                                   :max-width 600
+                                   :ascent 'center))))
+    (propertize "[[Image]]" 'display img)))
+
 (defun aob-trace--images-of (ev)
   "The pictures EV carries, shown where they can be and named where not."
-  (when-let* ((n (plist-get ev :images)) ((> n 0)))
-    (let ((files (plist-get ev :image-files)))
-      (concat " " (string-join
-                   (if files
-                       (delq nil (mapcar #'aob-trace--thumb files))
-                     (make-list n "[[Image]]"))
-                   " ")))))
+  (concat
+   (when-let* ((n (plist-get ev :images)) ((> n 0)))
+     (let ((files (plist-get ev :image-files)))
+       (concat " " (string-join
+                    (if files
+                        (delq nil (mapcar #'aob-trace--thumb files))
+                      (make-list n "[[Image]]"))
+                    " "))))
+   (when-let* ((drawn (delq nil (mapcar #'aob-trace--image-block
+                                        (plist-get ev :image-data)))))
+     (concat " " (string-join drawn " ")))))
 
 (defun aob-trace--hang (ev str)
   "STR with the agent\='s mark beside its first line when EV opens a turn.
@@ -1677,7 +1700,12 @@ whether or not they have been joined."
                                (if (string-empty-p meter)
                                    (aob-event-summary ev)
                                  (concat (aob-event-summary ev) " · " meter)))
-                             'font-lock-face 'aob-trace-done))
+                             'font-lock-face
+                             (if (plist-get ev :warning) 'warning 'aob-trace-done)))
+                     ('state (if (plist-get ev :warning)
+                                 (propertize (aob-event-summary ev)
+                                             'font-lock-face 'warning)
+                               (aob-event-summary ev)))
                      ('permission (or (plist-get ev :title) "permission"))
                      (_ (aob-event-summary ev)))
                    (if (string-empty-p st) "" (concat " " st)))))))))
@@ -1685,7 +1713,8 @@ whether or not they have been joined."
 (defun aob-trace--detail (ev)
   (or (pcase (plist-get ev :type)
         ('tool
-         (or (mapconcat
+         (or (plist-get ev :terminal-output)
+             (mapconcat
               (lambda (c)
                 (pcase (plist-get c :type)
                   ("diff" (format "--- %s\n%s"
@@ -1696,7 +1725,7 @@ whether or not they have been joined."
               (plist-get ev :content) "\n")
              (when-let* ((raw (plist-get ev :rawOutput)))
                (format "%S" raw))))
-        ((or 'message 'thought 'prompt 'error)
+        ((or 'message 'thought 'prompt 'error 'state)
          (aob-trace--md (aob-event-text ev)))
         ('plan (mapconcat
                 (lambda (e) (format "%s %s"
@@ -2649,6 +2678,12 @@ While the agent waits on a question or a plan, this answers it instead."
   "Face behind a comment card."
   :group 'aob)
 
+(defface aob-trace-commenting
+  '((((background dark)) :background "#2B1418" :underline "#D4484B")
+    (t :background "#f5e2e2" :underline "#9a2020"))
+  "Face marking the text a comment is being written on."
+  :group 'aob)
+
 (defun aob-trace--comments (s)
   "Comments held against S, oldest first."
   (reverse (aob-session-ref s :comments)))
@@ -3049,11 +3084,49 @@ of comments together."
     (deactivate-mark)
     (if (and (display-graphic-p) (fboundp 'posframe-show)
              (get-buffer-window (current-buffer)))
-        (aob-trace--comment-box (current-buffer) seq quoted end)
-      (aob-trace--add-comment
-       s seq quoted
-       (read-string (format "Comment on %s: "
-                            (truncate-string-to-width quoted 40 nil nil t)))))))
+        (aob-trace--comment-box (current-buffer) seq quoted end nil start)
+      (let ((lit (aob-trace--light-commented start end seq quoted)))
+        (aob-trace--add-comment
+         s seq quoted
+         (unwind-protect
+             (read-string (format "Comment on %s: "
+                                  (truncate-string-to-width quoted 40 nil nil t)))
+           (delete-overlay lit)))))))
+
+(defvar-local aob-trace--commenting nil
+  "In a comment draft, the overlay lighting the words it is on.")
+(put 'aob-trace--commenting 'permanent-local t)
+
+(defun aob-trace--light-commented (start end seq quoted &optional ov)
+  "Light START..END, the QUOTED words of event SEQ, while they are commented on.
+OV, a draft's overlay from before, is moved there rather than another made."
+  (if (and ov (overlay-buffer ov))
+      (move-overlay ov start end (current-buffer))
+    (setq ov (make-overlay start end)))
+  (overlay-put ov 'face 'aob-trace-commenting)
+  (overlay-put ov 'aob-commenting (cons seq quoted))
+  ov)
+
+(defun aob-trace--unlight-commented ()
+  "Take the light off the words this draft was on."
+  (when aob-trace--commenting
+    (delete-overlay aob-trace--commenting)))
+
+(defun aob-trace--relight-commented ()
+  "Put each commented-on light back over its words, a redraw having moved them."
+  (dolist (ov (overlays-in (point-min) (point-max)))
+    (pcase (overlay-get ov 'aob-commenting)
+      (`(,seq . ,quoted)
+       (unless (equal (string-trim (buffer-substring-no-properties
+                                    (overlay-start ov) (overlay-end ov)))
+                      quoted)
+         (when-let* ((prop (if (text-property-any (point-min) (point-max) 'aob-item seq)
+                               'aob-item 'aob-event))
+                     (beg (text-property-any (point-min) (point-max) prop seq))
+                     (end (or (text-property-not-all beg (point-max) prop seq)
+                              (point-max)))
+                     (at (string-search quoted (buffer-substring-no-properties beg end))))
+           (move-overlay ov (+ beg at) (+ beg at (length quoted)))))))))
 
 (defvar aob-trace-comment-mode-map
   (let ((map (make-sparse-keymap)))
@@ -3068,23 +3141,31 @@ Its send holds the comment for the next message; C-return holds it and
 sends every comment held."
   :lighter nil)
 
-(defun aob-trace--comment-box (trace seq quoted pos &optional s)
+(defun aob-trace--comment-box (trace seq quoted pos &optional s start)
   "Open a draft under the line POS is on in TRACE, on QUOTED in SEQ.
 S is the session the comment goes to when TRACE is not its trace.  One
 draft per session, event and words: a comment left unsent is still
-there when the same line is commented on again."
+there when the same line is commented on again.  With START, the text
+from START to POS stays lit in TRACE until the draft is held or gone."
   (let ((s (or s (aob-session-get
                   (buffer-local-value 'aob-trace--session-id trace)))))
     (unless s (user-error "aob: no session to comment to"))
     (let* ((line (with-current-buffer trace
                    (save-excursion (goto-char pos) (line-beginning-position))))
            (hold (lambda (text files)
-                   (aob-trace--hold-comment trace s seq quoted text files)))
+                   (aob-trace--hold-comment trace s seq quoted text files)
+                   (aob-trace--unlight-commented)))
            (buf (aob-compose s nil
                              (format "comment:%s:%s:%s" (aob-session-name s)
                                      (or seq "-") (substring (md5 quoted) 0 6))
                              nil (list (get-buffer-window trace) line hold))))
       (with-current-buffer buf
+        (when start
+          (let ((ov aob-trace--commenting))
+            (setq aob-trace--commenting
+                  (with-current-buffer trace
+                    (aob-trace--light-commented start pos seq quoted ov))))
+          (add-hook 'kill-buffer-hook #'aob-trace--unlight-commented nil t))
         (aob-trace-comment-mode 1)
         (setq aob-compose--label
               (concat "comment on: "
@@ -3210,7 +3291,8 @@ and what the header counts against — not the window the agent claims."
         (t (number-to-string n))))
 
 (defun aob-trace--header (s)
-  "S's header: name, model, state, clock, cost, context and todo, grey but the name.
+  "S's header: name, model, login, state, clock, cost, context and todo.
+All but the name are grey.
 A subagent's names the agent it works for instead of cost and context.
 The full account is \\ u; the header carries only what is looked at."
   (let* ((grey (lambda (str) (propertize (string-replace "%" "%%" str) 'face 'shadow)))
@@ -3245,7 +3327,10 @@ The full account is \\ u; the header carries only what is looked at."
                           "read-only"
                           (format "%s" (aob-session-state s))
                           clock)
-                  (list model (format "%s" (aob-session-state s))
+                  (list model (aob-session-ref s :auth-label)
+                        (format "%s" (aob-session-state s))
+                        (when-let* ((warning (aob-session-ref s :stop-warning)))
+                          (propertize warning 'face 'warning))
                         (aob-session-quiet s)
                         (and mode (not (member mode aob-trace-quiet-modes)) mode)
                         clock cost ctx todo goal wf))))
@@ -3499,6 +3584,7 @@ A call folded into a run since is found by the item it became."
         (when (and aob-trace--input (marker-position aob-trace--input))
           (set-marker aob-trace--input pos))))
     (setq aob-trace--blocks blocks)
+    (aob-trace--relight-commented)
     (aob-trace--ensure-input)
     (let ((before (aob-trace--place-pos point-before)))
       (goto-char (if at-end (point-max) before)))
