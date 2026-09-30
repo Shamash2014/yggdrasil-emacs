@@ -20,6 +20,7 @@
 (require 'aob-trace)
 (require 'ygg-todo)
 (require 'aob-todo-view)
+(require 'aob-schedule)
 (require 'aob-workflow)
 (require 'ygg-ui)
 
@@ -1791,7 +1792,11 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "c" #'aob-acp-spawn-with :label "spawn: agent, project, model"
   "W" #'aob-ask-to :label "ask, answer goes…"
   "x" #'aob-context-add :label "context: add region"
-  "X" #'aob-context-list :label "context: list")
+  "X" #'aob-context-list :label "context: list"
+  "s" #'aob-schedule :label "schedule a prompt"
+  "S" #'aob-schedule-list :label "schedules")
+
+(unless noninteractive (aob-schedule-start))
 
 (yggdrasil-define-keys 'ygg-leader-agent-map
   "c" ygg-leader-acp-map :label "sessions")
