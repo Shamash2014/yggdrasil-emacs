@@ -16,6 +16,7 @@
 ;;; Code:
 
 (require 'aob)
+(require 'aob-subagent)
 (require 'json)
 (require 'ygg-git)
 (require 'ygg-ui)
@@ -117,8 +118,13 @@ to this one can find its way back."
   (aob-acp--send-proc (aob-session-conn s)
                       (list :jsonrpc "2.0" :method method :params params)))
 
+(defun aob-acp--proc-of (s)
+  "The connection S speaks over; a subagent the agent announced has none
+of its own and answers over the one that announced it."
+  (or (aob-session-conn s) (aob-session-ref s :acp-conn)))
+
 (defun aob-acp--respond (s id result &optional error)
-  (aob-acp--respond-proc (aob-session-conn s) id result error))
+  (aob-acp--respond-proc (aob-acp--proc-of s) id result error))
 
 ;;; Connections — one per (agent . project), sessions multiplexed
 
@@ -255,38 +261,114 @@ first."
     (aob-acp--initialize proc)
     proc))
 
+(defcustom aob-acp-native-subagents nil
+  "Non-nil asks an agent to announce its subagents as sessions of their own.
+The agent that agrees sends each subagent's words and steps under the
+subagent's own session id, and says when it ends; one that does not is
+read as before, each Agent call or codex thread becoming a subagent.
+Read when a connection starts, so a change reaches new connections only.
+
+Off, because the only switch the adapters take today is JetBrains AIR's
+`_meta' list, and saying it puts claude-agent-acp into AIR-client mode
+for the whole connection, not just for its subagents."
+  :type 'boolean :group 'aob)
+
+(defconst aob-acp--air-subagents "nativeSubagentSessions"
+  "The name JetBrains AIR's capability list gives native subagent sessions.")
+
 (defconst aob-acp-protocol-version 1
-  "The ACP version this client speaks.")
+  "The ACP version every agent is spoken to in when nothing newer is agreed.")
+
+(defcustom aob-acp-offer-protocol-version 1
+  "The highest ACP version an initialize offers; the agent answers which it takes.
+2 is the draft.  No released adapter takes it yet: claude-agent-acp and
+codex-acp both answer 1 whatever is offered, and codex-acp's unreleased
+main picks v2 from the offer.  Under v2 aob reads the init result, the
+session lifetime (resume with replayFrom, list, close, delete) and the
+subject-generic permission request; the rest of the v2 update vocabulary
+\(agent_message, state_update, tool_call_update as an upsert, notices,
+compaction) is not read, so offering 2 is an experiment.  Read when a
+connection starts."
+  :type '(choice (const 1) (const 2)) :group 'aob)
+
+(defun aob-acp--initialize-params (offer)
+  "The initialize params offering ACP version OFFER.
+Version 1 is the request as it always was.  A v2 offer carries the v2
+keys beside the v1 ones: an agent without a version router reads the
+request as v1 whatever it says, and both schemas drop keys they do not
+know, so each side finds its own."
+  (let ((caps (aob-acp--client-capabilities))
+        (info (list :name "aob.el" :version "0.1")))
+    (append (list :protocolVersion offer
+                  :clientCapabilities caps
+                  :clientInfo info)
+            (when (>= offer 2)
+              (list :info info
+                    :capabilities
+                    (list :elicitation (plist-get caps :elicitation)
+                          :_meta (plist-get caps :_meta)))))))
 
 (defun aob-acp--initialize (proc)
   "Send PROC the initialize request and settle its init state on the reply."
+  (process-put proc 'aob-subagents-offered aob-acp-native-subagents)
+  (process-put proc 'aob-protocol-offered aob-acp-offer-protocol-version)
   (process-put
    proc 'aob-init-id
    (aob-acp--request-proc
     proc "initialize"
-    (list :protocolVersion aob-acp-protocol-version
-          :clientCapabilities (aob-acp--client-capabilities)
-          :clientInfo (list :name "aob.el" :version "0.1"))
+    (aob-acp--initialize-params aob-acp-offer-protocol-version)
     (lambda (res err) (aob-acp--initialized proc res err)))))
 
-(defun aob-acp--version-error (res)
-  "Why the initialize result RES cannot be spoken with, or nil."
-  (let ((version (plist-get res :protocolVersion)))
+(defun aob-acp--version-error (res &optional offered)
+  "Why the initialize result RES cannot be spoken with, or nil.
+Any version from 1 up to OFFERED is spoken; OFFERED defaults to
+`aob-acp-protocol-version'."
+  (let ((version (plist-get res :protocolVersion))
+        (offered (or offered aob-acp-protocol-version)))
     (cond
      ((null version)
       (list :message (format "agent names no ACP version; aob speaks %d"
-                             aob-acp-protocol-version)))
-     ((not (eql version aob-acp-protocol-version))
+                             offered)))
+     ((not (and (integerp version) (<= 1 version offered)))
       (list :message (format "agent speaks ACP v%s; aob speaks %d"
-                             version aob-acp-protocol-version))))))
+                             version offered))))))
+
+(defun aob-acp--v1-init (res)
+  "RES, a v2 initialize result, in the v1 shape every reader here expects.
+The v2 capabilities sit under `capabilities', the session ones under its
+`session', and a present `session' means list, resume and close; there
+is no `loadSession', since resume replays.  A v1 result is RES itself."
+  (if (not (eql (plist-get res :protocolVersion) 2))
+      res
+    (let* ((caps (plist-get res :capabilities))
+           (session (plist-get caps :session))
+           (base (and (plist-member caps :session)
+                      (list :list nil :resume nil :close nil))))
+      (append (list :protocolVersion 2
+                    :agentInfo (plist-get res :info)
+                    :agentCapabilities
+                    (append (list :sessionCapabilities (append base session)
+                                  :promptCapabilities (plist-get session :prompt)
+                                  :mcpCapabilities (plist-get session :mcp))
+                            caps))
+              res))))
+
+(defun aob-acp-protocol (proc)
+  "The ACP version PROC's agent agreed to, or nil before it answered."
+  (plist-get (aob-acp--conn-init proc) :protocolVersion))
 
 (defun aob-acp--initialized (proc res err)
   "Settle PROC's init state with RES or ERR and wake whoever waits on it.
 An agent on another protocol version cannot be spoken with, so its
 connection is closed and every waiting session fails with the reason."
-  (let ((mismatch (and (not err) (aob-acp--version-error res))))
+  (let ((mismatch (and (not err)
+                       (aob-acp--version-error
+                        res (process-get proc 'aob-protocol-offered)))))
     (setq err (or err mismatch))
+    (unless err (setq res (aob-acp--v1-init res)))
     (process-put proc 'aob-init (if err (list 'failed err) (list 'done res)))
+    (process-put proc 'aob-subagents
+                 (and (not err) (aob-acp--native-subagents-p proc res)))
     (when mismatch
       (when-let* ((key (process-get proc 'aob-conn-key)))
         (when (eq (gethash key aob-acp--conns) proc)
@@ -307,13 +389,35 @@ disallows AskUserQuestion and codex answers request_user_input empty
 without it.  The protocol reads the declaration as an object, and a bare
 true fails that schema and is dropped as though never sent.  Boolean
 config options are opt-in: an agent withholds its toggles until the
-client says it can show them."
-  (list :fs (list :readTextFile :false :writeTextFile :false)
-        :elicitation (list :form (make-hash-table))
-        :session (list :configOptions (list :boolean (make-hash-table)))
-        ;; without this the adapter treats us as a client that cannot
-        ;; nest, and strips every subagent's words before sending
-        :_meta (list :subagent-transcript t)))
+client says it can show them.  Native subagents are asked for twice:
+the draft field, which released SDKs strip, and the AIR list the
+adapters accept in its place."
+  (append
+   (list :fs (list :readTextFile :false :writeTextFile :false)
+         :elicitation (list :form (make-hash-table))
+         :session (list :configOptions (list :boolean (make-hash-table))))
+   (and aob-acp-native-subagents (list :subagents (make-hash-table)))
+   ;; without subagent-transcript the adapter treats us as a client that
+   ;; cannot nest, and strips every subagent's words before sending
+   (list :_meta (append
+                 (list :subagent-transcript t)
+                 (and aob-acp-native-subagents
+                      (list :jetbrains
+                            (list :air (list :version 1
+                                             :capabilities
+                                             (vector aob-acp--air-subagents)))))))))
+
+(defun aob-acp--native-subagents-p (proc init)
+  "Whether PROC offered native subagents and its INIT result took them.
+Both adapters list subagents among their session capabilities whoever
+asks, so that alone says they can; asking is what makes it so."
+  (and (process-get proc 'aob-subagents-offered)
+       (or (aob-acp--session-cap init :subagents)
+           (member aob-acp--air-subagents
+                   (plist-get (plist-get (plist-get (plist-get init :_meta) :jetbrains)
+                                         :air)
+                              :capabilities)))
+       t))
 
 (defun aob-acp--with-init (proc cb)
   "Run CB with (INIT-RESULT ERR) once PROC's initialize settles."
@@ -439,9 +543,23 @@ A request scoped to one of ours names that request instead of a
 session, and goes to the session that sent it."
   (let ((sid (plist-get params :sessionId))
         (rid (plist-get params :requestId)))
-    (or (and (not sid) rid
-             (gethash rid (aob-acp--request-owners proc)))
-        (aob-acp--route proc sid))))
+    (aob-acp--tool-maker
+     proc
+     (or (and (not sid) rid
+              (gethash rid (aob-acp--request-owners proc)))
+         (aob-acp--route proc sid))
+     (plist-get (aob-acp--permission-tool-call params) :toolCallId))))
+
+(defun aob-acp--tool-maker (proc s tid)
+  "The session on PROC that made tool call TID, S when it did or none did.
+Codex may ask a subagent's permission on the session that sent it."
+  (or (and s tid
+           (not (gethash tid (aob-acp--tools s)))
+           (seq-find (lambda (other)
+                       (when-let* ((tools (aob-session-ref other :tools)))
+                         (gethash tid tools)))
+                     (hash-table-values (aob-acp--proc-sessions proc))))
+      s))
 
 (defun aob-acp--dispatch (proc msg)
   (let* ((method (plist-get msg :method))
@@ -532,11 +650,12 @@ request, after its decision is pushed and its event recorded.")
 (defun aob-acp--on-request (s id method params)
   (pcase method
     ("session/request_permission"
-     (let* ((tc (plist-get params :toolCall))
+     (let* ((tc (aob-acp--known-tool-call s (aob-acp--permission-tool-call params)))
             (raw (plist-get tc :rawInput))
             (plan (aob-acp--plan-text tc))
             (d (list :reply-id id
-                     :title (or (plist-get tc :title) "permission")
+                     :title (or (plist-get tc :title) (plist-get params :title)
+                                "permission")
                      :detail (when-let* ((str (cond (plan nil)
                                                     ((and (listp raw)
                                                           (plist-get raw :command)))
@@ -579,6 +698,27 @@ request, after its decision is pushed and its event recorded.")
     (_ (aob-acp--respond s id nil
                          (list :code -32601
                                :message (format "aob: %s not supported" method))))))
+
+(defun aob-acp--permission-tool-call (params)
+  "The tool call a permission request PARAMS asks about.
+v1 names it outright; the v2 draft names a subject instead, a tool call
+or a command, and a command is read as the call that would run it."
+  (let ((subject (plist-get params :subject)))
+    (or (plist-get params :toolCall)
+        (pcase (plist-get subject :type)
+          ("tool_call" (plist-get subject :toolCall))
+          ("command" (list :toolCallId (plist-get subject :toolCallId)
+                           :kind "execute"
+                           :rawInput (list :command (plist-get subject :command)
+                                           :cwd (plist-get subject :cwd))))))))
+
+(defun aob-acp--known-tool-call (s tc)
+  "TC with the kind and content S already heard for it filled in where
+TC leaves them out.  An adapter speaking to an AIR client sends a
+permission only what it adds to the call, and a plan is told by its kind."
+  (if-let* ((ev (gethash (plist-get tc :toolCallId) (aob-acp--tools s))))
+      (append tc (list :kind (plist-get ev :kind) :content (plist-get ev :content)))
+    tc))
 
 (defun aob-acp--plan-text (toolcall)
   "The plan TOOLCALL asks to leave planning with, or nil when it asks
@@ -706,14 +846,20 @@ before it is dispatched.")
             (aob-usage-note-cost s (plist-get cost :amount) (plist-get cost :currency)
                                  (plist-get (plist-get u :_meta) :_claude/origin)))
           (when (fboundp 'ygg-usage-note) (ygg-usage-note s u))
-          (aob-acp--autocompact-check s)
+          (unless (aob-subagent-native-p s)
+            (aob-acp--autocompact-check s))
           (aob--dirty s))
+         ("subagent_spawned" (aob-acp--subagent-spawned s u))
+         ("subagent_state_update" (aob-acp--subagent-ended s u))
+         ("subagent_update" (aob-acp--subagent-update s u))
          ("session_info_update"
           ;; the goal rides this update with no title of its own — writing
           ;; the absent title through would erase the session's
           (when-let* ((title (plist-get u :title)))
             (aob-session-put s :info-title title)
             (aob-acp--auto-name s 'title title))
+          (when-let* ((at (plist-get u :updatedAt)))
+            (aob-session-put s :updated-at at))
           (when-let* ((meta (plist-get u :_meta)))
             (aob-session-put s :goal (plist-get meta :goal))
             (aob-acp--auto-name s 'goal (aob-acp--goal-text (plist-get meta :goal)))
@@ -737,6 +883,54 @@ before it is dispatched.")
           (if-let* ((pid (aob-acp--parent-of u)))
               (aob-acp--sub-plan s '(:entries nil) pid)
             (aob-acp--plan s '(:entries nil)))))))))
+
+(defun aob-acp--subagent-spawned (s u)
+  "Open the subagent U announces as a session S sent, and route its id there.
+Only a connection that agreed to announce subagents is heard.  Hearing
+one again, as a load replays it, finds its session already open."
+  (when-let* ((proc (aob-acp--proc-of s))
+              ((process-get proc 'aob-subagents))
+              (sid (plist-get u :subagentSessionId)))
+    (let ((kid (aob-subagent-announced s sid (plist-get u :name)
+                                       (plist-get u :task) (plist-get u :prompt))))
+      (aob-session-put kid :acp-conn proc)
+      (aob-acp--register proc sid kid))))
+
+(defun aob-acp--subagent-ended (s u)
+  "End the subagent U names: done when it completed, failed however else
+it stopped, cancelled and disconnected included."
+  (when-let* ((proc (aob-acp--proc-of s))
+              ((process-get proc 'aob-subagents))
+              (kid (gethash (plist-get u :subagentSessionId)
+                            (aob-acp--proc-sessions proc))))
+    (aob-subagent-announced-end
+     kid (if (equal (plist-get u :state) "completed") 'done 'failed))))
+
+(defun aob-acp--subagent-update (s u)
+  "Read the draft's single subagent update U as the two it replaces.
+An id not yet heard is a spawn; a state other than running ends it."
+  (when-let* ((proc (aob-acp--proc-of s))
+              (sid (plist-get u :subagentSessionId)))
+    (unless (gethash sid (aob-acp--proc-sessions proc))
+      (aob-acp--subagent-spawned s u))
+    (when-let* ((state (plist-get u :state))
+                ((not (equal state "running"))))
+      (aob-acp--subagent-ended s u))))
+
+(defun aob-acp--subagent-removed (s)
+  "Answer the requests the announced subagent S still holds, and stop
+routing its id: its agent is owed a reply either way."
+  (when-let* (((eq (aob-session-backend s) 'native-subagent))
+              (proc (aob-session-ref s :acp-conn)))
+    (dolist (d (aob-session-decisions s))
+      (ignore-errors
+        (aob-acp--respond-proc proc (plist-get d :reply-id)
+                               (if (eq (plist-get d :kind) 'elicitation)
+                                   (list :action "cancel")
+                                 (list :outcome (list :outcome "cancelled"))))))
+    (aob-acp--deregister proc s)))
+
+(add-hook 'aob-session-removed-hook #'aob-acp--subagent-removed)
 
 (defvar aob-acp--command-map nil)
 
@@ -1959,7 +2153,8 @@ Codex does this when a question times out on its own.  A request still
 unanswered is owed one response, so it gets the Request cancelled error;
 one that matches no open decision was answered already and gets nothing."
   (let ((open nil))
-    (dolist (s (aob-acp--conn-sessions proc))
+    (dolist (s (delete-dups (append (aob-acp--conn-sessions proc)
+                                    (hash-table-values (aob-acp--proc-sessions proc)))))
       (when-let* ((d (seq-find (lambda (d) (equal (plist-get d :reply-id) request-id))
                                (aob-session-decisions s))))
         (setq open t)
@@ -3533,7 +3728,10 @@ killed agent stays resumable; this is where that history stops growing."
 sends nothing, which is what a restart with dozens of daemon workers
 needs.  `load' asks for the whole history back as `session/update'
 notifications, so the transcript is in the buffer again.  Either falls
-back to the other when the adapter advertises only one."
+back to the other when the adapter advertises only one.  A conversation
+whose transcript is on disk is resumed either way where it can be, unless
+a command names the verb: its history is read from the file, and a
+replay would show it twice."
   :type '(choice (const resume) (const load)) :group 'aob)
 
 (defun aob-acp--resumes-p (init)
@@ -3543,18 +3741,29 @@ here nest it under `agentCapabilities', the way additionalDirectories is
 already read."
   (aob-acp--session-cap init :resume))
 
-(defun aob-acp--restore-open (init acp-id cwd name verb &optional pref)
+(defun aob-acp--restore-open (init acp-id cwd name verb &optional pref seeded)
   "The open form that brings ACP-ID back, honouring PREF.
 PREF defaults to `aob-acp-restore-preference'.  VERB is a cons cell
 whose car is set to the verb that restored it, so the session can say
-afterwards what it was given."
+afterwards what it was given.  SEEDED says the trace already holds the
+history, from the transcript on disk: a replay would only show it twice,
+so an agent that can resume is resumed whatever PREF asks.  Under v2
+there is no load; resume asks for the history with replayFrom instead."
   (let ((params (list :sessionId acp-id :cwd (aob-acp--wire-dir cwd)
                       :mcpServers (aob-acp--mcp-servers init cwd)))
         (pref (or pref aob-acp-restore-preference))
         (loads (plist-get (plist-get init :agentCapabilities) :loadSession))
         (resumes (aob-acp--resumes-p init)))
     (cond
-     ((and resumes (or (eq pref 'resume) (not loads)))
+     ((and resumes (eql (plist-get init :protocolVersion) 2))
+      (if (and (eq pref 'load) (not seeded))
+          (progn (setcar verb 'load)
+                 (list "session/resume"
+                       (append params (list :replayFrom (list :type "start")))
+                       acp-id))
+        (setcar verb 'resume)
+        (list "session/resume" params acp-id)))
+     ((and resumes (or (eq pref 'resume) (not loads) seeded))
       (setcar verb 'resume)
       (list "session/resume" params acp-id))
      (loads
@@ -3774,7 +3983,7 @@ this is the other verb, for a session that is over for good."
       (message "%s deleted" name))))
 
 (declare-function aob-transcript-file "aob-transcript" (entry))
-(declare-function aob-transcript-turns "aob-transcript" (file))
+(declare-function aob-transcript-turns "aob-transcript" (file &optional tools))
 
 (defun aob-acp--seed-history (s entry)
   "Put ENTRY\='s past turns in S, so a resumed conversation opens on itself.
@@ -3786,10 +3995,13 @@ be doubled."
              (fboundp 'aob-transcript-turns)
              (null (aob-session-events s)))
     (when-let* ((file (ignore-errors (aob-transcript-file entry))))
-      (dolist (turn (ignore-errors (aob-transcript-turns file)))
-        (aob-event s (if (equal (car turn) "user") 'prompt 'message)
-                   :text (cdr turn)
-                   :typed (equal (car turn) "user"))))))
+      (dolist (turn (ignore-errors (aob-transcript-turns file t)))
+        (if (equal (car turn) "tool")
+            (aob-event s 'tool :title (cdr turn) :status "completed" :seeded t)
+          (aob-event s (if (equal (car turn) "user") 'prompt 'message)
+                     :text (cdr turn)
+                     :typed (equal (car turn) "user")
+                     :seeded t))))))
 
 (defun aob-acp-resume-entry (e &optional pref)
   "Respawn persisted entry E, restoring its conversation; return the session.
@@ -3837,22 +4049,37 @@ Prompts sent while it opens queue and fire on readiness."
                   ;; Emacs means nothing, and is never persisted
                   (when-let* ((space (plist-get e :space)))
                     (list :space space))))
-         (verb (list nil)))
+         (verb (list nil))
+         ;; a verb asked for by name is the verb sent
+         (seeded (and (not pref)
+                      (fboundp 'aob-transcript-file)
+                      (ignore-errors (aob-transcript-file e))
+                      t))
+         (s nil))
     ;; the conversation goes in before the adapter answers: opening a
     ;; session takes seconds, and a trace that is empty for those seconds
     ;; is a conversation that looks lost
-    (let ((s (aob-acp--open
-              (plist-get e :agent) name (plist-get e :project) dir
-              (lambda (init) (aob-acp--restore-open init acp-id cwd name verb pref))
-              (lambda (s res)
-                (aob-session-put s :restored-by (car verb))
-                ;; a second time only where the first found nothing
-                (aob-acp--seed-history s e)
-                (aob-acp--session-opened s res acp-id "session resumed")))))
-      ;; `aob-acp--open' is what makes the session; a caller that stands
-      ;; in for it hands back whatever it likes
-      (when (aob-session-p s) (aob-acp--seed-history s e))
-      s)))
+    (setq s (aob-acp--open
+             (plist-get e :agent) name (plist-get e :project) dir
+             (lambda (init)
+               (prog1 (aob-acp--restore-open init acp-id cwd name verb pref seeded)
+                 ;; the replay brings back what was seeded; shown once
+                 (when (and (aob-session-p s) (eq (car verb) 'load))
+                   (let ((kept (seq-remove (lambda (ev) (plist-get ev :seeded))
+                                           (aob-session-events s))))
+                     (setf (aob-session-events s) kept
+                           (aob-session-nevents s) (length kept))))))
+             (lambda (s res)
+               (aob-session-put s :restored-by (car verb))
+               ;; a second time only where the first found nothing
+               (unless (eq (car verb) 'load)
+                 (aob-acp--seed-history s e))
+               (aob-acp--session-opened s res acp-id "session resumed"))))
+    ;; `aob-acp--open' is what makes the session; a caller that stands
+    ;; in for it hands back whatever it likes
+    (when (and (aob-session-p s) (not (eq (car verb) 'load)))
+      (aob-acp--seed-history s e))
+    s))
 
 (defun aob-acp--restore-target ()
   "The stored conversation to bring back: the one at point, else one picked."
@@ -4018,6 +4245,93 @@ An agent INIT does not show listing sessions is never asked."
                          (funcall page next)
                        (funcall then (list :sessions acc) nil))))))))
       (funcall page nil))))
+
+(defun aob-acp--conn-for (agent project)
+  "A running connection for AGENT on PROJECT, none being started to ask.
+The one keyed the default way comes first; failing it, any connection
+on that tree, whose config home may keep another store, where a delete
+finds nothing and a list shows that home's conversations."
+  (let ((dir (file-name-as-directory (expand-file-name project)))
+        (found (ignore-errors
+                 (let ((aob-acp--session-env nil) (aob-acp-isolate nil))
+                   (aob-acp--live-conn agent project)))))
+    (maphash (lambda (key proc)
+               (when (and (not found) (process-live-p proc)
+                          (equal (car key) agent)
+                          (stringp (cadr key))
+                          (equal (file-name-as-directory (expand-file-name (cadr key)))
+                                 dir))
+                 (setq found proc)))
+             aob-acp--conns)
+    found))
+
+(defun aob-acp--conn-init (proc)
+  "PROC's initialize result, or nil before it settled."
+  (pcase (process-get proc 'aob-init)
+    (`(done ,res) res)))
+
+(defun aob-acp-list-sessions (agent project then)
+  "Call THEN with the sessions AGENT itself lists under PROJECT, or nil.
+Only an agent already running on PROJECT and advertising session/list
+is asked; THEN is called with nil otherwise, so a caller never waits on
+an agent that will not answer."
+  (let* ((proc (aob-acp--conn-for agent project))
+         (init (and proc (aob-acp--conn-init proc))))
+    (if (not (aob-acp--session-cap init :list))
+        (funcall then nil)
+      (aob-acp--list-sessions
+       proc init agent (aob-acp--wire-dir project)
+       (lambda (res err) (funcall then (and (not err) (plist-get res :sessions))))))))
+
+(defun aob-acp-merge-listed (entries listed agent project)
+  "ENTRIES, the conversations found on disk, with LISTED merged in by id.
+LISTED is what AGENT answered session/list with under PROJECT.  An entry
+it names gains the agent's title and last activity; one it names that
+the disk did not show is added after them.  The disk stays the record:
+nothing found there is dropped for being missing from the list."
+  (let ((by-id (make-hash-table :test #'equal)))
+    (dolist (x listed)
+      (puthash (plist-get x :sessionId) x by-id))
+    (append
+     (mapcar (lambda (e)
+               (if-let* ((x (gethash (plist-get e :acp-id) by-id)))
+                   (progn (remhash (plist-get e :acp-id) by-id)
+                          (append e (list :listed t
+                                          :listed-title (plist-get x :title)
+                                          :updated-at (plist-get x :updatedAt))))
+                 e))
+             entries)
+     (delq nil
+           (mapcar (lambda (x)
+                     (when (gethash (plist-get x :sessionId) by-id)
+                       (list :agent agent :acp-id (plist-get x :sessionId)
+                             :project project
+                             :dir (or (plist-get x :cwd) project)
+                             :name (or (plist-get x :title) (plist-get x :sessionId))
+                             :listed t
+                             :listed-title (plist-get x :title)
+                             :updated-at (plist-get x :updatedAt))))
+                   listed)))))
+
+(defun aob-acp-delete-entry (entry)
+  "Ask ENTRY\='s agent to delete its conversation; non-nil when asked.
+Only an agent already running on ENTRY\='s tree and advertising
+session/delete is asked, and its answer is not waited for: the local
+copy is the record, and an agent that no longer finds the conversation
+has nothing left to free.  A conversation still awake here is left
+alone; deleting it would pull it out from under its session."
+  (when-let* ((id (plist-get entry :acp-id))
+              ((not (seq-find (lambda (s)
+                                (and (equal (aob-session-ref s :acp-id) id)
+                                     (aob-session-conn s)
+                                     (not (memq (aob-session-state s) '(dead failed)))))
+                              (aob-sessions))))
+              (proc (aob-acp--conn-for (plist-get entry :agent)
+                                       (or (plist-get entry :project)
+                                           (plist-get entry :dir))))
+              ((aob-acp--session-cap (aob-acp--conn-init proc) :delete)))
+    (aob-acp--request-proc proc "session/delete" (list :sessionId id) #'ignore)
+    t))
 
 ;;;###autoload
 (defun aob-acp-resume-from-list (agent)

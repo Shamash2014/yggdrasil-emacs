@@ -22,6 +22,8 @@
 (declare-function ygg-agent--own-home "ygg-agent-conf" (kind repo &optional isolate))
 (declare-function ygg-agent--repo-home "ygg-agent-conf" (project))
 (declare-function aob-acp-resume-entry "aob-acp" (e &optional pref))
+(declare-function aob-acp-delete-entry "aob-acp" (entry))
+(declare-function aob-acp--tool-title "aob-acp" (u raw))
 
 (defgroup aob-transcript nil
   "Conversations that already happened."
@@ -184,10 +186,43 @@ sidebar, and a row is drawn whenever anything moves."
         (setq aob-transcript--timer nil)))))
 
 (defun aob-transcript--title-1 (file)
-  "Read FILE\='s opening line off the disk, a little of it at a time."
-  (or (aob-transcript--title-in file 16384)
+  "Read FILE\='s title off the disk, a little of it at a time.
+The name the conversation was given where it has one, else its opening
+line."
+  (or (aob-transcript--named-in file 65536)
+      (aob-transcript--title-in file 16384)
       (and (> (or (file-attribute-size (file-attributes file)) 0) 16384)
            (aob-transcript--title-in file 262144))))
+
+(defun aob-transcript--named-in (file bytes)
+  "The name FILE\='s conversation was given, looking only at its last BYTES.
+Claude appends the name you set and the one it makes up itself after
+turns, and again as they change, so the newest of each is near the end;
+yours wins.  Codex appends its thread name the same way."
+  (let ((size (or (file-attribute-size (file-attributes file)) 0))
+        names)
+    (with-temp-buffer
+      (ignore-errors (insert-file-contents file nil (max 0 (- size bytes)) size))
+      (goto-char (point-min))
+      (while (re-search-forward
+              "\"type\":\"\\(custom-title\\|ai-title\\|thread_name_updated\\)\"" nil t)
+        (when-let* ((kind (match-string 1))
+                    (rec (ignore-errors
+                           (json-parse-string
+                            (buffer-substring-no-properties
+                             (line-beginning-position) (line-end-position))
+                            :object-type 'alist :null-object nil :false-object nil)))
+                    (name (or (alist-get 'customTitle rec) (alist-get 'aiTitle rec)
+                              (alist-get 'thread_name (alist-get 'payload rec))))
+                    ((stringp name))
+                    (name (string-trim name))
+                    ((not (string-empty-p name))))
+          (setf (alist-get kind names nil nil #'equal) name))
+        (forward-line 1)))
+    (when-let* ((name (or (cdr (assoc "custom-title" names))
+                          (cdr (assoc "ai-title" names))
+                          (cdr (assoc "thread_name_updated" names)))))
+      (truncate-string-to-width name 44 nil nil t))))
 
 (defun aob-transcript--title-in (file bytes)
   "FILE\='s opening line, looking only at its first BYTES."
@@ -205,6 +240,11 @@ sidebar, and a row is drawn whenever anything moves."
                            (json-parse-string line :object-type 'alist
                                               :null-object nil
                                               :false-object nil)))))
+          (when-let* ((summary (and (equal (alist-get 'type rec) "summary")
+                                    (alist-get 'summary rec)))
+                      ((stringp summary)))
+            ;; older Claude opened its file with what the talk was about
+            (throw 'found (truncate-string-to-width summary 44 nil nil t)))
           (when-let* ((turn (and rec (aob-transcript--turn rec)))
                       ((equal (car turn) "user")))
             (when-let* ((text (cdr turn))
@@ -259,14 +299,15 @@ WHERE, when given, is the folder they were put away in."
 
 (defun aob-transcript--entries (project agent where found)
   "AGENT\='s conversations about PROJECT as entries, newest first.
-FOUND holds (FILE ID DIR) for each, DIR the folder it ran in; WHERE,
-when given, is the folder they were put away in."
+FOUND holds (FILE ID DIR [NAME]) for each, DIR the folder it ran in and
+NAME what it was called, where it was; WHERE, when given, is the folder
+they were put away in."
   (let ((found (sort (mapcar (lambda (row) (cons (aob-transcript--mtime (car row)) row))
                              found)
                      (lambda (a b) (> (car a) (car b)))))
         seen)
     (mapcar (lambda (row)
-              (pcase-let* ((`(,ts ,file ,id ,dir) row)
+              (pcase-let* ((`(,ts ,file ,id ,dir . ,given) row)
                            (dir (file-name-as-directory (expand-file-name dir)))
                            (entry (list :agent agent
                                         :acp-id id
@@ -283,7 +324,9 @@ when given, is the folder they were put away in."
                            ;; and a hundred reads is not a listing.  What
                            ;; has been read is used, the rest is asked
                            ;; for and arrives on a later draw
-                           (name (or (aob-transcript--title-cached file)
+                           (name (or (and (car given)
+                                          (truncate-string-to-width (car given) 44 nil nil t))
+                                     (aob-transcript--title-cached file)
                                      (progn (aob-transcript--want-title file)
                                             (aob-transcript--name entry file))))
                            (name (if (member name seen)
@@ -321,7 +364,44 @@ thread Codex archived itself counts as put away in \"archive\"."
         (when indexed (puthash key (cons stamp entries) aob-transcript--found))
         entries))))
 
+(defun aob-transcript--codex-names (home)
+  "HOME\='s thread names by thread id.
+Codex keeps a name you gave a thread, or one it gave it, in its thread
+index and in session_index.jsonl beside it; either may be missing."
+  (let ((names (make-hash-table :test 'equal))
+        (db (expand-file-name "state_5.sqlite" home))
+        (index (expand-file-name "session_index.jsonl" home)))
+    (when (and (file-exists-p db) (sqlite-available-p))
+      (condition-case nil
+          (let ((conn (sqlite-open db t)))
+            (unwind-protect
+                (pcase-dolist (`(,id ,name)
+                               (sqlite-select conn "select id, name from threads
+                                                     where name <> ''"))
+                  (puthash id name names))
+              (sqlite-close conn)))
+        (error nil)))
+    (when (file-readable-p index)
+      (with-temp-buffer
+        (insert-file-contents index)
+        (dolist (line (split-string (buffer-string) "\n" t))
+          (when-let* ((rec (ignore-errors
+                             (json-parse-string line :object-type 'alist
+                                                :null-object nil :false-object nil)))
+                      (id (alist-get 'id rec))
+                      (name (alist-get 'thread_name rec))
+                      ((stringp name))
+                      ((not (string-empty-p (string-trim name)))))
+            (puthash id (string-trim name) names)))))
+    names))
+
 (defun aob-transcript--codex-rows (home root where)
+  "(FILE ID CWD NAME) for each of HOME\='s threads that ran in ROOT or under it."
+  (let ((names (aob-transcript--codex-names home)))
+    (mapcar (lambda (row) (append row (list (gethash (nth 1 row) names))))
+            (aob-transcript--codex-rows-1 home root where))))
+
+(defun aob-transcript--codex-rows-1 (home root where)
   "(FILE ID CWD) for each of HOME\='s threads that ran in ROOT or under it."
   (let ((db (expand-file-name "state_5.sqlite" home)))
     (if (and (file-exists-p db) (sqlite-available-p))
@@ -390,14 +470,18 @@ is read, and once per change of the file."
 
 (defun aob-transcript-move (entry where)
   "Move ENTRY\='s conversation into the WHERE folder beside it.
-Nothing is destroyed: archiving and discarding are both a move, and a
-folder the listing does not read is what \"gone\" means here."
+Nothing is destroyed here: archiving and discarding are both a move, and
+a folder the listing does not read is what \"gone\" means here.  A
+discard also tells a running agent that can delete to let it go; the
+move comes first, since the agent's delete removes the file it keeps."
   (when-let* ((file (aob-transcript-file entry)))
     (let* ((dir (expand-file-name where (file-name-directory file)))
            (to (expand-file-name (file-name-nondirectory file) dir)))
       (make-directory dir t)
       (rename-file file to t)
       (aob-transcript-forget)
+      (when (and (equal where "discarded") (fboundp 'aob-acp-delete-entry))
+        (ignore-errors (aob-acp-delete-entry entry)))
       to)))
 
 ;;;###autoload
@@ -426,8 +510,6 @@ home moving is a change of mind, and nothing on disk says when."
                                 (cond
                                  ((member type '("text" "input_text" "output_text"))
                                   (alist-get 'text part))
-                                 ((equal type "tool_use")
-                                  (format "· %s" (or (alist-get 'name part) "tool")))
                                  (t nil))))
                             content))
              nil)
@@ -461,10 +543,12 @@ start of the file."
         (forward-line extra)
         (delete-region (point-min) (point))))))
 
-(defun aob-transcript-turns (file)
+(defun aob-transcript-turns (file &optional tools)
   "FILE as a list of (WHO . TEXT), oldest first.
-Only its last records: a session keeps `aob-event-cap' events and drops
-the older half past that, so reading further back is work thrown away."
+WHO is \"user\" or \"assistant\", and with TOOLS also \"tool\", a
+tool\='s TEXT the line naming what it did.  Only its last records: a
+session keeps `aob-event-cap' events and drops the older half past
+that, so reading further back is work thrown away."
   (let (out)
     (with-temp-buffer
       (aob-transcript--insert-tail file aob-event-cap)
@@ -477,14 +561,34 @@ the older half past that, so reading further back is work thrown away."
                            (json-parse-string line :object-type 'alist
                                               :null-object nil :false-object nil))))
                (turn (and rec (aob-transcript--turn rec))))
-          (when turn (push turn out)))
+          (when turn (push turn out))
+          (dolist (tool (and tools rec (aob-transcript--tools rec)))
+            (push (cons "tool" tool) out)))
         (forward-line 1)))
     (nreverse out)))
+
+(defun aob-transcript--harness-text-p (text)
+  "Whether TEXT in a user turn was written in by the harness, not typed."
+  (string-match-p
+   "\\`\\(?:<\\|\\[workspace: \\|# AGENTS\\.md\\|\\[Request interrupted by user\\(?: for tool use\\)?]\\'\\)"
+   text))
 
 (defun aob-transcript--harness-part-p (part)
   "Whether PART of a user turn was written in by the harness, not typed."
   (when-let* ((text (alist-get 'text part)))
-    (string-match-p "\\`\\(?:<\\|\\[workspace: \\|# AGENTS\\.md\\)" text)))
+    (aob-transcript--harness-text-p text)))
+
+(defun aob-transcript--command (text)
+  "The slash or shell command TEXT is Claude\='s record of, as typed, or nil."
+  (cond
+   ((string-match "<command-name>\\([^<]*\\)</command-name>" text)
+    (let ((name (match-string 1 text)))
+      (string-trim
+       (if (string-match "<command-args>\\(\\(?:.\\|\n\\)*?\\)</command-args>" text)
+           (concat name " " (match-string 1 text))
+         name))))
+   ((string-match "\\`<bash-input>\\(\\(?:.\\|\n\\)*?\\)</bash-input>" text)
+    (concat "!" (match-string 1 text)))))
 
 (defun aob-transcript--turn (rec)
   "REC as (WHO . TEXT) when it is something said, else nil.
@@ -492,19 +596,72 @@ Claude writes a turn as {type: user|assistant, message: {content}};
 Codex as {type: response_item, payload: {type: message, role, content}}."
   (let* ((codex (equal (alist-get 'type rec) "response_item"))
          (body (alist-get (if codex 'payload 'message) rec))
-         (who (if codex
-                  (and (equal (alist-get 'type body) "message")
-                       (alist-get 'role body))
-                (alist-get 'type rec))))
+         (who (cond (codex (and (equal (alist-get 'type body) "message")
+                                (alist-get 'role body)))
+                    ;; written to the model, not by you
+                    ((or (alist-get 'isMeta rec) (alist-get 'isCompactSummary rec)) nil)
+                    (t (alist-get 'type rec))))
+         (user (equal who "user")))
     (when-let* (((member who '("user" "assistant")))
                 (content (alist-get 'content body))
-                (content (if (and (equal who "user") (vectorp content))
+                (content (if (and user (vectorp content))
                              (seq-remove #'aob-transcript--harness-part-p content)
                            content))
                 (text (aob-transcript--text content))
                 (text (string-trim text))
-                ((not (string-empty-p text))))
+                (text (or (and user (aob-transcript--command text)) text))
+                ((not (string-empty-p text)))
+                ((not (and user (aob-transcript--harness-text-p text)))))
       (cons who text))))
+
+(defun aob-transcript--tools (rec)
+  "The tools REC calls, each as the line a live session would show.
+Claude puts a call among an answer\='s parts; Codex writes each as its
+own record, its input a string of json or of code."
+  (let ((body (alist-get 'payload rec))
+        (message (alist-get 'message rec)))
+    (cond
+     ((equal (alist-get 'type rec) "response_item")
+      (pcase (alist-get 'type body)
+        ("function_call"
+         (list (aob-transcript--tool-title
+                (alist-get 'name body)
+                (ignore-errors
+                  (json-parse-string (alist-get 'arguments body)
+                                     :object-type 'alist :null-object nil
+                                     :false-object nil)))))
+        ("custom_tool_call"
+         (let ((input (or (alist-get 'input body) "")))
+           (list (aob-transcript--tool-title
+                  (alist-get 'name body)
+                  (cond
+                   ((string-match "\"cmd\":\\(\"\\(?:[^\"\\\\]\\|\\\\.\\)*\"\\)" input)
+                    `((cmd . ,(ignore-errors (json-parse-string (match-string 1 input))))))
+                   ((string-match "^\\*\\*\\* \\(?:Add\\|Update\\|Delete\\) File: \\(.+\\)" input)
+                    `((path . ,(match-string 1 input))))
+                   (t `((cmd . ,input))))))))))
+     ((and (equal (alist-get 'type rec) "assistant")
+           (not (alist-get 'isMeta rec))
+           (vectorp (alist-get 'content message)))
+      (delq nil
+            (seq-map (lambda (part)
+                       (when (equal (alist-get 'type part) "tool_use")
+                         (aob-transcript--tool-title (alist-get 'name part)
+                                                     (alist-get 'input part))))
+                     (alist-get 'content message)))))))
+
+(defun aob-transcript--tool-title (name input)
+  "The line for a call of tool NAME with INPUT, an alist, as live ones read."
+  (let* ((name (or name "tool"))
+         (raw (seq-mapcat (lambda (cell)
+                            (let ((v (cdr cell)))
+                              (list (if (eq (car cell) 'cmd) :command
+                                      (intern (format ":%s" (car cell))))
+                                    (if (vectorp v) (mapconcat (lambda (x) (format "%s" x)) v " ") v))))
+                          (and (consp input) input))))
+    (or (and (fboundp 'aob-acp--tool-title)
+             (aob-acp--tool-title (list :title name) raw))
+        name)))
 
 ;;; Opening one
 
@@ -548,11 +705,13 @@ Asleep: it carries the id its agent answers to, and no process."
           (aob-session-put s :asleep entry)
           (aob-session-put s :named-by-user (plist-get entry :named-by-user))
           (aob-session-put s :auto-named (plist-get entry :auto-named))
-          (dolist (turn (aob-transcript-turns file))
-            (aob-event s (if (equal (car turn) "user") 'prompt 'message)
-                       :text (cdr turn)
-                       ;; the user turns of a written conversation are yours
-                       :typed (equal (car turn) "user")))
+          (dolist (turn (aob-transcript-turns file t))
+            (if (equal (car turn) "tool")
+                (aob-event s 'tool :title (cdr turn) :status "completed")
+              (aob-event s (if (equal (car turn) "user") 'prompt 'message)
+                         :text (cdr turn)
+                         ;; the user turns of a written conversation are yours
+                         :typed (equal (car turn) "user"))))
           s))))
 
 ;;;###autoload

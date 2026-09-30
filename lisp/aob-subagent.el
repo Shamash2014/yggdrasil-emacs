@@ -13,6 +13,7 @@
 (require 'aob)
 
 (declare-function aob-trace "aob-trace" (s))
+(declare-function aob-acp--resolve "aob-acp" (s decision answer))
 
 (defun aob-subagent-parent (s)
   "The session that sent S, or nil when nobody did."
@@ -236,6 +237,50 @@ A plan update lists entries; a TodoWrite call lists todos in its input."
 
 (add-hook 'aob-event-change-functions #'aob-subagent--own-plan-note)
 
+(defun aob-subagent--announces-p (s)
+  "Whether S's agent announces its subagents as sessions of their own,
+so that no call of S's is read as one."
+  (when-let* ((proc (aob-session-conn s)))
+    (and (processp proc) (process-get proc 'aob-subagents) t)))
+
+(defun aob-subagent-announced (owner sid name task prompt)
+  "The session of the subagent SID that OWNER's agent announced, opened once.
+It is made, named and prompted as an Agent call's is, SID standing in
+for the call; NAME names it, else TASK, and PROMPT, else TASK, opens
+its trace."
+  (let* ((root (or (aob-session-get (aob-session-ref owner :native-root)) owner))
+         (said (or prompt task))
+         (ev (list :tool-id sid :title (or name task)
+                   :raw (and said (list :prompt said))))
+         (kid (or (aob-session-get (gethash sid (aob-subagent--native-kids root)))
+                  (aob-subagent--native-open root owner ev))))
+    (aob-session-put kid :announced t)
+    (aob-subagent--native-sync kid ev)
+    (dolist (call (aob-session-subagents owner))
+      (aob-subagent--pair-call owner call))
+    kid))
+
+(defun aob-subagent--pair-call (owner ev)
+  "Trace OWNER's subagent call EV in the announced subagent of the same
+name that has no call yet.  An announcement names no call, and the
+name, which is the call's description, is all the two share."
+  (let ((kids (aob-subagent--native-kids
+               (or (aob-session-get (aob-session-ref owner :native-root)) owner)))
+        (name (aob-subagent--native-name ev)))
+    (unless (gethash (plist-get ev :tool-id) kids)
+      (when-let* ((kid (seq-find (lambda (c) (and (aob-session-ref c :announced)
+                                                  (not (aob-session-ref c :paired-call))
+                                                  (equal name (aob-session-name c))))
+                                 (aob-subagent-children owner))))
+        (aob-session-put kid :paired-call (plist-get ev :tool-id))
+        (puthash (plist-get ev :tool-id) (aob-session-id kid) kids)))))
+
+(defun aob-subagent-announced-end (kid state)
+  "End KID, a subagent its agent announced, in STATE."
+  (unless (eq state (aob-session-state kid))
+    (aob-turn-end kid)
+    (aob-set-state kid state)))
+
 (defun aob-subagent--native-note (s ev)
   "Keep the subagent EV belongs to, or is, in step with EV of stream S."
   (unless (aob-subagent-native-p s)
@@ -247,10 +292,12 @@ A plan update lists entries; a TodoWrite call lists todos in its input."
         (aob-subagent--plan-note owner ev)
         (aob--dirty owner))
       (when (and (eq (plist-get ev :type) 'tool) (plist-get ev :subagent))
-        (aob-subagent--native-sync
-         (or (aob-session-native-child s ev)
-             (aob-subagent--native-open s owner ev))
-         ev))
+        (if (aob-subagent--announces-p s)
+            (aob-subagent--pair-call s ev)
+          (aob-subagent--native-sync
+           (or (aob-session-native-child s ev)
+               (aob-subagent--native-open s owner ev))
+           ev)))
       (when (and (eq (plist-get ev :type) 'tool) (not (plist-get ev :subagent)))
         (aob-subagent--codex-settle s ev)))))
 
@@ -263,8 +310,9 @@ the last the adapter says of a subagent sent in the background."
   (when (memq new '(dead failed idle done))
     (dolist (c (aob-subagent-children s))
       (when (and (aob-subagent-native-p c) (eq (aob-session-state c) 'working)
-                 ;; a codex thread outlives the turn that spawned it; its own report settles it
-                 (or (memq new '(dead failed)) (not (aob-session-ref c :codex-thread))))
+                 ;; codex threads and announced subagents outlive the turn; their own report settles them
+                 (or (memq new '(dead failed))
+                     (not (or (aob-session-ref c :codex-thread) (aob-session-ref c :announced)))))
         (aob-turn-end c)
         (aob-set-state c (if (memq new '(dead failed)) 'failed 'done))))))
 
@@ -308,6 +356,7 @@ the last the adapter says of a subagent sent in the background."
        :interject #'aob-subagent--native-refuse
        :cancel #'aob-subagent--native-cancel
        :flush #'ignore
+       :resolve #'aob-acp--resolve
        :kill #'aob-subagent--native-forget
        :focus #'aob-subagent--native-focus))
 
