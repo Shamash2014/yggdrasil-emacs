@@ -471,7 +471,8 @@ render above the top edge on macOS child frames."
 (defun ygg--theme-tweaks (&rest _)
   "Face details the modus palette can't express (matches nvim theme.lua)."
   (let* ((dark (memq 'modus-vivendi custom-enabled-themes))
-         (float-bg (if dark "#121212" "#ebe7dd")))
+         (float-bg (if dark "#121212" "#ebe7dd"))
+         (float-edge (if dark "#262626" "#c9c3b6")))
     ;; paper reads thin; its greys live in the palette, out of new dark frames
     (set-face-attribute 'default nil :weight (if dark 'regular 'medium))
     (set-face-attribute 'font-lock-comment-face nil :slant 'italic)
@@ -513,7 +514,7 @@ render above the top edge on macOS child frames."
           (set-face-attribute face nil :foreground divider)))
       (set-face-attribute 'internal-border nil
                           :background (face-attribute 'default :background nil t))
-      (set-face-attribute 'child-frame-border nil :background float-bg))
+      (set-face-attribute 'child-frame-border nil :background float-edge))
     (setq window-divider-default-places t
           window-divider-default-bottom-width 1
           window-divider-default-right-width 1)
@@ -527,9 +528,9 @@ render above the top edge on macOS child frames."
       (when (facep face)
         (set-face-attribute face nil :background float-bg)))
     (when (facep 'vertico-posframe-border)
-      (set-face-attribute 'vertico-posframe-border nil :background float-bg))
+      (set-face-attribute 'vertico-posframe-border nil :background float-edge))
     (when (facep 'which-key-posframe-border)
-      (set-face-attribute 'which-key-posframe-border nil :background float-bg))
+      (set-face-attribute 'which-key-posframe-border nil :background float-edge))
     (when (facep 'corfu-default)
       (set-face-attribute 'corfu-default nil :background float-bg))
     (when (facep 'corfu-current)
@@ -537,7 +538,7 @@ render above the top edge on macOS child frames."
                           :background (if dark "#171717" "#dcd7cb")
                           :weight 'bold))
     (when (facep 'corfu-border)
-      (set-face-attribute 'corfu-border nil :background float-bg))
+      (set-face-attribute 'corfu-border nil :background float-edge))
     (when (facep 'doom-modeline-bar)
       (set-face-attribute 'doom-modeline-bar nil
                           :background (if dark "#333333" "#c9c3b6")))

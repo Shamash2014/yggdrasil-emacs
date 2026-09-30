@@ -96,6 +96,8 @@
                                'face `(:inherit ,face))
                       :poshandler #'posframe-poshandler-frame-top-right-corner
                       :internal-border-width 0
+                      :border-width 1
+                      :border-color (face-background 'child-frame-border nil t)
                       :background-color bg
                       :min-width ygg-notify-width
                       :x-pixel-offset -12
@@ -223,7 +225,7 @@ extra lines of a multi-line prompt up to 0.8 of the frame."
        (require 'vertico-posframe)
        (with-eval-after-load 'vertico
          (setq vertico-posframe-poshandler #'ygg--posframe-top-center
-               vertico-posframe-border-width 0
+               vertico-posframe-border-width 1
                vertico-posframe-size-function #'ygg--vertico-posframe-size
                vertico-posframe-parameters '((left-fringe . 0) (right-fringe . 0)))
          (ygg--vertico-posframe-enable))))))
