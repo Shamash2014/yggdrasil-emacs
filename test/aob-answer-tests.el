@@ -34,7 +34,7 @@
      (cl-letf (((symbol-function 'aob-prompt)
                 (lambda (_s text &rest _) (push text ,var)))
                ((symbol-function 'aob-interject)
-                (lambda (_s text) (push text ,var))))
+                (lambda (_s text &rest _) (push text ,var))))
        ,@body)))
 
 (ert-deftest aob-answer-finds-plain-question-lines ()

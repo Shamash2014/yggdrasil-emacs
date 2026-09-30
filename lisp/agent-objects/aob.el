@@ -764,14 +764,15 @@ already produced always survives."
     (message "aob: %s %s" (aob-session-name s)
              (if full "fully cancelled — queue dropped" "cancelled (again to drop queue)"))))
 
-(defun aob-interject (s text)
-  "Say TEXT to S now, into the turn it is running when it takes one."
+(defun aob-interject (s text &optional atts)
+  "Say TEXT to S now, into the turn it is running when it takes one.
+ATTS are image files that go with it."
   (interactive (let ((s (aob-target)))
                  (list s (read-string (format "%s ⇄ " (aob-session-name s))))))
   (if-let* ((fn (aob-backend-fn s :interject)))
-      (funcall fn s text)
+      (funcall fn s text atts)
     (aob--call s :cancel)
-    (aob--call s :prompt text)))
+    (aob--call s :prompt text atts)))
 
 (defvar aob-compose--steer)
 
@@ -1693,14 +1694,12 @@ attachments whose [[ImageN]] survived the user's editing ride along."
       (user-error "aob: empty prompt"))
     (add-to-history 'aob-compose-history text)
     ;; send before killing the buffer — a refused send must not eat the text
-    ;; steering carries text only; a draft with images queues rather than
-    ;; sending as a correction that silently lost its attachments
     ;; whatever the draft goes to — a session, a spawn, a caller — it is
     ;; words the owner typed, and a spawn queues its first turn right here
     (let ((aob-prompt-typed t))
       (cond ((null rewritten))
             (hold (funcall hold text atts))
-            ((and session (null atts)
+            ((and session
                   (or aob-compose--steer
                       ;; a turn that takes words mid-way gets them now: a
                       ;; subagent can keep a turn open for an hour, and a
@@ -1708,7 +1707,7 @@ attachments whose [[ImageN]] survived the user's editing ride along."
                       (and (eq (aob-session-state session) 'working)
                            (fboundp 'aob-acp--steers-p)
                            (ignore-errors (aob-acp--steers-p session)))))
-             (aob-interject session text))
+             (aob-interject session text atts))
             (session (aob-prompt session text atts))
             ((stringp tgt) (user-error "aob: target session is gone"))
             ;; a function target wants the words themselves rather than a

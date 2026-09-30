@@ -1825,21 +1825,28 @@ the turn it actually opens."
 (defvar aob-acp--overflow-retry nil
   "Non-nil while resending a prompt after an overflow compact.")
 
+(defun aob-acp--image-paths (s text atts)
+  "TEXT and ATTS as S's agent takes them, as (TEXT . ATTS).
+An agent that never declared image support gets paths, not blocks it
+can't parse: the reference survives, and the demotion is said."
+  (if (and atts
+           (not (plist-get (plist-get (aob-session-ref s :agent-caps)
+                                      :promptCapabilities)
+                           :image)))
+      (progn
+        (message "aob: %s takes no images — attached as paths"
+                 (aob-session-name s))
+        (cons (concat text "\n"
+                      (mapconcat (lambda (f) (format "[image: %s]" f))
+                                 atts "\n"))
+              nil))
+    (cons text atts)))
+
 (defun aob-acp--prompt-1 (s text &optional atts queued)
   (aob-acp--auto-name s 'prompt text)
   (aob-acp--break-accum s)
-  ;; an agent that never declared image support gets paths, not blocks
-  ;; it can't parse — the reference survives, and the demotion is said
-  (when (and atts
-             (not (plist-get (plist-get (aob-session-ref s :agent-caps)
-                                        :promptCapabilities)
-                             :image)))
-    (setq text (concat text "\n"
-                       (mapconcat (lambda (f) (format "[image: %s]" f))
-                                  atts "\n"))
-          atts nil)
-    (message "aob: %s takes no images — attached as paths"
-             (aob-session-name s)))
+  (pcase-let ((`(,said . ,imgs) (aob-acp--image-paths s text atts)))
+    (setq text said atts imgs))
   (aob-session-put s :turn-fails nil)
   (aob-session-put s :turn-error nil)
   (aob-session-put s :stop-warning nil)
@@ -2180,10 +2187,11 @@ initialize result's own _meta, so that is read too."
   "Non-nil when this agent takes a word into the turn it is running."
   (eq t (plist-get (aob-acp--extension s :steering) :supported)))
 
-(defun aob-acp--interject (s text)
-  "Say TEXT to S now.
+(defun aob-acp--interject (s text &optional atts)
+  "Say TEXT, with the image files ATTS, to S now.
 The _session/steering request injects it into the running turn at the top
 of the agent's queue, so a correction costs the work in flight nothing.
+A turn held on a decision is still running, and is steered the same way.
 The request asks for promptRequired when there was no turn to steer,
 which is the adapter telling us to say it the ordinary way.  An adapter
 that starts a turn of its own instead answers startedNewTurn: the words are
@@ -2192,17 +2200,20 @@ is.  Any other answer, or an error, queues the text and cancels, as does
 an agent that never advertised steering; a session already idle by then
 is prompted with it at once."
   (cond
-   ((not (eq (aob-session-state s) 'working)) (aob-acp--prompt-1 s text))
+   ((not (memq (aob-session-state s) '(working blocked)))
+    (aob-acp--prompt-1 s text atts))
    ((not (aob-acp--steers-p s))
-    (aob-acp--queue s text nil)
+    (aob-acp--queue s text atts)
     (aob-acp--cancel s))
    (t
     ;; the reply comes after the send has returned, and whether you typed
     ;; this is known only while it is being sent
     (let* ((typed aob-prompt-typed)
            (told aob-told-pending)
+           (sent (aob-acp--image-paths s text atts))
            (blocks (aob-acp--content-blocks
-                    text nil (or (aob-session-dir s) (aob-session-project s))
+                    (car sent) (cdr sent)
+                    (or (aob-session-dir s) (aob-session-project s))
                     (aob-acp-embeds-p s) s)))
       (aob-acp--request
        s "_session/steering"
@@ -2216,19 +2227,24 @@ is prompted with it at once."
              ("injected"
               (aob-tell-all s told)
               (aob-acp--tell-embeds s blocks)
-              (aob-event s 'prompt :text text :title "steered"
+              (aob-event s 'prompt :text (car sent) :title "steered"
+                         :images (length (cdr sent)) :image-files (cdr sent)
                          :typed aob-prompt-typed)
-              (aob-set-state s 'working))
-             ("promptRequired" (aob-acp--prompt-1 s text))
+              ;; a turn held on a decision stays held until it is answered
+              (unless (eq (aob-session-state s) 'blocked)
+                (aob-set-state s 'working)))
+             ("promptRequired" (aob-acp--prompt-1 s text atts))
              ;; nothing tells us when a turn we never prompted ends
              ("startedNewTurn"
               (aob-tell-all s told)
               (aob-acp--tell-embeds s blocks)
-              (aob-event s 'prompt :text text :typed aob-prompt-typed))
+              (aob-event s 'prompt :text (car sent)
+                         :images (length (cdr sent)) :image-files (cdr sent)
+                         :typed aob-prompt-typed))
              ;; a steer that never landed must not swallow what you wrote
              (_ (if (eq (aob-session-state s) 'idle)
-                    (aob-acp--prompt-1 s text)
-                  (aob-acp--queue s text nil)
+                    (aob-acp--prompt-1 s text atts)
+                  (aob-acp--queue s text atts)
                   (aob-acp--cancel s)))))))))))
 
 ;;; Goal — an objective the agent holds across turns and keeps working
@@ -4275,12 +4291,23 @@ mid-write still flushes its transcript."
 ;; transcript, one killed outright does not
 (add-hook 'kill-emacs-hook #'aob-acp--shutdown-all 80)
 
+(defvar aob-acp--persisted-cache nil
+  "(KEY . ENTRIES) as last read, KEY the file, its mtime and size.
+A header line asks for these on every redisplay.")
+
 (defun aob-acp--persisted-entries ()
-  (when (and aob-acp-persist-file (file-readable-p aob-acp-persist-file))
-    (ignore-errors
-      (with-temp-buffer
-        (insert-file-contents aob-acp-persist-file)
-        (read (current-buffer))))))
+  "The persisted conversations, each a fresh copy callers may change."
+  (when-let* ((file aob-acp-persist-file)
+              (attrs (file-attributes file))
+              (key (list file (file-attribute-modification-time attrs)
+                         (file-attribute-size attrs))))
+    (unless (equal (car aob-acp--persisted-cache) key)
+      (setq aob-acp--persisted-cache
+            (cons key (ignore-errors
+                        (with-temp-buffer
+                          (insert-file-contents file)
+                          (read (current-buffer)))))))
+    (copy-tree (cdr aob-acp--persisted-cache))))
 
 (defun aob-acp-persisted-entry (acp-id)
   "The persisted conversation ACP-ID names, or nil."

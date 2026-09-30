@@ -851,7 +851,7 @@ command run reads apart from a file read at a glance."
 (defun aob-trace--root ()
   "The folder this trace's session works in, or nil."
   (when-let* ((s (and aob-trace--session-id (aob-session-get aob-trace--session-id)))
-              (dir (or (aob-session-project s) (aob-session-dir s))))
+              (dir (or (aob-session-dir s) (aob-session-project s))))
     (file-name-as-directory (expand-file-name dir))))
 
 (declare-function nerd-icons-icon-for-file "nerd-icons")
@@ -2456,8 +2456,6 @@ Idle with the queue held, it goes out straight away."
                     (car (aob-session-ref s :queued))
                     (user-error "aob: nothing is queued")))
          (ev (nth 2 entry)))
-    (when (nth 1 entry)
-      (user-error "aob: a message with images waits for the turn to end"))
     (unless (and (fboundp 'aob-acp--steers-p) (ignore-errors (aob-acp--steers-p s)))
       (user-error "aob: %s takes nothing mid-turn" (aob-session-name s)))
     (aob-session-put s :queued (delq entry (aob-session-ref s :queued)))
@@ -2465,7 +2463,7 @@ Idle with the queue held, it goes out straight away."
     (run-hook-with-args 'aob-queue-change-hook s)
     (let ((aob-prompt-typed (plist-get ev :typed))
           (aob-told-pending (plist-get ev :told)))
-      (aob-interject s (car entry)))))
+      (aob-interject s (car entry) (nth 1 entry)))))
 
 (defun aob-trace--queue-move (by)
   (let* ((s (or (aob-session-get aob-trace--session-id) (user-error "aob: no session here")))
@@ -2613,7 +2611,7 @@ standing at the end of the trace with it."
   (when (fboundp 'ygg-insert-state) (ygg-insert-state)))
 
 (declare-function aob-acp--steers-p "aob-acp" (s))
-(declare-function aob-interject "aob" (s text))
+(declare-function aob-interject "aob" (s text &optional atts))
 
 (defun aob-trace--say (s text &optional files)
   "Say TEXT to S: into the turn it is running, where it takes that.
@@ -3385,7 +3383,7 @@ not in a folder no command of it runs in."
                            :seq)))
     (unless (equal newest aob-trace--root-seq)
       (setq aob-trace--root-seq newest)
-      (let ((home (or (aob-session-project s) (aob-session-dir s))))
+      (let ((home (or (aob-session-dir s) (aob-session-project s))))
         (unless (and home (locate-dominating-file home ".git"))
           (when-let* ((root (aob-trace--work-root s)))
             (setq default-directory root)))))))
@@ -3711,10 +3709,10 @@ LINE is where to land; without one, SEARCH is text to land on."
               (propertize (format "  %s" (abbreviate-file-name dir))
                           'face 'shadow)))
       (when-let* ((dir (seq-find #'file-directory-p
-                                 (delq nil (list (aob-session-project s)
-                                                 (aob-session-dir s))))))
+                                 (delq nil (list (aob-session-dir s)
+                                                 (aob-session-project s))))))
         ;; a trace stands where its agent does: magit, a terminal, a
-        ;; find-file started from here open on the agent\='s project and
+        ;; find-file started from here open on the agent\='s worktree and
         ;; not on whatever folder the buffer happened to be made in
         (setq default-directory (file-name-as-directory (expand-file-name dir))
               aob-trace--root-seq nil)

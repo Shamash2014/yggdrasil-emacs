@@ -116,7 +116,7 @@
         (insert "use a temp dir instead")
         (cl-letf (((symbol-function 'aob-acp--steers-p) (lambda (_) t))
                   ((symbol-function 'aob-interject)
-                   (lambda (to text) (push (cons (aob-session-id to) text) said))))
+                   (lambda (to text &rest _) (push (cons (aob-session-id to) text) said))))
           (aob-compose-send)))
       (should (equal said (list (cons (aob-session-id s) "use a temp dir instead")))))
     (should-not (aob-session-ref s :queued))))

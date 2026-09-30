@@ -142,11 +142,17 @@ sessions/YYYY/MM/DD/rollout-<time>-ID.jsonl."
   "Conversations whose opening line is read in one go of the idle timer."
   :type 'natnum :group 'aob-transcript)
 
+(defun aob-transcript--title-read-p (file)
+  "Non-nil when FILE\='s opening has been read since it last changed.
+A file with no opening line to read counts as read, or every draw would
+queue it again and the reader would never settle."
+  (let ((cell (gethash file aob-transcript--titles)))
+    (and cell (equal (car cell) (aob-transcript--mtime file)))))
+
 (defun aob-transcript--title-cached (file)
   "FILE\='s opening line if it has already been read, else nil."
-  (let ((cell (gethash file aob-transcript--titles)))
-    (when (and cell (equal (car cell) (aob-transcript--mtime file)))
-      (cdr cell))))
+  (when (aob-transcript--title-read-p file)
+    (cdr (gethash file aob-transcript--titles))))
 
 (defun aob-transcript--title (file)
   "What the conversation in FILE opened with, reading it if need be.
@@ -328,7 +334,8 @@ they were put away in."
                            (name (or (and (car given)
                                           (truncate-string-to-width (car given) 44 nil nil t))
                                      (aob-transcript--title-cached file)
-                                     (progn (aob-transcript--want-title file)
+                                     (progn (unless (aob-transcript--title-read-p file)
+                                              (aob-transcript--want-title file))
                                             (aob-transcript--name entry file))))
                            (name (if (member name seen)
                                      (format "%s %s" name (substring id 0 4))

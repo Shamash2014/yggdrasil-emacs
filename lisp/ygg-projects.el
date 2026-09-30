@@ -291,8 +291,8 @@ or not this Emacs was there for it."
     ;; newest first, whichever list it came from: a conversation is
     ;; found again by when it happened
     (sort (append known found)
-          (lambda (a b) (> (or (ygg-projects--entry-ts a) 0)
-                           (or (ygg-projects--entry-ts b) 0))))))
+          :key (lambda (e) (or (ygg-projects--entry-ts e) 0))
+          :reverse t :in-place t)))
 
 (defun ygg-projects--found (root &optional where)
   "What the default agent and Codex left on disk for ROOT, put away in WHERE.
@@ -1960,8 +1960,13 @@ In visual state, every session selected, after one question."
 
 ;; a conversation's opening line arrives after the list it belongs to
 (defvar aob-transcript-titles-hook)
+(defun ygg-projects--on-titles ()
+  "Redraw once for a burst of titles read, if anyone is watching."
+  (when (get-buffer-window ygg-projects-buffer-name 'visible)
+    (ygg-projects--redraw-soon)))
+
 (with-eval-after-load 'aob-transcript
-  (add-hook 'aob-transcript-titles-hook #'ygg-projects--on-import))
+  (add-hook 'aob-transcript-titles-hook #'ygg-projects--on-titles))
 
 (defun ygg-projects-forget-root (root)
   "Drop what the sidebar has cached about ROOT."

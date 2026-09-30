@@ -1169,6 +1169,38 @@ and saves nothing."
       (should (seq-find (lambda (f) (equal (plist-get f :method) "session/cancel"))
                         frames)))))
 
+(ert-deftest aob-steering-carries-images-and-reaches-a-held-turn ()
+  "A correction with an image steers with the image block, a turn held on
+a decision is steered rather than prompted, and a queued message with an
+image steers from the queue."
+  (let ((png (make-temp-file "aob-steer" nil ".png" "\x89PNG")))
+    (unwind-protect
+        (aob-tests--with-session s
+          (aob-session-put s :acp-id "sess-test")
+          (aob-session-put s :agent-meta '(:steering (:supported t)))
+          (aob-session-put s :agent-caps '(:promptCapabilities (:image t)))
+          (aob-set-state s 'blocked)
+          (aob-tests--capturing frames
+            (aob-acp--interject s "look at this" (list png))
+            (let ((f (car frames)))
+              (should (equal (plist-get f :method) "_session/steering"))
+              (should (seq-find (lambda (b) (equal (plist-get b :type) "image"))
+                                (plist-get (plist-get f :params) :prompt))))
+            (aob-tests--reply s '(:outcome "injected"))
+            (should (eq (aob-session-state s) 'blocked))
+            (should (equal (plist-get (car (aob-session-events s)) :images) 1)))
+          (aob-set-state s 'working)
+          (aob-acp--queue s "fix" (list png))
+          (with-temp-buffer
+            (setq-local aob-trace--session-id (aob-session-id s))
+            (aob-tests--capturing frames
+              (aob-trace--queue-steer-1 s)
+              (should (equal (plist-get (car frames) :method) "_session/steering"))
+              (should (seq-find (lambda (b) (equal (plist-get b :type) "image"))
+                                (plist-get (plist-get (car frames) :params) :prompt)))
+              (should-not (aob-session-ref s :queued)))))
+      (delete-file png))))
+
 (ert-deftest aob-goal-precedes-the-first-prompt ()
   "The goal is set before the queue flushes, and the runtime's answer is kept."
   (aob-tests--with-session s
@@ -3180,6 +3212,26 @@ the host weighs it at, and no keys."
     (should (equal (aob-event-text ev) (mapconcat #'identity
                                                   (make-list 40 "0123456789") "")))))
 
+(ert-deftest aob-transcript-a-file-with-no-title-is-read-once ()
+  "A conversation with no opening line to show is not queued again once
+read: re-reading it every draw kept the reader and a full redraw running."
+  (let ((file (make-temp-file "aob-notitle" nil ".jsonl"
+                              "{\"type\":\"summary\"}\n"))
+        (aob-transcript--titles (make-hash-table :test 'equal))
+        (aob-transcript--queue nil)
+        (aob-transcript--timer nil))
+    (unwind-protect
+        (progn
+          (aob-transcript--want-title file)
+          (aob-transcript--read-some)
+          (should-not (aob-transcript--title-cached file))
+          (should (aob-transcript--title-read-p file))
+          (aob-transcript--entries "/p/" "claude" nil (list (list file "id-1" "/p/")))
+          (should-not aob-transcript--queue)
+          (should-not aob-transcript--timer))
+      (when (timerp aob-transcript--timer) (cancel-timer aob-transcript--timer))
+      (delete-file file))))
+
 (ert-deftest aob-transcript-reads-only-the-end ()
   "A long log is read from its tail, whole lines only."
   (skip-unless (fboundp 'aob-transcript--insert-tail))
@@ -3737,6 +3789,25 @@ under it included, and not for any other."
              (aob-set-state ,var 'working)
              ,@body)
          (kill-buffer buf)))))
+
+(ert-deftest aob-trace-stands-in-the-sessions-own-worktree ()
+  "A session working in a worktree of its project has its trace in that
+worktree, so git and project commands from the trace reach the same tree
+the agent edits."
+  (let* ((project (file-name-as-directory (make-temp-file "aob-proj" t)))
+         (tree (file-name-as-directory (make-temp-file "aob-tree" t))))
+    (unwind-protect
+        (aob-tests--with-session s
+          (setf (aob-session-project s) project
+                (aob-session-dir s) tree)
+          (let ((buf (aob-trace-buffer s)))
+            (unwind-protect
+                (with-current-buffer buf
+                  (should (equal default-directory tree))
+                  (should (equal (aob-trace--root) tree)))
+              (kill-buffer buf))))
+      (delete-directory project t)
+      (delete-directory tree t))))
 
 (defun aob-tests--request (s id method params)
   "Feed S a request frame, serialised and parsed as the wire does."
@@ -4417,7 +4488,8 @@ relative to the project, is under the pointer, and RET opens it."
     (with-temp-file file (insert "1\n2\n3\n4\n"))
     (unwind-protect
         (aob-tests--with-trace-session s
-          (setf (aob-session-project s) dir)
+          (setf (aob-session-project s) dir
+                (aob-session-dir s) dir)
           (aob-tests--tool s "r1" "read" (concat "Read File  " file) "completed"
                            :locations (vector (list :path file :line 3)))
           (aob-trace--render t)
@@ -5071,7 +5143,7 @@ next chunk does not pull the page back down."
      (cl-letf (((symbol-function 'aob-prompt)
                 (lambda (_s text &optional files) (push (cons text files) ,var)))
                ((symbol-function 'aob-interject)
-                (lambda (_s text) (push (list text) ,var))))
+                (lambda (_s text &rest _) (push (list text) ,var))))
        ,@body)))
 
 (ert-deftest aob-trace-send-carries-held-images ()
