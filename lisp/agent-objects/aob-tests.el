@@ -2170,7 +2170,7 @@ session is writing into, so it moves the name and nothing else."
           (funcall git main "init" "-q" "-b" "trunk")
           (funcall git main "-c" "user.email=t@t" "-c" "user.name=t"
                    "commit" "-q" "--allow-empty" "-m" "0")
-          (funcall git main "worktree" "add" "-q" "-b" "feat" tree)
+          (aob-tests--link-worktree main tree "feat")
           (should (equal (aob-acp--place-note main)
                          (format "[workspace: %s · branch trunk · other worktrees: tree (feat)]"
                                  (directory-file-name main))))
@@ -2203,10 +2203,10 @@ session is writing into, so it moves the name and nothing else."
           (funcall git main "init" "-q" "-b" "trunk")
           (funcall git main "-c" "user.email=t@t" "-c" "user.name=t"
                    "commit" "-q" "--allow-empty" "-m" "0")
-          (funcall git main "worktree" "add" "-q" "-b" "feat" tree)
+          (aob-tests--link-worktree main tree "feat")
           (should (string-suffix-p "other worktrees: main (trunk)]"
                                    (plist-get (aob-acp--place-block s) :text)))
-          (funcall git main "worktree" "add" "-q" "-b" "fix/y" other)
+          (aob-tests--link-worktree main other "fix/y")
           (should (equal (plist-get (aob-acp--place-block s) :text)
                          (format "[workspace: %s · branch feat · linked worktree of %s · other worktrees: main (trunk), other (fix/y)]"
                                  (directory-file-name tree)
@@ -4494,15 +4494,15 @@ out in."
     (should-not (memq 'aob-trace-prose (ensure-list (aob-tests--at "Read" 'font-lock-face))))))
 
 (ert-deftest aob-trace-header-says-only-what-is-looked-at ()
-  "Name, state, clock, cost, context and todo; a mode only when it is not
-the one a session runs in anyway; no folder, model or token count out."
+  "Name, model, state, clock, cost, context and todo; a mode only when it
+is not the one a session runs in anyway; no folder or token count out."
   (aob-tests--with-trace-session s
     (aob-session-put s :mode-id "default")
     (aob-session-put s :model-name "opus")
     (aob-session-put s :ctx-used 213400)
     (aob-trace--render t)
-    (should (string-match-p "\\` test:1 · working · .*213k ctx\\'" header-line-format))
-    (should-not (string-match-p "default\\|opus\\|/tmp/proj" header-line-format))
+    (should (string-match-p "\\` test:1 · opus · working · .*213k ctx\\'" header-line-format))
+    (should-not (string-match-p "default\\|/tmp/proj" header-line-format))
     (should (eq 'warning (get-text-property (string-search "213k" header-line-format)
                                             'face header-line-format)))
     (aob-session-put s :mode-id "plan")
@@ -5027,7 +5027,7 @@ next chunk does not pull the page back down."
           (funcall git main "add" "a.txt")
           (funcall git main "-c" "user.email=t@t" "-c" "user.name=t"
                    "commit" "-q" "-m" "0")
-          (funcall git main "worktree" "add" "-q" "-b" "feat/x" tree)
+          (aob-tests--link-worktree main tree "feat/x")
           (with-temp-file (expand-file-name "a.txt" tree) (insert "two\n"))
           (let ((out (funcall expand "acp:diff:1")))
             (should (string-match-p "<diff>\nworktree feat-x · branch feat/x\n" out))
@@ -5553,6 +5553,34 @@ something already."
                          "-c" "user.email=t@t" "-c" "user.name=t" args))
       (error "git %S: %s" args (buffer-string)))))
 
+(defun aob-tests--link-worktree (main tree branch)
+  "Lay out TREE as a linked worktree of the repository MAIN on a new BRANCH,
+the files git itself leaves on disk for one, without asking git to make it.
+MAIN\='s index goes with it, so the tree starts out clean."
+  (let* ((main (file-name-as-directory (expand-file-name main)))
+         (tree (directory-file-name (expand-file-name tree)))
+         (admin (expand-file-name (concat ".git/worktrees/" (file-name-nondirectory tree))
+                                  main))
+         (write (lambda (file text)
+                  (make-directory (file-name-directory file) t)
+                  (with-temp-file file (insert text)))))
+    (funcall write (expand-file-name (concat ".git/refs/heads/" branch) main)
+             (with-temp-buffer
+               (call-process "git" nil t nil "-C" main "rev-parse" "HEAD")
+               (buffer-string)))
+    (funcall write (expand-file-name "gitdir" admin) (concat tree "/.git\n"))
+    (funcall write (expand-file-name "commondir" admin) "../..\n")
+    (funcall write (expand-file-name "HEAD" admin) (format "ref: refs/heads/%s\n" branch))
+    (when (file-exists-p (expand-file-name ".git/index" main))
+      (copy-file (expand-file-name ".git/index" main) (expand-file-name "index" admin)))
+    (funcall write (expand-file-name ".git" tree) (format "gitdir: %s\n" admin))))
+
+(defun aob-tests--linking-worktree-make (project dir done &optional branch)
+  "`aob-acp--worktree-make\=', laying DIR out by hand rather than asking git."
+  (aob-tests--link-worktree project dir
+                            (or branch (concat "aob/" (file-name-nondirectory dir))))
+  (funcall done nil))
+
 (defmacro aob-tests--with-trees (repo second &rest body)
   "REPO is a scratch repository; SECOND its linked worktree, or nil for none."
   (declare (indent 2))
@@ -5566,7 +5594,6 @@ something already."
            ,@body)
        (dolist (w (aob-acp--worktrees ,repo))
          (unless (equal (file-truename (car w)) ,repo)
-           (ignore-errors (aob-tests--git ,repo "worktree" "remove" "--force" (car w)))
            (ignore-errors (delete-directory (car w) t))
            (let ((parent (file-name-directory (directory-file-name (car w)))))
              (when (string-prefix-p "aob-tree-home"
@@ -5577,7 +5604,7 @@ something already."
 (defun aob-tests--add-tree (repo name)
   (let ((dir (file-name-as-directory
               (file-truename (expand-file-name name (make-temp-file "aob-tree-home" t))))))
-    (aob-tests--git repo "worktree" "add" "-q" "-b" name (directory-file-name dir))
+    (aob-tests--link-worktree repo dir name)
     dir))
 
 (defun aob-tests--no-asking (&rest args)
@@ -5622,12 +5649,12 @@ something already."
     (let* ((aob-acp-worktree-root (file-truename (make-temp-file "aob-wt-root" t)))
            (fresh (file-name-as-directory (expand-file-name "made" aob-acp-worktree-root))))
       (unwind-protect
-          (progn
+          (cl-letf (((symbol-function 'aob-acp--worktree-make)
+                     #'aob-tests--linking-worktree-make))
             (should (equal (car (aob-tests--spawn-cwd repo (cons fresh "topic/new")))
                            (directory-file-name fresh)))
             (should (file-directory-p fresh))
             (should (equal (cdr (assoc fresh (aob-acp--worktrees repo))) "topic/new")))
-        (ignore-errors (aob-tests--git repo "worktree" "remove" "--force" fresh))
         (delete-directory aob-acp-worktree-root t)))))
 
 (ert-deftest aob-spawn-prompt-asks-no-worktree-in-a-single-tree-repo ()
@@ -5781,8 +5808,10 @@ something already."
     (setq second (aob-tests--add-tree repo "second"))
     (let ((aob-acp-worktree-root (file-truename (make-temp-file "aob-wt-root" t))))
       (unwind-protect
-          (pcase-let ((`(,_ ,dir ,_) (aob-tests--spawn-cwd repo second "claude-isolated")))
-            (should (string-prefix-p aob-acp-worktree-root dir)))
+          (cl-letf (((symbol-function 'aob-acp--worktree-make)
+                     #'aob-tests--linking-worktree-make))
+            (pcase-let ((`(,_ ,dir ,_) (aob-tests--spawn-cwd repo second "claude-isolated")))
+              (should (string-prefix-p aob-acp-worktree-root dir))))
         (delete-directory aob-acp-worktree-root t)))))
 
 (ert-deftest aob-a-worktree-another-session-works-in-is-not-reaped ()
@@ -6831,8 +6860,9 @@ asked for by name still reloads."
                       (and (plist-member caps :close) t))))))))
 
 (ert-deftest aob-discard-deletes-only-where-the-agent-can ()
-  "A discard moves the file first and then asks the running agent to
-delete; an agent that cannot delete is not asked, and an archive never."
+  "A discard copies the file first and then asks the running agent to
+delete, finishing the move when it answers; an agent that cannot delete
+is not asked, and an archive never."
   (dolist (case '(((:delete nil) "discarded" t)
                   ((:list nil) "discarded" nil)
                   ((:delete nil) "archive" nil)))
@@ -6851,15 +6881,156 @@ delete; an agent that cannot delete is not asked, and an archive never."
                 (aob-tests--capturing sent
                   (let ((to (aob-transcript-move
                              (list :agent "claude" :project home :acp-id "sid-9")
-                             (nth 1 case))))
-                    (should (file-exists-p to))
-                    (should-not (file-exists-p file)))
-                  (let ((del (seq-find (lambda (m) (equal (plist-get m :method) "session/delete"))
+                             (nth 1 case)))
+                        (del (seq-find (lambda (m) (equal (plist-get m :method) "session/delete"))
                                        sent)))
                     (should (eq (and del t) (nth 2 case)))
                     (when del
-                      (should (equal (plist-get del :params) '(:sessionId "sid-9")))))))
+                      (should (equal (plist-get del :params) '(:sessionId "sid-9")))
+                      (should (file-exists-p file))
+                      (aob-tests--reply s nil))
+                    (should (file-exists-p to))
+                    (should-not (file-exists-p file)))))
             (delete-directory home t)))))))
+
+(ert-deftest aob-discard-ends-with-only-the-copy-whatever-the-agent-says ()
+  "The file ends up in discarded/ alone: the agent deleting it, the agent
+failing to, no agent to ask, and one still awake that is never asked."
+  (dolist (case '(deleted failed none awake))
+    (let* ((home (make-temp-file "aob-discard" t))
+           (file (expand-file-name "sid-9.jsonl" home))
+           (to (expand-file-name "discarded/sid-9.jsonl" home))
+           (aob-acp--conns (make-hash-table :test #'equal)))
+      (aob-tests--with-session s
+        (let ((proc (aob-session-conn s)))
+          (process-put proc 'aob-init
+                       '(done (:agentCapabilities (:sessionCapabilities (:delete nil)))))
+          (unless (eq case 'none)
+            (puthash (list "claude" home "iso") proc aob-acp--conns))
+          (aob-set-state s 'idle)
+          (with-temp-file file (insert "{}\n"))
+          (unwind-protect
+              (cl-letf (((symbol-function 'aob-transcript-file)
+                         (lambda (_e) (and (file-exists-p file) file))))
+                (aob-tests--capturing sent
+                  (aob-transcript-move
+                   (list :agent "claude" :project home
+                         :acp-id (if (eq case 'awake) "sess-test" "sid-9"))
+                   "discarded")
+                  (let ((del (seq-find (lambda (m)
+                                         (equal (plist-get m :method) "session/delete"))
+                                       sent)))
+                    (should (eq (and del t) (and (memq case '(deleted failed)) t)))
+                    (pcase case
+                      ('deleted (delete-file file) (aob-tests--reply s nil))
+                      ('failed
+                       (let* ((pending (process-get proc 'aob-pending))
+                              (id (apply #'max (hash-table-keys pending))))
+                         (funcall (gethash id pending) nil
+                                  '(:code -32603 :message "not found"))))))
+                  (should (file-exists-p to))
+                  (should-not (file-exists-p file))))
+            (delete-directory home t)))))))
+
+(ert-deftest aob-an-adapter-that-dies-fails-what-it-still-owed ()
+  "A delete in flight when its adapter exits is answered once with an
+error, so the discard still ends with only the copy; a turn the dead
+session was running is not answered back to idle."
+  (let* ((home (make-temp-file "aob-discard" t))
+         (file (expand-file-name "sid-9.jsonl" home))
+         (to (expand-file-name "discarded/sid-9.jsonl" home))
+         (aob-acp--conns (make-hash-table :test #'equal))
+         (answers nil))
+    (aob-tests--with-session s
+      (let ((proc (aob-session-conn s)))
+        (process-put proc 'aob-init
+                     '(done (:agentCapabilities (:sessionCapabilities (:delete nil)))))
+        (puthash (list "claude" home "iso") proc aob-acp--conns)
+        (aob-set-state s 'idle)
+        (with-temp-file file (insert "{}\n"))
+        (unwind-protect
+            (cl-letf (((symbol-function 'aob-transcript-file)
+                       (lambda (_e) (and (file-exists-p file) file))))
+              (aob-tests--capturing sent
+                (aob-acp--request s "session/prompt" '(:sessionId "sess-test")
+                                  (lambda (_res _err) (aob-set-state s 'idle)))
+                (aob-transcript-move (list :agent "claude" :project home :acp-id "sid-9")
+                                     "discarded"
+                                     (lambda () (push 'moved answers)))
+                (aob-acp-delete-entry (list :agent "claude" :project home :acp-id "sid-8")
+                                      (lambda (res err) (push (list res err) answers)))
+                (should (= 2 (seq-count (lambda (m) (equal (plist-get m :method) "session/delete"))
+                                        sent)))
+                (should (file-exists-p file))
+                (delete-process proc)
+                (aob-acp--sentinel proc "killed\n")
+                (should (eq (aob-session-state s) 'dead))
+                (aob-acp--sentinel proc "killed\n")
+                (should (= 2 (length answers)))
+                (should (memq 'moved answers))
+                (let ((reply (seq-find #'consp answers)))
+                  (should-not (car reply))
+                  (should (stringp (plist-get (cadr reply) :message))))
+                (should (= 0 (hash-table-count (process-get proc 'aob-pending))))
+                (should (file-exists-p to))
+                (should-not (file-exists-p file))))
+          (delete-directory home t))))))
+
+(ert-deftest aob-an-adapter-that-dies-mid-handshake-leaves-its-session-dead ()
+  "The initialize still pending when the adapter exits is answered with an
+error, and the session waiting on it stays dead, said so once."
+  (aob-tests--with-session s
+    (let ((proc (aob-session-conn s)))
+      (aob-session-put s :agent "claude")
+      (cl-letf (((symbol-function 'aob-acp--live-conn) (lambda (&rest _) proc)))
+        (aob-tests--capturing _sent
+          (aob-acp--initialize proc)
+          (aob-acp--connect s (lambda (_init) (error "Never opened")) #'ignore)
+          (delete-process proc)
+          (aob-acp--sentinel proc "killed\n")))
+      (should (eq (aob-session-state s) 'dead))
+      (should (= 1 (seq-count (lambda (e) (eq (plist-get e :type) 'error))
+                              (aob-session-events s)))))))
+
+(ert-deftest aob-discard-unlists-at-once-and-waits-for-the-agent-only-so-long ()
+  "A discarded conversation leaves the listing as soon as its copy is made.
+An agent that never answers the delete is not waited on past
+`aob-transcript-delete-wait', and its answer when it does come is ignored."
+  (let* ((home (make-temp-file "aob-discard" t))
+         (project (file-name-as-directory (make-temp-file "aob-project" t)))
+         (dir (expand-file-name (format "projects/%s" (aob-transcript--slug project)) home))
+         (file (expand-file-name "sid-9.jsonl" dir))
+         (aob-transcript-delete-wait 0.1)
+         (reply nil)
+         (moved 0)
+         (listed (lambda ()
+                   (mapcar (lambda (e) (plist-get e :acp-id))
+                           (aob-transcript-found project "claude")))))
+    (make-directory (expand-file-name "discarded" dir) t)
+    (with-temp-file (expand-file-name "discarded/old.jsonl" dir) (insert "{}\n"))
+    (with-temp-file file (insert "{}\n"))
+    (unwind-protect
+        (cl-letf (((symbol-function 'aob-transcript--homes) (lambda (&rest _) (list home)))
+                  ((symbol-function 'aob-transcript--want-title) #'ignore)
+                  ((symbol-function 'aob-acp-delete-entry)
+                   (lambda (_e &optional then) (setq reply then) t)))
+          (aob-transcript-forget)
+          (should (equal (funcall listed) '("sid-9")))
+          (aob-transcript-move (list :agent "claude" :project project :acp-id "sid-9"
+                                     :file file)
+                               "discarded" (lambda () (cl-incf moved)))
+          (should (file-exists-p file))
+          (should-not (funcall listed))
+          (let ((deadline (+ (float-time) 3)))
+            (while (and (file-exists-p file) (< (float-time) deadline))
+              (accept-process-output nil 0.05)))
+          (should-not (file-exists-p file))
+          (should (= moved 1))
+          (funcall reply nil nil)
+          (should (= moved 1)))
+      (aob-transcript-forget)
+      (delete-directory home t)
+      (delete-directory project t))))
 
 (ert-deftest aob-info-update-names-and-dates-a-session-not-named-by-you ()
   (aob-tests--with-default-name s

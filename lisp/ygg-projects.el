@@ -75,6 +75,9 @@
 (declare-function aob-acp-forget-entry "aob-acp" (e))
 (declare-function aob-acp-delete-session "aob-acp" (s))
 (declare-function aob-transcript-view "aob-transcript" (entry))
+(declare-function aob-transcript--title-cached "aob-transcript" (file))
+(declare-function aob-acp-list-sessions "aob-acp" (agent project then))
+(declare-function aob-acp-merge-listed "aob-acp" (entries listed agent project))
 (declare-function ygg-task--locate-justfile "layer-tasks" (start))
 (declare-function ygg-task--justfile-recipes-text "layer-tasks" (file))
 (declare-function nerd-icons-mdicon "nerd-icons")
@@ -293,17 +296,79 @@ or not this Emacs was there for it."
 
 (defun ygg-projects--found (root &optional where)
   "What the default agent and Codex left on disk for ROOT, put away in WHERE.
-Codex keeps its own history whichever agent sessions here start with."
-  (seq-mapcat (lambda (agent) (ignore-errors (aob-transcript-found root agent where)))
+Codex keeps its own history whichever agent sessions here start with.
+Outside WHERE, what a running agent lists as its own is merged in."
+  (seq-mapcat (lambda (agent)
+                (let ((found (ignore-errors (aob-transcript-found root agent where))))
+                  (if where found (ygg-projects--with-listed found agent root))))
               (delete-dups (list (or (bound-and-true-p aob-acp-default-agent) "claude")
                                  "codex"))))
 
+(defvar ygg-projects--listed (make-hash-table :test #'equal)
+  "The sessions each (AGENT . ROOT) last listed as its own.")
+
+(defvar ygg-projects--listed-asked (make-hash-table :test #'equal)
+  "When each (AGENT . ROOT) was last asked for its sessions.")
+
+(defconst ygg-projects--listed-every 30
+  "Seconds before an agent is asked for its session list again.")
+
+(defun ygg-projects--listed (agent root)
+  "The sessions AGENT last listed for ROOT, from the cache only.
+It is asked again at most every `ygg-projects--listed-every\=' seconds,
+without waiting; an answer that differs redraws once."
+  (let ((key (cons agent root)))
+    (when (and (fboundp 'aob-acp-list-sessions)
+               (> (- (float-time) (gethash key ygg-projects--listed-asked 0))
+                  ygg-projects--listed-every))
+      (puthash key (float-time) ygg-projects--listed-asked)
+      (ignore-errors
+        (aob-acp-list-sessions
+         agent root
+         (lambda (sessions)
+           (unless (equal sessions (gethash key ygg-projects--listed))
+             (puthash key sessions ygg-projects--listed)
+             (run-at-time 0 nil #'ygg-projects-refresh))))))
+    (gethash key ygg-projects--listed)))
+
+(defvar ygg-projects--discarded (make-hash-table :test #'equal)
+  "Ids discarded here that only their agent kept a file of.
+Nothing on disk says they are gone, and the agent's list says so only
+once it is asked again.")
+
+(defun ygg-projects--with-listed (found agent root)
+  "FOUND, with what AGENT lists for ROOT merged in by id.
+One put away here stays away however stale the list; one with no
+opening line read yet goes by the title the agent gave it."
+  (if-let* ((listed (ygg-projects--listed agent root))
+            ((fboundp 'aob-acp-merge-listed)))
+      (let ((away (append (hash-table-keys ygg-projects--discarded)
+                          (mapcar (lambda (e) (plist-get e :acp-id))
+                                  (append (ignore-errors
+                                            (aob-transcript-found root agent "archive"))
+                                          (ignore-errors
+                                            (aob-transcript-found root agent "discarded")))))))
+        (delq nil
+              (mapcar (lambda (e)
+                        (cond ((plist-get e :file)
+                               (if (and (plist-get e :listed-title)
+                                        (not (aob-transcript--title-cached
+                                              (plist-get e :file))))
+                                   (plist-put e :name (plist-get e :listed-title))
+                                 e))
+                              ((not (member (plist-get e :acp-id) away)) e)))
+                      (aob-acp-merge-listed found listed agent root))))
+    found))
+
 (defun ygg-projects--entry-ts (entry)
-  "When ENTRY was last written to, as far as the disk knows."
+  "When ENTRY was last written to, as far as the disk knows.
+One only its agent keeps goes by when the agent says it last moved."
   (or (plist-get entry :ts)
       (when-let* ((file (and (fboundp 'aob-transcript-file)
                              (ignore-errors (aob-transcript-file entry)))))
-        (float-time (file-attribute-modification-time (file-attributes file))))))
+        (float-time (file-attribute-modification-time (file-attributes file))))
+      (when-let* ((at (plist-get entry :updated-at)))
+        (ignore-errors (float-time (date-to-time at))))))
 
 (defun ygg-projects--agents (root)
   "What ROOT has going, and everything it could go back to.
@@ -1936,7 +2001,8 @@ answers have changed underneath, or one of them was wrong."
 (defvar ygg-conversations--index (make-hash-table :test #'equal)
   "Candidate string to the conversation it stands for.")
 
-(declare-function aob-transcript-move "aob-transcript" (entry where))
+(declare-function aob-transcript-move "aob-transcript" (entry where &optional then))
+(declare-function aob-acp-delete-entry "aob-acp" (entry &optional then))
 (declare-function aob-acp-archive-entry "aob-acp" (e))
 
 (defun ygg-conversations--label (entry root)
@@ -1982,8 +2048,16 @@ discards everything the filter left."
   (interactive "sConversation: ")
   (let ((entry (ygg-conversations--entry candidate)))
     (cond ((and (fboundp 'aob-session-p) (aob-session-p entry)) (aob-trace entry))
-          ((fboundp 'aob-transcript-view) (aob-transcript-view entry))
+          ((fboundp 'aob-transcript-view) (ygg-projects--open-ended entry))
           (t (user-error "projects: nothing to read it with")))))
+
+(defun ygg-projects--open-ended (entry)
+  "Read ENTRY's conversation, or resume it when only its agent keeps it.
+A session the agent lists with no file here has nothing to read."
+  (if (and (plist-get entry :listed)
+           (not (ignore-errors (aob-transcript-file entry))))
+      (aob-acp-resume-entry entry)
+    (aob-transcript-view entry)))
 
 (defun ygg-conversation-archive (candidate)
   "Put CANDIDATE away: kept, and out of the list."
@@ -1992,12 +2066,25 @@ discards everything the filter left."
     (ygg-projects--put-away entry)
     (ygg-projects-refresh)))
 
-(defun ygg-conversation-discard (candidate)
-  "Move CANDIDATE out of the way, into a folder nothing reads."
-  (interactive "sConversation: ")
+(defun ygg-conversation-discard (candidate &optional ask)
+  "Move CANDIDATE out of the way, into a folder nothing reads.
+ASK, as when called by hand, names it and asks first; under
+`embark-act-all\=' the one question for all of them was already asked."
+  (interactive (list (read-string "Conversation: ")
+                     ;; act-all stubs its confirm out around each action it runs
+                     (not (eq (symbol-function 'embark--confirm) #'ignore))))
   (let ((entry (ygg-conversations--entry candidate)))
-    (when (fboundp 'aob-transcript-move) (aob-transcript-move entry "discarded"))
-    (ygg-projects-refresh)))
+    (when (or (not ask)
+              (y-or-n-p (format "Discard “%s”? "
+                                (or (plist-get entry :name)
+                                    (plist-get entry :listed-title)
+                                    (plist-get entry :acp-id)))))
+      (cond ((ignore-errors (aob-transcript-file entry))
+             (when (fboundp 'aob-transcript-move)
+               (aob-transcript-move entry "discarded" #'ygg-projects-refresh)))
+            ((and (fboundp 'aob-acp-delete-entry) (aob-acp-delete-entry entry))
+             (puthash (plist-get entry :acp-id) t ygg-projects--discarded)))
+      (ygg-projects-refresh))))
 
 (defcustom ygg-projects-show-past t
   "Whether the sessions row lists ended conversations under the live ones.
@@ -2234,7 +2321,7 @@ umbrella's Folders row moves that repository."
             ;; reading what was said costs nothing; resuming starts an
             ;; agent, so that is a different key
             ((and (consp entry) (plist-member entry :acp-id))
-             (aob-transcript-view entry))
+             (ygg-projects--open-ended entry))
             (t (when (fboundp 'ygg-aob-goto-space) (ygg-aob-goto-space entry))
                (aob-trace entry))))
           ('commands (if (fboundp 'ygg-project-commands-run)

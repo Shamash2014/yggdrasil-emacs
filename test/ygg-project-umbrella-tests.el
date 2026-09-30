@@ -78,18 +78,51 @@ every root `ygg-project-import' is asked for."
     (apply #'call-process "git" nil nil nil
            "-c" "user.name=t" "-c" "user.email=t@t" args)))
 
+(defun ygg-umbrella-tests--write (file text)
+  (make-directory (file-name-directory file) t)
+  (with-temp-file file (insert text)))
+
+(defun ygg-umbrella-tests--link-worktree (main tree branch)
+  "Lay out TREE as a linked worktree of MAIN on BRANCH, the files
+git itself leaves on disk for one, without asking git to make it."
+  (let ((admin (expand-file-name (concat ".git/worktrees/"
+                                         (file-name-nondirectory tree))
+                                 main)))
+    (ygg-umbrella-tests--write (expand-file-name "gitdir" admin)
+                               (concat (expand-file-name ".git" tree) "\n"))
+    (ygg-umbrella-tests--write (expand-file-name "commondir" admin) "../..\n")
+    (ygg-umbrella-tests--write (expand-file-name "HEAD" admin)
+                               (format "ref: refs/heads/%s\n" branch))
+    (ygg-umbrella-tests--write (expand-file-name ".git" tree)
+                               (format "gitdir: %s\n" admin))))
+
+(defun ygg-umbrella-tests--porcelain (&rest trees)
+  "git worktree list --porcelain for TREES, each (DIR . BRANCH)."
+  (mapconcat (pcase-lambda (`(,dir . ,branch))
+               (format "worktree %s\nHEAD %s\nbranch refs/heads/%s\n\n"
+                       dir (make-string 40 ?0) branch))
+             trees ""))
+
+(defvar ygg-umbrella-tests--worktree-lists nil
+  "Each checkout's git worktree list --porcelain, as (DIR . OUT).")
+
 (defun ygg-umbrella-tests--git-now (dir args callback)
-  "`ygg-git-async' answering before it returns, so no test waits on git."
-  (with-temp-buffer
-    (let* ((default-directory dir)
-           (exit (apply #'call-process "git" nil t nil args)))
-      (funcall callback (buffer-string) exit)))
+  "`ygg-git-async' answering before it returns, so no test waits on git.
+Only a worktree list is asked for, read from
+`ygg-umbrella-tests--worktree-lists'."
+  (should (equal args '("worktree" "list" "--porcelain")))
+  (let ((out (cdr (assoc (file-name-as-directory (expand-file-name dir))
+                         ygg-umbrella-tests--worktree-lists))))
+    (if out
+        (funcall callback out 0)
+      (funcall callback "fatal: not a git repository\n" 128)))
   t)
 
 (defmacro ygg-umbrella-tests--with-sidebar (umbrella &rest body)
   "Run BODY with UMBRELLA taken in: repos a and b, and a-wt, a linked
-worktree of a made inside the umbrella.  The sidebar's caches, the saved
-order and `custom-file' are private to BODY, and git answers at once."
+worktree of a laid out inside the umbrella.  The sidebar's caches, the
+saved order and `custom-file' are private to BODY, and a worktree list
+answers at once from `ygg-umbrella-tests--worktree-lists'."
   (declare (indent 1))
   `(let* ((,umbrella (file-name-as-directory
                       (file-truename (make-temp-file "ygg-umbrella" t))))
@@ -107,7 +140,16 @@ order and `custom-file' are private to BODY, and git answers at once."
           (ygg-projects--worktrees-pending (make-hash-table :test #'equal))
           (ygg-projects--tree-notes (make-hash-table :test #'equal))
           (ygg-projects--tree-notes-pending (make-hash-table :test #'equal))
-          (ygg-projects--tree-mains (make-hash-table :test #'equal)))
+          (ygg-projects--tree-mains (make-hash-table :test #'equal))
+          (ygg-umbrella-tests--worktree-lists
+           (let ((a (concat ,umbrella "a")) (wt (concat ,umbrella "a-wt"))
+                 (b (concat ,umbrella "b")))
+             (list (cons (concat a "/") (ygg-umbrella-tests--porcelain
+                                         (cons a "main") (cons wt "a-wt")))
+                   (cons (concat wt "/") (ygg-umbrella-tests--porcelain
+                                          (cons a "main") (cons wt "a-wt")))
+                   (cons (concat b "/") (ygg-umbrella-tests--porcelain
+                                         (cons b "main")))))))
      ;; set, not bound: a reload through Custom does not reach a let
      (setq ygg-project-order nil)
      (unwind-protect
@@ -117,8 +159,9 @@ order and `custom-file' are private to BODY, and git answers at once."
                (make-directory dir)
                (ygg-umbrella-tests--git dir "init" "-q")
                (ygg-umbrella-tests--git dir "commit" "-q" "--allow-empty" "-m" "i")))
-           (ygg-umbrella-tests--git (expand-file-name "a" ,umbrella)
-                                    "worktree" "add" "-q" "../a-wt")
+           (ygg-umbrella-tests--link-worktree (expand-file-name "a" ,umbrella)
+                                              (expand-file-name "a-wt" ,umbrella)
+                                              "a-wt")
            (cl-letf (((symbol-function 'ygg-project-import) #'ignore)
                      ((symbol-function 'ygg-git-async) #'ygg-umbrella-tests--git-now)
                      ((symbol-function 'ygg-projects--past) #'ignore))

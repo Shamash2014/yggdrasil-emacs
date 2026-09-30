@@ -22,7 +22,7 @@
 (declare-function ygg-agent--own-home "ygg-agent-conf" (kind repo &optional isolate))
 (declare-function ygg-agent--repo-home "ygg-agent-conf" (project))
 (declare-function aob-acp-resume-entry "aob-acp" (e &optional pref))
-(declare-function aob-acp-delete-entry "aob-acp" (entry))
+(declare-function aob-acp-delete-entry "aob-acp" (entry &optional then))
 (declare-function aob-acp--tool-title "aob-acp" (u raw))
 
 (defgroup aob-transcript nil
@@ -303,7 +303,8 @@ FOUND holds (FILE ID DIR [NAME]) for each, DIR the folder it ran in and
 NAME what it was called, where it was; WHERE, when given, is the folder
 they were put away in."
   (let ((found (sort (mapcar (lambda (row) (cons (aob-transcript--mtime (car row)) row))
-                             found)
+                             (if where found
+                               (seq-remove #'aob-transcript--discarded-p found)))
                      (lambda (a b) (> (car a) (car b)))))
         seen)
     (mapcar (lambda (row)
@@ -335,6 +336,15 @@ they were put away in."
                 (push name seen)
                 (plist-put entry :name name)))
             found)))
+
+(defun aob-transcript--discarded-p (row)
+  "Whether ROW\='s file already has its copy in the discarded folder beside it.
+The original goes only once its agent answers the delete; until then it
+is gone as far as the listing is concerned."
+  (let ((file (car row)))
+    (file-exists-p (expand-file-name (file-name-nondirectory file)
+                                     (expand-file-name "discarded"
+                                                       (file-name-directory file))))))
 
 (defvar aob-transcript--codex-heads (make-hash-table :test 'equal)
   "Rollout file to (MTIME ID . CWD), for a home with no thread index.")
@@ -468,20 +478,46 @@ is read, and once per change of the file."
     (when (cdr cell)
       (list file (cadr cell) (cddr cell)))))
 
-(defun aob-transcript-move (entry where)
+(defcustom aob-transcript-delete-wait 10
+  "Seconds a discard waits for its agent to answer the delete.
+Past that the original is removed anyway: the copy is already made, and
+an agent that never answers should not keep it listed."
+  :type 'number :group 'aob-transcript)
+
+(defun aob-transcript-move (entry where &optional then)
   "Move ENTRY\='s conversation into the WHERE folder beside it.
 Nothing is destroyed here: archiving and discarding are both a move, and
 a folder the listing does not read is what \"gone\" means here.  A
-discard also tells a running agent that can delete to let it go; the
-move comes first, since the agent's delete removes the file it keeps."
+discard copies first and tells a running agent that can delete to let
+it go, since its delete removes the file it keeps; whatever that
+leaves behind is removed here, once it answers or at once when nobody
+is asked, so the copy is all that remains.  An agent that has not
+answered within `aob-transcript-delete-wait' seconds is not waited for.
+THEN is called when the move is done."
   (when-let* ((file (aob-transcript-file entry)))
     (let* ((dir (expand-file-name where (file-name-directory file)))
-           (to (expand-file-name (file-name-nondirectory file) dir)))
+           (to (expand-file-name (file-name-nondirectory file) dir))
+           (done nil)
+           (timer nil)
+           (finish (lambda (&rest _)
+                     (unless done
+                       (setq done t)
+                       (when timer (cancel-timer timer))
+                       (when (file-exists-p file) (delete-file file))
+                       (aob-transcript-forget)
+                       (when then (funcall then))))))
       (make-directory dir t)
-      (rename-file file to t)
-      (aob-transcript-forget)
-      (when (and (equal where "discarded") (fboundp 'aob-acp-delete-entry))
-        (ignore-errors (aob-acp-delete-entry entry)))
+      (if (not (equal where "discarded"))
+          (progn (rename-file file to t)
+                 (aob-transcript-forget)
+                 (when then (funcall then)))
+        (copy-file file to t t)
+        (aob-transcript-forget)
+        (if (and (fboundp 'aob-acp-delete-entry)
+                 (ignore-errors (aob-acp-delete-entry entry finish)))
+            (unless done
+              (setq timer (run-at-time aob-transcript-delete-wait nil finish)))
+          (funcall finish)))
       to)))
 
 ;;;###autoload

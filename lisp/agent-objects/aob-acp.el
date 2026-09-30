@@ -629,16 +629,37 @@ one, and failing that the newest line that is not noise."
                          (string-trim
                           (buffer-substring-no-properties
                            (max (point-min) (- (point-max) 2000))
-                           (point-max))))))))
+                           (point-max)))))))
+          (died nil))
       (dolist (s (aob-acp--conn-sessions proc))
         (when (aob-session-get (aob-session-id s))
           (aob-session-put s :fail-reason
                            (or (aob-acp--fail-reason tail) "process exited"))
           (aob-set-state s 'dead)
+          (push s died)
           (aob-event s 'error :title "process exited" :text tail)
           (message "aob: %s died: %s" (aob-session-name s)
-                   (aob-session-ref s :fail-reason)))))
+                   (aob-session-ref s :fail-reason))))
+      (aob-acp--fail-pending proc died
+                             (or (aob-acp--fail-reason tail) "process exited")))
     (aob-acp--conn-cleanup proc)))
+
+(defun aob-acp--fail-pending (proc died why)
+  "Answer each request still awaiting PROC, once, with an error saying WHY.
+One sent for a session in DIED gets nothing: that session was just told
+it is dead, and a reply would carry it back to idle."
+  (let ((pending (process-get proc 'aob-pending))
+        (owners (aob-acp--request-owners proc))
+        (owed nil))
+    (when pending
+      (maphash (lambda (id cb)
+                 (unless (memq (gethash id owners) died)
+                   (push cb owed)))
+               pending)
+      (clrhash pending))
+    (clrhash owners)
+    (dolist (cb (nreverse owed))
+      (ignore-errors (funcall cb nil (list :code -32603 :message why))))))
 
 ;;; Incoming requests — permission becomes a Decision object; the JSON-RPC
 ;;; reply is held until a human resolves it
@@ -2619,13 +2640,17 @@ WANT is an id, or a name such as \"haiku\" that an offered model carries."
      (t (aob-acp--set-model s id)))))
 
 (defun aob-acp--fail (s err)
-  (let ((why (or (and err (plist-get err :message)) "error")))
-    (aob-session-put s :fail-reason why)
-    (aob-set-state s 'failed)
-    (aob-event s 'error :title why)
-    ;; a quiet death reads as a live-but-broken session — the human
-    ;; pokes verbs at a corpse
-    (message "aob: %s failed: %s" (aob-session-name s) why)))
+  "Mark S failed with ERR\='s message, unless its process already died.
+A dead session was told why when it died; failing it again would bury
+that reason under whatever its unanswered requests say."
+  (unless (eq (aob-session-state s) 'dead)
+    (let ((why (or (and err (plist-get err :message)) "error")))
+      (aob-session-put s :fail-reason why)
+      (aob-set-state s 'failed)
+      (aob-event s 'error :title why)
+      ;; a quiet death reads as a live-but-broken session — the human
+      ;; pokes verbs at a corpse
+      (message "aob: %s failed: %s" (aob-session-name s) why))))
 
 (defvar aob-acp-before-first-prompt-functions nil
   "Abnormal hook run with a ready session before its queue flushes.
@@ -4313,13 +4338,13 @@ nothing found there is dropped for being missing from the list."
                              :updated-at (plist-get x :updatedAt))))
                    listed)))))
 
-(defun aob-acp-delete-entry (entry)
+(defun aob-acp-delete-entry (entry &optional then)
   "Ask ENTRY\='s agent to delete its conversation; non-nil when asked.
 Only an agent already running on ENTRY\='s tree and advertising
-session/delete is asked, and its answer is not waited for: the local
-copy is the record, and an agent that no longer finds the conversation
-has nothing left to free.  A conversation still awake here is left
-alone; deleting it would pull it out from under its session."
+session/delete is asked; THEN, when given, is called with the answer\='s
+result and error once it comes.  Nothing is called when nothing was
+asked.  A conversation still awake here is left alone; deleting it
+would pull it out from under its session."
   (when-let* ((id (plist-get entry :acp-id))
               ((not (seq-find (lambda (s)
                                 (and (equal (aob-session-ref s :acp-id) id)
@@ -4330,7 +4355,8 @@ alone; deleting it would pull it out from under its session."
                                        (or (plist-get entry :project)
                                            (plist-get entry :dir))))
               ((aob-acp--session-cap (aob-acp--conn-init proc) :delete)))
-    (aob-acp--request-proc proc "session/delete" (list :sessionId id) #'ignore)
+    (aob-acp--request-proc proc "session/delete" (list :sessionId id)
+                           (or then #'ignore))
     t))
 
 ;;;###autoload

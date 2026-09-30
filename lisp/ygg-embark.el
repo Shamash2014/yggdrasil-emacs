@@ -241,7 +241,7 @@ Dropping it is the general map's DEL: the bounds cover the mention.")
   "RET" #'ygg-conversation-open)
 
 (declare-function ygg-conversation-archive "ygg-projects" (candidate))
-(declare-function ygg-conversation-discard "ygg-projects" (candidate))
+(declare-function ygg-conversation-discard "ygg-projects" (candidate &optional ask))
 (declare-function ygg-conversation-open "ygg-projects" (candidate))
 
 (defconst ygg-embark-keymaps

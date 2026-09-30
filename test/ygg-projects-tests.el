@@ -803,5 +803,136 @@ TAB on the lead shows them, TAB on one of them folds them back."
             (should-not (ygg-projects--pins)))
         (delete-file ygg-projects-pins-file)))))
 
+;;; Discarding, and what the agent lists of its own
+
+(defmacro ygg-projects-tests--with-discardable (asked &rest body)
+  "Run BODY with the conversation \"row\" on disk and no agent to ask.
+Every question put is pushed onto ASKED and answered no."
+  (declare (indent 1))
+  `(let* ((dir (make-temp-file "ygg-discard" t))
+          (file (expand-file-name "c1.jsonl" dir))
+          (ygg-conversations--index (make-hash-table :test #'equal))
+          (,asked nil))
+     (puthash "row" (list :agent "claude" :acp-id "c1" :name "Fix the race" :file file)
+              ygg-conversations--index)
+     (with-temp-file file (insert "{}\n"))
+     (unwind-protect
+         (cl-letf (((symbol-function 'aob-transcript-file)
+                    (lambda (_) (and (file-exists-p file) file)))
+                   ((symbol-function 'aob-acp-delete-entry) #'ignore)
+                   ((symbol-function 'aob-transcript-forget) #'ignore)
+                   ((symbol-function 'ygg-projects-refresh) #'ignore)
+                   ((symbol-function 'read-string) (lambda (&rest _) "row"))
+                   ((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt ,asked) nil)))
+           ,@body)
+       (delete-directory dir t))))
+
+(ert-deftest ygg-conversation-discard-by-hand-names-it-and-a-no-keeps-it ()
+  "Under embark-act-all, which asked once for all, it asks nothing."
+  (require 'aob-transcript)
+  (ygg-projects-tests--with-discardable asked
+    (call-interactively #'ygg-conversation-discard)
+    (should (equal asked '("Discard “Fix the race”? ")))
+    (should (file-exists-p file))
+    (cl-letf (((symbol-function 'embark--confirm) #'ignore))
+      (call-interactively #'ygg-conversation-discard))
+    (should (= 1 (length asked)))
+    (should-not (file-exists-p file))
+    (should (file-exists-p (expand-file-name "discarded/c1.jsonl" dir)))))
+
+(ert-deftest ygg-conversation-discard-from-code-asks-nothing ()
+  (require 'aob-transcript)
+  (ygg-projects-tests--with-discardable asked
+    (ygg-conversation-discard "row")
+    (should-not asked)
+    (should-not (file-exists-p file))
+    (should (file-exists-p (expand-file-name "discarded/c1.jsonl" dir)))))
+
+(ert-deftest ygg-projects-past-lists-what-only-the-agent-keeps-once ()
+  "A session the running agent lists with no file here is one row, named
+by its title, and opening it resumes it; one discarded here stays gone."
+  (let ((ygg-projects--listed (make-hash-table :test #'equal))
+        (ygg-projects--listed-asked (make-hash-table :test #'equal))
+        (aob-acp-default-agent "claude")
+        (ygg-projects-show-archived nil)
+        (asked 0)
+        resumed viewed)
+    (cl-letf (((symbol-function 'aob-transcript-found)
+               (lambda (_root agent &optional where)
+                 (when (equal agent "claude")
+                   (pcase where
+                     ('nil (list (list :agent "claude" :acp-id "on-disk" :name "Disk"
+                                       :file "/nowhere/on-disk.jsonl" :ts 100.0 :found t)))
+                     ("discarded" (list (list :agent "claude" :acp-id "gone")))))))
+              ((symbol-function 'aob-acp-list-sessions)
+               (lambda (agent _project then)
+                 (cl-incf asked)
+                 (funcall then (and (equal agent "claude")
+                                    (list (list :sessionId "on-disk" :title "T1")
+                                          (list :sessionId "gone" :title "Gone")
+                                          (list :sessionId "only-listed"
+                                                :title "Listed only"
+                                                :updatedAt "2026-09-30T08:00:00Z"))))))
+              ((symbol-function 'aob-acp-resumable-entries) #'ignore)
+              ((symbol-function 'aob-acp-archived-entries) #'ignore)
+              ((symbol-function 'aob-sessions) #'ignore)
+              ((symbol-function 'aob-transcript--title-cached) (lambda (_) "Disk"))
+              ((symbol-function 'aob-transcript-file) (lambda (e) (plist-get e :file)))
+              ((symbol-function 'aob-acp-resume-entry) (lambda (e) (push e resumed)))
+              ((symbol-function 'aob-transcript-view) (lambda (e) (push e viewed)))
+              ((symbol-function 'ygg-projects--selecting-p) #'ignore)
+              ((symbol-function 'run-at-time) #'ignore))
+      (dotimes (_ 2)
+        (let* ((past (ygg-projects--past "/tmp/p/"))
+               (ids (mapcar (lambda (e) (plist-get e :acp-id)) past)))
+          (should (equal (sort ids #'string<) '("on-disk" "only-listed")))
+          (should (equal (plist-get (seq-find (lambda (e) (plist-get e :listed-title))
+                                              (seq-remove (lambda (e) (plist-get e :file))
+                                                          past))
+                                    :name)
+                         "Listed only"))))
+      (should (= asked 2))
+      (let ((listed (seq-find (lambda (e) (not (plist-get e :file)))
+                              (ygg-projects--past "/tmp/p/"))))
+        (with-temp-buffer
+          (insert (propertize "row" 'ygg-project "/tmp/p/" 'ygg-row 'agents
+                              'ygg-entry listed))
+          (goto-char (point-min))
+          (ygg-projects-visit))
+        (should (equal resumed (list listed)))
+        (should-not viewed)))))
+
+(ert-deftest ygg-conversation-discard-of-what-only-the-agent-keeps-asks-it-to-delete ()
+  "With no file here, the agent is asked to delete it, once, and the row
+goes at once, though the agent still lists it until it is asked again."
+  (require 'aob-transcript)
+  (let ((ygg-projects--listed (make-hash-table :test #'equal))
+        (ygg-projects--listed-asked (make-hash-table :test #'equal))
+        (ygg-projects--discarded (make-hash-table :test #'equal))
+        (ygg-conversations--index (make-hash-table :test #'equal))
+        (aob-acp-default-agent "claude")
+        (ygg-projects-show-archived nil)
+        (deleted nil))
+    (cl-letf (((symbol-function 'aob-transcript-found) #'ignore)
+              ((symbol-function 'aob-acp-list-sessions)
+               (lambda (agent _project then)
+                 (funcall then (and (equal agent "claude")
+                                    (list (list :sessionId "only-listed"
+                                                :title "Listed only"))))))
+              ((symbol-function 'aob-acp-resumable-entries) #'ignore)
+              ((symbol-function 'aob-acp-archived-entries) #'ignore)
+              ((symbol-function 'aob-sessions) #'ignore)
+              ((symbol-function 'aob-transcript-file) #'ignore)
+              ((symbol-function 'aob-acp-delete-entry)
+               (lambda (e &optional _then) (push (plist-get e :acp-id) deleted) t))
+              ((symbol-function 'ygg-projects-refresh) #'ignore)
+              ((symbol-function 'run-at-time) #'ignore))
+      (let ((row (car (ygg-projects--past "/tmp/p/"))))
+        (should (equal (plist-get row :acp-id) "only-listed"))
+        (puthash "row" row ygg-conversations--index))
+      (ygg-conversation-discard "row")
+      (should (equal deleted '("only-listed")))
+      (should-not (ygg-projects--past "/tmp/p/")))))
+
 (provide 'ygg-projects-tests)
 ;;; ygg-projects-tests.el ends here
