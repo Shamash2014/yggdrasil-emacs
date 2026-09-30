@@ -80,18 +80,44 @@ project has a history from all three."
                    (expand-file-name
                     (if (equal agent "codex") "~/.codex" "~/.claude"))))))
 
+(defvar aob-transcript--codex-files (make-hash-table :test 'equal)
+  "Codex session id to its file: finding one walks a folder per day.")
+
+(defun aob-transcript--codex-file (id homes)
+  "The file Codex wrote session ID to under one of HOMES.
+Codex files by the day it started, not by project, as
+sessions/YYYY/MM/DD/rollout-<time>-ID.jsonl."
+  (let ((known (gethash id aob-transcript--codex-files)))
+    (if (and known (file-readable-p known))
+        known
+      (when-let* ((file (seq-some
+                         (lambda (home)
+                           (car (append
+                                 (file-expand-wildcards
+                                  (expand-file-name
+                                   (format "sessions/*/*/*/rollout-*-%s.jsonl" id) home))
+                                 (file-expand-wildcards
+                                  (expand-file-name
+                                   (format "archived_sessions/rollout-*-%s.jsonl" id) home)))))
+                         homes)))
+        (puthash id file aob-transcript--codex-files)))))
+
 (defun aob-transcript-file (entry)
   "Where ENTRY's conversation was written, if it is still there."
   (or (when-let* ((file (plist-get entry :file)) ((file-readable-p file))) file)
       (when-let* ((id (plist-get entry :acp-id))
                   (dir (or (plist-get entry :dir) (plist-get entry :project))))
-        (seq-some
-         (lambda (home)
-           (let ((file (expand-file-name
-                        (format "projects/%s/%s.jsonl" (aob-transcript--slug dir) id)
-                        home)))
-             (and (file-readable-p file) file)))
-         (aob-transcript--homes (or (plist-get entry :agent) "claude") dir)))))
+        (let* ((agent (or (plist-get entry :agent) "claude"))
+               (homes (aob-transcript--homes agent dir)))
+          (if (equal agent "codex")
+              (aob-transcript--codex-file id homes)
+            (seq-some
+             (lambda (home)
+               (let ((file (expand-file-name
+                            (format "projects/%s/%s.jsonl" (aob-transcript--slug dir) id)
+                            home)))
+                 (and (file-readable-p file) file)))
+             homes))))))
 
 (defvar aob-transcript--titles (make-hash-table :test 'equal)
   "File to (MTIME . TITLE): reading the head of one is not free.")
@@ -179,16 +205,15 @@ sidebar, and a row is drawn whenever anything moves."
                            (json-parse-string line :object-type 'alist
                                               :null-object nil
                                               :false-object nil)))))
-          (when (and rec (equal (alist-get 'type rec) "user"))
-            (when-let* ((msg (alist-get 'message rec))
-                        (text (aob-transcript--text (alist-get 'content msg)))
-                        (text (string-trim text))
-                        ((not (string-empty-p text)))
+          (when-let* ((turn (and rec (aob-transcript--turn rec)))
+                      ((equal (car turn) "user")))
+            (when-let* ((text (cdr turn))
                         ;; the harness writes its own preamble in as a
                         ;; user turn; the first thing a person said is
                         ;; what this is after
                         ((not (string-prefix-p "<" text)))
-                        ((not (string-prefix-p "Caveat:" text))))
+                        ((not (string-prefix-p "Caveat:" text)))
+                        ((not (string-prefix-p "# AGENTS.md" text))))
               (throw 'found
                      (truncate-string-to-width
                       (car (split-string text "\n" t)) 44 nil nil t)))))
@@ -283,6 +308,7 @@ home moving is a change of mind, and nothing on disk says when."
   (clrhash aob-transcript--homes)
   (clrhash aob-transcript--found)
   (clrhash aob-transcript--titles)
+  (clrhash aob-transcript--codex-files)
   (setq aob-transcript--queue nil))
 
 (defun aob-transcript--text (content)
@@ -296,7 +322,8 @@ home moving is a change of mind, and nothing on disk says when."
                    (seq-map (lambda (part)
                               (let ((type (alist-get 'type part)))
                                 (cond
-                                 ((equal type "text") (alist-get 'text part))
+                                 ((member type '("text" "input_text" "output_text"))
+                                  (alist-get 'text part))
                                  ((equal type "tool_use")
                                   (format "· %s" (or (alist-get 'name part) "tool")))
                                  (t nil))))
@@ -347,14 +374,35 @@ the older half past that, so reading further back is work thrown away."
                          (ignore-errors
                            (json-parse-string line :object-type 'alist
                                               :null-object nil :false-object nil))))
-               (kind (and rec (alist-get 'type rec)))
-               (msg (and rec (alist-get 'message rec))))
-          (when (member kind '("user" "assistant"))
-            (when-let* ((text (aob-transcript--text (alist-get 'content msg)))
-                        ((not (string-empty-p (string-trim text)))))
-              (push (cons kind (string-trim text)) out))))
+               (turn (and rec (aob-transcript--turn rec))))
+          (when turn (push turn out)))
         (forward-line 1)))
     (nreverse out)))
+
+(defun aob-transcript--harness-part-p (part)
+  "Whether PART of a user turn was written in by the harness, not typed."
+  (when-let* ((text (alist-get 'text part)))
+    (string-match-p "\\`\\(?:<\\|\\[workspace: \\|# AGENTS\\.md\\)" text)))
+
+(defun aob-transcript--turn (rec)
+  "REC as (WHO . TEXT) when it is something said, else nil.
+Claude writes a turn as {type: user|assistant, message: {content}};
+Codex as {type: response_item, payload: {type: message, role, content}}."
+  (let* ((codex (equal (alist-get 'type rec) "response_item"))
+         (body (alist-get (if codex 'payload 'message) rec))
+         (who (if codex
+                  (and (equal (alist-get 'type body) "message")
+                       (alist-get 'role body))
+                (alist-get 'type rec))))
+    (when-let* (((member who '("user" "assistant")))
+                (content (alist-get 'content body))
+                (content (if (and (equal who "user") (vectorp content))
+                             (seq-remove #'aob-transcript--harness-part-p content)
+                           content))
+                (text (aob-transcript--text content))
+                (text (string-trim text))
+                ((not (string-empty-p text))))
+      (cons who text))))
 
 ;;; Opening one
 

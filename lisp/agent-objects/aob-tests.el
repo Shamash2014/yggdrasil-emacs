@@ -2972,6 +2972,31 @@ the host weighs it at, and no keys."
                            4400))))
       (delete-file file))))
 
+(ert-deftest aob-transcript-reads-a-codex-rollout ()
+  "A Codex session is found by id under its day folder, and read without
+the harness's own user turns."
+  (skip-unless (fboundp 'aob-transcript--codex-file))
+  (let* ((home (make-temp-file "aob-codex-home" t))
+         (id "01a0ee9c-f365-7e22-90e3-ff308a4b9ec7")
+         (dir (expand-file-name "sessions/2026/09/29" home))
+         (file (expand-file-name (format "rollout-2026-09-29T22-20-58-%s.jsonl" id) dir))
+         (aob-transcript--codex-files (make-hash-table :test 'equal)))
+    (unwind-protect
+        (progn
+          (make-directory dir t)
+          (with-temp-file file
+            (insert "{\"type\":\"session_meta\",\"payload\":{\"id\":\"x\"}}\n"
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"developer\",\"content\":[{\"type\":\"input_text\",\"text\":\"rules\"}]}}\n"
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"<environment_context>x</environment_context>\"}]}}\n"
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"user\",\"content\":[{\"type\":\"input_text\",\"text\":\"[workspace: /r · branch m]\"},{\"type\":\"input_text\",\"text\":\"fix the dashboard\"}]}}\n"
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"reasoning\"}}\n"
+                    "{\"type\":\"response_item\",\"payload\":{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"Fixed.\"}]}}\n"))
+          (should (equal (aob-transcript--codex-file id (list home)) file))
+          (should (equal (aob-transcript-turns file)
+                         '(("user" . "fix the dashboard") ("assistant" . "Fixed."))))
+          (should (equal (aob-transcript--title-1 file) "fix the dashboard")))
+      (delete-directory home t))))
+
 (defun aob-tests--aob-command-p (def)
   (and (symbolp def) (string-match-p "\\`\\(?:ygg-\\)?aob-" (symbol-name def))))
 
