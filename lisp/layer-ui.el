@@ -511,6 +511,7 @@ extra lines of a multi-line prompt up to 0.8 of the frame."
 (defvar doom-modeline-buffer-encoding)
 (defvar doom-modeline-modal)
 (defvar doom-modeline-bar-width)
+(defvar doom-modeline-height)
 (defvar doom-modeline-check-simple-format)
 (defvar ygg--modeline-tag)
 (defvar ygg--macro-tag)
@@ -521,6 +522,7 @@ extra lines of a multi-line prompt up to 0.8 of the frame."
           doom-modeline-buffer-file-name-style 'relative-to-project
           doom-modeline-buffer-encoding nil
           doom-modeline-bar-width 1
+          doom-modeline-height 1
           doom-modeline-check-simple-format t
           doom-modeline-modal nil)
     (doom-modeline-mode 1)
