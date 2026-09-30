@@ -38,6 +38,7 @@
 (declare-function aob-session-events "aob" (s))
 (declare-function aob-session-started "aob" (s))
 (declare-function aob-session-clock "aob" (s))
+(declare-function aob-transcript-found "aob-transcript" (project &optional agent where))
 (declare-function aob-session-quiet "aob" (s))
 (declare-function aob-session-spend "aob" (s))
 (defvar aob-trace--session-id)
@@ -260,7 +261,7 @@ or not this Emacs was there for it."
                                        ;; writing, and one conversation is
                                        ;; one row
                                        (member (plist-get e :acp-id) awake)))
-                                 (ignore-errors (aob-transcript-found root)))))
+                                 (ygg-projects--found root))))
          (put-away (when ygg-projects-show-archived
                      (append
                       (seq-filter
@@ -271,14 +272,20 @@ or not this Emacs was there for it."
                        (and (fboundp 'aob-acp-archived-entries)
                             (ignore-errors (aob-acp-archived-entries))))
                       (and (fboundp 'aob-transcript-found)
-                           (ignore-errors
-                             (aob-transcript-found root nil "archive")))))))
+                           (ygg-projects--found root "archive"))))))
     (setq found (append found put-away))
     ;; newest first, whichever list it came from: a conversation is
     ;; found again by when it happened
     (sort (append known found)
           (lambda (a b) (> (or (ygg-projects--entry-ts a) 0)
                            (or (ygg-projects--entry-ts b) 0))))))
+
+(defun ygg-projects--found (root &optional where)
+  "What the default agent and Codex left on disk for ROOT, put away in WHERE.
+Codex keeps its own history whichever agent sessions here start with."
+  (seq-mapcat (lambda (agent) (ignore-errors (aob-transcript-found root agent where)))
+              (delete-dups (list (or (bound-and-true-p aob-acp-default-agent) "claude")
+                                 "codex"))))
 
 (defun ygg-projects--entry-ts (entry)
   "When ENTRY was last written to, as far as the disk knows."

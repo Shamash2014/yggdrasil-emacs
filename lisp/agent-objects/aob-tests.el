@@ -2997,6 +2997,36 @@ the harness's own user turns."
           (should (equal (aob-transcript--title-1 file) "fix the dashboard")))
       (delete-directory home t))))
 
+(ert-deftest aob-transcript-lists-codex-rollouts-by-cwd ()
+  "Codex rollouts are listed for the project their cwd is in, worktrees
+under it included, and not for any other."
+  (skip-unless (fboundp 'aob-transcript--codex-found))
+  (let* ((home (make-temp-file "aob-codex-home" t))
+         (dir (expand-file-name "sessions/2026/09/29" home))
+         (here "01a0ee9c-f365-7e22-90e3-ff308a4b9ec7")
+         (there "01a0ee9d-0000-7e22-90e3-ff308a4b9ec7")
+         (aob-transcript--found (make-hash-table :test 'equal))
+         (aob-transcript--codex-heads (make-hash-table :test 'equal))
+         (aob-transcript--titles (make-hash-table :test 'equal))
+         (aob-transcript--queue nil))
+    (cl-letf (((symbol-function 'aob-transcript--homes) (lambda (&rest _) (list home)))
+              ((symbol-function 'aob-transcript--want-title) #'ignore))
+      (unwind-protect
+          (progn
+            (make-directory dir t)
+            (dolist (thread `((,here "/p/wt/a") (,there "/q")))
+              (with-temp-file (expand-file-name
+                               (format "rollout-2026-09-29T22-20-58-%s.jsonl" (car thread)) dir)
+                (insert (format "{\"type\":\"session_meta\",\"payload\":{\"session_id\":\"s\",\"id\":\"%s\",\"cwd\":\"%s\",\"base_instructions\":{\"text\":\"%s\"}}}\n"
+                                (car thread) (cadr thread) (make-string 20000 ?x)))))
+            (let ((found (aob-transcript-found "/p/" "codex")))
+              (should (equal (mapcar (lambda (e) (plist-get e :acp-id)) found) (list here)))
+              (should (equal (plist-get (car found) :agent) "codex"))
+              (should (equal (plist-get (car found) :project) "/p/"))
+              (should (plist-get (car found) :found)))
+            (should-not (aob-transcript-found "/p/" "codex" "archive")))
+        (delete-directory home t)))))
+
 (defun aob-tests--aob-command-p (def)
   (and (symbolp def) (string-match-p "\\`\\(?:ygg-\\)?aob-" (symbol-name def))))
 

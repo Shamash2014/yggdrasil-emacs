@@ -226,47 +226,54 @@ sidebar, and a row is drawn whenever anything moves."
 The CLI writes one file per conversation under its config home.  What
 this Emacs knows about is what it started itself, which for a project
 you have only just taken in is none of them."
-  (let* ((agent (or agent (bound-and-true-p aob-acp-default-agent) "claude"))
-         (dirs (seq-filter
-                #'file-directory-p
-                (mapcar (lambda (home)
-                          (expand-file-name
-                           (format "projects/%s%s" (aob-transcript--slug project)
-                                   (if where (concat "/" where) ""))
-                           home))
-                        (aob-transcript--homes agent project))))
-         (key (list agent dirs where)))
-    (when dirs
-      ;; the folder's own clock says when a conversation was added to it
-      ;; or written to; until it moves, the listing stands
-      (let ((stamp (mapcar #'aob-transcript--mtime dirs))
-            (cell (gethash key aob-transcript--found)))
-        (if (and cell (equal (car cell) stamp))
-            (cdr cell)
-          (let ((entries (aob-transcript--found-1 project agent dirs where)))
-            (puthash key (cons stamp entries) aob-transcript--found)
-            entries))))))
+  (let ((agent (or agent (bound-and-true-p aob-acp-default-agent) "claude")))
+    (if (equal agent "codex")
+        (aob-transcript--codex-found project where)
+      (let* ((dirs (seq-filter
+                    #'file-directory-p
+                    (mapcar (lambda (home)
+                              (expand-file-name
+                               (format "projects/%s%s" (aob-transcript--slug project)
+                                       (if where (concat "/" where) ""))
+                               home))
+                            (aob-transcript--homes agent project))))
+             (key (list agent dirs where)))
+        (when dirs
+          ;; the folder's own clock says when a conversation was added to it
+          ;; or written to; until it moves, the listing stands
+          (let ((stamp (mapcar #'aob-transcript--mtime dirs))
+                (cell (gethash key aob-transcript--found)))
+            (if (and cell (equal (car cell) stamp))
+                (cdr cell)
+              (let ((entries (aob-transcript--found-1 project agent dirs where)))
+                (puthash key (cons stamp entries) aob-transcript--found)
+                entries))))))))
 
 (defun aob-transcript--found-1 (project agent dirs &optional where)
   "Read DIRS, which hold AGENT\='s conversations about PROJECT.
 WHERE, when given, is the folder they were put away in."
-  (let ((files (sort (seq-mapcat (lambda (dir) (directory-files dir t "\\.jsonl\\'"))
-                                 dirs)
-                         (lambda (a b)
-                           (time-less-p
-                            (file-attribute-modification-time (file-attributes b))
-                            (file-attribute-modification-time (file-attributes a)))))))
-        (let (seen)
-          (mapcar (lambda (file)
-                    (let* ((entry (list :agent agent
-                                        :acp-id (file-name-base file)
+  (aob-transcript--entries
+   project agent where
+   (mapcar (lambda (file) (list file (file-name-base file) project))
+           (seq-mapcat (lambda (dir) (directory-files dir t "\\.jsonl\\'")) dirs))))
+
+(defun aob-transcript--entries (project agent where found)
+  "AGENT\='s conversations about PROJECT as entries, newest first.
+FOUND holds (FILE ID DIR) for each, DIR the folder it ran in; WHERE,
+when given, is the folder they were put away in."
+  (let ((found (sort (mapcar (lambda (row) (cons (aob-transcript--mtime (car row)) row))
+                             found)
+                     (lambda (a b) (> (car a) (car b)))))
+        seen)
+    (mapcar (lambda (row)
+              (pcase-let* ((`(,ts ,file ,id ,dir) row)
+                           (dir (file-name-as-directory (expand-file-name dir)))
+                           (entry (list :agent agent
+                                        :acp-id id
                                         :project (file-name-as-directory
                                                   (expand-file-name project))
-                                        :dir (file-name-as-directory
-                                              (expand-file-name project))
-                                        :ts (float-time
-                                             (file-attribute-modification-time
-                                              (file-attributes file)))
+                                        :dir dir
+                                        :ts ts
                                         ;; which home it came out of is
                                         ;; not derivable from the entry
                                         :file file
@@ -280,12 +287,106 @@ WHERE, when given, is the folder they were put away in."
                                      (progn (aob-transcript--want-title file)
                                             (aob-transcript--name entry file))))
                            (name (if (member name seen)
-                                     (format "%s %s" name
-                                             (substring (plist-get entry :acp-id) 0 4))
+                                     (format "%s %s" name (substring id 0 4))
                                    name)))
-                      (push name seen)
-                      (plist-put entry :name name)))
-                  files))))
+                (push name seen)
+                (plist-put entry :name name)))
+            found)))
+
+(defvar aob-transcript--codex-heads (make-hash-table :test 'equal)
+  "Rollout file to (MTIME ID . CWD), for a home with no thread index.")
+
+(defun aob-transcript--codex-found (project where)
+  "Codex conversations held in PROJECT or a folder under it, newest first.
+Codex files by day, not by project, so every home is asked which of its
+threads ran here: its thread index where it keeps one, the head of each
+rollout where it does not.  WHERE is as for `aob-transcript-found'; a
+thread Codex archived itself counts as put away in \"archive\"."
+  (let* ((root (file-name-as-directory (expand-file-name project)))
+         (homes (seq-filter #'file-directory-p (aob-transcript--homes "codex" root)))
+         (key (list "codex" root where))
+         (stamp (mapcar (lambda (home)
+                          (mapcar (lambda (db) (and (file-exists-p db) (aob-transcript--mtime db)))
+                                  (list (expand-file-name "state_5.sqlite" home)
+                                        (expand-file-name "state_5.sqlite-wal" home))))
+                        homes))
+         (indexed (seq-every-p #'car stamp))
+         (cell (gethash key aob-transcript--found)))
+    (if (and indexed cell (equal (car cell) stamp))
+        (cdr cell)
+      (let* ((rows (seq-mapcat (lambda (home) (aob-transcript--codex-rows home root where))
+                               homes))
+             (entries (aob-transcript--entries
+                       root "codex" where (seq-uniq rows (lambda (a b) (equal (nth 1 a) (nth 1 b)))))))
+        (when indexed (puthash key (cons stamp entries) aob-transcript--found))
+        entries))))
+
+(defun aob-transcript--codex-rows (home root where)
+  "(FILE ID CWD) for each of HOME\='s threads that ran in ROOT or under it."
+  (let ((db (expand-file-name "state_5.sqlite" home)))
+    (if (and (file-exists-p db) (sqlite-available-p))
+        (delq nil
+              (mapcar
+               (pcase-lambda (`(,id ,path ,cwd ,archived))
+                 ;; the index still points where the file was before
+                 ;; it was put away beside it
+                 (let ((file (if where
+                                 (expand-file-name
+                                  (file-name-nondirectory path)
+                                  (expand-file-name where (file-name-directory path)))
+                               path)))
+                   (cond ((and (not where) (eq archived 1)) nil)
+                         ((file-readable-p file) (list file id cwd))
+                         ((and (equal where "archive") (eq archived 1)
+                               (file-readable-p path))
+                          (list path id cwd)))))
+               (condition-case nil
+                   (let ((conn (sqlite-open db t)))
+                     (unwind-protect
+                         (sqlite-select
+                          conn
+                          "select id, rollout_path, cwd, archived from threads
+                           where cwd = ?1 or substr(cwd, 1, length(?2)) = ?2"
+                          (list (directory-file-name root) root))
+                       (sqlite-close conn)))
+                 (error nil))))
+      (seq-filter
+       (lambda (row) (string-prefix-p root (file-name-as-directory (nth 2 row))))
+       (delq nil
+             (mapcar #'aob-transcript--codex-head
+                     (seq-mapcat
+                      (lambda (glob) (file-expand-wildcards (expand-file-name glob home)))
+                      (if where
+                          (delq nil (list (format "sessions/*/*/*/%s/rollout-*.jsonl" where)
+                                          (format "archived_sessions/%s/rollout-*.jsonl" where)
+                                          (and (equal where "archive")
+                                               "archived_sessions/rollout-*.jsonl")))
+                        (list "sessions/*/*/*/rollout-*.jsonl")))))))))
+
+(defun aob-transcript--codex-head (file)
+  "(FILE ID CWD) from the session_meta line FILE opens with.
+That line carries the whole of Codex\='s instructions, so only its start
+is read, and once per change of the file."
+  (let* ((mtime (aob-transcript--mtime file))
+         (cell (gethash file aob-transcript--codex-heads)))
+    (unless (equal (car cell) mtime)
+      (setq cell
+            (puthash file
+                     (cons mtime
+                           (with-temp-buffer
+                             (ignore-errors (insert-file-contents file nil 0 4096))
+                             (let ((field (lambda (name)
+                                            (goto-char (point-min))
+                                            (when (re-search-forward
+                                                   (format "[{,]\"%s\":\"\\([^\"]+\\)\"" name)
+                                                   (line-end-position) t)
+                                              (match-string 1)))))
+                               (let ((id (funcall field "id"))
+                                     (cwd (funcall field "cwd")))
+                                 (and id cwd (cons id cwd))))))
+                     aob-transcript--codex-heads)))
+    (when (cdr cell)
+      (list file (cadr cell) (cddr cell)))))
 
 (defun aob-transcript-move (entry where)
   "Move ENTRY\='s conversation into the WHERE folder beside it.
@@ -309,6 +410,7 @@ home moving is a change of mind, and nothing on disk says when."
   (clrhash aob-transcript--found)
   (clrhash aob-transcript--titles)
   (clrhash aob-transcript--codex-files)
+  (clrhash aob-transcript--codex-heads)
   (setq aob-transcript--queue nil))
 
 (defun aob-transcript--text (content)
