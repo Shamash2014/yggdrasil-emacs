@@ -24,7 +24,8 @@ shared parts."""
 
 SCENARIO_HEADING = re.compile(r"^##\s+Scenario:\s*(\S+)")
 CONFIG_KEYS = ("test_cmd", "report_path", "lock_paths", "sec_cmd", "live_cmd", "perf_cmd", "mutate_cmd", "commit_gate")
-LEDGER_COLUMNS = ("ts", "change", "branch", "sha", "verdict", "evidence", "hash")
+LEDGER_COLUMNS = ("ts", "change", "branch", "sha", "verdict", "evidence", "hash", "slice", "files")
+SLICE_DONE = "slice-done"
 ICE_BOOKKEEPING = (".ice/state", ".ice/evidence", ".ice/ledger.tsv")
 TEST_FILE = re.compile(r"(^|/)(test_[^/]*\.py|[^/]*_test\.py|[^/]*_test\.go|[^/]*[._-](test|spec)s?\.[cm]?[jt]sx?|[^/]*-tests?\.el|[^/]*_spec\.rb|[^/]*Tests?\.(swift|kt|java))$")
 TEST_SUPPORT = re.compile(r"(^|/)(conftest\.py|__snapshots__/|__fixtures__/|fixtures/|testdata/|test-data/|test_helper[^/]*|test-helper[^/]*)")
@@ -80,6 +81,11 @@ def append_ledger(root, row):
         if fresh:
             f.write("\t".join(LEDGER_COLUMNS) + "\n")
         f.write("\t".join(row.get(c, "") for c in LEDGER_COLUMNS) + "\n")
+
+
+def done_slices(root, name):
+    return {r["slice"]: [f for f in r.get("files", "").split(",") if f]
+            for r in read_ledger(root) if r.get("change") == name and r.get("verdict") == SLICE_DONE and r.get("slice")}
 
 
 def _write_tree_excluding_bookkeeping(root, index_file):

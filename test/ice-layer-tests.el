@@ -1496,5 +1496,148 @@ Presets come from PRESETS only; the preset path is layer-aob's own."
       (delete-directory src t)
       (delete-directory dst t))))
 
+;;; Slices removed once their code is written
+
+(defconst ice-tests--ledger-head "ts\tchange\tbranch\tsha\tverdict\tevidence\thash\tslice\tfiles\n")
+
+(defun ice-tests--done-row (change slice files)
+  (format "2026-10-01T00:00:00+00:00\t%s\tmain\tabc\tslice-done\t.ice/evidence/x\th\t%s\t%s\n" change slice files))
+
+(ert-deftest ice-check-plan-counts-a-slice-the-ledger-removed-as-done ()
+  (ice-tests--with-tasks change (replace-regexp-in-string "- \\[ \\] 2\\. b\n.*\n.*\n" "" ice-tests--checkpoints)
+    (should-not (seq-filter (lambda (gap) (string-match-p "slices" gap)) (ice-tests--checkpoint-gaps change)))
+    (let ((root (expand-file-name "../../../" (plist-get change :dir))))
+      (make-directory (expand-file-name ".ice" root) t)
+      (with-temp-file (expand-file-name ".ice/ledger.tsv" root) (insert ice-tests--ledger-head))
+      (should (string-match-p ": 2 checkpoints but 1 slices" (string-join (ice-tests--checkpoint-gaps change) "\n")))
+      (with-temp-file (expand-file-name ".ice/ledger.tsv" root)
+        (insert ice-tests--ledger-head (ice-tests--done-row "cart" "2" "src/tax.py")))
+      (should-not (seq-filter (lambda (gap) (string-match-p "slices" gap)) (ice-tests--checkpoint-gaps change)))
+      (with-temp-file (plist-get change :tasks)
+        (insert (replace-regexp-in-string "- \\[ \\] 1\\. a\n.*\n.*\n" "" (ice-tests--tasks-of change))))
+      (should (string-match-p ": 2 checkpoints but 1 slices" (string-join (ice-tests--checkpoint-gaps change) "\n")))
+      (with-temp-file (expand-file-name ".ice/ledger.tsv" root)
+        (insert ice-tests--ledger-head (ice-tests--done-row "cart" "2" "src/tax.py")
+                (ice-tests--done-row "cart" "1" "src/cart.py") (ice-tests--done-row "other" "3" "x")))
+      (should-not (seq-filter (lambda (gap) (string-match-p "slices" gap)) (ice-tests--checkpoint-gaps change))))))
+
+(ert-deftest ice-changes-progress-counts-removed-slices-as-done ()
+  (ice-tests--with-repo root
+      (list (cons "openspec/changes/cart/tasks.md" "## Slices\n\n- [ ] 3. c\n")
+            (cons ".ice/ledger.tsv" (concat ice-tests--ledger-head (ice-tests--done-row "cart" "1" "a")
+                                            (ice-tests--done-row "cart" "2" "b") (ice-tests--done-row "cart" "2" "b")
+                                            (ice-tests--done-row "other" "1" "z"))))
+    (let ((cart (car (ygg-ice-changes root))))
+      (should (equal (list (plist-get cart :done) (plist-get cart :total)) '(2 3))))))
+
+;;; ice-lat-drift
+
+(defconst ice-tests--lat-drift-script
+  (expand-file-name "ice-lat-drift" (file-name-directory ice-tests--check-script)))
+
+(defun ice-tests--lat-drift (root &rest args)
+  "ice-lat-drift ARGS in ROOT as (EXIT . OUTPUT)."
+  (with-temp-buffer
+    (let ((default-directory root))
+      (cons (apply #'call-process "python3" nil t nil ice-tests--lat-drift-script args) (buffer-string)))))
+
+(ert-deftest ice-lat-drift-reports-a-section-left-behind-a-listed-exemption-and-a-missing-path ()
+  (skip-unless (and (executable-find "git") (executable-find "python3")))
+  (ice-tests--with-repo root
+      '(("lat.md/cart.md" . "# Cart\n\nThe cart.\n\n## Total\n\nSums lines, see `lisp/cart.el`.\n\n## Tax\n\nTax is [[lisp/tax.el]] and `lisp/gone.el`.\n")
+        ("lat.md/changes.md" . "# Changes\n\n## old\n\n- Where: `lisp/removed.el`, `lisp/cart.el`\n")
+        ("lisp/cart.el" . "(defun cart ())\n")
+        ("lisp/tax.el" . "(defun tax ())\n")
+        ("openspec/changes/cart/intent.md" . "## What is wanted\n\nx\n"))
+    (let ((process-environment (append '("GIT_AUTHOR_NAME=t" "GIT_AUTHOR_EMAIL=t@t" "GIT_COMMITTER_NAME=t"
+                                         "GIT_COMMITTER_EMAIL=t@t" "GIT_CONFIG_NOSYSTEM=1")
+                                       process-environment))
+          (default-directory root))
+      (should (= 0 (call-process "git" nil nil nil "init" "-q" "-b" "main")))
+      (should (= 0 (call-process "git" nil nil nil "add" "-A")))
+      (should (= 0 (call-process "git" nil nil nil "commit" "-q" "-m" "base")))
+      (with-temp-file (expand-file-name "lisp/cart.el" root) (insert "(defun cart () 2)\n"))
+      (with-temp-file (expand-file-name "lisp/tax.el" root) (insert "(defun tax () 2)\n"))
+      (should (equal (ice-tests--lat-drift root "cart")
+                     (cons 1 (concat "lat.md/cart.md:5: section cart#Total links lisp/cart.el, which changed; lat.md did not (cart)\n"
+                                     "lat.md/cart.md:9: section cart#Tax links lisp/tax.el, which changed; lat.md did not (cart)\n"
+                                     "lat.md/cart.md:11: `lisp/gone.el` names a path that does not exist\n"))))
+      (with-temp-file (expand-file-name "openspec/changes/cart/design.md" root)
+        (insert "## Decisions\n\n- lat unchanged: [[cart#Tax]] (a constant moved)\n"))
+      (with-temp-file (expand-file-name "lat.md/cart.md" root)
+        (insert "# Cart\n\nThe cart.\n\n## Total\n\nSums lines in cents, see `lisp/cart.el`.\n\n## Tax\n\nTax is [[lisp/tax.el]] and `lisp/gone.el`.\n"))
+      (should (equal (ice-tests--lat-drift root "cart")
+                     '(1 . "lat.md/cart.md:11: `lisp/gone.el` names a path that does not exist\n")))
+      (with-temp-file (expand-file-name "lat.md/cart.md" root)
+        (insert "# Cart\n\nThe cart.\n\n## Total\n\nSums lines in cents, see `lisp/cart.el`.\n\n## Tax\n\nTax is [[lisp/tax.el]].\n"))
+      (should (equal (ice-tests--lat-drift root)
+                     '(0 . "ice-lat-drift: ok, 1 lat.md file(s) match the code\n"))))))
+
+(defmacro ice-tests--with-drift-repo (root files &rest body)
+  "Run BODY in ROOT, a git repo committing FILES on main; identity and config kept local."
+  (declare (indent 2))
+  `(ice-tests--with-repo ,root ,files
+     (let ((process-environment (append '("GIT_AUTHOR_NAME=t" "GIT_AUTHOR_EMAIL=t@t" "GIT_COMMITTER_NAME=t"
+                                          "GIT_COMMITTER_EMAIL=t@t" "GIT_CONFIG_NOSYSTEM=1")
+                                        process-environment))
+           (coding-system-for-read 'utf-8)
+           (default-directory ,root))
+       (should (= 0 (call-process "git" nil nil nil "init" "-q" "-b" "main")))
+       (should (= 0 (call-process "git" nil nil nil "add" "-A")))
+       (should (= 0 (call-process "git" nil nil nil "commit" "-q" "-m" "base")))
+       ,@body)))
+
+(ert-deftest ice-lat-drift-without-a-change-honours-an-exemption-from-any-open-change ()
+  (skip-unless (and (executable-find "git") (executable-find "python3")))
+  (ice-tests--with-drift-repo root
+      '(("lat.md/cart.md" . "# Cart\n\nThe cart.\n\n## Tax\n\nTax is `lisp/tax.el`.\n")
+        ("lisp/tax.el" . "(defun tax ())\n")
+        ("openspec/changes/a/design.md" . "- lat unchanged: [[cart#Tax]] (a constant moved)\n")
+        ("openspec/changes/b/design.md" . "# Design\n"))
+    (with-temp-file (expand-file-name "lisp/tax.el" root) (insert "(defun tax () 2)\n"))
+    (should (equal (ice-tests--lat-drift root) '(0 . "ice-lat-drift: ok, 1 lat.md file(s) match the code\n")))))
+
+(ert-deftest ice-lat-drift-refuses-a-lock-base-git-cannot-resolve ()
+  (skip-unless (and (executable-find "git") (executable-find "python3")))
+  (ice-tests--with-drift-repo root
+      '(("lat.md/cart.md" . "# Cart\n\nThe cart.\n\n## Tax\n\nTax is `lisp/tax.el`.\n")
+        ("lisp/tax.el" . "(defun tax ())\n")
+        ("openspec/changes/cart/design.md" . "# Design\n"))
+    (with-temp-buffer
+      (insert "-----BEGIN ICE LOCK RECORD-----\n{\"base\": \"0123456789abcdef0123456789abcdef01234567\"}\n-----END ICE LOCK RECORD-----\n")
+      (should (= 0 (call-process-region (point-min) (point-max) "git" nil nil nil
+                                        "tag" "-a" "--cleanup=verbatim" "-F" "-" "ice-expect/cart" "HEAD"))))
+    (with-temp-file (expand-file-name "lisp/tax.el" root) (insert "(defun tax () 2)\n"))
+    (should (= 2 (car (ice-tests--lat-drift root "cart"))))))
+
+(ert-deftest ice-lat-drift-matches-non-ascii-paths ()
+  (skip-unless (and (executable-find "git") (executable-find "python3")))
+  (ice-tests--with-drift-repo root
+      '(("lat.md/cart.md" . "# Cart\n\nThe cart.\n\n## Tax\n\nTax is `lisp/täx.el`.\n")
+        ("lisp/täx.el" . "(defun tax ())\n"))
+    (with-temp-file (expand-file-name "lisp/täx.el" root) (insert "(defun tax () 2)\n"))
+    (should (equal (ice-tests--lat-drift root)
+                   '(1 . "lat.md/cart.md:5: section cart#Tax links lisp/täx.el, which changed; lat.md did not\n")))))
+
+(ert-deftest ice-lat-drift-reads-hunks-past-color-and-an-external-diff ()
+  (skip-unless (and (executable-find "git") (executable-find "python3")))
+  (ice-tests--with-drift-repo root
+      '(("lat.md/cart.md" . "# Cart\n\nThe cart.\n\n## Tax\n\nTax is `lisp/tax.el`.\n")
+        ("lisp/tax.el" . "(defun tax ())\n"))
+    (should (= 0 (call-process "git" nil nil nil "config" "color.ui" "always")))
+    (should (= 0 (call-process "git" nil nil nil "config" "diff.external" "true")))
+    (with-temp-file (expand-file-name "lisp/tax.el" root) (insert "(defun tax () 2)\n"))
+    (with-temp-file (expand-file-name "lat.md/cart.md" root)
+      (insert "# Cart\n\nThe cart.\n\n## Tax\n\nTax, in cents, is `lisp/tax.el`.\n"))
+    (should (equal (ice-tests--lat-drift root) '(0 . "ice-lat-drift: ok, 1 lat.md file(s) match the code\n")))))
+
+(ert-deftest ice-lat-drift-skips-a-gitignored-path ()
+  (skip-unless (and (executable-find "git") (executable-find "python3")))
+  (ice-tests--with-drift-repo root
+      '((".gitignore" . "dist/\n")
+        ("lat.md/cart.md" . "# Cart\n\nBuilt into `dist/app.js`; source `lisp/gone.el`.\n"))
+    (should (equal (ice-tests--lat-drift root)
+                   '(1 . "lat.md/cart.md:3: `lisp/gone.el` names a path that does not exist\n")))))
+
 (provide 'ice-layer-tests)
 ;;; ice-layer-tests.el ends here

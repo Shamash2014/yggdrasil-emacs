@@ -1,0 +1,221 @@
+#!/usr/bin/env python3
+import importlib.machinery
+import importlib.util
+import os
+import re
+import subprocess
+import sys
+
+sys.dont_write_bytecode = True
+_loader = importlib.machinery.SourceFileLoader("ice_scenarios", os.path.join(os.path.dirname(os.path.realpath(__file__)), "ice-scenarios"))
+ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scenarios", _loader))
+_loader.exec_module(ice)
+
+HELP = """usage: ice-lat-drift [CHANGE]
+
+Reports lat.md that the code moved past; reads only, writes nothing.
+
+A lat.md section that links a file changed since the change's base
+([[path]], [[path#symbol]] or `path`) is reported when the section
+itself did not change, unless intent.md or design.md of the change
+lists it as "lat unchanged: [[section]] (why)"; without CHANGE, any
+open change's listing counts. The base is the one
+ice-lock recorded, else the merge-base with main or master. Every
+backticked repo path in lat.md that git does not ignore must also
+exist: lat check reads code links only for the languages it parses.
+
+lat.md/changes.md and lat.md/learnings.md are history and are skipped.
+Without CHANGE every open change under openspec/changes is checked.
+Exit 1 on any report, 2 when there is no lat.md or no base."""
+
+HISTORY = ("changes.md", "learnings.md")
+HEADING = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
+WIKI = re.compile(r"\[\[([^\]|#]+)(?:#[^\]|]*)?(?:\|[^\]]*)?\]\]")
+TICKED = re.compile(r"`([^`\s]+)`")
+EXEMPT = re.compile(r"lat unchanged:\s*\[\[([^\]|]+)(?:\|[^\]]*)?\]\]\s*\(\s*\S[^)]*\)", re.I)
+HUNK = re.compile(r"^@@ -\S+ \+(\d+)(?:,(\d+))? @@")
+
+
+def git(root, *args):
+    out = subprocess.run(["git", "-c", "core.quotePath=false", *args], cwd=root, capture_output=True, text=True)
+    return out.stdout if out.returncode == 0 else None
+
+
+def paths(root, *args):
+    return {p for p in (git(root, *args, "-z") or "").split("\0") if p}
+
+
+def base_of(root, name):
+    record, _ = ice.tag_record(root, name) if name else (None, None)
+    if record and record.get("base"):
+        return record["base"] if git(root, "rev-parse", "-q", "--verify", record["base"] + "^{commit}") else None
+    for ref in ("main", "master", "origin/main", "origin/master"):
+        if git(root, "rev-parse", "-q", "--verify", ref + "^{commit}"):
+            return (git(root, "merge-base", "HEAD", ref) or "").strip() or None
+    return None
+
+
+def changed_files(root, base):
+    untracked = paths(root, "ls-files", "--others", "--exclude-standard")
+    return paths(root, "diff", "--no-color", "--no-ext-diff", "--name-only", base) | untracked, untracked
+
+
+def touched_lines(root, base, rel, untracked):
+    if rel in untracked:
+        return None
+    lines = set()
+    for line in (git(root, "diff", "--no-color", "--no-ext-diff", "-U0", base, "--", rel) or "").splitlines():
+        m = HUNK.match(line)
+        if m:
+            start, count = int(m.group(1)), int(m.group(2) or 1)
+            lines.update(range(start, start + max(count, 1)))
+    return lines
+
+
+def sections(path):
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().splitlines()
+    out, trail, fence, current = [], [], False, None
+    for n, line in enumerate(lines, 1):
+        if line.lstrip().startswith("```"):
+            fence = not fence
+        m = None if fence else HEADING.match(line)
+        if m:
+            level = len(m.group(1))
+            trail = [t for t in trail if t[0] < level] + [(level, m.group(2))]
+            current = {"trail": list(trail), "start": n, "end": n, "body": []}
+            out.append(current)
+        elif current is None:
+            current = {"trail": [], "start": n, "end": n, "body": []}
+            out.append(current)
+        current["end"] = n
+        if not fence:
+            current["body"].append((n, line))
+    return out
+
+
+def looks_like_path(root, token):
+    if "/" not in token or "://" in token or token.startswith(("-", "/", "~", "$", "..")) \
+       or re.search(r"[*?{}<>()=]", token):
+        return False
+    return os.path.exists(os.path.join(root, token.split("/")[0])) or bool(re.search(r"\.\w+$", token))
+
+
+def bare(token):
+    return re.sub(r"(#.*|:\d.*)$", "", token)
+
+
+def section_id(stem, trail):
+    return "#".join([stem] + [title for level, title in trail if level > 1])
+
+
+def exempted(stem, trail, names):
+    heading = trail[-1][1] if trail else None
+    for name in names:
+        parts = [p.strip() for p in name.split("#")]
+        if parts == [stem] or (parts[0] == stem and parts[-1] == heading) or parts == [heading]:
+            return True
+    return False
+
+
+def exemptions(change):
+    names = []
+    for doc in ("intent.md", "design.md"):
+        path = os.path.join(change, doc)
+        if os.path.isfile(path):
+            with open(path, encoding="utf-8") as f:
+                names += EXEMPT.findall(f.read())
+    return names
+
+
+def open_changes(root, given):
+    if given:
+        for path in (given, os.path.join(root, given), os.path.join(root, "openspec", "changes", given)):
+            if os.path.isdir(path):
+                return [os.path.realpath(path)]
+        sys.stderr.write("ice-lat-drift: no change %s\n" % given)
+        sys.exit(2)
+    folder = os.path.join(root, "openspec", "changes")
+    if not os.path.isdir(folder):
+        return []
+    return [os.path.join(folder, e) for e in sorted(os.listdir(folder))
+            if e != "archive" and os.path.isdir(os.path.join(folder, e))]
+
+
+def drift(root, change, docs, names, label):
+    name = os.path.basename(change) if change else None
+    base = base_of(root, name)
+    if not base:
+        sys.stderr.write("ice-lat-drift: no base for %s: no resolvable ice-lock base and no main or master\n"
+                         % (name or "HEAD"))
+        sys.exit(2)
+    changed, untracked = changed_files(root, base)
+    changed = {p for p in changed if not p.startswith("lat.md/")}
+    found = []
+    for rel, secs in docs:
+        touched = touched_lines(root, base, rel, untracked)
+        stem = os.path.splitext(os.path.basename(rel))[0]
+        for sec in secs:
+            if touched is None or touched & set(range(sec["start"], sec["end"] + 1)):
+                continue
+            linked = []
+            for _, line in sec["body"]:
+                for target in WIKI.findall(line) + [bare(t) for t in TICKED.findall(line)]:
+                    if target.strip() in changed and target.strip() not in linked:
+                        linked.append(target.strip())
+            if linked and not exempted(stem, sec["trail"], names):
+                for path in linked:
+                    found.append("%s:%d: section %s links %s, which changed; lat.md did not%s"
+                                 % (rel, sec["start"], section_id(stem, sec["trail"]), path,
+                                    " (%s)" % name if label else ""))
+    return found
+
+
+def missing_paths(root, docs):
+    gone = []
+    for rel, secs in docs:
+        for sec in secs:
+            for n, line in sec["body"]:
+                for token in TICKED.findall(line):
+                    path = bare(token)
+                    if looks_like_path(root, path) and not os.path.exists(os.path.join(root, path)) \
+                       and git(root, "check-ignore", "-q", "--no-index", "--", path) is None:
+                        gone.append("%s:%d: `%s` names a path that does not exist" % (rel, n, token))
+    return gone
+
+
+def main(argv):
+    if len(argv) > 2 or (len(argv) == 2 and argv[1] in ("-h", "--help")):
+        sys.stdout.write(HELP + "\n")
+        return 0 if len(argv) == 2 else 2
+    root = (git(".", "rev-parse", "--show-toplevel") or "").strip()
+    if not root:
+        sys.stderr.write("ice-lat-drift: not inside a git repository\n")
+        return 2
+    lat_dir = os.path.join(root, "lat.md")
+    if not os.path.isdir(lat_dir):
+        sys.stderr.write("ice-lat-drift: no lat.md/ in %s\n" % root)
+        return 2
+    docs = []
+    for here, _, files in os.walk(lat_dir):
+        for f in sorted(files):
+            if f.endswith(".md") and f not in HISTORY:
+                path = os.path.join(here, f)
+                docs.append((os.path.relpath(path, root), sections(path)))
+    docs.sort()
+    given = argv[1] if len(argv) == 2 else None
+    changes = open_changes(root, given)
+    names = [n for change in changes for n in exemptions(change)]
+    found = []
+    for change in changes or [None]:
+        found += [line for line in drift(root, change, docs, names, bool(given)) if line not in found]
+    found += missing_paths(root, docs)
+    for line in found:
+        print(line)
+    if not found:
+        print("ice-lat-drift: ok, %d lat.md file(s) match the code" % len(docs))
+    return 1 if found else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

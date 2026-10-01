@@ -100,7 +100,7 @@ else
   note x "$arch C4 skeleton created (TODO titles) and README.md generated"
 fi
 
-for tool in ice-check ice-archive-to-lat ice-c4-drift ice-scenarios ice-fail-on-base ice-lock ice-coverage ice-verify ice-compact ice-commit-gate; do
+for tool in ice-check ice-archive-to-lat ice-c4-drift ice-lat-drift ice-scenarios ice-fail-on-base ice-lock ice-coverage ice-verify ice-compact ice-commit-gate; do
   if copy_if_changed "$ice_dir/$tool" ".ice/$tool"; then chmod +x ".ice/$tool"; note x ".ice/$tool installed"; else note x ".ice/$tool (already current)"; fi
 done
 runner() {
@@ -132,7 +132,7 @@ done
 
 if [ ! -f lat.md/features.md ]; then
   printf '%s\n' "# Features" "" \
-    "One section per user-visible feature: sub-features, how to get there, driving it and gotchas, each as a subsection." \
+    "One section per user-visible feature: sub-features, how to get there, driving it and gotchas, each as a subsection: what and why, invariants and code anchors, never the code restated." \
     > lat.md/features.md
   note x "lat.md/features.md feature map created"
 else
@@ -274,12 +274,15 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@v4
       - run: npm install -g lat.md@0.12.2 likec4@1.59.3
       - run: likec4 validate --no-layout --json $arch
       - run: likec4 format --check $arch
       - run: .ice/ice-c4-drift $arch
       - run: lat check
+      - run: .ice/ice-lat-drift
       - run: .ice/ice-check repo
 EOF
     note x ".github/workflows/ice.yml added"

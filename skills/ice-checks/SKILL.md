@@ -41,10 +41,12 @@ time when the spec held the violated contract, 19% when it did not.
 
 ## 2. Expected values from the spec, never from the code
 
-Reading code to understand what to specify is fine. Expected values come
-from the intent, the spec deltas, docs, the issue, a worked example or a
-reference implementation, never from running or reading the code under
-test.
+Reading code to understand what to specify is fine. Expected values for
+behaviour the change adds or alters come from the intent, the spec
+deltas, docs, the issue, a worked example or a reference implementation,
+never from running or reading the code under test. Behaviour the change
+keeps is specified by the code and its tests: mark it (tested: path) or
+(code: path#symbol).
 
 When the code may be wrong, because you wrote it or it is under a fix,
 the checks are written by a fresh subagent given only the intent, the
@@ -53,7 +55,7 @@ The code must be out of view, not beside the spec: a spec added next to
 buggy code barely helps, and looking for bugs with the code in view is
 worse than not looking.
 
-## 3. Specify the corrected behaviour, not the observed one
+## 3. Today's code is the spec; a fix needs the intent
 
 When a contract has to be written from existing code, audit it first:
 
@@ -62,10 +64,10 @@ When a contract has to be written from existing code, audit it first:
 2. robustness omissions: missing input validation, null and boundary
    handling, error handling, escaping.
 
-Then write the contract for a correct and robust version, the fixes
-applied, and hand only that contract to the check writer. Specifying what
-the code does today writes its bugs into the spec. This caught about a
-fifth more bugs; it costs a little more noise, so a check that fails on
+Each finding goes to the owner as a proposed intent line, with its
+default; it never goes into the contract on the audit's word. Only a
+confirmed intent line may make a contract line differ from what the code
+does today, and that contract line quotes it. A check that fails on
 correct behaviour goes back to the owner, not into the code.
 
 ## 4. Property checks where a law holds
@@ -138,7 +140,8 @@ exists, is named by its scenario id and traces to the spec is for the
 owner to confirm. A change's checks are ready when:
 
 - every untested contract line has one check named by its scenario id;
-- every expected value traces to the intent, the contract or a named
-  reference, never to the code;
+- every expected value for changed behaviour traces to the intent, the
+  contract or a named reference, never to the code; kept behaviour
+  traces to the code or an existing test;
 - each law the contract states has a property check;
 - the owner has confirmed them.

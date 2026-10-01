@@ -38,8 +38,8 @@ init, run without a terminal, deletes legacy prompts from the global
 - docs/arch/ (or doc/arch/ where the repo already uses doc/): a LikeC4
   skeleton with TODO titles and its generated README.md. An existing arch
   folder is never touched.
-- .ice/: ice-check, ice-archive-to-lat and ice-c4-drift, so hooks and CI
-  work without this machine.
+- .ice/: ice-check, ice-archive-to-lat, ice-c4-drift and ice-lat-drift,
+  so hooks and CI work without this machine.
 - The ice-checks and likec4-dsl skills, copied beside the skills OpenSpec
   and lat already copy in.
 - lat.md/features.md, the feature map, and lat.md/architecture.md, one
@@ -53,7 +53,8 @@ init, run without a terminal, deletes legacy prompts from the global
     instead;
   - .husky/pre-commit gets the lines appended;
   - .github/workflows gets ice.yml, a CI job on push and pull request
-    that runs the chain without the README step;
+    that runs the chain without the README step, plus ice-lat-drift
+    (it needs the change's base, so it is never a per-commit hook);
   - lefthook is never edited; the chain is listed for the owner.
   Only when none of these exist does it write a local git pre-commit
   hook, so a repo with only a workflow gets no local hook and nothing
@@ -81,9 +82,11 @@ enforces the order through its artifact dependencies.
    Given / When / Then scenarios with ids. ice-check expect passes.
 4. tasks.md, the minimal plan. ice-check plan passes, and it requires
    expect to pass.
-5. After openspec archive, run .ice/ice-archive-to-lat on the archived
-   change folder; it files the change in lat.md under its feature and
-   runs lat check.
+5. Before the owner archives, .ice/ice-lat-drift CHANGE is clean. After
+   openspec archive, run .ice/ice-archive-to-lat on the archived change
+   folder; it files the change in lat.md under its feature and runs lat
+   check. Where openspec/specs or lat.md disagree with the code, the code
+   wins and they are corrected.
 
 ## Finish with the checklist
 

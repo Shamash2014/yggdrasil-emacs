@@ -251,6 +251,46 @@ etc/ice/ice-hook-install, the same script ice-wire.sh calls."
       (should (/= 0 (car out)))
       (should (string-match-p "^stale:" (cdr out))))))
 
+;; --- ice-verify --done: a written slice leaves tasks.md, the ledger keeps it ---
+
+(ert-deftest ice-verify-done-refuses-without-a-verified-row ()
+  (skip-unless (and (executable-find "git") (executable-find "python3")))
+  (ice-gate-tests--with-repo root
+    (let ((out (ice-gate-tests--run root "python3" (ice-gate-tests--script "ice-verify") "--done" "1" "c")))
+      (should (= 1 (car out)))
+      (should (string-match-p "refused, no verified row" (cdr out))))
+    (should (string-match-p "^- \\[ \\] 1\\. Build$"
+                            (with-temp-buffer
+                              (insert-file-contents (expand-file-name "openspec/changes/c/tasks.md" root))
+                              (buffer-string))))))
+
+(ert-deftest ice-verify-done-removes-the-slice-and-the-gate-and-plan-still-know-it ()
+  (skip-unless (and (executable-find "git") (executable-find "python3")))
+  (ice-gate-tests--with-repo root
+    (should (string-match-p "verdict: unit-verified" (cdr (ice-gate-tests--verify-c root))))
+    (let ((out (ice-gate-tests--run root "python3" (ice-gate-tests--script "ice-verify") "--done" "1" "c")))
+      (should (= 0 (car out))))
+    (let ((tasks (with-temp-buffer
+                   (insert-file-contents (expand-file-name "openspec/changes/c/tasks.md" root))
+                   (buffer-string)))
+          (last (with-temp-buffer
+                  (insert-file-contents (expand-file-name ".ice/ledger.tsv" root))
+                  (split-string (car (last (split-string (buffer-string) "\n" t))) "\t"))))
+      (should-not (string-match-p "1\\. Build\n  -\\|Files:\\|Evidence:" tasks))
+      (should (string-match-p "^## Checkpoints\n1\\. Build\nApproved: " tasks))
+      (should (equal (list (nth 1 last) (nth 4 last) (nth 7 last) (nth 8 last))
+                     '("c" "slice-done" "1" "tests/calc.py"))))
+    (let ((plan (ice-gate-tests--run root "python3" (ice-gate-tests--script "ice-check") "plan" "openspec/changes/c")))
+      (should (equal plan '(0 . "ice-check plan openspec/changes/c: ok\n"))))
+    (should (string-match-p "verdict: unit-verified" (cdr (ice-gate-tests--verify-c root))))
+    (should (= 0 (car (ice-gate-tests--git root "add" "-A"))))
+    (should (= 0 (car (ice-gate-tests--run root "python3" (expand-file-name ".ice/ice-commit-gate" root)))))
+    (ice-gate-tests--write (expand-file-name "tests/calc.py" root) ice-gate-tests--other-calc)
+    (should (= 0 (car (ice-gate-tests--git root "add" "tests/calc.py"))))
+    (let ((out (ice-gate-tests--run root "python3" (expand-file-name ".ice/ice-commit-gate" root))))
+      (should (/= 0 (car out)))
+      (should (string-match-p "touches locked change c" (cdr out))))))
+
 ;; --- mutation detection in ice-runner ---
 
 (ert-deftest ice-runner-sets-mutate-cmd-when-the-tool-is-on-path ()

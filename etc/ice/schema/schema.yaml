@@ -12,7 +12,9 @@ artifacts:
 
       Order, and no step starts before the one above it ends:
       1. Explore first (opsx explore). Read the code at the places the change
-         will touch, the specs under openspec/specs, CONTEXT.md and lat.md.
+         will touch, CONTEXT.md, lat.md (lat search, lat locate) and the
+         specs under openspec/specs. The code is what the system does:
+         where a spec or lat.md disagrees with it, note it for correction.
       2. Settle by probe whatever running something can answer, or
          prototype it through skill prototype (ice-prototype for UI)
          under docs/prototypes/CHANGE/. Run it; do not ask the owner a
@@ -130,7 +132,10 @@ artifacts:
     instruction: |
       Create specification files that define WHAT the system should do.
 
-      A spec is a behavior contract, not an implementation plan.
+      A spec is a behavior contract, not an implementation plan. Keep it
+      minimal: intent, why and invariants, never the code restated. After
+      archive the code is the final spec; openspec/specs is corrected to
+      it, never the reverse.
 
       Good spec content:
       - Observable behavior users or downstream systems rely on
@@ -279,11 +284,13 @@ artifacts:
          example cart#promo-before-tax). Each has one GIVEN, one WHEN and
          one THEN line, taken from the intent's success and failure
          scenarios and the spec deltas.
-      3. Expected values come from the intent, the contract, the spec
-         deltas or a named reference, never from running or reading the code
-         under change. When that code may be wrong, a fresh subagent that
-         sees only the intent, the contract and the public interface writes
-         the checks.
+      3. Expected values for behaviour the change adds or alters come from
+         the intent, the contract, the spec deltas or a named reference,
+         never from running or reading the code under change. Behaviour the
+         change keeps is specified by the code and its tests: mark it
+         (tested: path) or (code: path#symbol). When that code may be wrong,
+         a fresh subagent that sees only the intent, the contract and the
+         public interface writes the checks.
       4. Agree the seam with the owner first: the highest one that can
          observe the behaviour, ideally one. Name it on the "Seam:" line.
       5. "Check:" names the test or command that proves the scenario, and
@@ -331,9 +338,11 @@ artifacts:
       - Evidence: the path where the proof lands (test output, log, capture).
 
       Only the checkbox line is tracked; keep fields on indented lines below
-      it. Tick a slice only after its Pass when holds and its Evidence exists,
-      and only when no lead runs the change; under a lead, only the lead
-      ticks, through todo_update.
+      it. A slice whose code is written leaves tasks.md, never ticked and
+      kept: ice-verify --done N CHANGE removes it, with its fields, once a
+      verified row matches the current content, and the ledger keeps it as
+      done. Under a lead, only the lead runs it. The Checkpoints list stays
+      as approved.
       No other prose sections, no groups, no restated design.
 
       Check with: ice-check plan <change-dir> (it also requires expect to pass)
@@ -347,10 +356,13 @@ apply:
   instruction: |
     Work the slices in tasks.md in blocking order, one fresh context each.
     Read intent.md and expectations.md first; never edit expectations.md.
-    When no lead runs the change, tick a slice in tasks.md only after its
-    Pass when holds and its Evidence file exists. When a lead runs it, never
-    tick tasks.md yourself: report the slice as done to the lead, with its
-    Pass when result and Evidence path; the lead ticks it, through
-    todo_update, after its own ice-verify run.
+    Change code only through the slice's Files; never regenerate or rewrite
+    a file from a spec, a prototype or lat.md.
+    When no lead runs the change, once a slice's Pass when holds and its
+    Evidence file exists, run ice-verify CHANGE, then ice-verify --done N
+    CHANGE: the slice leaves tasks.md and the ledger keeps it. When a lead
+    runs it, never edit tasks.md yourself: report the slice as done to the
+    lead, with its Pass when result and Evidence path; the lead removes it
+    after its own ice-verify run.
     If a check looks wrong, stop and flag it to the owner; do not change it.
     Pause if you hit blockers or need clarification.

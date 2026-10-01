@@ -22,8 +22,9 @@ tests, so it stays fast enough for a hook.
 
 A change's files are the union of: its own folder, every path the
 lock record covers, and every path named on a "Files:" line under
-tasks.md's Slices (the lock record excludes source beside a test, so
-the slice's own declared scope closes that gap).
+tasks.md's Slices or on a slice-done ledger row for a slice already
+removed (the lock record excludes source beside a test, so the slice's
+own declared scope closes that gap).
 
 commit_gate = off in .ice/config, set by the owner, turns this off for
 the repo. git commit --no-verify skips this the way it skips every
@@ -65,6 +66,7 @@ def active_changes(root):
             continue
         rel = os.path.relpath(path, root)
         files = set(record.get("files", {}).keys()) | slice_files(path)
+        files |= {f for done in ice.done_slices(root, entry).values() for f in done}
         files.add(rel)
         out.append((entry, files))
     return out

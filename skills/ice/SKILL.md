@@ -10,6 +10,15 @@ needed; the building agent never defines done. This skill is the order
 the work goes in and the check that closes each item. Whoever runs it
 delegates the reading and writing to workers and does none of it.
 
+Code is the final spec. ICE changes code only through an item's diff and
+never regenerates or rewrites it from intent, expectations, spec deltas,
+a prototype, openspec/specs or lat.md. Those stay minimal: intent, why,
+invariants and anchors, never the code restated. lat.md links to the
+code one way, [[path#symbol]] where lat parses the language and `path`
+elsewhere; the code never carries @lat comments.
+Where a spec or lat.md disagrees with the code, the spec or lat.md is
+corrected, or the owner opens a change.
+
 ## Is the repo wired
 
 Wired means .ice/ and openspec/ exist and openspec/config.yaml names the
@@ -61,7 +70,7 @@ workers, never by hand:
   CONTEXT;
 - rules: when a learning keeps holding, propose a rule for
   lat.md/rules.md; the owner approves it before a worker writes it;
-- the map: when a change's last item is ticked, a worker updates the
+- the map: when a change's last slice is removed, a worker updates the
   lat.md feature sections the change touched, a maintain pass scoped to
   that change;
 - archive: after the owner archives, run .ice/ice-archive-to-lat.
@@ -120,7 +129,7 @@ with every scenario covered, then the sec, live, perf and mutation lanes
 the repo sets, and ends on one line:
 
 - unit-verified or live-verified, with the diff on disk and inside the
-  item's scope: the item may be ticked;
+  item's scope: the item may close;
 - failed STEP or blocked STEP: the item stops there; say which step, the
   choices and a pick, and let the owner decide.
 
@@ -133,6 +142,14 @@ After ice-verify passes an item, in this order:
    CHANGE N passes when the last round of CHANGE/reviews/code-N.md has
    two approvals and, when ui-N.md exists, its last verdict is approve.
 3. The owner. Their feedback becomes lines under ice-learnings.
+
+When the item closes, its code is written, so its slice leaves tasks.md:
+run etc/ice/ice-verify --done N CHANGE. It removes slice N only when a
+verified row matches the current content, and the ledger keeps the
+slice with its evidence and Files, which ice-check, the commit gate and
+ice-archive-to-lat read as done. Never tick a slice and keep it. The
+Checkpoints list stays as the owner approved it. The removal moves the
+content hash, so ice-verify runs once more before the owner commits.
 
 Every brief's CONTEXT carries the learnings lines that apply to it,
 pasted as they stand.
@@ -147,10 +164,18 @@ beside each row when reporting.
 
 ## After
 
-When the last item is ticked, a worker updates the lat.md feature
-sections the change touched. The owner archives the change (openspec
-archive); then run .ice/ice-archive-to-lat on the archived folder. It
+When the last slice is removed, a worker updates the lat.md feature
+sections the change touched from the merged code, each claim anchored
+to the code, until lat check and .ice/ice-lat-drift CHANGE are clean; a
+section left alone on purpose is listed in design.md (intent.md is
+locked) as "lat unchanged: [[section]] (why)". The owner archives the
+change (openspec archive), which merges its deltas into openspec/specs;
+then run .ice/ice-archive-to-lat on the archived folder. It
 files the change under its feature in lat.md, deletes
 docs/prototypes/CHANGE/, and moves the change's learnings lines into
 lat.md/learnings.md, "owner N" rewritten to "owner CHANGE#N", all but
 those whose Where is "this change".
+
+Then a worker prunes what the change touched in openspec/specs and
+lat.md to intent, why, invariants and anchors: what restates the code
+goes, and what disagrees with the code is corrected, never the code.

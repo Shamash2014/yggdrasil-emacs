@@ -1,13 +1,20 @@
 #!/usr/bin/env python3
+import importlib.machinery
+import importlib.util
 import os
 import re
 import shutil
 import subprocess
 import sys
 
+sys.dont_write_bytecode = True
+_loader = importlib.machinery.SourceFileLoader("ice_scenarios", os.path.join(os.path.dirname(os.path.realpath(__file__)), "ice-scenarios"))
+ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scenarios", _loader))
+_loader.exec_module(ice)
+
 MAX_LEAD = 240
 FEATURES_LEAD = ("One section per user-visible feature: sub-features, how to get there, "
-                 "driving it and gotchas, each as a subsection.")
+                 "driving it and gotchas, each as a subsection: what and why, invariants and code anchors, never the code restated.")
 CHANGES_LEAD = "Archived OpenSpec changes, newest last: what changed, why and where, linked to the feature."
 INDEX_ENTRIES = {
     "features": "feature map, one section per user-visible feature",
@@ -212,6 +219,8 @@ def main(argv):
     what = first_paragraph(section(intent, "What is wanted")) or first_paragraph(section(proposal, "What Changes"))
     why = first_paragraph(section(proposal, "Why")) or first_paragraph(section(intent, "Caller's view"))
     where = change_files(tasks)
+    for files in ice.done_slices(root, DATED_ARCHIVE.sub("", name)).values():
+        where += [f for f in files if f not in where]
     specs = spec_names(archive)
     body = "%s\n\n- Why: %s\n- Where: %s\n- Specs: %s\n- Feature: [[features#%s]]\n- Archive: %s\n" % (
         clip(what or "No summary in intent.md or proposal.md."),

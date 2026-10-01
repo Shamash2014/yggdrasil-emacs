@@ -52,10 +52,19 @@ each step's output is kept under .ice/evidence/CHANGE/SHA/RUN/, one folder per r
 whose hash matches the working tree's content hash right now; workers
 never commit, so HEAD alone cannot tell one item's diff from the next.
 A row for the same change and branch but a different hash is stale.
-Exit 0 only for a verified row matching the current content."""
+Exit 0 only for a verified row matching the current content.
+
+--done N CHANGE removes slice N, its checkbox line and fields, from
+tasks.md once the code it asked for is written: only when a verified
+row matches the current content. The ledger keeps it as a slice-done
+row with that row's evidence and the slice's Files, which ice-check,
+ice-commit-gate and ice-archive-to-lat read as the done slice."""
 
 LEDGER_COLUMNS = ice.LEDGER_COLUMNS
 BLOCKED_EXIT = 75
+VERIFIED = ("unit-verified", "live-verified")
+SLICE_LINE = re.compile(r"^- \[[ xX]\]\s+(\d+)\.")
+FILES_LINE = re.compile(r"^\s+[-*]\s*Files:\s*(.*)$")
 
 
 class Stop(Exception):
@@ -71,13 +80,14 @@ def branch_of(root):
 def status(root, name):
     branch = branch_of(root)
     current_hash = ice.working_tree_hash(root)
-    rows = [r for r in ice.read_ledger(root) if r.get("change") == name and r.get("branch") == branch]
+    rows = [r for r in ice.read_ledger(root)
+            if r.get("change") == name and r.get("branch") == branch and r.get("verdict") != ice.SLICE_DONE]
     matching = [r for r in rows if r.get("hash") == current_hash]
     if matching:
         row = matching[-1]
         print("\t".join(LEDGER_COLUMNS))
         print("\t".join(row.get(c, "") for c in LEDGER_COLUMNS))
-        return 0 if row["verdict"] in ("unit-verified", "live-verified") else 1
+        return 0 if row["verdict"] in VERIFIED else 1
     if rows:
         latest = rows[-1]
         print("stale: no verdict for %s at the current content (%s); %d older row(s), latest %s at %s"
@@ -85,6 +95,40 @@ def status(root, name):
     else:
         print("none: no verdict for %s on %s" % (name, branch))
     return 1
+
+
+def done(root, change, name, number):
+    branch, content_hash = branch_of(root), ice.working_tree_hash(root)
+    verified = [r for r in ice.read_ledger(root) if r.get("change") == name and r.get("branch") == branch
+                and r.get("hash") == content_hash and r.get("verdict") in VERIFIED]
+    if not verified:
+        print("ice-verify --done %s %s: refused, no verified row for the current content; run ice-verify %s first"
+              % (number, name, name))
+        return 1
+    path = os.path.join(change, "tasks.md")
+    with open(path, encoding="utf-8") as f:
+        lines = f.read().split("\n")
+    start = next((i for i, l in enumerate(lines) if SLICE_LINE.match(l) and SLICE_LINE.match(l).group(1) == number), None)
+    if start is None:
+        print("ice-verify --done %s %s: no slice %s in tasks.md" % (number, name, number))
+        return 1
+    end = next((i for i in range(start + 1, len(lines)) if re.match(r"^\S", lines[i])), len(lines))
+    while end > start + 1 and not lines[end - 1].strip():
+        end -= 1
+    files = []
+    for line in lines[start:end]:
+        m = FILES_LINE.match(line)
+        if m:
+            files += [p for p in re.split(r"[,\s]+", m.group(1).strip()) if p and p.lower() != "none"]
+    with open(path, "w", encoding="utf-8") as f:
+        f.write("\n".join(lines[:start] + lines[end:]))
+    ts = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds")
+    ice.append_ledger(root, {"ts": ts, "change": name, "branch": branch, "sha": ice.git("rev-parse", "HEAD", cwd=root),
+                             "verdict": ice.SLICE_DONE, "evidence": verified[-1]["evidence"],
+                             "hash": ice.working_tree_hash(root), "slice": number, "files": ",".join(files)})
+    print("ice-verify --done %s %s: slice removed from tasks.md; the ledger keeps it with %s"
+          % (number, name, verified[-1]["evidence"]))
+    return 0
 
 
 class Run:
@@ -179,7 +223,7 @@ def verify(root, change, name):
     ice.append_ledger(root, {"ts": ts, "change": name, "branch": branch, "sha": head, "verdict": verdict,
                              "evidence": os.path.relpath(evidence, root), "hash": content_hash})
     print("verdict: " + verdict)
-    return 0 if verdict in ("unit-verified", "live-verified") else 1
+    return 0 if verdict in VERIFIED else 1
 
 
 def main():
@@ -187,10 +231,13 @@ def main():
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("change")
     parser.add_argument("--status", action="store_true", help="show the verdict for the current HEAD only")
+    parser.add_argument("--done", metavar="N", type=int, help="remove slice N from tasks.md once it is verified")
     args = parser.parse_args()
     root = ice.repo_root()
     change = ice.change_dir(root, args.change)
     name = ice.change_name(change)
+    if args.done is not None:
+        return done(root, change, name, str(args.done))
     return status(root, name) if args.status else verify(root, change, name)
 
 

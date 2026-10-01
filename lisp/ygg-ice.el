@@ -56,6 +56,10 @@
   "The ice-c4-drift script: C4 elements whose code paths are gone."
   :type 'file)
 
+(defcustom ygg-ice-lat-drift-script (locate-user-emacs-file "etc/ice/ice-lat-drift")
+  "The ice-lat-drift script: lat.md left behind by the code it links."
+  :type 'file)
+
 (defcustom ygg-ice-compact-script (locate-user-emacs-file "etc/ice/ice-compact")
   "The ice-compact script: file archived changes into lat.md, remove old ones."
   :type 'file)
@@ -612,6 +616,20 @@ Sections are read here; lat locate is asked only when that finds none."
 
 ;;; OpenSpec
 
+(defun ygg-ice--removed-slices (dir)
+  "How many slices of the change in DIR ice-verify --done removed, per the ledger."
+  (let ((ledger (expand-file-name "../../../.ice/ledger.tsv" (file-name-as-directory dir)))
+        (name (file-name-nondirectory (directory-file-name dir)))
+        slices)
+    (when (file-readable-p ledger)
+      (with-temp-buffer
+        (insert-file-contents ledger)
+        (dolist (line (split-string (buffer-string) "\n" t))
+          (let ((row (split-string line "\t")))
+            (when (and (equal (nth 1 row) name) (equal (nth 4 row) "slice-done") (nth 7 row))
+              (cl-pushnew (nth 7 row) slices :test #'equal))))))
+    (length slices)))
+
 (defun ygg-ice-changes (root)
   "ROOT's open OpenSpec changes as (:name :dir :tasks :done :total)."
   (let ((dir (expand-file-name "openspec/changes" root)))
@@ -622,10 +640,11 @@ Sections are read here; lat locate is asked only when that finds none."
                                  (not (equal (file-name-nondirectory d) "archive")))
                         (let* ((tasks (expand-file-name "tasks.md" d))
                                (tasks (and (file-exists-p tasks) tasks))
+                               (removed (ygg-ice--removed-slices d))
                                (progress (if tasks (ygg-todo-progress tasks) '(0 . 0))))
                           (list :name (file-name-nondirectory d)
                                 :dir (file-name-as-directory d) :tasks tasks
-                                :done (car progress) :total (cdr progress)))))
+                                :done (+ removed (car progress)) :total (+ removed (cdr progress))))))
                     (directory-files dir t "\\`[^.]"))))))
 
 (defun ygg-ice--change-files (change)
@@ -1041,11 +1060,12 @@ lat.md that section; elsewhere, or with a prefix, one picked."
       (lambda ()
         (let* ((list (ygg-todo-read file))
                (items (plist-get list :items))
-               (done (seq-count (lambda (it) (plist-get it :done)) items))
+               (removed (ygg-ice--removed-slices (plist-get change :dir)))
+               (done (+ removed (seq-count (lambda (it) (plist-get it :done)) items)))
                section)
           (ygg-ice--drawing
             (insert (propertize (plist-get change :name) 'font-lock-face 'ygg-ice-heading)
-                    (propertize (format "  %d/%d" done (length items)) 'font-lock-face 'ygg-ice-dim)
+                    (propertize (format "  %d/%d" done (+ removed (length items))) 'font-lock-face 'ygg-ice-dim)
                     "\n")
             (dolist (it items)
               (unless (equal (plist-get it :section) section)
@@ -1242,6 +1262,14 @@ scripts, skills and baseline.  It runs only when the import picked it."
     (ygg-ice--compile root (format "%s %s" (shell-quote-argument (ygg-ice--script ygg-ice-c4-drift-script))
                                    (shell-quote-argument (directory-file-name arch)))
                       "c4 drift")))
+
+(defun ygg-ice-lat-drift (change)
+  "Run ice-lat-drift on CHANGE: lat.md sections its code left behind."
+  (interactive (list (ygg-ice-read-change (ygg-ice-root) "Lat drift of: ")))
+  (ygg-ice--compile (ygg-ice-root (plist-get change :dir))
+                    (format "%s %s" (shell-quote-argument (ygg-ice--script ygg-ice-lat-drift-script))
+                            (shell-quote-argument (directory-file-name (plist-get change :dir))))
+                    "lat drift"))
 
 (defun ygg-ice--compact-command (root &optional apply)
   "The ice-compact command line for ROOT, a dry run unless APPLY."

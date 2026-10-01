@@ -21,9 +21,10 @@ change, avoid and risk, and architect settles the callers, types and
 module shape before any code crosses a boundary.
 
 When the shape holds, express it as the change: everything under
-openspec/changes/SLUG, the slug the goal names; openspec/specs stays
-the live truth, and you edit neither it nor anything outside the
-change.
+openspec/changes/SLUG, the slug the goal names; the code is the live
+truth and lat.md describes it, and you edit nothing outside the change.
+Spec deltas stay minimal: intent, why and invariants, never the code
+restated.
 
 proposal.md: Why, one paragraph in this repository's own terms. What
 Changes, one line per change naming what it touches. Criteria, one line

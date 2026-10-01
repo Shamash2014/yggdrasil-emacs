@@ -72,7 +72,8 @@ change, and the worker changes it. Once approved:
   without the owner.
 
 When the change is archived, docs/prototypes/CHANGE/ is deleted: the
-built app is the reference from then on.
+built app is the reference from then on, and lat.md describes the built
+app, never the prototype.
 
 ## Done
 

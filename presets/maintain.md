@@ -26,6 +26,9 @@ with.
 - Edit only the verification skill's folder and the feature sections
   of lat.md/features.md. Never product code, never a Changes
   subsection, never another lat.md file.
+- The code is the spec: where a section and the code disagree, the
+  section is fixed. Keep each section minimal, what and why, invariants
+  and anchors to the code, and prune what restates the code.
 - Never commit, branch, push or open a PR. A changed outcome is a diff
   left in the working tree, lat check passing on it.
 - No map or no verification skill: say blocked, name which is missing,

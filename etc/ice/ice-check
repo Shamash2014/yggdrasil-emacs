@@ -1,9 +1,16 @@
 #!/usr/bin/env python3
 import datetime
 import hashlib
+import importlib.machinery
+import importlib.util
 import os
 import re
 import sys
+
+sys.dont_write_bytecode = True
+_loader = importlib.machinery.SourceFileLoader("ice_scenarios", os.path.join(os.path.dirname(os.path.realpath(__file__)), "ice-scenarios"))
+ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scenarios", _loader))
+_loader.exec_module(ice)
 
 INTENT_SECTIONS = [
     "What is wanted",
@@ -235,6 +242,16 @@ def check_expect(change):
     return gaps
 
 
+def done_slices(change):
+    path = os.path.abspath(change)
+    parent = os.path.dirname(path)
+    root = os.path.dirname(os.path.dirname(parent))
+    if os.path.basename(parent) != "changes" or os.path.basename(os.path.dirname(parent)) != "openspec" \
+       or not os.path.isfile(ice.ledger_path(root)):
+        return None
+    return ice.done_slices(root, os.path.basename(path))
+
+
 def check_plan(change):
     gaps = ["expect: %s" % g for g in check_expect(change)]
     path = os.path.join(change, "tasks.md")
@@ -255,10 +272,14 @@ def check_plan(change):
             current["fields"][normalize(f.group(1))] = f.group(2).strip()
         elif re.match(r"^\S", line):
             current = None
-    if not slices:
+    done = done_slices(change)
+    total = len(slices) + len(set(done or {}) - {s["label"].split(".")[0] for s in slices})
+    # without a ledger (fresh clone, CI) a removed slice cannot be told from a missing one
+    removed_unrecorded = done is None and count and total < count
+    if not total and not removed_unrecorded:
         gaps.append("tasks.md has no slices ('- [ ] N. <slice>')")
-    elif count and count != len(slices):
-        gaps.append("%d checkpoints but %d slices: one checkpoint per slice" % (count, len(slices)))
+    elif count and count != total and not removed_unrecorded:
+        gaps.append("%d checkpoints but %d slices: one checkpoint per slice" % (count, total))
     for s in slices:
         for field in ("Pass when", "Evidence"):
             if not s["fields"].get(normalize(field)):
