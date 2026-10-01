@@ -276,7 +276,6 @@
   "Idle seconds before the current line's blame appears."
   :type 'number :group 'yggdrasil)
 
-(defvar ygg-blame--timer nil)
 (defvar ygg-blame--proc nil)
 (defvar ygg-blame--overlay nil)
 (defvar ygg-blame--at nil "(BUFFER . BOL) the overlay belongs to.")
@@ -387,13 +386,12 @@ without a verdict: a cancelled ask says nothing about the file."
 (define-minor-mode ygg-inline-blame-mode
   "Zed-style inline blame on the current line after a pause."
   :global t :group 'yggdrasil
+  ;; turning it on again, as reloading this file does, must not add a timer
+  (cancel-function-timers #'ygg-blame--show)
   (if ygg-inline-blame-mode
       (progn
-        (setq ygg-blame--timer
-              (run-with-idle-timer ygg-blame-idle-delay t #'ygg-blame--show))
+        (run-with-idle-timer ygg-blame-idle-delay t #'ygg-blame--show)
         (add-hook 'post-command-hook #'ygg-blame--on-move))
-    (when ygg-blame--timer (cancel-timer ygg-blame--timer))
-    (setq ygg-blame--timer nil)
     (remove-hook 'post-command-hook #'ygg-blame--on-move)
     (when (process-live-p ygg-blame--proc) (delete-process ygg-blame--proc))
     (ygg-blame--clear)))

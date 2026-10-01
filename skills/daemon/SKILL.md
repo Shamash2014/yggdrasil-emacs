@@ -1,6 +1,6 @@
 ---
 name: daemon
-description: Entry command: restates the ask, routes it to a playbook (feature, bugfix, exploration, architecture, testing, qa, review, ice), then leads it.
+description: "Entry command: restates the ask, routes it to a playbook (feature, bugfix, exploration, architecture, testing, qa, review, ice), then leads it."
 ---
 
 # Daemon

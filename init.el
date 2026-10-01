@@ -75,7 +75,11 @@
         '("/COMMIT_EDITMSG\\'" "/git-rebase-todo\\'"))
   (undo-fu-session-global-mode 1))
 (elpaca ultra-scroll
-  (ultra-scroll-mode 1))
+  (ultra-scroll-mode 1)
+  ;; the mode keeps the GC step it saw at load and restores it after every scroll
+  (add-hook 'emacs-startup-hook
+            (lambda () (setq ultra-scroll--gc-percentage-orig gc-cons-percentage))
+            90))
 
 ;;; lisp/ — compile the engine only; layers stay source (they carry elpaca
 ;;; macro calls that poison the .elc when compiled outside a session)
@@ -631,8 +635,6 @@ render above the top edge on macOS child frames."
 (add-hook 'kill-emacs-hook #'ygg--kill-all-jobs 90)
 
 (blink-cursor-mode -1)
-(setq auto-revert-use-notify t
-      auto-revert-avoid-polling t)
 
 ;; A day-long Emacs keeps what it no longer needs: a package index nobody
 ;; is browsing, event logs of servers that answered hours ago, image data

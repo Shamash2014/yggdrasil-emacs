@@ -549,12 +549,14 @@ extra lines of a multi-line prompt up to 0.8 of the frame."
   "Recheck the file state rarely rather than every two seconds.
 Doom modeline arms a two second repeat that stats the visited file and
 redraws the mode line, for a check that already runs after every
-command; an idle session wakes up for it and learns nothing."
+command; an idle session wakes up for it and learns nothing.  Without
+icons the state it finds is never drawn, so it is not rechecked at all."
   (when (fboundp 'doom-mdeline-refresh-buffer-file-state)
     (cancel-function-timers #'doom-mdeline-refresh-buffer-file-state)
-    (run-with-timer ygg-modeline-file-state-interval
-                    ygg-modeline-file-state-interval
-                    #'doom-mdeline-refresh-buffer-file-state)))
+    (when doom-modeline-icon
+      (run-with-timer ygg-modeline-file-state-interval
+                      ygg-modeline-file-state-interval
+                      #'doom-mdeline-refresh-buffer-file-state))))
 
 (with-eval-after-load 'doom-modeline-segments
   (ygg-modeline-slow-file-state-refresh))

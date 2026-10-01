@@ -356,13 +356,20 @@ second.  EXACT keeps the seconds a settled turn took."
 
 (defvar aob--clock-timer nil)
 
+(defvar aob-clock-shown-functions nil
+  "Functions called with a session, non-nil when its clock is on screen.
+A running clock ticks only while one of them says it is seen.")
+
+(defun aob--clock-start ()
+  (unless (timerp aob--clock-timer)
+    (setq aob--clock-timer (run-with-timer 1 1 #'aob--clock-tick))))
+
 (defun aob-turn-begin (s)
   "Start S's turn clock; return the stamp that owns it."
   (let ((stamp (float-time)))
     (aob-session-put s :turn-start stamp)
     (aob-session-put s :turn-cost nil)
-    (unless (timerp aob--clock-timer)
-      (setq aob--clock-timer (run-with-timer 1 1 #'aob--clock-tick)))
+    (aob--clock-start)
     stamp))
 
 (defun aob-turn-end (s &optional stamp)
@@ -403,17 +410,29 @@ WITH-TOTAL puts the total after a running turn where there is room."
       (and (> total 0) (aob-duration-short total)))))
 
 (defun aob--clock-tick ()
-  (let ((running nil))
+  "Move every running clock that is on screen; stop when none is."
+  (let ((seen nil))
     (dolist (s (aob-sessions))
-      (when (aob-session-ref s :turn-start)
-        (setq running t)
+      (when (and (aob-session-ref s :turn-start)
+                 (run-hook-with-args-until-success 'aob-clock-shown-functions s))
+        (setq seen t)
         (let ((label (aob-session-clock s)))
           (unless (equal label (aob-session-ref s :clock-shown))
             (aob-session-put s :clock-shown label)
             (run-hook-with-args 'aob-meter-change-hook s)))))
-    (unless running
-      (cancel-timer aob--clock-timer)
+    (unless seen
+      (when (timerp aob--clock-timer) (cancel-timer aob--clock-timer))
       (setq aob--clock-timer nil))))
+
+(defun aob--clock-on-display (&rest _)
+  "Wind the clock again when a window or a frame brings a running one into view."
+  (unless (timerp aob--clock-timer)
+    (when (seq-some (lambda (s) (aob-session-ref s :turn-start)) (aob-sessions))
+      (aob--clock-start)
+      (aob--clock-tick))))
+
+(add-hook 'window-buffer-change-functions #'aob--clock-on-display)
+(add-function :after after-focus-change-function #'aob--clock-on-display)
 
 (defun aob--clock-on-state (s _old new)
   (when (memq new '(idle done dead failed))

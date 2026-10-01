@@ -186,6 +186,14 @@ refresh runs in, and a refresh runs in the sidebar's own.")
 (defvar-local ygg-projects--instance nil
   "The mounted vui root of this sidebar.")
 
+(defvar-local ygg-projects--drawn nil
+  "The cards this sidebar last drew, as `ygg-projects--picture\=' made them.")
+
+(defvar ygg-projects--stale nil
+  "Non-nil when a redraw was due while no window showed the sidebar.")
+
+(defvar aob-transcript--stat-memo)
+
 (defcustom ygg-projects-show-archived nil
   "Whether conversations put away are listed with the rest."
   :type 'boolean :group 'ygg-projects)
@@ -201,11 +209,49 @@ you looked at another is a row you have to open twice.")
 (declare-function aob-trace--work-root "aob-trace" (s))
 (declare-function aob-session-put "aob" (s key val))
 
+(defvar ygg-projects--drawing nil
+  "What the redraw under way has already worked out, by what asked it.
+Nil between redraws, so nothing outside one is answered from it.")
+
+(defmacro ygg-projects--once (key &rest body)
+  "BODY's value, worked out once per redraw under KEY."
+  (declare (indent 1))
+  (let ((k (make-symbol "key")) (seen (make-symbol "seen")))
+    `(if (not ygg-projects--drawing)
+         (progn ,@body)
+       (let* ((,k ,key)
+              (,seen (gethash ,k ygg-projects--drawing 'ygg-projects--unseen)))
+         (if (eq ,seen 'ygg-projects--unseen)
+             (puthash ,k (progn ,@body) ygg-projects--drawing)
+           ,seen)))))
+
+(defvar ygg-projects--true-dirs (make-hash-table :test #'equal)
+  "Each folder a session was placed by, to its true name as a directory.")
+
+(defvar ygg-projects--true-dirs-roots nil
+  "The roots on show when `ygg-projects--true-dirs\=' was last emptied.")
+
+(defun ygg-projects--true-dir (dir)
+  "DIR's true name as a directory, the disk asked once per spelling."
+  (let ((true (lambda ()
+                (file-name-as-directory
+                 (if (file-remote-p dir) (expand-file-name dir) (file-truename dir))))))
+    (if (file-name-absolute-p dir)
+        (with-memoization (gethash dir ygg-projects--true-dirs) (funcall true))
+      (funcall true))))
+
+(defun ygg-projects--forget-true-dirs (&optional roots)
+  "Forget the true names, unless ROOTS are the roots they were found under.
+A link re-pointed is seen again when a project comes or goes, or on a
+rescan."
+  (unless (and roots (equal roots ygg-projects--true-dirs-roots))
+    (clrhash ygg-projects--true-dirs)
+    (setq ygg-projects--true-dirs-roots roots)))
+
 (defun ygg-projects--root-of (dir roots)
   "The one of ROOTS DIR is, or is inside of, the deepest when several are."
   (when dir
-    (let ((dir (file-name-as-directory
-                (if (file-remote-p dir) (expand-file-name dir) (file-truename dir)))))
+    (let ((dir (ygg-projects--true-dir dir)))
       (car (sort (seq-filter (lambda (r) (string-prefix-p r dir)) roots)
                  (lambda (a b) (> (length a) (length b))))))))
 
@@ -235,64 +281,86 @@ as its tools last said."
   (and (fboundp 'aob-subagent-p) (aob-subagent-p s)
        (memq (aob-session-state s) '(dead done failed))))
 
+(defun ygg-projects--root-dirs ()
+  "The roots on show, spelled as folders, the way a session is matched to one."
+  (ygg-projects--once 'root-dirs
+    (mapcar (lambda (r) (file-name-as-directory
+                         (expand-file-name (if (consp r) (car r) r))))
+            (ygg-projects--roots))))
+
+(defun ygg-projects--by-root ()
+  "Every root's sessions, in their own order, from one pass over them all."
+  (ygg-projects--once 'by-root
+    (let ((roots (ygg-projects--root-dirs))
+          (table (make-hash-table :test #'equal)))
+      (dolist (s (reverse (aob-sessions)))
+        (unless (or (ygg-projects--ended-subagent-p s) (aob-session-ref s :hidden))
+          (push s (gethash (ygg-projects--session-root s roots) table))))
+      table)))
+
 (defun ygg-projects--sessions (root)
   "ROOT's sessions, a subagent only while it runs."
   (when (fboundp 'aob-sessions)
-    (let ((roots (mapcar (lambda (r) (file-name-as-directory
-                                      (expand-file-name (if (consp r) (car r) r))))
-                         (ygg-projects--roots))))
-      (seq-filter (lambda (s) (and (not (ygg-projects--ended-subagent-p s))
-                                   (not (aob-session-ref s :hidden))
-                                   (equal (ygg-projects--session-root s roots) root)))
-                  (aob-sessions)))))
+    (gethash root (ygg-projects--by-root))))
 
 (defun ygg-projects--past (root)
   "Conversations in ROOT that ended but can be picked up again.
 The ones this Emacs started, and the ones the CLI left on disk before
 it ever did — a project you have just taken in has a history whether
 or not this Emacs was there for it."
-  (let* ((hidden (and (fboundp 'aob-acp-archived-entries)
-                      (mapcar (lambda (e) (plist-get e :acp-id))
-                              (ignore-errors (aob-acp-archived-entries)))))
-         (known (and (fboundp 'aob-acp-resumable-entries)
-                     (seq-filter
-                      (lambda (e)
-                        (equal root (file-name-as-directory
-                                     (expand-file-name (or (plist-get e :project)
-                                                           (plist-get e :dir) "/")))))
-                      (ignore-errors (aob-acp-resumable-entries)))))
-         (ids (mapcar (lambda (e) (plist-get e :acp-id)) known))
-         (awake (delq nil (mapcar (lambda (s) (aob-session-ref s :acp-id))
-                                  (and (fboundp 'aob-sessions) (aob-sessions)))))
-         (found (and (fboundp 'aob-transcript-found)
-                     (seq-remove (lambda (e)
-                                   (or (member (plist-get e :acp-id) ids)
-                                       ;; put away as a persisted entry, but
-                                       ;; its file is still where it was
-                                       (member (plist-get e :acp-id) hidden)
-                                       ;; woken: the file it was found in is
-                                       ;; the file the live session is
-                                       ;; writing, and one conversation is
-                                       ;; one row
-                                       (member (plist-get e :acp-id) awake)))
-                                 (ygg-projects--found root))))
-         (put-away (when ygg-projects-show-archived
-                     (append
-                      (seq-filter
-                       (lambda (e)
-                         (equal root (file-name-as-directory
-                                      (expand-file-name (or (plist-get e :project)
-                                                            (plist-get e :dir) "/")))))
-                       (and (fboundp 'aob-acp-archived-entries)
-                            (ignore-errors (aob-acp-archived-entries))))
-                      (and (fboundp 'aob-transcript-found)
-                           (ygg-projects--found root "archive"))))))
-    (setq found (append found put-away))
-    ;; newest first, whichever list it came from: a conversation is
-    ;; found again by when it happened
-    (sort (append known found)
-          :key (lambda (e) (or (ygg-projects--entry-ts e) 0))
-          :reverse t :in-place t)))
+  (ygg-projects--once (list 'past root)
+    (let* ((hidden (mapcar (lambda (e) (plist-get e :acp-id))
+                           (ygg-projects--archived)))
+           (known (and (fboundp 'aob-acp-resumable-entries)
+                       (seq-filter
+                        (lambda (e)
+                          (equal root (file-name-as-directory
+                                       (expand-file-name (or (plist-get e :project)
+                                                             (plist-get e :dir) "/")))))
+                        (ygg-projects--resumable))))
+           (ids (mapcar (lambda (e) (plist-get e :acp-id)) known))
+           (awake (delq nil (mapcar (lambda (s) (aob-session-ref s :acp-id))
+                                    (and (fboundp 'aob-sessions) (aob-sessions)))))
+           (found (and (fboundp 'aob-transcript-found)
+                       (seq-remove (lambda (e)
+                                     (or (member (plist-get e :acp-id) ids)
+                                         ;; put away as a persisted entry, but
+                                         ;; its file is still where it was
+                                         (member (plist-get e :acp-id) hidden)
+                                         ;; woken: the file it was found in is
+                                         ;; the file the live session is
+                                         ;; writing, and one conversation is
+                                         ;; one row
+                                         (member (plist-get e :acp-id) awake)))
+                                   (ygg-projects--found root))))
+           (put-away (when ygg-projects-show-archived
+                       (append
+                        (seq-filter
+                         (lambda (e)
+                           (equal root (file-name-as-directory
+                                        (expand-file-name (or (plist-get e :project)
+                                                              (plist-get e :dir) "/")))))
+                         (ygg-projects--archived))
+                        (and (fboundp 'aob-transcript-found)
+                             (ygg-projects--found root "archive"))))))
+      (setq found (append found put-away))
+      ;; newest first, whichever list it came from: a conversation is
+      ;; found again by when it happened
+      (sort (append known found)
+            :key (lambda (e) (or (ygg-projects--entry-ts e) 0))
+            :reverse t :in-place t))))
+
+(defun ygg-projects--resumable ()
+  "The conversations this Emacs ended and can pick up again."
+  (ygg-projects--once 'resumable
+    (and (fboundp 'aob-acp-resumable-entries)
+         (ignore-errors (aob-acp-resumable-entries)))))
+
+(defun ygg-projects--archived ()
+  "The conversations put away here."
+  (ygg-projects--once 'archived
+    (and (fboundp 'aob-acp-archived-entries)
+         (ignore-errors (aob-acp-archived-entries)))))
 
 (defun ygg-projects--found (root &optional where)
   "What the default agent and Codex left on disk for ROOT, put away in WHERE.
@@ -328,7 +396,7 @@ without waiting; an answer that differs redraws once."
          (lambda (sessions)
            (unless (equal sessions (gethash key ygg-projects--listed))
              (puthash key sessions ygg-projects--listed)
-             (run-at-time 0 nil #'ygg-projects-refresh))))))
+             (ygg-projects--redraw-soon))))))
     (gethash key ygg-projects--listed)))
 
 (defvar ygg-projects--discarded (make-hash-table :test #'equal)
@@ -412,8 +480,9 @@ when the project has nothing of its own running."
   "The projects on show, each umbrella followed by its repositories.
 A repository is drawn in its umbrella's Folders row, not as a card, but
 its sessions, commands and worktrees are its own all the same."
-  (seq-mapcat (lambda (r) (cons r (ignore-errors (ygg-project-children r))))
-              (ygg-projects--shown)))
+  (ygg-projects--once 'roots
+    (seq-mapcat (lambda (r) (cons r (ignore-errors (ygg-project-children r))))
+                (ygg-projects--shown))))
 
 (defun ygg-projects--shown ()
   "Every project card worth listing, in an order that does not move.
@@ -423,25 +492,27 @@ worse than a row in an inconvenient place.  The open project and the
 one the sidebar was opened from are kept whatever the cap, since a
 list that can drop the thing it is showing is a list that shows
 nothing.  An umbrella's repositories are not cards of their own."
-  (let* ((scanned (seq-uniq (mapcar #'file-name-as-directory
-                                    (delq nil (ignore-errors (ygg-project-top-roots))))
-                            #'equal))
-         ;; only ones you imported: standing in a folder is not importing
-         ;; it, and a row that appears because you opened a file there is
-         ;; the row you removed yesterday coming back
-         (pinned (seq-filter (lambda (r) (member r scanned))
-                             (mapcar (lambda (r) (or (ygg-projects--umbrella-of r) r))
-                                     (delq nil (list ygg-projects--here
-                                                     ygg-projects--open)))))
-         (all (append scanned (seq-remove (lambda (r) (member r scanned)) pinned)))
-         (picked (seq-take all (max 1 ygg-projects-limit))))
-    (dolist (r pinned)
-      (unless (member r picked) (setq picked (append picked (list r)))))
-    picked))
+  (ygg-projects--once 'shown
+    (let* ((scanned (seq-uniq (mapcar #'file-name-as-directory
+                                      (delq nil (ignore-errors (ygg-project-top-roots))))
+                              #'equal))
+           ;; only ones you imported: standing in a folder is not importing
+           ;; it, and a row that appears because you opened a file there is
+           ;; the row you removed yesterday coming back
+           (pinned (seq-filter (lambda (r) (member r scanned))
+                               (mapcar (lambda (r) (or (ygg-projects--umbrella-of r) r))
+                                       (delq nil (list ygg-projects--here
+                                                       ygg-projects--open)))))
+           (all (append scanned (seq-remove (lambda (r) (member r scanned)) pinned)))
+           (picked (seq-take all (max 1 ygg-projects-limit))))
+      (dolist (r pinned)
+        (unless (member r picked) (setq picked (append picked (list r)))))
+      picked)))
 
 (defun ygg-projects--umbrella-of (root)
   "The umbrella ROOT is a repository of, else nil."
-  (ignore-errors (ygg-project-umbrella-of root)))
+  (ygg-projects--once (list 'umbrella root)
+    (ignore-errors (ygg-project-umbrella-of root))))
 
 (defvar ygg-projects--buffers nil
   "Each root's buffers as (ROOT COMMANDS . TERMINALS), for one redraw.")
@@ -484,13 +555,8 @@ in the background and redraws this when it settles."
 Never from the render: the callback redraws, the redraw counts the
 commands, and counting them would ask for another scan."
   (when (fboundp 'ygg-project-commands-refresh)
-    (let ((done nil))
-      (dolist (root (ygg-projects--roots))
-        (ygg-project-commands-refresh
-         root (lambda (_root)
-                (unless done
-                  (setq done t)
-                  (run-at-time 0 nil #'ygg-projects-refresh))))))))
+    (dolist (root (ygg-projects--roots))
+      (ygg-project-commands-refresh root #'ygg-projects--redraw-soon))))
 
 (defvar ygg-projects--docker-cache (make-hash-table :test #'equal)
   "Root to the containers docker last said were running for it.")
@@ -595,7 +661,7 @@ on every row of a list of thirty is a second of nothing."
                                      (split-string (or out "") "\n" t)))))
                    (when (buffer-live-p buf) (kill-buffer buf))
                    (puthash root rows ygg-projects--docker-cache)
-                   (unless (equal was rows) (ygg-projects-refresh))))))
+                   (unless (equal was rows) (ygg-projects--redraw-soon))))))
           (error (remhash root ygg-projects--docker-pending)
                  (when (buffer-live-p buf) (kill-buffer buf))))))))
 
@@ -623,17 +689,18 @@ on every row of a list of thirty is a second of nothing."
   "Every folder ROOT covers, the checkout itself first.
 The root is where its agents already stand; the rest is what they were
 additionally given to see."
-  (let ((root (file-name-as-directory (expand-file-name root))))
-    (delete-dups
-     (append (list root)
-             (ignore-errors (ygg-project-children root))
-             (mapcar #'file-name-as-directory
-                     (ignore-errors (ygg-project-folders root)))
-             ;; a monorepo's members are folders of the project whether or
-             ;; not anybody listed them by hand
-             (mapcar #'file-name-as-directory
-                     (and (fboundp 'ygg-project-workspaces)
-                          (ignore-errors (ygg-project-workspaces root))))))))
+  (ygg-projects--once (list 'folders root)
+    (let ((root (file-name-as-directory (expand-file-name root))))
+      (delete-dups
+       (append (list root)
+               (ignore-errors (ygg-project-children root))
+               (mapcar #'file-name-as-directory
+                       (ignore-errors (ygg-project-folders root)))
+               ;; a monorepo's members are folders of the project whether or
+               ;; not anybody listed them by hand
+               (mapcar #'file-name-as-directory
+                       (and (fboundp 'ygg-project-workspaces)
+                            (ignore-errors (ygg-project-workspaces root)))))))))
 
 (defvar ygg-projects--worktrees-cache (make-hash-table :test #'equal)
   "Each root's other worktrees as (NAME . DIR), as the last scan found them.")
@@ -685,7 +752,7 @@ scan already learned not to do."
                          (now (and (zerop exit)
                                    (ygg-projects--worktrees-parse out root))))
                      (puthash root now ygg-projects--worktrees-cache)
-                     (unless (equal was now) (ygg-projects-refresh))))))
+                     (unless (equal was now) (ygg-projects--redraw-soon))))))
           (puthash root t ygg-projects--worktrees-pending))))))
 
 (declare-function ygg-ice-context-scan "ygg-ice" (root))
@@ -799,7 +866,7 @@ it has none or an old one — safe on a drawing path."
                                 ygg-projects--tree-mains)
                      (remhash dir ygg-projects--tree-mains))
                    (puthash dir (cons (float-time) note) ygg-projects--tree-notes)
-                   (unless (equal note (cdr seen)) (ygg-projects-refresh))))))
+                   (unless (equal note (cdr seen)) (ygg-projects--redraw-soon))))))
             (puthash dir t ygg-projects--tree-notes-pending)
           (puthash dir (cons (float-time) nil) ygg-projects--tree-notes)))
       (cdr seen))))
@@ -830,13 +897,11 @@ running session's is: a linked worktree under its main checkout."
 worktrees: a pin outlasts the session, so the row does too."
   (when-let* ((pins (ygg-projects--pins))
               ((fboundp 'aob-acp-resumable-entries)))
-    (let ((roots (mapcar (lambda (r) (file-name-as-directory
-                                      (expand-file-name (if (consp r) (car r) r))))
-                         (ygg-projects--roots))))
+    (let ((roots (ygg-projects--root-dirs)))
       (seq-filter (lambda (e)
                     (and (member (plist-get e :acp-id) pins)
                          (equal (ygg-projects--entry-root e roots) root)))
-                  (ignore-errors (aob-acp-resumable-entries))))))
+                  (ygg-projects--resumable)))))
 
 (declare-function aob-subagent-live-count "aob-subagent" (s))
 (declare-function aob-subagent-parent "aob-subagent" (s))
@@ -970,6 +1035,16 @@ S may be an ended conversation, kept pinned across a restart."
   (sort (copy-sequence sessions)
         (lambda (a b) (> (ygg-projects--session-ts a) (ygg-projects--session-ts b)))))
 
+(defun ygg-projects--session-label (s)
+  "S's name as its row says it: without the agent in front of the task,
+which the grey line under the row already names."
+  (let ((name (aob-session-name s))
+        (agent (aob-session-ref s :agent)))
+    (if (and (stringp name) (stringp agent)
+             (string-prefix-p (concat agent ": ") name))
+        (substring name (+ 2 (length agent)))
+      name)))
+
 (defun ygg-projects--descendant-rows (s depth seen)
   "The rows of what S sent, and what they sent, DEPTH levels in.
 SEEN holds the sessions already drawn, so a loop in the refs ends."
@@ -978,7 +1053,7 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
               (unless (memq kid seen)
                 (push kid seen)
                 (cons (cons (concat (make-string (* 2 depth) ?\s) "└ "
-                                    (aob-session-name kid))
+                                    (ygg-projects--session-label kid))
                             kid)
                       (ygg-projects--descendant-rows kid (1+ depth) seen))))
             (ygg-projects--by-start
@@ -1006,7 +1081,7 @@ SEEN holds the sessions already drawn, so a loop in the refs ends."
             (label (lambda (s)
                      (if (ygg-projects--ended-p s)
                          (or (plist-get s :name) (plist-get s :agent) "session")
-                       (aob-session-name s))))
+                       (ygg-projects--session-label s))))
             (rows (lambda (s)
                     ;; what it sent goes under it, two columns a level:
                     ;; a row this narrow has no more to spare
@@ -1324,15 +1399,15 @@ name, anything else by its path, each marked open or shut when it opens."
 worktrees and, for an umbrella's repository, its sessions, set in a
 step.  What is under a folder carries that folder as its project."
   (mapcan (lambda (d)
-            (cons (vui-text (ygg-projects--entry-text
-                             (ygg-projects--folder-label d) root 'folders d))
+            (cons (ygg-projects--entry-text
+                   (ygg-projects--folder-label d) root 'folders d)
                   (when (ygg-projects--folder-open-p d)
                     (let ((ygg-projects-entry-indent (+ 2 ygg-projects-entry-indent)))
                       (append
                        (mapcar (lambda (wt)
-                                 (vui-text (ygg-projects--entry-text
-                                            (concat "⌥ " (car wt)) d 'folders
-                                            (cons 'worktree (cdr wt)))))
+                                 (ygg-projects--entry-text
+                                  (concat "⌥ " (car wt)) d 'folders
+                                  (cons 'worktree (cdr wt))))
                                (ygg-projects--worktree-entries d))
                        (when-let* (((ygg-projects--umbrella-of d))
                                    (cells (ygg-projects--entries d 'agents)))
@@ -1348,7 +1423,7 @@ step.  What is under a folder carries that folder as its project."
 (defun ygg-projects--cell-nodes (root kind cells)
   (mapcan (lambda (cell)
             (if (eq (cdr cell) 'ygg-projects-gap)
-                (list (vui-text " "))
+                (list " ")
               (let* ((payload (cdr cell))
                      (note (and (eq kind 'agents) (ygg-projects--entry-tree payload)))
                      (texts (cons (ygg-projects--entry-text (car cell) root kind payload)
@@ -1357,7 +1432,7 @@ step.  What is under a folder carries that folder as its project."
                 (when (ygg-projects--on-screen-p payload)
                   (dolist (text texts)
                     (ygg-projects--mark-row text 'ygg-projects-on-screen)))
-                (mapcar #'vui-text texts))))
+                texts)))
           (or cells
               (ygg-projects--entries root kind)
               (list (cons "— none —" nil)))))
@@ -1418,14 +1493,13 @@ cannot spill past the text area and mark every line truncated."
 Each goes under the deepest project holding its folder, the way a
 session does, so a parent does not count what its child already shows."
   (when (fboundp 'aob-schedule-for-project)
-    (let ((roots (mapcar (lambda (r) (file-name-as-directory
-                                      (expand-file-name (if (consp r) (car r) r))))
-                         (ygg-projects--roots))))
-      (seq-filter (lambda (s)
-                    (equal (ygg-projects--root-of
-                            (plist-get (plist-get s :target) :project) roots)
-                           root))
-                  (aob-schedule-for-project root)))))
+    (ygg-projects--once (list 'schedules root)
+      (let ((roots (ygg-projects--root-dirs)))
+        (seq-filter (lambda (s)
+                      (equal (ygg-projects--root-of
+                              (plist-get (plist-get s :target) :project) roots)
+                             root))
+                    (aob-schedule-for-project root))))))
 
 (defun ygg-projects--head-text (root)
   "ROOT's own line."
@@ -1487,40 +1561,66 @@ session does, so a parent does not count what its child already shows."
   "ROOT's rows, the opened one followed by what it holds."
   (let ((out nil))
     (pcase-dolist (`(,kind ,icon ,label ,count) (ygg-projects--row-specs root))
-      (push (vui-text (ygg-projects--row-text icon label count root kind)) out)
+      (push (ygg-projects--row-text icon label count root kind) out)
       (when (member (cons root kind) ygg-projects--open-row)
         (dolist (node (ygg-projects--entry-nodes root kind)) (push node out))))
     (nreverse out)))
+
+(defun ygg-projects--picture ()
+  "Every card on show as (ROOT OPEN LINES), LINES its drawn text."
+  (mapcar (lambda (root)
+            (let ((open (equal root ygg-projects--open)))
+              (list root open (cons (ygg-projects--head-text root)
+                                    (and open (ygg-projects--rows root))))))
+          (ygg-projects--shown)))
+
+(defun ygg-projects--fresh-picture ()
+  "The cards as they stand now, each thing a redraw asks worked out once."
+  (let ((ygg-projects--drawing (make-hash-table :test #'equal))
+        (aob-transcript--stat-memo (make-hash-table :test #'equal)))
+    (ygg-projects--forget-true-dirs (ygg-projects--root-dirs))
+    (ygg-projects--forget-buffers)
+    (ygg-projects--picture)))
+
+(defun ygg-projects--same-p (a b)
+  "Whether A and B draw alike: text by its characters and properties, a
+session or a buffer by identity, anything else by value.  A session is
+never compared by value: that walks its whole history."
+  (while (and (consp a) (consp b) (ygg-projects--same-p (car a) (car b)))
+    (setq a (cdr a) b (cdr b)))
+  (cond ((eq a b) t)
+        ((or (consp a) (consp b)) nil)
+        ((stringp a)
+         (and (stringp b) (string= a b)
+              (ygg-projects--same-p (object-intervals a) (object-intervals b))))
+        ((or (recordp a) (recordp b)) nil)
+        (t (equal a b))))
 
 (with-eval-after-load 'vui
   ;; expanded where vui is loaded, never before: byte-compiled in a
   ;; session that has not loaded it, `vui-defcomponent' is not yet a
   ;; macro, compiles to a function call, and the file signals on load
   (eval '(progn
-    (vui-defcomponent ygg-projects-card (root open)
+    (vui-defcomponent ygg-projects-card (open lines)
         "One project: a line in the list, or an opened block when OPEN.
     Nothing is drawn above the head line: a row that slid down as it
     opened would take the hand that pressed TAB with it."
         :render
         (if (not open)
-            (vui-text (ygg-projects--head-text root))
+            (vui-text (car lines))
           (vui-region
            :face 'ygg-projects-card
-           (apply #'vui-vstack
-                  (cons (vui-text (ygg-projects--head-text root))
-                        (ygg-projects--rows root))))))
+           (apply #'vui-vstack (mapcar #'vui-text lines)))))
 
-      (vui-defcomponent ygg-projects-view (roots open)
+      (vui-defcomponent ygg-projects-view (cards)
         "The projects as a list, the open one lifted out of it as a card."
         :render
         (apply #'vui-vstack
-               (apply #'append
-                      (mapcar (lambda (root)
-                                (let ((card (vui-component 'ygg-projects-card
-                                                           :key root :root root
-                                                           :open (equal root open))))
-                                  (list card)))
-                              roots)))))
+               (mapcar (lambda (card)
+                         (vui-component 'ygg-projects-card
+                                        :key (nth 0 card) :open (nth 1 card)
+                                        :lines (nth 2 card)))
+                       cards))))
         t))
 
 (defun ygg-projects--entry-key (entry)
@@ -1579,17 +1679,20 @@ the sidebar moving on its own."
   (when-let* ((buf (get-buffer ygg-projects-buffer-name)))
     (with-current-buffer buf
       (when ygg-projects--instance
-        (let* ((row (ygg-projects--row-at-point))
-               (win (get-buffer-window buf 'visible))
-               (start (and (window-live-p win) (window-start win))))
-          (ygg-projects--forget-buffers)
-          (vui-update-props ygg-projects--instance
-                            (list :roots (ygg-projects--shown)
-                                  :open ygg-projects--open))
-          (ygg-projects--goto-row row)
-          (ygg-projects--follow-point)
-          (when (and (window-live-p win) start (<= start (point-max)))
-            (set-window-start win start t)))))))
+        (if (not (get-buffer-window buf t))
+            (setq ygg-projects--stale t)
+          (setq ygg-projects--stale nil)
+          (let ((cards (ygg-projects--fresh-picture)))
+            (unless (ygg-projects--same-p cards ygg-projects--drawn)
+              (let* ((row (ygg-projects--row-at-point))
+                     (win (get-buffer-window buf 'visible))
+                     (start (and (window-live-p win) (window-start win))))
+                (vui-update-props ygg-projects--instance (list :cards cards))
+                (setq ygg-projects--drawn cards)
+                (ygg-projects--goto-row row)
+                (ygg-projects--follow-point)
+                (when (and (window-live-p win) start (<= start (point-max)))
+                  (set-window-start win start t))))))))))
 
 ;;; Moving and acting
 
@@ -2117,6 +2220,7 @@ going on, not the history of the project."
   "Redraw, and look again for what the projects can run."
   (interactive)
   (when (fboundp 'aob-transcript-forget) (aob-transcript-forget))
+  (ygg-projects--forget-true-dirs)
   (ygg-projects-refresh)
   (ygg-projects--scan-commands)
   (ygg-projects--scan-worktrees)
@@ -2533,13 +2637,16 @@ window configuration, a session load, a compose box making room.")
       (let ((ygg-projects--restoring t))
         (when-let* ((win (ignore-errors (ygg-projects--display buf))))
           (set-window-dedicated-p win t)
-          (with-current-buffer buf (ygg-projects--trim-window)))))))
+          (with-current-buffer buf (ygg-projects--trim-window))
+          (when ygg-projects--stale (ygg-projects-refresh)))))))
 
 (add-hook 'window-configuration-change-hook #'ygg-projects--restore)
 
 (defun ygg-projects--follow-trace (&rest _)
-  "Redraw when another conversation comes on screen, so the fill follows it."
-  (unless (equal (ygg-projects--traced-ids) ygg-projects--on-screen)
+  "Redraw when another conversation comes on screen, so the fill follows it,
+or when the sidebar comes back with a redraw it missed while away."
+  (when (or ygg-projects--stale
+            (not (equal (ygg-projects--traced-ids) ygg-projects--on-screen)))
     (ygg-projects-refresh)))
 
 (add-hook 'window-configuration-change-hook #'ygg-projects--follow-trace)
@@ -2550,13 +2657,16 @@ window configuration, a session load, a compose box making room.")
   "Redraw shortly: a burst of session changes is one redraw, not fifty.
 A plain timer and not an idle one — an idle timer made while Emacs is
 already idle waits for the next keystroke, and agents finish their
-turns while nobody is typing."
-  (unless (timerp ygg-projects--redraw-timer)
+turns while nobody is typing.  Out of sight, it only notes one is due."
+  (cond
+   ((not (get-buffer-window ygg-projects-buffer-name t))
+    (setq ygg-projects--stale t))
+   ((not (timerp ygg-projects--redraw-timer))
     (setq ygg-projects--redraw-timer
           (run-with-timer 0.3 nil
                           (lambda ()
                             (setq ygg-projects--redraw-timer nil)
-                            (ygg-projects-refresh))))))
+                            (ygg-projects-refresh)))))))
 
 (defvar aob-session-created-hook)
 (defvar aob-session-removed-hook)
@@ -2658,16 +2768,15 @@ windows around, the width it was opened at is the width it keeps."
       (unless (and buf (buffer-local-value 'ygg-projects--instance buf))
         ;; vui-mount ends in `switch-to-buffer', which would leave the
         ;; sidebar showing in the main window as well as its own
-        (ygg-projects--forget-buffers)
-        (let ((inst (save-window-excursion
-                      (vui-mount (vui-component 'ygg-projects-view
-                                                :roots (ygg-projects--shown)
-                                                :open ygg-projects--open)
-                                 ygg-projects-buffer-name))))
+        (let* ((cards (ygg-projects--fresh-picture))
+               (inst (save-window-excursion
+                       (vui-mount (vui-component 'ygg-projects-view :cards cards)
+                                  ygg-projects-buffer-name))))
           (setq buf (get-buffer ygg-projects-buffer-name))
-          (with-current-buffer buf (setq ygg-projects--instance inst))))
+          (with-current-buffer buf
+            (setq ygg-projects--instance inst
+                  ygg-projects--drawn cards))))
       (ygg-projects--setup buf)
-      (ygg-projects-refresh)
       (ygg-projects--scan-commands)
       (ygg-projects--scan-worktrees)
       (ygg-projects--scan-docker)
@@ -2682,6 +2791,7 @@ windows around, the width it was opened at is the width it keeps."
           (dolist (other (get-buffer-window-list buf nil 'visible))
             (unless (eq other win) (ygg-projects--dismiss other)))
           (select-window win)))
+      (ygg-projects-refresh)
       (ygg-projects--trim-window))))
 
 ;;; Sessions — the sidebar is laid over a layout, never saved inside one

@@ -127,8 +127,16 @@ sessions/YYYY/MM/DD/rollout-<time>-ID.jsonl."
 (defvar aob-transcript--found (make-hash-table :test 'equal)
   "Project to (MTIME . ENTRIES): the listing is redone when the folder moves.")
 
+(defvar aob-transcript--stat-memo nil
+  "File to its modification time while one drawing asks, else nil.
+A sidebar redraw asks after the same files from several rows.")
+
 (defun aob-transcript--mtime (file)
-  (float-time (file-attribute-modification-time (file-attributes file))))
+  (let ((stat (lambda ()
+                (float-time (file-attribute-modification-time (file-attributes file))))))
+    (if aob-transcript--stat-memo
+        (with-memoization (gethash file aob-transcript--stat-memo) (funcall stat))
+      (funcall stat))))
 
 (defvar aob-transcript-titles-hook nil
   "Run with no arguments when titles read in the background land.")

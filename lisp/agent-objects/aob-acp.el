@@ -61,6 +61,13 @@ ISOLATE is what this connection belongs to when it is one of its own,
 so the caller can give it a config home nothing else writes to."
   :type '(choice function (const nil)) :group 'aob)
 
+(defcustom aob-acp-prepare-function nil
+  "Function (AGENT PROJECT ISOLATE) run as a connection for them starts, or nil.
+Where whatever the connection's environment names is made ready: the
+environment function is also asked for every lookup of a running
+connection, so it must only name things, never make them."
+  :type '(choice function (const nil)) :group 'aob)
+
 (defun aob-acp-login-shell-command (argv)
   ;; -l only, never -i: interactive shell startup can print to stdout
   ;; and stdout is the ndjson wire
@@ -222,6 +229,9 @@ first."
                    (user-error "aob: unknown agent %s" agent)))
          (argv (plist-get spec :command))
          (default-directory project)
+         (_ready (and aob-acp-prepare-function
+                      (funcall aob-acp-prepare-function
+                               agent project aob-acp-isolate)))
          ;; a claude spawned with CLAUDECODE set refuses to start (nested
          ;; guard); the append keeps envrc/mise buffer-local env visible
          (process-environment
@@ -277,6 +287,20 @@ for the whole connection, not just for its subagents."
 (defconst aob-acp--air-subagents "nativeSubagentSessions"
   "The name JetBrains AIR's capability list gives native subagent sessions.")
 
+(defcustom aob-acp-async-tasks nil
+  "Non-nil asks an agent to report each background command as a task it can stop.
+The agent that agrees says when a command it left running ends, and
+stops one on request; without it a background command is seen only as
+the call that started it, and stopping one means ending its process.
+Read when a connection starts.
+
+Off for the reason `aob-acp-native-subagents' is: the switch is the
+same AIR list, and it puts the adapter into AIR-client mode."
+  :type 'boolean :group 'aob)
+
+(defconst aob-acp--air-async-tasks "asyncTasks"
+  "The name JetBrains AIR's capability list gives stoppable background tasks.")
+
 (defconst aob-acp-protocol-version 1
   "The ACP version every agent is spoken to in when nothing newer is agreed.")
 
@@ -312,6 +336,7 @@ know, so each side finds its own."
 (defun aob-acp--initialize (proc)
   "Send PROC the initialize request and settle its init state on the reply."
   (process-put proc 'aob-subagents-offered aob-acp-native-subagents)
+  (process-put proc 'aob-async-tasks-offered aob-acp-async-tasks)
   (process-put proc 'aob-protocol-offered aob-acp-offer-protocol-version)
   (process-put
    proc 'aob-init-id
@@ -409,11 +434,13 @@ of its own, where an agent that is not told sends them as prose."
    ;; cannot nest, and strips every subagent's words before sending
    (list :_meta (append
                  (list :subagent-transcript t :terminal_output_delta t)
-                 (and aob-acp-native-subagents
-                      (list :jetbrains
-                            (list :air (list :version 1
-                                             :capabilities
-                                             (vector aob-acp--air-subagents)))))))))
+                 (when-let* ((air (delq nil (list (and aob-acp-native-subagents
+                                                       aob-acp--air-subagents)
+                                                  (and aob-acp-async-tasks
+                                                       aob-acp--air-async-tasks)))))
+                   (list :jetbrains
+                         (list :air (list :version 1
+                                          :capabilities (vconcat air)))))))))
 
 (defun aob-acp--native-subagents-p (proc init)
   "Whether PROC offered native subagents and its INIT result took them.
@@ -908,6 +935,8 @@ before it is dispatched.")
          ("subagent_spawned" (aob-acp--subagent-spawned s u))
          ("subagent_state_update" (aob-acp--subagent-ended s u))
          ("subagent_update" (aob-acp--subagent-update s u))
+         ((or "async_task_spawned" "async_task_progress" "async_task_state_update")
+          (aob-acp--async-task s u))
          ("session_info_update"
           ;; the goal rides this update with no title of its own — writing
           ;; the absent title through would erase the session's
@@ -1466,6 +1495,7 @@ never learns there was more than one."
                         :stat (aob-acp--diff-stat (plist-get u :content)))))
     (puthash (plist-get u :toolCallId) ev (aob-acp--tools s))
     (aob-acp--terminal-note ev u)
+    (aob-acp--background-note s ev u)
     (aob-acp--child-note s ev nil)))
 
 (defconst aob-acp--terminal-output-max 65536
@@ -1491,7 +1521,105 @@ place of the text block that would otherwise carry the output."
                            "\n[… output past this was not kept]"))))
     (when-let* ((code (plist-get (plist-get meta :terminal_exit) :exit_code))
                 ((integerp code)))
-      (plist-put ev :terminal-exit code))))
+      (plist-put ev :terminal-exit code))
+    (when-let* ((cwd (plist-get (plist-get meta :terminal_info) :cwd))
+                ((stringp cwd)))
+      (plist-put ev :cwd cwd))))
+
+(defun aob-acp--background-note (s ev u)
+  "Mark EV as a command left running when U says its agent handed it off.
+Claude's Bash returns at once for a command run in the background, the
+call completed, and says only in its text which task holds the command
+and the file its output goes to.  A load replaying S's history says it
+too, of commands long gone, so nothing is marked while S is starting."
+  (when (and (equal (plist-get ev :kind) "execute")
+             (not (eq (aob-session-state s) 'starting))
+             (plist-get (plist-get (plist-get (plist-get (plist-get u :_meta) :jetbrains)
+                                              :air)
+                                   :asyncTasks)
+                        :backgrounded))
+    (plist-put ev :background (or (plist-get ev :background) t)))
+  (when-let* (((equal (plist-get ev :kind) "execute"))
+              ((not (eq (aob-session-state s) 'starting)))
+              (text (concat (plist-get (plist-get (plist-get u :_meta) :terminal_output_delta)
+                                       :data)
+                            (aob-acp--content-text (plist-get u :content))))
+              ((string-match "Command running in background with ID: \\([^ .\n]+\\)\\." text)))
+    (plist-put ev :background (match-string 1 text))
+    (when (string-match "Output is being written to: \\(.+?\\)\\. You will be notified" text)
+      (plist-put ev :output-file (match-string 1 text)))))
+
+(defun aob-acp--content-text (content)
+  "The text blocks of tool call CONTENT, joined."
+  (mapconcat (lambda (c)
+               (let ((inner (plist-get c :content)))
+                 (if (and (equal (plist-get c :type) "content")
+                          (stringp (plist-get inner :text)))
+                     (plist-get inner :text)
+                   "")))
+             content ""))
+
+(defun aob-acp--shell-changed (s ev)
+  "Redraw tool call EV of S, leaving what S is doing now as it was."
+  (plist-put ev :line nil)
+  (run-hook-with-args 'aob-event-change-functions s ev)
+  (aob--dirty s))
+
+(defun aob-acp-shell-end (s ev state)
+  "Say the command of tool call EV in S ended in STATE, and redraw it.
+STATE is stopped, completed, failed or gone; the first word of an end
+is the one kept."
+  (unless (plist-get ev :shell-end)
+    (plist-put ev :shell-end state)
+    (plist-put ev :shell-end-ts (float-time))
+    (aob-acp--shell-changed s ev)))
+
+(defun aob-acp--async-task (s u)
+  "Fold async task update U into the command it runs in S.
+An agent told it may report background work names each task's tool call
+when it starts; a task without one is not guessed at."
+  (let* ((tools (aob-acp--tools s))
+         (id (plist-get u :asyncTaskId))
+         (ev (or (gethash (plist-get u :toolCallId) tools)
+                 (seq-find (lambda (e) (equal (plist-get e :task-id) id))
+                           (hash-table-values tools)))))
+    (when ev
+      (plist-put ev :task-id id)
+      (plist-put ev :background (or (plist-get ev :background) t))
+      (when-let* ((file (plist-get u :outputFilePath)))
+        (plist-put ev :output-file file))
+      (when-let* ((state (plist-get u :state))
+                  ((member state '("completed" "failed" "stopped"))))
+        (aob-acp-shell-end s ev (intern state)))
+      (aob-acp--shell-changed s ev))))
+
+(defun aob-acp-task-stoppable-p (s ev)
+  "Non-nil when S's agent itself can stop the background task of EV."
+  (and (plist-get ev :task-id)
+       (not (plist-get ev :shell-end))
+       (when-let* ((proc (aob-acp--proc-of s)))
+         (process-get proc 'aob-async-tasks-offered))))
+
+(defun aob-acp-stop-task (s ev cb)
+  "Ask S's agent to stop the background task of EV; CB takes (STOPPED ERR).
+The task's own end usually arrives as an update before this answer does."
+  (aob-acp--request-proc
+   (aob-acp--proc-of s) "_session/async_task/stop"
+   (list :sessionId (aob-acp--acp-id s) :asyncTaskId (plist-get ev :task-id))
+   (lambda (res err)
+     (let ((stopped (and (not err) (eq t (plist-get res :stopped)))))
+       (when stopped (aob-acp-shell-end s ev 'stopped))
+       (funcall cb stopped err)))
+   s))
+
+(defun aob-acp--background-running (s)
+  "Mark each command of S still running at the end of its turn as background."
+  (maphash (lambda (_ ev)
+             (when (and (equal (plist-get ev :kind) "execute")
+                        (aob-acp--child-live-p (plist-get ev :status)))
+               (plist-put ev :background (or (plist-get ev :background) t))
+               (plist-put ev :line nil)))
+           (aob-acp--tools s)))
 
 (defconst aob-acp-tool-detail-keys
   '(:command :pattern :query :url :file_path :path :filePath :description)
@@ -1541,6 +1669,7 @@ column of the word bash."
                     (role (aob-acp--codex-role s (plist-get ev :raw))))
           (plist-put ev :subagent-type role))
         (aob-acp--terminal-note ev u)
+        (aob-acp--background-note s ev u)
         (when-let* ((st (aob-acp--diff-stat (plist-get ev :content))))
           (plist-put ev :stat st))
         (when (and (member (plist-get ev :status) '("completed" "failed"))
@@ -1974,6 +2103,8 @@ can't parse: the reference survives, and the demotion is said."
                (aob-usage-note-turn s usage)
                (when (fboundp 'ygg-usage-note) (ygg-usage-note s usage)))
              (aob-session-put s :stop-warning warning)
+             (unless (equal (plist-get res :stopReason) "cancelled")
+               (aob-acp--background-running s))
              (aob-event s 'stop :reason (plist-get res :stopReason)
                         :warning warning
                         :tokens (let ((tk (plist-get usage :totalTokens)))

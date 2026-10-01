@@ -16,6 +16,7 @@
 ;; -Q resolves to the real config: a suite run must never rewrite the owner's sessions
 (setq aob-acp-persist-file (make-temp-file "aob-tests-sessions-" nil ".eld"))
 (require 'aob-transcript nil t)
+(require 'aob-shells nil t)
 
 (defconst aob-tests--file (or load-file-name buffer-file-name))
 
@@ -3990,6 +3991,78 @@ under it included, and not for any other."
       (cancel-timer aob--clock-timer)
       (setq aob--clock-timer nil))))
 
+(ert-deftest aob-clock-ticks-only-while-a-running-clock-is-seen ()
+  "A clock no window shows moves nothing and keeps no timer; showing it winds it."
+  (aob-tests--with-session s
+    (let ((now 100.0) (heard 0) (seen nil))
+      (cl-letf (((symbol-function 'float-time) (lambda (&optional _) now)))
+        (let ((aob-meter-change-hook (list (lambda (x) (when (eq x s) (cl-incf heard)))))
+              (aob-clock-shown-functions (list (lambda (x) (and seen (eq x s))))))
+          (unwind-protect
+              (progn
+                (aob-turn-begin s)
+                (should (timerp aob--clock-timer))
+                (setq now 101.0)
+                (aob--clock-tick)
+                (should (= heard 0))
+                (should-not aob--clock-timer)
+                (aob--clock-on-display)
+                (should-not aob--clock-timer)
+                (should (= heard 0))
+                (setq seen t)
+                (aob--clock-on-display)
+                (should (timerp aob--clock-timer))
+                (should (= heard 1))
+                (aob--clock-tick)
+                (should (= heard 1))
+                (setq now 102.0)
+                (aob--clock-tick)
+                (should (= heard 2)))
+            (aob-turn-end s)
+            (when (timerp aob--clock-timer)
+              (cancel-timer aob--clock-timer)
+              (setq aob--clock-timer nil))))))))
+
+(ert-deftest aob-trace-clock-is-seen-only-in-a-shown-trace ()
+  (let* ((s (aob-create-session :id "trace:clock" :backend 'acp :name "clock" :state 'idle))
+         (buf (aob-trace-buffer s)))
+    (unwind-protect
+        (progn
+          (should (memq #'aob-trace--clock-shown-p aob-clock-shown-functions))
+          (should-not (aob-trace--clock-shown-p s))
+          (with-current-buffer buf (rename-buffer "*a trace by another name*"))
+          (save-window-excursion
+            (set-window-buffer (selected-window) buf)
+            (should (aob-trace--clock-shown-p s))))
+      (kill-buffer buf)
+      (aob-remove-session s))))
+
+(ert-deftest aob-trace-meter-change-redraws-the-header-not-the-trace ()
+  "A spend that moves rewrites a shown header and leaves the session's tick
+alone; a buried trace is only marked, and drawn whole when it is shown."
+  (let* ((s (aob-create-session :id "trace:meter" :backend 'acp :name "meter" :state 'idle))
+         (buf (aob-trace-buffer s))
+         (header (lambda () (buffer-local-value 'header-line-format buf))))
+    (unwind-protect
+        (let ((tick (aob-session-ref s :tick)))
+          (should (memq #'aob-trace--meter-changed aob-meter-change-hook))
+          (should-not (memq #'aob--dirty aob-meter-change-hook))
+          (should-not (string-match-p "\\$1\\.50" (funcall header)))
+          (with-current-buffer buf (rename-buffer "*a trace by another name*"))
+          (aob-session-put s :cost-reading 1.5)
+          (aob-trace--meter-changed s)
+          (should-not (string-match-p "\\$1\\.50" (funcall header)))
+          (save-window-excursion
+            (set-window-buffer (selected-window) buf)
+            (aob--render-on-display nil)
+            (should (string-match-p "\\$1\\.50" (funcall header)))
+            (aob-session-put s :cost-reading 2.5)
+            (aob-trace--meter-changed s)
+            (should (string-match-p "\\$2\\.50" (funcall header))))
+          (should (eql tick (aob-session-ref s :tick))))
+      (kill-buffer buf)
+      (aob-remove-session s))))
+
 (ert-deftest aob-queue-send-now-stops-the-turn-with-this-one-first ()
   (aob-tests--with-session s
     (aob-set-state s 'working)
@@ -5451,6 +5524,24 @@ next chunk does not pull the page back down."
       (should (string-match-p "> why\\?\nsee this" (caar sent)))
       (should (equal (cdar sent) '("/tmp/held.png"))))
     (should-not (aob-session-ref s :comments))))
+
+(ert-deftest aob-sidebar-shows-only-the-clocks-it-draws ()
+  "A visible sidebar keeps the clock ticking only for sessions it has a row for."
+  (aob-tests--host-defun 'ygg-aob--sidebar-shows-clock-p)
+  (defvar ygg-projects-buffer-name)
+  (let ((ygg-projects-buffer-name " *aob-tests-sidebar*"))
+    (aob-tests--with-session drawn
+      (aob-tests--with-session hidden
+        (with-current-buffer (get-buffer-create ygg-projects-buffer-name)
+          (insert (propertize "row" 'ygg-entry drawn)))
+        (unwind-protect
+            (progn
+              (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) t)))
+                (should (ygg-aob--sidebar-shows-clock-p drawn))
+                (should-not (ygg-aob--sidebar-shows-clock-p hidden)))
+              (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) nil)))
+                (should-not (ygg-aob--sidebar-shows-clock-p drawn))))
+          (kill-buffer ygg-projects-buffer-name))))))
 
 (ert-deftest aob-compose-send-carries-held-images-through-the-host-hook ()
   (aob-tests--host-defun 'ygg-aob--comments-compose)
@@ -8253,3 +8344,271 @@ the trace was read in still shows it, and no space is landed in."
               (should (= 1 (seq-count (lambda (e) (equal (plist-get e :acp-id) acp-id))
                                       (aob-acp--persisted-entries)))))
           (delete-file aob-acp-persist-file))))))
+
+(require 'ygg-agent-conf)
+
+(defun aob-tests--with-config-homes (fn)
+  "Call FN with a git project, under config homes of a scratch root.
+FN gets the project.  The keychain answers as a home logged in, with no
+other homes to share from, so nothing reaches the real one."
+  (let* ((root (make-temp-file "aob-conf-homes" t))
+         (home (expand-file-name "home/claude" root))
+         (project (file-name-as-directory (expand-file-name "repo" root)))
+         (ygg-agent-conf-root (expand-file-name "conf" root))
+         (ygg-agent--config-homes
+          `(("claude" :var "CLAUDE_CONFIG_DIR" :marker ".claude-config-dir"
+             :home ,home :share ("skills"))))
+         (ygg-agent--login-cache (make-hash-table :test #'equal))
+         (ygg-agent--config-dirs (make-hash-table :test #'equal))
+         (aob-acp-environment-function
+          (lambda (agent project _dir &optional _isolate)
+            (when-let* ((env (ygg-agent--known-config-env agent agent project)))
+              (list env))))
+         (aob-acp-prepare-function
+          (lambda (agent project &optional _isolate)
+            (ygg-agent--config-env agent agent project))))
+    (make-directory (expand-file-name "skills" home) t)
+    (make-directory project t)
+    (call-process "git" nil nil nil "-C" project "init" "-q")
+    (unwind-protect
+        (cl-letf (((symbol-function 'ygg-agent--keychain-read)
+                   (lambda (_service) (let ((json (make-hash-table :test #'equal)))
+                                        (puthash "claudeAiOauth" t json)
+                                        json)))
+                  ((symbol-function 'ygg-agent--credential-services) #'ignore)
+                  ((symbol-function 'ygg-agent--keychain-account) #'ignore))
+          (funcall fn project))
+      (delete-directory root t))))
+
+(defun aob-tests--conn-home (project)
+  "The config home the connection key for claude on PROJECT was filed with."
+  (car (funcall aob-acp-environment-function "claude" project project nil)))
+
+(ert-deftest aob-acp-conn-key-runs-no-process ()
+  "Once a connection has started, asking for its key spawns nothing and makes nothing."
+  (aob-tests--with-config-homes
+   (lambda (project)
+     (funcall aob-acp-prepare-function "claude" project)
+     (let ((key (aob-acp--conn-key "claude" project))
+           (spawned 0) (made 0))
+       (cl-letf (((symbol-function 'call-process)
+                  (lambda (&rest _) (setq spawned (1+ spawned)) 0))
+                 ((symbol-function 'ygg-agent--bootstrap-share)
+                  (lambda (&rest _) (setq made (1+ made)))))
+         (dotimes (_ 50)
+           (should (equal key (aob-acp--conn-key "claude" project)))))
+       (should (= 0 spawned))
+       (should (= 0 made))
+       (should (equal (ygg-agent--config-env "claude" "claude" project)
+                      (aob-tests--conn-home project)))))))
+
+(ert-deftest aob-acp-conn-key-follows-what-names-the-home ()
+  "A marker file appearing, or a login check changing its answer, renames the home."
+  (aob-tests--with-config-homes
+   (lambda (project)
+     (funcall aob-acp-prepare-function "claude" project)
+     (should (string-match-p "/conf/repo/claude\\'" (aob-tests--conn-home project)))
+     (let ((other (expand-file-name "elsewhere" project)))
+       (with-temp-file (expand-file-name ".claude-config-dir" project)
+         (insert other "\n"))
+       (should (equal (concat "CLAUDE_CONFIG_DIR=" other)
+                      (aob-tests--conn-home project)))
+       (delete-file (expand-file-name ".claude-config-dir" project)))
+     (should (string-match-p "/conf/repo/claude\\'" (aob-tests--conn-home project)))
+     (cl-letf (((symbol-function 'ygg-agent--keychain-read) #'ignore))
+       (ygg-agent--logged-in-p "claude" (ygg-agent--own-home "claude" project)))
+     (should-not (aob-tests--conn-home project)))))
+
+(ert-deftest aob-acp-start-conn-makes-the-home-ready ()
+  "Starting a connection provisions its config home; looking one up does not."
+  (aob-tests--with-config-homes
+   (lambda (project)
+     (let ((aob-acp-agents '(("claude" :command ("cat"))))
+           (aob-acp-command-function #'identity)
+           (aob-acp--session-env nil)
+           (aob-acp-isolate nil)
+           (made nil) proc)
+       (cl-letf* ((real (symbol-function 'ygg-agent--bootstrap-share))
+                  ((symbol-function 'ygg-agent--bootstrap-share)
+                   (lambda (spec dir) (push dir made) (funcall real spec dir))))
+         (aob-acp--conn-key "claude" project)
+         (should-not made)
+         (unwind-protect
+             (progn
+               (setq proc (aob-acp--start-conn "claude" project))
+               (should (= 1 (length made)))
+               (should (file-symlink-p (expand-file-name "skills" (car made))))
+               (should (member (aob-tests--conn-home project)
+                               (process-get proc 'aob-env)))
+               (should (eq proc (aob-acp--live-conn "claude" project))))
+           (when proc
+             (remhash (process-get proc 'aob-conn-key) aob-acp--conns)
+             (ignore-errors (kill-buffer (process-get proc 'aob-json-buf)))
+             (ignore-errors (kill-buffer (process-get proc 'aob-stderr-buf)))
+             (delete-process proc))))))))
+
+(defun aob-tests--shell-meta (ev)
+  "The right-hand words of EV's command card."
+  (with-temp-buffer
+    (car (split-string (substring-no-properties (aob-trace--shell-card ev)) "\n"))))
+
+(ert-deftest aob-shells-command-runs-on-after-its-turn ()
+  "A command still running when its turn ends is a background command: its
+row stays running with its time and keeps taking what it prints."
+  (aob-tests--with-session s
+    (aob-tests--update s '(:sessionUpdate "tool_call" :toolCallId "c1" :kind "execute"
+                           :title "npm run dev" :status "in_progress"
+                           :rawInput (:command "npm run dev")
+                           :_meta (:terminal_info (:terminal_id "c1" :cwd "/tmp/proj/web"))))
+    (aob-set-state s 'idle)
+    (aob-tests--capturing sent
+      (aob-acp--prompt-1 s "start the server")
+      (aob-tests--answer s (car sent) '(:stopReason "end_turn")))
+    (let ((ev (car (aob-tests--events-of s 'tool))))
+      (should (plist-get ev :background))
+      (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "c1"
+                             :_meta (:terminal_output_delta (:terminal_id "c1"
+                                                             :data "ready on :3000\n"))))
+      (should (aob-trace-shell-live-p ev))
+      (should (eq (aob-trace--state ev) 'running))
+      (should (equal (aob-trace--shell-output ev) '("ready on :3000")))
+      (should (equal (plist-get ev :cwd) "/tmp/proj/web"))
+      (should (string-match-p "background · running · [0-9.]+m?s"
+                              (aob-tests--shell-meta ev)))
+      (aob-tests--update s '(:sessionUpdate "tool_call_update" :toolCallId "c1"
+                             :status "completed"
+                             :_meta (:terminal_exit (:terminal_id "c1" :exit_code 130))))
+      (should-not (aob-trace-shell-live-p ev))
+      (should (string-match-p "exit 130" (aob-tests--shell-meta ev))))))
+
+(defun aob-tests--claude-handoff (s id)
+  "Feed S claude's Bash call ID that hands sleep 300 to the background."
+  (aob-tests--update s `(:sessionUpdate "tool_call" :toolCallId ,id :kind "execute"
+                         :title "sleep 300" :status "pending" :rawInput (:command "sleep 300")))
+  (aob-tests--update s `(:sessionUpdate "tool_call_update" :toolCallId ,id
+                         :_meta (:terminal_output_delta
+                                 (:terminal_id ,id
+                                  :data "Command running in background with ID: bx7q2. Output is being written to: /tmp/claude/tasks/bx7q2.output. You will be notified when it completes."))))
+  (aob-tests--update s `(:sessionUpdate "tool_call_update" :toolCallId ,id
+                         :status "completed"
+                         :_meta (:terminal_exit (:terminal_id ,id :exit_code 0))))
+  (seq-find (lambda (e) (equal (plist-get e :tool-id) id)) (aob-session-events s)))
+
+(ert-deftest aob-shells-claude-handoff-keeps-running ()
+  "Claude completes a Bash call it handed to the background; the command
+it names stays running, with the task and the file its output goes to.
+The same call replayed by a load is history, not a command running."
+  (aob-tests--with-session s
+    (let ((replayed (aob-tests--claude-handoff s "toolu_0")))
+      (should-not (plist-get replayed :background))
+      (should-not (aob-trace-shell-live-p replayed)))
+    (aob-set-state s 'working)
+    (let ((ev (aob-tests--claude-handoff s "toolu_1")))
+      (should (equal (plist-get ev :background) "bx7q2"))
+      (should (equal (plist-get ev :output-file) "/tmp/claude/tasks/bx7q2.output"))
+      (should (aob-trace-shell-live-p ev))
+      (should (eq (aob-trace--state ev) 'running)))))
+
+(ert-deftest aob-shells-lists-commands-of-every-session ()
+  "The list holds each running command of every session, and nothing that ended."
+  (skip-unless (featurep 'aob-shells))
+  (aob-tests--with-session a
+    (aob-tests--with-session b
+      (aob-tests--update a '(:sessionUpdate "tool_call" :toolCallId "x1" :kind "execute"
+                             :title "make watch" :status "in_progress"
+                             :rawInput (:command "make watch")))
+      (aob-tests--update b '(:sessionUpdate "tool_call" :toolCallId "y1" :kind "execute"
+                             :title "cargo test" :status "in_progress"
+                             :rawInput (:command "cargo test")))
+      (aob-tests--update b '(:sessionUpdate "tool_call" :toolCallId "y2" :kind "execute"
+                             :title "ls" :status "completed" :rawInput (:command "ls")))
+      (let ((live (aob-shells--live)))
+        (should (equal (sort (mapcar (lambda (p) (aob-trace--shell-command (cdr p))) live)
+                             #'string<)
+                       '("cargo test" "make watch")))
+        (should (seq-set-equal-p (mapcar #'car live) (list a b) #'eq)))
+      (with-temp-buffer
+        (aob-shells-mode)
+        (aob-shells--entries)
+        (should (equal (sort (mapcar (lambda (e) (aref (cadr e) 4)) tabulated-list-entries)
+                             #'string<)
+                       '("cargo test" "make watch")))))))
+
+(ert-deftest aob-shells-stop-asks-the-agent-to-stop-its-task ()
+  "A command the agent reports as a task is stopped by the agent, with
+_session/async_task/stop, and its row in the trace says stopped."
+  (skip-unless (featurep 'aob-shells))
+  (aob-tests--with-trace-session s
+    (process-put (aob-session-conn s) 'aob-async-tasks-offered t)
+    (aob-tests--update s '(:sessionUpdate "tool_call" :toolCallId "item_9" :kind "execute"
+                           :title "tail -f log" :status "in_progress"
+                           :rawInput (:command "tail -f log")))
+    (aob-tests--update s '(:sessionUpdate "async_task_spawned" :asyncTaskId "sess-test:item_9"
+                           :name "tail -f log" :taskType "shell" :canStop t
+                           :toolCallId "item_9"))
+    (let ((ev (car (aob-tests--events-of s 'tool)))
+          (summary (aob-session-summary s)))
+      (should (aob-acp-task-stoppable-p s ev))
+      (aob-event s 'message :text "watching it")
+      (setq summary (aob-session-summary s))
+      (aob-trace--render-1 s)
+      (should (string-match-p "\\$ tail -f log.*running" (buffer-string)))
+      (aob-tests--capturing sent
+        (cl-letf (((symbol-function 'aob-shells-kill)
+                   (lambda (&rest _) (error "the process must not be signalled"))))
+          (aob-shells-stop (cons s ev)))
+        (should (equal (plist-get (car sent) :method) "_session/async_task/stop"))
+        (should (equal (plist-get (car sent) :params)
+                       '(:sessionId "sess-test" :asyncTaskId "sess-test:item_9")))
+        (aob-tests--update s '(:sessionUpdate "async_task_state_update"
+                               :asyncTaskId "sess-test:item_9" :state "stopped"))
+        (aob-tests--reply s '(:stopped t)))
+      (should (eq (plist-get ev :shell-end) 'stopped))
+      (should-not (aob-trace-shell-live-p ev))
+      (should (eq (aob-session-summary s) summary))
+      (aob-trace--render-1 s)
+      (should (string-match-p "\\$ tail -f log.*stopped" (buffer-string))))))
+
+(ert-deftest aob-shells-kill-ends-only-the-commands-process ()
+  "Without a task to stop, the process running the command is ended, and
+neither the agent nor its other commands are touched."
+  (skip-unless (featurep 'aob-shells))
+  (aob-tests--with-session s
+    (let* ((cat (aob-session-conn s))
+           (ev (aob-event s 'tool :tool-id "k1" :kind "execute" :status "in_progress"
+                          :title "sleep 301" :raw '(:command "sleep 301")))
+           (agent (make-process :name "aob-test-agent" :noquery t
+                                :command '("sh" "-c" "sleep 301 & sleep 302 & wait")))
+           (other nil))
+      (unwind-protect
+          (progn
+            (setf (aob-session-conn s) agent)
+            (let ((deadline (+ (float-time) 5)))
+              (while (and (< (length (aob-shells--below (process-id agent)
+                                                         (aob-shells--process-table)))
+                             2)
+                          (< (float-time) deadline))
+                (accept-process-output nil 0.05)))
+            (let* ((below (aob-shells--below (process-id agent) (aob-shells--process-table)))
+                   (target (caar (seq-filter (lambda (row) (equal (nth 2 row) "sleep 301")) below)))
+                   (pids nil))
+              (setq other (caar (seq-filter (lambda (row) (equal (nth 2 row) "sleep 302")) below)))
+              (should (and target other))
+              (setq pids (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t)))
+                           (aob-shells-kill s ev)))
+              (should (equal pids (list target)))
+              (let ((deadline (+ (float-time) 5)))
+                (while (and (process-attributes (car pids))
+                            (not (equal (alist-get 'state (process-attributes (car pids))) "Z"))
+                            (< (float-time) deadline))
+                  (accept-process-output nil 0.05)))
+              (should (or (null (process-attributes (car pids)))
+                          (equal (alist-get 'state (process-attributes (car pids))) "Z"))))
+            (should (process-live-p agent))
+            (should (process-attributes other))
+            (should-not (equal (alist-get 'state (process-attributes other)) "Z"))
+            (should (eq (plist-get ev :shell-end) 'stopped))
+            (should (string-match-p "stopped" (aob-tests--shell-meta ev))))
+        (when other (ignore-errors (signal-process other 'KILL)))
+        (ignore-errors (delete-process agent))
+        (setf (aob-session-conn s) cat)))))

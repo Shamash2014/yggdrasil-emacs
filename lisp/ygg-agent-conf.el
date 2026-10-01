@@ -310,9 +310,9 @@ second run replaces ours rather than adding another."
      ;; with every plugin off.  settings.json cannot be shared the way a
      ;; directory is — the CLI rewrites it by rename, which would leave a
      ;; copy where the symlink was — so these keys are seeded into whatever
-     ;; the config home already has, and only when it lacks them.
+     ;; the config home already has, entry by entry, only where it lacks them.
      :settings "settings.json"
-     :seed ("enabledPlugins" "extraKnownMarketplaces")
+     :seed ("enabledPlugins" "extraKnownMarketplaces" "skillOverrides")
      :adopt-plugin-mcp t)
     ("codex" :var "CODEX_HOME" :marker ".codex-home" :home "~/.codex"
      :share ("agents" "prompts")))
@@ -363,39 +363,61 @@ command naming the kind's adapter, still reads that kind's home."
                            :null-object nil :false-object :false)))))
 
 (defun ygg-agent--seed-settings (spec dir)
-  "Give DIR's settings file what SPEC's real home has and it lacks.
+  "Give DIR's settings file what SPEC's real home has to say.
 Entry by entry, not key by key: a config home that once turned one
 plugin on has said something about that plugin and nothing about the
 others, so seeding the whole object only where it is absent leaves every
 home the CLI ever wrote to stuck with whatever it decided that day.  An
-explicit answer here always wins — this only fills silence."
+explicit answer here always wins — a project keeps the plugins it turned
+on and the skills it switched off — and this only fills silence.
+Returns what changed, nil when nothing did and nothing was written."
   (when-let* ((name (plist-get spec :settings))
-              (keys (plist-get spec :seed))
               (src (expand-file-name name (expand-file-name (plist-get spec :home))))
               (global (ygg-agent--read-json src)))
     (let* ((dest (expand-file-name name dir))
-           (local (or (ygg-agent--read-json dest) (make-hash-table :test #'equal)))
-           (added nil))
-      (dolist (key keys)
-        (let ((have (gethash key local 'missing))
-              (want (gethash key global 'missing)))
-          (cond
-           ((eq want 'missing))
-           ((eq have 'missing) (puthash key want local) (push key added))
-           ((and (hash-table-p want) (hash-table-p have))
-            (let ((n 0))
-              (maphash (lambda (id value)
-                         (when (eq 'missing (gethash id have 'missing))
-                           (puthash id value have)
-                           (setq n (1+ n))))
-                       want)
-              (when (> n 0) (push (format "%s+%d" key n) added)))))))
-      (when added
-        (ignore-errors
-          (with-temp-file dest
-            (insert (json-serialize local :null-object nil :false-object :false)
-                    "\n")))
-        added))))
+           (local (if (file-exists-p dest)
+                      (ygg-agent--read-json dest)
+                    (make-hash-table :test #'equal)))
+           (changed nil))
+      (when local
+        (dolist (key (plist-get spec :seed))
+          (let ((have (gethash key local 'missing))
+                (want (gethash key global 'missing)))
+            (cond
+             ((eq want 'missing))
+             ((eq have 'missing) (puthash key want local) (push key changed))
+             ((and (hash-table-p want) (hash-table-p have))
+              (let ((n 0))
+                (maphash (lambda (id value)
+                           (when (eq 'missing (gethash id have 'missing))
+                             (puthash id value have)
+                             (setq n (1+ n))))
+                         want)
+                (when (> n 0)
+                  (push (format "%s+%d" key n) changed)))))))
+        (when (and changed (ygg-agent--replace-json dest local))
+          (nreverse changed))))))
+
+(defun ygg-agent--replace-json (path table)
+  "Swap TABLE in for PATH, pretty-printed, by rename.
+The CLI reads and rewrites this file on its own; a rename leaves it
+either the old file or the new one, never half of each."
+  (when-let* ((tmp (ignore-errors
+                     (make-temp-file (expand-file-name
+                                      (concat "." (file-name-nondirectory path) ".ygg-")
+                                      (file-name-directory path))))))
+    (condition-case nil
+        (let ((coding-system-for-write 'utf-8-unix)
+              (modes (file-modes path)))
+          (with-temp-file tmp
+            (insert (json-serialize table :null-object nil :false-object :false))
+            (json-pretty-print-buffer)
+            (goto-char (point-max))
+            (insert "\n"))
+          (when modes (set-file-modes tmp modes))
+          (rename-file tmp path t)
+          t)
+      (error (ignore-errors (delete-file tmp)) nil))))
 
 (defun ygg-agent--write-json (path table)
   "Write TABLE to PATH as JSON, utf-8, no questions.
@@ -578,6 +600,11 @@ tools.  Only `mcpOAuth' travels: the account token stays each home's own."
 (defvar ygg-agent--login-cache (make-hash-table :test #'equal)
   "Config home to whether its keychain item still holds an account token.")
 
+(defvar ygg-agent--config-dirs (make-hash-table :test #'equal)
+  "Kind, project, isolate and conf root to the config home last named for them.
+Each value is (DIR REPO TIMES): the home, the repository it was read
+from, and the modification times of the marker files it was read under.")
+
 (defun ygg-agent--logged-in-p (kind dir &optional cached)
   "Non-nil when a KIND agent started in DIR can reach an account.
 Claude Code keys its credentials on the config home\='s path, so a home
@@ -590,12 +617,13 @@ the keychain, for a picker that has not been answered yet."
    ((not (and (eq system-type 'darwin) (equal kind "claude"))) t)
    (cached (let ((known (gethash dir ygg-agent--login-cache 'unknown)))
              (if (eq known 'unknown) t known)))
-   (t (puthash dir
-               (and (when-let* ((json (ygg-agent--keychain-read
-                                       (ygg-agent--credential-name dir))))
-                      (gethash "claudeAiOauth" json))
-                    t)
-               ygg-agent--login-cache))))
+   (t (let ((known (gethash dir ygg-agent--login-cache t))
+              (now (and (when-let* ((json (ygg-agent--keychain-read
+                                           (ygg-agent--credential-name dir))))
+                          (gethash "claudeAiOauth" json))
+                        t)))
+          (unless (eq known now) (clrhash ygg-agent--config-dirs))
+          (puthash dir now ygg-agent--login-cache)))))
 
 (defun ygg-agent--authenticated-home (kind spec homes &optional cached)
   "The first of HOMES with a login left, else the home the CLI itself uses.
@@ -662,6 +690,7 @@ Homes made before a share or a seed was added never get it otherwise —
 they are only built once, when the project first launches an agent."
   (interactive)
   (clrhash ygg-agent--login-cache)
+  (clrhash ygg-agent--config-dirs)
   (let ((root (and ygg-agent-conf-root (expand-file-name ygg-agent-conf-root)))
         (touched 0) (seeded nil) (reclaimed nil) (anonymous nil))
     (unless (and root (file-directory-p root))
@@ -731,22 +760,47 @@ logged in — the share seeds plugins and prompts, not credentials — so
 workers take the project\='s home, the same one SPC a s and SPC a a give
 their agents, and isolation stops at the process.  This stays for the
 day a login can be seeded too."
-  (let ((marker (plist-get spec :marker))
-        (repo (ygg-agent--repo-home project)))
-    (or (and (not isolate)
-             (or (ygg-agent--read-marker (expand-file-name marker project))
-                 (ygg-agent--read-marker (expand-file-name marker repo))))
-        (when ygg-agent-conf-root
-          (let* ((own (ygg-agent--own-home kind repo isolate))
-                 (shared (and isolate (ygg-agent--own-home kind repo)))
-                 (dir (ygg-agent--authenticated-home
-                       kind spec (delq nil (list own shared)) peek)))
-            (unless (or peek
-                        (equal (directory-file-name dir)
-                               (directory-file-name
-                                (expand-file-name (plist-get spec :home)))))
-              (ygg-agent--bootstrap-share spec dir))
-            dir)))))
+  (let* ((marker (plist-get spec :marker))
+         (repo (ygg-agent--repo-home project))
+         (times (ygg-agent--marker-times marker project repo))
+         (dir (or (and (not isolate)
+                       (or (ygg-agent--read-marker (expand-file-name marker project))
+                           (ygg-agent--read-marker (expand-file-name marker repo))))
+                  (when ygg-agent-conf-root
+                    (let* ((own (ygg-agent--own-home kind repo isolate))
+                           (shared (and isolate (ygg-agent--own-home kind repo)))
+                           (dir (ygg-agent--authenticated-home
+                                 kind spec (delq nil (list own shared)) peek)))
+                      (unless (or peek
+                                  (equal (directory-file-name dir)
+                                         (directory-file-name
+                                          (expand-file-name (plist-get spec :home)))))
+                        (ygg-agent--bootstrap-share spec dir))
+                      dir)))))
+    (puthash (list kind project isolate ygg-agent-conf-root)
+             (list dir repo times) ygg-agent--config-dirs)
+    dir))
+
+(defun ygg-agent--marker-times (marker project repo)
+  "Modification times of MARKER in PROJECT and in REPO, nil where absent."
+  (mapcar (lambda (dir)
+            (file-attribute-modification-time
+             (file-attributes (expand-file-name marker dir))))
+          (list project repo)))
+
+(defun ygg-agent--known-config-dir (kind spec project &optional isolate)
+  "Config home for KIND in PROJECT, as last named, provisioning nothing.
+Asked once per agent per row on every sidebar refresh, so it runs no
+process and reads no keychain: a home is worked out afresh only when a
+marker file has come, gone or changed, or a login check changed its
+answer, and then the way a peek would."
+  (let ((hit (gethash (list kind project isolate ygg-agent-conf-root)
+                      ygg-agent--config-dirs)))
+    (if (and hit (equal (nth 2 hit)
+                        (ygg-agent--marker-times (plist-get spec :marker)
+                                                 project (nth 1 hit))))
+        (car hit)
+      (ygg-agent--config-dir kind spec project 'peek isolate))))
 
 (defun ygg-agent--config-label (preset cmd project)
   "Abbreviated fallback config home for PRESET/CMD in PROJECT, or nil.
@@ -777,10 +831,25 @@ The shared home answers nil, and not its own path: the CLI keys its
 credentials on the variable, so naming the default home is not the same
 as leaving the variable alone — it is a home of that name nobody has
 ever logged into."
+  (ygg-agent--home-env preset cmd
+                       (lambda (kind spec)
+                         (ygg-agent--config-dir kind spec project nil isolate))))
+
+(defun ygg-agent--known-config-env (preset cmd project &optional isolate)
+  "Return the \"VAR=DIR\" `ygg-agent--config-env' would, making nothing ready.
+For whoever only needs to know which home: no process runs, so it is
+cheap to ask on every refresh, and once a home has been made ready it
+names the one that was."
+  (ygg-agent--home-env preset cmd
+                       (lambda (kind spec)
+                         (ygg-agent--known-config-dir kind spec project isolate))))
+
+(defun ygg-agent--home-env (preset cmd home-of)
+  "\"VAR=DIR\" for PRESET/CMD, DIR what HOME-OF gives its kind and spec."
   (condition-case nil
       (when-let* ((kind (ygg-agent--kind preset cmd))
                   (spec (cdr (assoc kind ygg-agent--config-homes)))
-                  (dir (ygg-agent--config-dir kind spec project nil isolate))
+                  (dir (funcall home-of kind spec))
                   ((not (equal (directory-file-name dir)
                                (directory-file-name
                                 (expand-file-name (plist-get spec :home)))))))
@@ -815,6 +884,7 @@ where it earns its place back."
          (exe (or (executable-find "claude") "claude")))
     (ygg-agent--bootstrap-share spec home)
     (remhash home ygg-agent--login-cache)
+    (clrhash ygg-agent--config-dirs)
     (let ((process-environment
            (cons (format "%s=%s" (plist-get spec :var) (directory-file-name home))
                  process-environment))

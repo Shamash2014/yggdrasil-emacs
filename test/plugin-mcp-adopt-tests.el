@@ -199,5 +199,97 @@
       (should (equal "{\"mcpServers\":"
                      (with-temp-buffer (insert-file-contents path) (buffer-string)))))))
 
+(defun plugin-mcp-adopt-tests--seed ()
+  "Seed the conf home from the scratch real home with the shipped claude spec."
+  (ygg-agent--seed-settings
+   (append (list :home (expand-file-name "home" plugin-mcp-adopt-tests--root))
+           (cdr (assoc "claude" ygg-agent--config-homes)))
+   (expand-file-name "conf" plugin-mcp-adopt-tests--root)))
+
+(defun plugin-mcp-adopt-tests--conf-settings ()
+  (ygg-agent--read-json
+   (expand-file-name "conf/settings.json" plugin-mcp-adopt-tests--root)))
+
+(ert-deftest ygg-agent-seed-skill-overrides-keep-home-entries ()
+  (plugin-mcp-adopt-tests--with
+    (plugin-mcp-adopt-tests--file
+     "home/settings.json"
+     "{\"skillOverrides\":{\"shared\":\"off\",\"global-only\":\"off\"}}")
+    (plugin-mcp-adopt-tests--settings
+     "{\"skillOverrides\":{\"shared\":\"on\",\"home-only\":\"off\"}}")
+    (should (equal '("skillOverrides+1") (plugin-mcp-adopt-tests--seed)))
+    (let ((overrides (gethash "skillOverrides" (plugin-mcp-adopt-tests--conf-settings))))
+      (should (equal "on" (gethash "shared" overrides)))
+      (should (equal "off" (gethash "global-only" overrides)))
+      (should (equal "off" (gethash "home-only" overrides))))))
+
+(ert-deftest ygg-agent-seed-skill-overrides-fill-an-empty-home ()
+  (plugin-mcp-adopt-tests--with
+    (plugin-mcp-adopt-tests--file "home/settings.json"
+                                  "{\"skillOverrides\":{\"a\":\"off\",\"b\":\"off\"}}")
+    (should (equal '("skillOverrides") (plugin-mcp-adopt-tests--seed)))
+    (should (= 2 (hash-table-count
+                  (gethash "skillOverrides" (plugin-mcp-adopt-tests--conf-settings)))))))
+
+(ert-deftest ygg-agent-seed-home-plugins-win ()
+  (plugin-mcp-adopt-tests--with
+    (plugin-mcp-adopt-tests--file
+     "home/settings.json"
+     "{\"enabledPlugins\":{\"off@mkt\":false,\"on@mkt\":true,\"global-only@mkt\":false}}")
+    (plugin-mcp-adopt-tests--settings
+     "{\"enabledPlugins\":{\"off@mkt\":true,\"on@mkt\":false,\"mine@mkt\":true}}")
+    (should (equal '("enabledPlugins+1") (plugin-mcp-adopt-tests--seed)))
+    (let ((plugins (gethash "enabledPlugins" (plugin-mcp-adopt-tests--conf-settings))))
+      (should (eq t (gethash "off@mkt" plugins)))
+      (should (eq :false (gethash "on@mkt" plugins)))
+      (should (eq :false (gethash "global-only@mkt" plugins)))
+      (should (eq t (gethash "mine@mkt" plugins))))))
+
+(ert-deftest ygg-agent-seed-unchanged-home-is-not-written ()
+  (plugin-mcp-adopt-tests--with
+    (plugin-mcp-adopt-tests--file
+     "home/settings.json"
+     "{\"enabledPlugins\":{\"a@mkt\":false},\"skillOverrides\":{\"s\":\"off\"}}")
+    (let ((path (plugin-mcp-adopt-tests--settings
+                 "{\"enabledPlugins\":{\"b@mkt\":true},\"skillOverrides\":{\"t\":\"on\"}}"))
+          (past (encode-time '(0 0 0 1 1 2020 nil nil t))))
+      (should (plugin-mcp-adopt-tests--seed))
+      (set-file-times path past)
+      (should-not (plugin-mcp-adopt-tests--seed))
+      (should (time-equal-p past (file-attribute-modification-time
+                                  (file-attributes path)))))))
+
+(ert-deftest ygg-agent-seed-keeps-other-keys-and-leaves-hooks ()
+  (plugin-mcp-adopt-tests--with
+    (plugin-mcp-adopt-tests--file
+     "home/settings.json"
+     (concat "{\"enabledPlugins\":{\"a@mkt\":false},"
+             "\"hooks\":{\"Stop\":[]},\"theme\":\"light\"}"))
+    (let ((path (plugin-mcp-adopt-tests--settings
+                 (concat "{\"theme\":\"dark\",\"permissions\":{\"allow\":[\"Bash(ls)\"]},"
+                         "\"model\":null,\"enabledPlugins\":{\"b@mkt\":true}}"))))
+      (set-file-modes path #o600)
+      (should (plugin-mcp-adopt-tests--seed))
+      (let ((conf (plugin-mcp-adopt-tests--conf-settings)))
+        (should (equal "dark" (gethash "theme" conf)))
+        (should (equal ["Bash(ls)"] (gethash "allow" (gethash "permissions" conf))))
+        (should-not (eq 'absent (gethash "model" conf 'absent)))
+        (should (eq 'absent (gethash "hooks" conf 'absent))))
+      (should (file-regular-p path))
+      (should-not (file-symlink-p path))
+      (should (= #o600 (file-modes path)))
+      (should (string-match-p "\n  \"theme\": \"dark\""
+                              (with-temp-buffer (insert-file-contents path) (buffer-string))))
+      (should-not (directory-files (file-name-directory path) nil "\\.ygg-")))))
+
+(ert-deftest ygg-agent-seed-unreadable-home-settings-left-alone ()
+  (plugin-mcp-adopt-tests--with
+    (plugin-mcp-adopt-tests--file "home/settings.json"
+                                  "{\"enabledPlugins\":{\"a@mkt\":false}}")
+    (let ((path (plugin-mcp-adopt-tests--settings "{\"enabledPlugins\":")))
+      (should-not (plugin-mcp-adopt-tests--seed))
+      (should (equal "{\"enabledPlugins\":"
+                     (with-temp-buffer (insert-file-contents path) (buffer-string)))))))
+
 (provide 'plugin-mcp-adopt-tests)
 ;;; plugin-mcp-adopt-tests.el ends here

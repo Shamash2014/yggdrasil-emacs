@@ -10,8 +10,9 @@
       file-name-handler-alist nil)
 (add-hook 'emacs-startup-hook
           (lambda ()
-            (setq gc-cons-threshold (* 32 1024 1024)
-                  gc-cons-percentage 0.1
+            ;; a pause marks the live heap whatever the step: fewer GCs, fixed headroom
+            (setq gc-cons-threshold (* 128 1024 1024)
+                  gc-cons-percentage 0.05
                   file-name-handler-alist ygg--file-name-handler-alist)
             (message "Yggdrasil up in %s (%d GCs)" (emacs-init-time) gcs-done)))
 

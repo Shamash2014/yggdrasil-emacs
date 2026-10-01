@@ -838,24 +838,28 @@ Rows other layers hang under a space go there after the switch."
 ;;; Space-aware tab-bar: only same-level siblings + dimmed ancestor crumbs
 
 (defun ygg-space--format-key ()
-  "All the bar can differ by: the tick, where we stand, and how many stand."
+  "All the bar can differ by: the tick, where we stand, how many stand,
+and the room and the font its tabs are stretched to."
   (let ((tabs (ygg-space--tabs)))
     (list ygg-space--format-tick
           (ygg-space--id-of (assq 'current-tab tabs))
           (seq-position tabs 'current-tab (lambda (tb x) (eq (car tb) x)))
-          (length tabs))))
+          (length tabs)
+          (frame-inner-width)
+          (frame-char-width))))
 
 (defun ygg-space--format ()
   "`tab-bar-format' entry: parent breadcrumb then current-level spaces.
 Emacs rebuilds the tab-bar keymap on every single redisplay, so the
 items are kept per frame and handed back as they are until something
-the bar is drawn from has moved."
+the bar is drawn from has moved.  They are kept already stretched to
+the frame's width, which Emacs would otherwise measure again each time."
   (let* ((frame (selected-frame))
          (key (ygg-space--format-key))
          (hit (assq frame ygg-space--format-cache)))
     (if (and hit (equal (cadr hit) key))
         (cddr hit)
-      (let ((items (ygg-space--format-1)))
+      (let ((items (tab-bar-auto-width (ygg-space--format-1))))
         (setq ygg-space--format-cache
               (cons (cons frame (cons key items))
                     (seq-filter (lambda (entry)
@@ -1182,7 +1186,8 @@ by re-parenting them to the phantom root, so they group as siblings."
 (defun ygg-spacetree-setup ()
   "Enable the space-tree tab-bar: crumbs + numbered same-level siblings."
   (setq tab-bar-show t
-        tab-bar-format '(ygg-space--format))
+        tab-bar-format '(ygg-space--format)
+        tab-bar-auto-width nil)
   (tab-bar-mode 1)
   (ygg-space--ensure-root)
   (add-hook 'tab-bar-tab-post-open-functions #'ygg-space--on-open)

@@ -21,6 +21,7 @@
 (require 'ygg-todo)
 (require 'aob-todo-view)
 (require 'aob-schedule)
+(require 'aob-shells)
 (require 'aob-workflow)
 (require 'ygg-ui)
 
@@ -180,6 +181,7 @@
 (yggdrasil-localleader-def 'aob-trace-mode "u" #'aob-trace-usage "usage: time, tokens, cost")
 (yggdrasil-localleader-def 'aob-trace-mode "A" #'aob-answer "answer its questions")
 (yggdrasil-localleader-def 'aob-trace-mode "H" #'aob-handoff "hand off to a fresh session")
+(yggdrasil-localleader-def 'aob-trace-mode "$" #'aob-shells "running commands (stop one)")
 (autoload 'ygg-projects-toggle-pin "ygg-projects" nil t)
 (dolist (mode '(aob-trace-mode aob-plan-mode))
   (yggdrasil-localleader-def mode "P" #'ygg-projects-toggle-pin "pin session")
@@ -361,8 +363,12 @@ actions keep their tool title.  The short path stays the clickable target."
         ;; own, not a login of its own: a home per worker is a worker
         ;; that has never authenticated, which is an agent that cannot
         ;; start
-        (when-let* ((env (ygg-agent--config-env agent agent project)))
+        (when-let* ((env (ygg-agent--known-config-env agent agent project)))
           (list env))))
+
+(setq aob-acp-prepare-function
+      (lambda (agent project &optional _isolate)
+        (ygg-agent--config-env agent agent project)))
 
 (setq aob-acp-command-function
       (lambda (argv)
@@ -830,7 +836,8 @@ up nineteen columns wide in a frame with room for four of them."
         (window--display-buffer buffer widest 'reuse alist)))))
 
 (setq aob-acp-show-trace nil)
-(setq aob-acp-native-subagents t)
+(setq aob-acp-native-subagents t
+      aob-acp-async-tasks t)
 
 (defvar ygg-aob--compose-sending nil
   "Non-nil while a draft is on its way out.
@@ -1029,6 +1036,16 @@ The spawn cannot do this itself: the worktree is made on its way out."
 ;; whatever a compose box does to the window layout on its way in, the
 ;; sidebar is not collateral: it goes back if it went
 (advice-add 'aob-compose :around #'ygg-projects-keep-open)
+
+(defun ygg-aob--sidebar-shows-clock-p (s)
+  "Whether the sidebar is on screen with a row drawn for S.
+Only the open card draws its sessions' clocks."
+  (when-let* ((buf (get-buffer ygg-projects-buffer-name))
+              ((get-buffer-window buf 'visible)))
+    (with-current-buffer buf
+      (text-property-any (point-min) (point-max) 'ygg-entry s))))
+
+(add-hook 'aob-clock-shown-functions #'ygg-aob--sidebar-shows-clock-p)
 
 
 ;; trace buffers join their session's space bucket so SPC b b lists
@@ -1809,7 +1826,8 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "x" #'aob-context-add :label "context: add region"
   "X" #'aob-context-list :label "context: list"
   "s" #'aob-schedule :label "schedule a prompt"
-  "S" #'aob-schedule-list :label "schedules")
+  "S" #'aob-schedule-list :label "schedules"
+  "p" #'aob-shells :label "running commands")
 
 (unless noninteractive (aob-schedule-start))
 
@@ -2021,9 +2039,6 @@ As session refs; the first preset settling each one decides it."
   (add-hook 'aob-capf-mention-functions #'ygg-aob--diff-mention)
   (add-hook 'aob-compose-before-send-functions #'ygg-aob--expand-presets)
   (add-hook 'aob-compose-before-send-functions #'ygg-aob--expand-diff))
-
-(with-eval-after-load 'magit
-  (require 'ygg-magit-review))
 
 ;;; A session's todo list: its plan carried in, your edits told back
 

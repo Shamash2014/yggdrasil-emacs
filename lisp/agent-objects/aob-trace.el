@@ -395,13 +395,29 @@ what the line says, not what its gutter drew."
         (setq i next)))
     (apply #'concat (nreverse parts))))
 
+(defun aob-trace-shell-live-p (ev)
+  "Non-nil while the command tool call EV ran is still running.
+A command handed off to the background outlives its call: it runs until
+its task says it ended, or something saw it end."
+  (and (eq (plist-get ev :type) 'tool)
+       (equal (plist-get ev :kind) "execute")
+       (not (plist-get ev :shell-end))
+       (or (member (plist-get ev :status) '("pending" "in_progress"))
+           (plist-get ev :task-id)
+           (stringp (plist-get ev :background)))))
+
 (defun aob-trace--state (ev)
   "Running, done or failed, for an event that has such a thing, else nil."
   (pcase (plist-get ev :type)
-    ('tool (pcase (plist-get ev :status)
-             ((or "pending" "in_progress") 'running)
-             ((or "completed" "success") 'done)
-             ("failed" 'failed)))
+    ('tool (pcase (plist-get ev :shell-end)
+             ('failed 'failed)
+             ((pred identity) 'done)
+             (_ (if (aob-trace-shell-live-p ev)
+                    'running
+                  (pcase (plist-get ev :status)
+                    ((or "pending" "in_progress") 'running)
+                    ((or "completed" "success") 'done)
+                    ("failed" 'failed))))))
     ('error 'failed)))
 
 (defun aob-trace--faces-of (v)
@@ -1099,6 +1115,17 @@ whoever reads why S is stuck reads what it did and said."
   (propertize (format "  … %d more line%s" n (if (= n 1) "" "s"))
               'font-lock-face 'shadow))
 
+(defun aob-trace--shell-elapsed (ev)
+  "How long EV's command has run, or ran, as Delta prints it, or nil.
+A command left running in the background is timed to its own end, not
+to the call that started it."
+  (when-let* ((start (plist-get ev :ts))
+              (end (cond ((plist-get ev :shell-end-ts))
+                         ((aob-trace-shell-live-p ev) (float-time))
+                         (t (plist-get ev :done-ts))))
+              (ms (round (* 1000 (- end start)))))
+    (if (< ms 1000) (format "%dms" ms) (format "%.1fs" (/ ms 1000.0)))))
+
 (defun aob-trace--shell-card (ev)
   "EV, a command the agent ran, as a card: the command, its output cut to
 `aob-trace-shell-lines\=' unless opened, and how it ended on the right."
@@ -1107,10 +1134,15 @@ whoever reads why S is stuck reads what it did and said."
          (code (aob-trace--exit-code ev out))
          (status (plist-get ev :status))
          (meta (string-join
-                (delq nil (list (cond ((member status '("pending" "in_progress")) "running")
-                                      ((and code (/= code 0)) (format "exit %d" code))
-                                      ((equal status "failed") "failed"))
-                                (aob-trace--elapsed ev)))
+                (delq nil (list (and (plist-get ev :background) "background")
+                                (pcase (plist-get ev :shell-end)
+                                  ('stopped "stopped")
+                                  ('gone "ended")
+                                  ('failed "failed")
+                                  (_ (cond ((aob-trace-shell-live-p ev) "running")
+                                           ((and code (/= code 0)) (format "exit %d" code))
+                                           ((equal status "failed") "failed"))))
+                                (aob-trace--shell-elapsed ev)))
                 " · "))
          (room (max 20 (- (aob-trace--text-width) (string-width meta) 6)))
          (first (if (or aob-trace--opening (null (cdr cmd)))
@@ -3306,7 +3338,38 @@ the way it answers at fifty.  This is the window worth staying inside,
 and what the header counts against — not the window the agent claims."
   :type 'natnum :group 'aob)
 
-(add-hook 'aob-meter-change-hook #'aob--dirty)
+(defun aob-trace--buffers-of (s)
+  "The live traces drawing S, whatever each is named."
+  (let ((id (aob-session-id s)))
+    (delq nil (mapcar (lambda (v)
+                        (and (eq (cdr v) #'aob-trace--render)
+                             (buffer-live-p (car v))
+                             (equal (buffer-local-value 'aob-trace--session-id (car v)) id)
+                             (car v)))
+                      aob--views))))
+
+(defun aob-trace--meter-changed (s)
+  "Redraw only the header of S's shown traces: a clock or a spend moved, no
+event did.  A buried trace is only marked, to be drawn whole when shown."
+  (dolist (buf (aob-trace--buffers-of s))
+    (with-current-buffer buf
+      (if (get-buffer-window buf 'visible)
+          (let ((header (ignore-errors (aob-trace--header s))))
+            (unless (or (null header)
+                        (equal-including-properties header header-line-format))
+              (setq header-line-format header)
+              (force-mode-line-update)))
+        (setq aob--rendered-tick -1
+              aob-trace--tick nil)))))
+
+(add-hook 'aob-meter-change-hook #'aob-trace--meter-changed)
+
+(defun aob-trace--clock-shown-p (s)
+  "Whether a trace of S, whose header carries its clock, is in a visible window."
+  (seq-some (lambda (buf) (get-buffer-window buf 'visible))
+            (aob-trace--buffers-of s)))
+
+(add-hook 'aob-clock-shown-functions #'aob-trace--clock-shown-p)
 
 (defun aob-trace--tokens-round (n)
   "N tokens as the header says them: 213k, 1.2M."
