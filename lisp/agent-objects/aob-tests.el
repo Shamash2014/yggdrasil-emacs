@@ -8612,3 +8612,205 @@ neither the agent nor its other commands are touched."
         (when other (ignore-errors (signal-process other 'KILL)))
         (ignore-errors (delete-process agent))
         (setf (aob-session-conn s) cat)))))
+
+(defmacro aob-tests--with-tree (s dir state &rest body)
+  "Bind S to a session in STATE working in DIR, a fresh folder, for BODY."
+  (declare (indent 3))
+  `(let* ((,dir (file-name-as-directory (make-temp-file "aob-tree" t)))
+          (,s (aob-create-session :id "acp:tree:1" :backend 'acp :name "tree"
+                                  :project ,dir :dir ,dir :state ,state)))
+     (unwind-protect
+         (progn ,@body)
+       (when-let* ((buf (get-buffer (aob-trace--name ,s)))) (kill-buffer buf))
+       (aob-remove-session ,s)
+       (delete-directory ,dir t))))
+
+(defun aob-tests--write (dir name text)
+  "Write TEXT to NAME under DIR, making its folder, and return the file."
+  (let ((file (expand-file-name name dir)))
+    (make-directory (file-name-directory file) t)
+    (with-temp-file file (insert text))
+    file))
+
+(defun aob-tests--preview ()
+  "The preview hung in this trace, or nil."
+  (seq-find (lambda (o) (overlay-get o 'aob-preview))
+            (overlays-in (point-min) (point-max))))
+
+(defun aob-tests--goto-chip ()
+  "Put point on the first file chip in the buffer."
+  (goto-char (text-property-not-all (point-min) (point-max) 'aob-file nil)))
+
+(ert-deftest aob-trace-tab-on-a-chip-opens-the-file-around-its-line ()
+  "TAB on a chip hangs the file under its row, read against the session\='s
+own folder, coloured by its mode, numbered, the named line lit; TAB again
+folds it, and copying never takes it."
+  (aob-tests--with-tree s dir 'idle
+    (aob-tests--write dir "src/a.el"
+                      (mapconcat (lambda (i) (format "(defun f%d () %d)\n" i i))
+                                 (number-sequence 0 39) ""))
+    (aob-event s 'tool :kind "read" :status "completed" :title "Read"
+               :locations (list (list :path "src/a.el" :line 25)))
+    (with-current-buffer (aob-trace-buffer s)
+      (let ((inhibit-read-only t) (aob-trace-icons nil))
+        (aob-trace--render t)
+        (aob-tests--goto-chip)
+        (should (equal (car (get-text-property (point) 'aob-file))
+                       (expand-file-name "src/a.el" dir)))
+        (aob-trace-tab)
+        (let* ((shown (overlay-get (aob-tests--preview) 'after-string))
+               (lit (string-search "(defun f24 () 24)" shown))
+               (dim (string-search "(defun f23 () 23)" shown)))
+          (should (string-search "src/a.el:25 · 40 lines" shown))
+          (should (= 20 (cl-count ?\n (substring shown (string-search "40 lines" shown)))))
+          (should (string-search "25 (defun f24" shown))
+          (should (memq 'highlight (ensure-list (get-text-property lit 'face shown))))
+          (should-not (memq 'highlight (ensure-list (get-text-property dim 'face shown))))
+          (should (memq 'font-lock-keyword-face
+                        (ensure-list (get-text-property (1+ dim) 'face shown)))))
+        (should-not (string-search "(defun" (filter-buffer-substring (point-min) (point-max))))
+        (aob-trace-tab)
+        (should-not (aob-tests--preview))))))
+
+(ert-deftest aob-trace-a-preview-of-a-file-not-there-says-so ()
+  (aob-tests--with-tree s dir 'idle
+    (aob-event s 'tool :kind "read" :status "completed" :title "Read"
+               :locations (list (list :path "gone.el")))
+    (with-current-buffer (aob-trace-buffer s)
+      (let ((inhibit-read-only t) (aob-trace-icons nil))
+        (aob-trace--render t)
+        (aob-tests--goto-chip)
+        (aob-trace-tab)
+        (should (equal (string-trim (overlay-get (aob-tests--preview) 'after-string))
+                       "gone.el · not on disk"))))))
+
+(ert-deftest aob-trace-a-preview-outlives-the-next-event ()
+  "A redraw for a new event puts the preview back under the same row."
+  (aob-tests--with-tree s dir 'idle
+    (aob-tests--write dir "a.txt" "one\ntwo\n")
+    (aob-event s 'tool :kind "read" :status "completed" :title "Read"
+               :locations (list (list :path "a.txt" :line 2)))
+    (with-current-buffer (aob-trace-buffer s)
+      (let ((inhibit-read-only t) (aob-trace-icons nil))
+        (aob-trace--render t)
+        (aob-tests--goto-chip)
+        (aob-trace-tab)
+        (let ((before aob-trace--blocks))
+          (aob-event s 'message :text "and then some")
+          (aob-trace--render)
+          (should-not (equal before aob-trace--blocks)))
+        (should (string-search "and then some" (buffer-string)))
+        (let ((ov (aob-tests--preview)))
+          (should ov)
+          (should (= (overlay-start ov)
+                     (save-excursion (aob-tests--goto-chip) (line-end-position))))
+          (should (string-search "a.txt:2 · 2 lines" (overlay-get ov 'after-string))))))))
+
+(ert-deftest aob-trace-a-preview-refuses-binary-and-caps-large-files ()
+  (let ((bin (make-temp-file "aob-bin" nil ".dat" "head\0tail"))
+        (big (make-temp-file "aob-big" nil ".txt"
+                             (mapconcat (lambda (i) (format "row %04d\n" i))
+                                        (number-sequence 1 1000) "")))
+        (aob-trace-preview-bytes 2048))
+    (unwind-protect
+        (progn
+          (should (string-search "binary, not shown" (aob-trace--preview bin nil)))
+          (should-not (string-search "head" (aob-trace--preview bin nil)))
+          (let ((shown (aob-trace--preview big 3)))
+            (should (string-search ":3 · 228+ lines" shown))
+            (should (string-search "row 0003" shown)))
+          (should (string-search "past the first 2 KB" (aob-trace--preview big 900))))
+      (delete-file bin)
+      (delete-file big))))
+
+(ert-deftest aob-trace-tab-on-an-edit-chip-opens-its-diff ()
+  "An edit\='s chip opens the change it made, uncut, and no file text."
+  (aob-tests--with-tree s dir 'idle
+    (aob-event s 'tool :kind "edit" :status "completed" :title "Edit a.el"
+               :content (list (list :type "diff" :path "a.el" :oldText "keep\n"
+                                    :newText (mapconcat (lambda (i) (format "added %d" i))
+                                                        (number-sequence 1 30) "\n"))))
+    (with-current-buffer (aob-trace-buffer s)
+      (let ((inhibit-read-only t) (aob-trace-icons nil))
+        (aob-trace--render t)
+        (should (string-search "more line" (buffer-string)))
+        (should-not (string-search "added 30" (buffer-string)))
+        (aob-tests--goto-chip)
+        (aob-trace-tab)
+        (should-not (string-search "more line" (buffer-string)))
+        (should (string-search "added 30" (buffer-string)))
+        (should-not (aob-tests--preview))))))
+
+(defmacro aob-tests--drawing (made &rest body)
+  "Run BODY as if on a display, each image made pushed onto MADE as its args."
+  (declare (indent 1))
+  `(let ((,made nil) (aob-trace-icons t))
+     (cl-letf (((symbol-function 'display-graphic-p) #'always)
+               ((symbol-function 'aob-trace--agent-icon) #'ignore)
+               ((symbol-function 'create-image)
+                (lambda (&rest args) (push args ,made) (list 'image :n (length ,made)))))
+       ,@body)))
+
+(defun aob-tests--thumbs ()
+  "The pictures drawn in this buffer, as (POS KEY DISPLAY) in order."
+  (let ((pos (point-min)) out)
+    (while (setq pos (text-property-not-all pos (point-max) 'aob-thumb nil))
+      (push (list pos (get-text-property pos 'aob-thumb) (get-text-property pos 'display)) out)
+      (setq pos (next-single-property-change pos 'aob-thumb nil (point-max))))
+    (nreverse out)))
+
+(ert-deftest aob-trace-a-finished-tool-draws-its-pictures-inline ()
+  "The picture a tool returned and the screenshot it names are drawn under
+its row, small, once: a redraw reuses them, a name with no file draws
+nothing, TAB opens one whole and back, and copying passes over them."
+  (aob-tests--with-tree s dir 'idle
+    (let ((shot (aob-tests--write dir "shots/home.png" "png")))
+      (aob-tests--drawing made
+        (let ((ev (aob-event s 'tool :kind "other" :status "completed" :title "Screenshot"
+                             :content (list (list :type "content"
+                                                  :content (list :type "text"
+                                                                 :text "Saved shots/home.png, not shots/gone.png"))
+                                            (list :type "content"
+                                                  :content (list :type "image" :mimeType "image/png"
+                                                                 :data "iVBORw0KGgo="))))))
+          (with-current-buffer (aob-trace-buffer s)
+            (let ((inhibit-read-only t))
+              (aob-trace--render t)
+              (let ((thumbs (aob-tests--thumbs)))
+                (should (= 2 (length thumbs)))
+                (should (equal (nth 1 (nth 1 thumbs)) shot))
+                (should (equal (get-text-property (car (nth 1 thumbs)) 'aob-file)
+                               (list shot nil nil)))
+                (should (= 2 (length made)))
+                (should (seq-every-p (lambda (args) (memq :max-height args)) made))
+                (plist-put ev :line nil)
+                (aob-trace--render t)
+                (should (= 2 (length made)))
+                (should-not (string-search "[[Image]]"
+                                           (filter-buffer-substring (point-min) (point-max))))
+                (goto-char (car (nth 1 thumbs)))
+                (aob-trace-tab)
+                (should (= 3 (length made)))
+                (should-not (memq :max-height (car made)))
+                (should (equal (get-text-property (point) 'display) (list 'image :n 3)))
+                (aob-trace-tab)
+                (should (= 3 (length made)))
+                (should (equal (get-text-property (point) 'display)
+                               (nth 2 (nth 1 thumbs))))))))))))
+
+(ert-deftest aob-trace-a-picture-the-agent-is-still-sending-waits-to-settle ()
+  "Nothing is decoded while its message streams; it is drawn once it settles."
+  (aob-tests--with-tree s dir 'working
+    (aob-tests--drawing made
+      (aob-event s 'message :text "look [[Image]]"
+                 :image-data (list (list :type "image" :mimeType "image/png"
+                                         :data "iVBORw0KGgo=")))
+      (with-current-buffer (aob-trace-buffer s)
+        (let ((inhibit-read-only t))
+          (aob-trace--render t)
+          (should-not (aob-tests--thumbs))
+          (should-not made)
+          (aob-event s 'tool :kind "read" :status "in_progress" :title "Read")
+          (aob-trace--render)
+          (should (= 1 (length (aob-tests--thumbs))))
+          (should (= 1 (length made))))))))

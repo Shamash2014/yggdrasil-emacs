@@ -22,6 +22,8 @@
 (declare-function ygg-diagram-toggle-any-at-point "ygg-diagram" ())
 (defvar ygg-diagram-image-root)
 (defvar ygg-diagram--shown)
+(defvar aob-trace-explore-kinds)
+(defvar aob-trace--previews)
 (declare-function ygg-diagram-image-at-point "ygg-diagram" ())
 (declare-function ygg-diagram-md-fence-at-point "ygg-diagram" ())
 (declare-function ygg-normal-state "yggdrasil-core" ())
@@ -385,12 +387,14 @@ draw its mark down in that gap, under the text it marks."
     str))
 
 (defun aob-trace--unmarked (str)
-  "STR without the characters that carry fringe marks: copied text is
-what the line says, not what its gutter drew."
+  "STR without the characters that carry fringe marks or pictures: copied
+text is what the line says, not what its gutter or a thumbnail drew."
   (let ((i 0) (parts nil))
     (while (< i (length str))
-      (let ((next (next-single-property-change i 'aob-status str (length str))))
-        (unless (get-text-property i 'aob-status str)
+      (let ((next (min (next-single-property-change i 'aob-status str (length str))
+                       (next-single-property-change i 'aob-thumb str (length str)))))
+        (unless (or (get-text-property i 'aob-status str)
+                    (get-text-property i 'aob-thumb str))
           (push (substring str i next) parts))
         (setq i next)))
     (apply #'concat (nreverse parts))))
@@ -1572,56 +1576,187 @@ remap such as `ygg-focus-dim' cannot outrank it."
             (setq i (1+ i)))))
       copy)))
 
-(defcustom aob-trace-image-height 160
-  "How tall a picture sent to an agent is drawn in the trace, in pixels."
+(defcustom aob-trace-image-lines 12
+  "How many lines tall a picture is drawn in the trace until TAB opens it whole."
+  :type 'natnum :group 'aob)
+
+(defcustom aob-trace-image-bytes (* 8 1024 1024)
+  "The largest picture the trace decodes; a bigger one is only named."
   :type 'natnum :group 'aob)
 
 (defvar aob-trace--images (make-hash-table :test 'equal)
-  "(FILE HEIGHT . MTIME) to the image drawn for it.")
+  "(FILE MTIME SIZE) to the image drawn for it.")
 
-(defun aob-trace--thumb (file)
-  "FILE as a picture, or its name when there is nothing to draw it with."
-  (or (when (and aob-trace-icons (display-graphic-p)
-                 (stringp file) (file-readable-p file))
-        (let* ((mtime (file-attribute-modification-time (file-attributes file)))
-               (key (list file aob-trace-image-height mtime))
-               (img (gethash key aob-trace--images 'miss)))
-          (when (eq img 'miss)
-            (setq img (ignore-errors
-                        (create-image file nil nil
-                                      :max-height aob-trace-image-height
-                                      :max-width 600
-                                      :ascent 'center)))
-            (puthash key img aob-trace--images))
-          (when img (propertize "[[Image]]" 'display img))))
-      (and (stringp file) (format "[[%s]]" (file-name-nondirectory file)))))
+(defvar aob-trace--data-images (make-hash-table :test 'eq :weakness 'key)
+  "A picture\='s base64 data to the images drawn from it, as ((SIZE . IMAGE) ...).")
+
+(defvar-local aob-trace--full-images nil
+  "The pictures TAB opened to their whole size: a file, or the block it came in.")
+
+(defun aob-trace--image-size (full)
+  "(HEIGHT WIDTH) in pixels a picture is held to; no height when FULL."
+  (let ((win (get-buffer-window (current-buffer) t)))
+    (list (and (not full) (* aob-trace-image-lines (frame-char-height)))
+          (max 200 (- (if win (window-body-width win t) 640) 40)))))
+
+(defun aob-trace--create-image (spec data-p size)
+  "SPEC, a file or the bytes of one when DATA-P, as an image held to SIZE."
+  (ignore-errors
+    (apply #'create-image spec nil data-p
+           :max-width (nth 1 size) :ascent 'center
+           (and (car size) (list :max-height (car size))))))
+
+(defun aob-trace--file-picture (file full)
+  "FILE drawn thumbnail-sized, or whole when FULL; nil when it is too big to."
+  (when-let* ((attrs (file-attributes file))
+              ((<= (file-attribute-size attrs) aob-trace-image-bytes)))
+    (let* ((key (list file (file-attribute-modification-time attrs)
+                      (aob-trace--image-size full)))
+           (img (gethash key aob-trace--images 'miss)))
+      (when (eq img 'miss)
+        (when (> (hash-table-count aob-trace--images) 500)
+          (clrhash aob-trace--images))
+        (setq img (aob-trace--create-image file nil (nth 2 key)))
+        (puthash key img aob-trace--images))
+      img)))
+
+(defun aob-trace--data-picture (data full)
+  "The base64 DATA drawn thumbnail-sized, or whole when FULL; nil when too big."
+  (when (<= (* 3 (/ (length data) 4)) aob-trace-image-bytes)
+    (let* ((size (aob-trace--image-size full))
+           (seen (gethash data aob-trace--data-images))
+           (hit (assoc size seen)))
+      (if hit
+          (cdr hit)
+        (let ((img (aob-trace--create-image (ignore-errors (base64-decode-string data))
+                                            t size)))
+          (puthash data (cons (cons size img) seen) aob-trace--data-images)
+          img)))))
+
+(defun aob-trace--picture (key)
+  "The picture KEY stands for, a file or an image block, at the size TAB left it."
+  (let ((full (member key aob-trace--full-images)))
+    (if (stringp key)
+        (aob-trace--file-picture key full)
+      (aob-trace--data-picture (plist-get key :data) full))))
+
+(defun aob-trace--thumb-p ()
+  "Whether pictures can be drawn here."
+  (and aob-trace-icons (display-graphic-p)))
+
+(defun aob-trace--thumb (key)
+  "KEY, a file or an image block, drawn; nil where it cannot be.
+RET opens it, TAB opens it whole; copying passes over it."
+  (when-let* (((aob-trace--thumb-p))
+              (img (aob-trace--picture key)))
+    (propertize "[[Image]]" 'display img 'aob-thumb key
+                'aob-file (and (stringp key) (list key nil nil)))))
 
 (defun aob-trace--image-block (block)
   "The picture an image content BLOCK carries, or nil where none can be drawn.
 Its words already hold the [[Image]] that names it."
-  (when-let* (((and aob-trace-icons (display-graphic-p)))
-              (data (plist-get block :data))
-              ((stringp data))
-              (img (ignore-errors
-                     (create-image (base64-decode-string data) nil t
-                                   :max-height aob-trace-image-height
-                                   :max-width 600
-                                   :ascent 'center))))
-    (propertize "[[Image]]" 'display img)))
+  (and (stringp (plist-get block :data)) (aob-trace--thumb block)))
 
 (defun aob-trace--images-of (ev)
-  "The pictures EV carries, shown where they can be and named where not."
+  "The pictures EV carries, shown where they can be and named where not.
+One still arriving is named only: it is drawn once it settles."
   (concat
    (when-let* ((n (plist-get ev :images)) ((> n 0)))
      (let ((files (plist-get ev :image-files)))
        (concat " " (string-join
                     (if files
-                        (delq nil (mapcar #'aob-trace--thumb files))
+                        (mapcar (lambda (f)
+                                  (or (and (stringp f) (aob-trace--thumb f))
+                                      (and (stringp f) (format "[[%s]]" (file-name-nondirectory f)))))
+                                files)
                       (make-list n "[[Image]]"))
                     " "))))
-   (when-let* ((drawn (delq nil (mapcar #'aob-trace--image-block
+   (when-let* (((not (aob-trace--live-p ev)))
+               (drawn (delq nil (mapcar #'aob-trace--image-block
                                         (plist-get ev :image-data)))))
      (concat " " (string-join drawn " ")))))
+
+(defconst aob-trace--image-re
+  "[^][ \t\n\"'`()<>|,;]+\\.\\(?:png\\|jpe?g\\|gif\\|webp\\|svg\\)\\b"
+  "A name in a tool call\='s words that may be a picture it made or read.")
+
+(defconst aob-trace--image-ext-re "\\.\\(?:png\\|jpe?g\\|gif\\|webp\\|svg\\)\\'"
+  "The end of a file name that is a picture.")
+
+(defun aob-trace--local-image (name root)
+  "NAME read against ROOT, when that is a picture on this machine; else nil.
+A handled name (TRAMP above all) would dial out mid-draw."
+  (let ((file (let ((file-name-handler-alist nil)) (expand-file-name name root)))
+        (case-fold-search t))
+    (and (string-match-p aob-trace--image-ext-re file)
+         (not (find-file-name-handler file 'file-readable-p))
+         (file-readable-p file)
+         (not (file-directory-p file))
+         file)))
+
+(defun aob-trace--tool-images (ev)
+  "The pictures the finished tool call EV made or read: the ones its content
+carries, and the files it names that are pictures here."
+  (when (and (aob-trace--thumb-p)
+             (member (plist-get ev :status) '("completed" "success" "failed")))
+    (let* ((root (or (aob-trace--root) default-directory))
+           (blocks (seq-keep (lambda (c)
+                               (let ((inner (plist-get c :content)))
+                                 (and (equal (plist-get c :type) "content")
+                                      (equal (plist-get inner :type) "image")
+                                      inner)))
+                             (plist-get ev :content)))
+           (words (unless (member (plist-get ev :kind) aob-trace-explore-kinds)
+                    (let ((text (concat (aob-trace--content-text ev) "\n"
+                                        (or (plist-get ev :terminal-output) ""))))
+                      (substring text 0 (min (length text) 20000)))))
+           (names (append (mapcar #'car (aob-trace--chip-paths ev))
+                          (let ((start 0) out (case-fold-search t))
+                            (while (and words (string-match aob-trace--image-re words start))
+                              (push (match-string 0 words) out)
+                              (setq start (match-end 0)))
+                            (nreverse out))))
+           (files (seq-take (seq-uniq (delq nil (mapcar (lambda (n) (aob-trace--local-image n root))
+                                                        names)))
+                            6))
+           (drawn (delq nil (append (mapcar #'aob-trace--image-block blocks)
+                                    (mapcar #'aob-trace--thumb files)))))
+      (when drawn
+        (concat "\n    " (string-join drawn " "))))))
+
+(defun aob-trace--toggle-full (key)
+  "Draw the picture KEY stands for whole, or back to its thumbnail."
+  (let ((was aob-trace--full-images))
+    (setq aob-trace--full-images (if (member key was) (remove key was) (cons key was)))
+    (if-let* ((img (aob-trace--picture key)))
+        (with-silent-modifications
+          (let ((pos (point-min)))
+            (while (< pos (point-max))
+              (let ((next (next-single-property-change pos 'aob-thumb nil (point-max))))
+                (when (equal (get-text-property pos 'aob-thumb) key)
+                  (when-let* ((s (aob-session-get aob-trace--session-id))
+                              (ev (seq-find (lambda (e)
+                                              (memq (plist-get e :seq)
+                                                    (list (get-text-property pos 'aob-event)
+                                                          (get-text-property pos 'aob-item))))
+                                            (aob-session-events s))))
+                    (plist-put ev :line nil))
+                  (put-text-property pos next 'display img))
+                (setq pos next)))))
+      (setq aob-trace--full-images was))))
+
+(defun aob-trace--view-image-data (block)
+  "Open the picture the image BLOCK carries in a buffer of its own."
+  (let ((buf (get-buffer-create "*aob image*")))
+    (with-current-buffer buf
+      (let ((inhibit-read-only t))
+        (fundamental-mode)
+        (erase-buffer)
+        (set-buffer-multibyte nil)
+        (insert (base64-decode-string (plist-get block :data)))
+        (image-mode)))
+    (pop-to-buffer buf '((display-buffer-reuse-window display-buffer-use-some-window)
+                         (inhibit-same-window . t)))))
 
 (defun aob-trace--hang (ev str)
   "STR with the agent\='s mark beside its first line when EV opens a turn.
@@ -1794,9 +1929,12 @@ whether or not they have been joined."
 event mutated (chunk pushes, tool updates clear the cache), or after
 the width it was clipped against changed, which is the same thing to a
 row that no longer fits."
-  (let ((width (aob-trace--text-width)))
-    (unless (equal (plist-get ev :line-width) width)
+  (let ((width (aob-trace--text-width))
+        (live (aob-trace--live-p ev)))
+    (unless (and (equal (plist-get ev :line-width) width)
+                 (eq (plist-get ev :line-live) live))
       (plist-put ev :line-width width)
+      (plist-put ev :line-live live)
       (plist-put ev :line nil)))
   (or (plist-get ev :line)
       (let ((l (aob-trace--build-line s ev nil)))
@@ -1825,8 +1963,10 @@ row that no longer fits."
   (let ((aob-trace--opening open))
     (propertize (aob-trace--mark
                  (aob-trace--state ev)
-                 (aob-trace--line ev (and (fboundp 'aob-session-ref)
-                                          (aob-session-ref s :agent))))
+                 (concat (aob-trace--line ev (and (fboundp 'aob-session-ref)
+                                                  (aob-session-ref s :agent)))
+                         (and (eq (plist-get ev :type) 'tool)
+                              (aob-trace--tool-images ev))))
                 'aob-session (aob-session-id s)
                 'aob-event (plist-get ev :seq)
                 'aob-gap (aob-trace--gap-class ev))))
@@ -2822,15 +2962,13 @@ with the next message, ZZ at the end of the trace."
   (let ((option (get-text-property (line-beginning-position) 'aob-option))
         (question (get-text-property (line-beginning-position) 'aob-question))
         (plan-option (get-text-property (line-beginning-position) 'aob-plan-option))
-        (file (or (get-text-property (point) 'aob-file)
-                  (when-let* ((at (text-property-not-all (line-beginning-position)
-                                                         (line-end-position)
-                                                         'aob-file nil)))
-                    (get-text-property at 'aob-file))))
+        (shown (get-text-property (point) 'aob-thumb))
+        (file (aob-trace--file-on-line))
         (seq (or (get-text-property (point) 'aob-item)
                  (get-text-property (point) 'aob-event)))
         (s (aob-session-get aob-trace--session-id)))
     (cond
+     ((consp shown) (aob-trace--view-image-data shown))
      (file (aob-trace--visit file))
      ((and plan-option s)
       (let ((d (aob-trace--pending s seq)))
@@ -3740,7 +3878,15 @@ A call folded into a run since is found by the item it became."
             (set-window-point win (aob-trace--on-page win pt)))))))
     (when (and aob-trace-draw-diagrams (fboundp 'ygg-diagram-fence-at-point))
       (aob-trace--mark-diagrams s))
-    (when (fboundp 'ygg-diagram-replace) (ygg-diagram-replace))))
+    (when (fboundp 'ygg-diagram-replace) (ygg-diagram-replace))
+    (when aob-trace--previews (aob-trace--place-previews))))
+
+(defun aob-trace--edit-p (seq)
+  "Non-nil when the event SEQ is an edit with a diff to show."
+  (when-let* ((s (aob-session-get aob-trace--session-id))
+              (ev (seq-find (lambda (e) (eql (plist-get e :seq) seq))
+                            (aob-session-events s))))
+    (aob-trace--diff-items ev)))
 
 (defun aob-trace--event-bounds (seq)
   "Where the text event SEQ was drawn as begins and ends, or nil."
@@ -3762,16 +3908,31 @@ A call folded into a run since is found by the item it became."
 
 (defun aob-trace-tab ()
   "Draw the fence at point, or open the event point is on with its pictures.
+A thumbnail opens whole and back.  A file chip, or a row naming a
+file:line, opens that file under it around the line; an edit\='s chip
+opens its whole diff instead.
 An event naming images opens and draws every one of them, not only the
 one its folded line has room for; TAB again folds it and takes them away.
 Anything else expands or collapses as before."
   (interactive)
-  (let ((seq (or (get-text-property (point) 'aob-item)
-                 (get-text-property (point) 'aob-event))))
+  (let* ((seq (or (get-text-property (point) 'aob-item)
+                  (get-text-property (point) 'aob-event)))
+         (thumb (get-text-property (point) 'aob-thumb))
+         (spec (and seq (not thumb)
+                    (or (get-text-property (point) 'aob-file)
+                        (let ((named (aob-trace--file-on-line)))
+                          (and (nth 1 named) named)))))
+         (spec (and spec
+                    (not (let ((case-fold-search t))
+                           (string-match-p aob-trace--image-ext-re (car spec))))
+                    spec)))
     (cond
+     (thumb (aob-trace--toggle-full thumb))
      ((and (fboundp 'ygg-diagram-fence-at-point)
            (or (ygg-diagram-fence-at-point) (ygg-diagram-md-fence-at-point)))
       (ygg-diagram-toggle-any-at-point))
+     ((and spec (aob-trace--edit-p seq)) (aob-trace-toggle))
+     (spec (aob-trace--toggle-preview seq spec))
      ((and seq (fboundp 'ygg-diagram-image-at-point) (ygg-diagram-image-at-point))
       (if (memq seq aob-trace--expanded)
           (let ((drawn (aob-trace--event-images seq)))
@@ -3825,6 +3986,122 @@ LINE is where to land; without one, SEARCH is text to land on."
     (cond ((and line (> line 0)) (forward-line (1- line)))
           ((and search (not (string-empty-p search)) (search-forward search nil t))
            (goto-char (match-beginning 0))))))
+
+(defcustom aob-trace-preview-lines 20
+  "How many lines of a file TAB on its chip shows under the row."
+  :type 'natnum :group 'aob)
+
+(defcustom aob-trace-preview-bytes (* 256 1024)
+  "How much of a file a preview reads; a longer one is shown from its start."
+  :type 'natnum :group 'aob)
+
+(defvar-local aob-trace--previews nil
+  "Files opened under their rows, as ((SEQ FILE LINE) . DRAWN), newest first.
+Read once, when TAB opened them: a redraw puts back what was read and
+never reads again, so a file on another machine costs one TAB.")
+
+(defun aob-trace--file-on-line ()
+  "The (FILE LINE SEARCH) a chip at point names, else the first on its line."
+  (or (get-text-property (point) 'aob-file)
+      (when-let* ((at (text-property-not-all (line-beginning-position)
+                                             (line-end-position)
+                                             'aob-file nil)))
+        (get-text-property at 'aob-file))))
+
+(defun aob-trace--preview-fontify (file)
+  "Colour this buffer\='s text as FILE\='s own major mode does, starting nothing.
+The mode\='s hooks never run, so no language server or minor mode wakes."
+  (let ((enable-local-variables nil))
+    (ignore-errors
+      (let ((buffer-file-name file))
+        (delay-mode-hooks (set-auto-mode)))
+      (font-lock-ensure))))
+
+(defun aob-trace--preview (file line)
+  "FILE around LINE as a preview: a dimmed header, then numbered rows with
+LINE lit."
+  (let* ((root (aob-trace--root))
+         (where (concat (if (and root (string-prefix-p root file))
+                            (file-relative-name file root)
+                          (abbreviate-file-name file))
+                        (if (and line (> line 0)) (format ":%d" line) "")))
+         (say (lambda (what) (propertize (format "    %s · %s" where what) 'face 'shadow))))
+    (concat
+     "\n"
+     (with-temp-buffer
+       (cond
+        ((not (file-exists-p file)) (funcall say "not on disk"))
+        ((file-directory-p file) (funcall say "a folder"))
+        (t
+         (insert-file-contents-literally file nil 0 aob-trace-preview-bytes)
+         (if (search-forward "\0" nil t)
+             (funcall say "binary, not shown")
+           (decode-coding-inserted-region (point-min) (point-max) file)
+           (let* ((capped (> (or (file-attribute-size (file-attributes file)) 0)
+                             aob-trace-preview-bytes))
+                  (total (count-lines (point-min) (point-max)))
+                  (at (if (and line (> line 0)) line 1)))
+             (if (> at total)
+                 (funcall say (if capped
+                                  (format "past the first %d KB" (/ aob-trace-preview-bytes 1024))
+                                (format "%d lines" total)))
+               (aob-trace--preview-fontify file)
+               (let* ((from (max 1 (min (- at (/ aob-trace-preview-lines 2))
+                                        (1+ (- total aob-trace-preview-lines)))))
+                      (to (min total (+ from aob-trace-preview-lines -1)))
+                      (digits (length (number-to-string to)))
+                      (rows nil))
+                 (goto-char (point-min))
+                 (forward-line (1- from))
+                 (dotimes (i (1+ (- to from)))
+                   (let* ((n (+ from i))
+                          (row (concat "    "
+                                       (propertize (format (format "%%%dd " digits) n)
+                                                   'face (if (= n at) 'line-number-current-line
+                                                           'line-number))
+                                       (buffer-substring (point) (line-end-position)))))
+                     (when (and line (= n at))
+                       (add-face-text-property 0 (length row) 'highlight t row))
+                     (push row rows)
+                     (forward-line 1)))
+                 (concat (funcall say (format "%d%s lines" total (if capped "+" "")))
+                         "\n"
+                         (string-join (nreverse rows) "\n"))))))))))))
+
+(defun aob-trace--file-row (seq file)
+  "Where the row of event SEQ that names FILE ends, or nil when none shows."
+  (when-let* ((prop (if (text-property-any (point-min) (point-max) 'aob-item seq)
+                        'aob-item 'aob-event))
+              (beg (text-property-any (point-min) (point-max) prop seq)))
+    (let ((end (or (text-property-not-all beg (point-max) prop seq) (point-max)))
+          (found nil))
+      (while (and (not found) (< beg end))
+        (if (equal (car (get-text-property beg 'aob-file)) file)
+            (setq found beg)
+          (setq beg (next-single-property-change beg 'aob-file nil end))))
+      (when found
+        (save-excursion (goto-char found) (line-end-position))))))
+
+(defun aob-trace--place-previews ()
+  "Hang each open preview under the row that names its file, afresh.
+An empty overlay drifts as rows are written around it, so none is kept."
+  (remove-overlays (point-min) (point-max) 'aob-preview t)
+  (pcase-dolist (`((,seq ,file ,_line) . ,drawn) aob-trace--previews)
+    (when-let* ((at (aob-trace--file-row seq file)))
+      (let ((ov (make-overlay at at)))
+        (overlay-put ov 'aob-preview t)
+        (overlay-put ov 'after-string drawn)))))
+
+(defun aob-trace--toggle-preview (seq spec)
+  "Open the file SPEC names under event SEQ\='s row, or fold it away."
+  (let* ((key (list seq (car spec) (nth 1 spec)))
+         (open (assoc key aob-trace--previews)))
+    (setq aob-trace--previews
+          (if open
+              (delq open aob-trace--previews)
+            (cons (cons key (aob-trace--preview (car spec) (nth 1 spec)))
+                  aob-trace--previews)))
+    (aob-trace--place-previews)))
 
 (defun aob-trace-buffer (s)
   "Return S's trace buffer, creating and registering it if needed."

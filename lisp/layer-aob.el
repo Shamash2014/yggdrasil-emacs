@@ -182,6 +182,7 @@
 (yggdrasil-localleader-def 'aob-trace-mode "A" #'aob-answer "answer its questions")
 (yggdrasil-localleader-def 'aob-trace-mode "H" #'aob-handoff "hand off to a fresh session")
 (yggdrasil-localleader-def 'aob-trace-mode "$" #'aob-shells "running commands (stop one)")
+(yggdrasil-localleader-def 'aob-trace-mode "b" #'ygg-aob-browser "preview in a browser pane")
 (autoload 'ygg-projects-toggle-pin "ygg-projects" nil t)
 (dolist (mode '(aob-trace-mode aob-plan-mode))
   (yggdrasil-localleader-def mode "P" #'ygg-projects-toggle-pin "pin session")
@@ -1731,6 +1732,101 @@ layer stays quiet rather than dying inside a state-change hook."
        (ygg-aob--say (format "%s done" name))))))
 
 (add-hook 'aob-state-change-hook #'ygg-aob--notify)
+
+;;; Preview — what the agent is building, in a browser beside its trace
+
+(autoload 'ygg-browser-pane "layer-browser")
+(autoload 'ygg-browser-pane-reload "layer-browser")
+(declare-function aob-trace--shell-output "aob-trace" (ev))
+
+(defcustom ygg-aob-browser-reload t
+  "Non-nil reloads a session's preview when its turn ends, if it is on screen."
+  :type 'boolean :group 'aob)
+
+(defcustom ygg-aob-browser-auto-open nil
+  "Non-nil opens a session's preview the first time it names a local server.
+Asked when a turn ends, of what the agent said and its commands printed."
+  :type 'boolean :group 'aob)
+
+(defconst ygg-aob--url-re
+  (rx "http" (? "s") "://" (+ (not (any space "\"'<>`()[]{}|\\"))))
+  "A web address, up to the first character that ends one in prose.")
+
+(defconst ygg-aob--local-url-re
+  (rx "http" (? "s") "://" (or "localhost" "127.0.0.1" "0.0.0.0" "[::1]")
+      ":" (+ digit) (* (not (any space "\"'<>`()[]{}|\\"))))
+  "A local server's address: this machine, with a port.")
+
+(defun ygg-aob--event-words (ev)
+  "What EV said or printed: an agent's message, or a command's output."
+  (pcase (plist-get ev :type)
+    ('message (aob-event-text ev))
+    ('tool (and (equal (plist-get ev :kind) "execute")
+                (string-join (aob-trace--shell-output ev) "\n")))))
+
+(defun ygg-aob--event-urls (ev regexp)
+  "REGEXP's matches in what EV said or printed, the last one first."
+  (when-let* ((words (ygg-aob--event-words ev)))
+    (let ((start 0) urls)
+      (while (string-match regexp words start)
+        (setq start (match-end 0))
+        (push (string-trim-right (match-string 0 words) "[.,;:!?*_~]+") urls))
+      urls)))
+
+(defun ygg-aob--local-url (s)
+  "The local server address S named or printed last, or nil."
+  (seq-some (lambda (ev) (car (ygg-aob--event-urls ev ygg-aob--local-url-re)))
+            (aob-session-events s)))
+
+(defun ygg-aob--preview-url (s)
+  "Where S's preview points: the URL at point, the one S was last shown,
+the local server S named last, or one read with S's URLs to complete."
+  (or (thing-at-point 'url t)
+      (aob-session-ref s :preview-url)
+      (ygg-aob--local-url s)
+      (let ((url (completing-read
+                  "Preview URL: "
+                  (delete-dups (mapcan (lambda (ev) (ygg-aob--event-urls ev ygg-aob--url-re))
+                                       (aob-session-events s))))))
+        (if (string-empty-p url) (user-error "aob: no URL to preview") url))))
+
+(defun ygg-aob-browser (s url)
+  "Show S's preview at URL in a browser pane beside its trace.
+URL is the one at point, else the one S was last shown, else the local
+server S named last, else read.  S keeps the URL and the pane's buffer,
+so the next preview of S reuses both."
+  (interactive (let ((s (aob-target))) (list s (ygg-aob--preview-url s))))
+  (let ((buf (aob-session-ref s :preview-buffer)))
+    (aob-session-put s :preview-url url)
+    (aob-session-put s :preview-buffer
+                     (ygg-browser-pane url (if (buffer-live-p buf) buf
+                                             (format "*preview: %s*" (aob-session-name s)))))))
+
+(defun ygg-aob--preview-turn-end (s old new)
+  "When S's turn ends, reload its preview if it is on screen, or open it
+the first time S names a local server when `ygg-aob-browser-auto-open'."
+  (when (and (eq old 'working) (eq new 'idle))
+    (let ((buf (aob-session-ref s :preview-buffer)))
+      (ignore-errors
+        (cond ((buffer-live-p buf)
+               (when (and ygg-aob-browser-reload (get-buffer-window buf t))
+                 (ygg-browser-pane-reload buf)))
+              ((and ygg-aob-browser-auto-open
+                    (not (aob-session-ref s :preview-url))
+                    (not (aob-session-ref s :hidden)))
+               (when-let* ((url (ygg-aob--local-url s)))
+                 (ygg-aob-browser s url))))))))
+
+(add-hook 'aob-state-change-hook #'ygg-aob--preview-turn-end)
+
+(defun ygg-aob--preview-forget (s)
+  "Close S's preview with S: a page left open keeps hitting its server."
+  (when-let* ((buf (aob-session-ref s :preview-buffer))
+              ((buffer-live-p buf)))
+    (let ((kill-buffer-query-functions nil))
+      (kill-buffer buf))))
+
+(add-hook 'aob-session-removed-hook #'ygg-aob--preview-forget)
 
 (aob-modeline-mode 1)
 

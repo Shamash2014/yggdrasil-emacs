@@ -6,7 +6,8 @@
 ;; - embr — Chromium via CDP screencast (Playwright backend), for full
 ;;   web-dev / DevTools work; `e' (and `i' incognito).  Needs a one-time
 ;;   `M-x embr-install-or-update-chromium'.
-;; Home for the eventual aob session preview (`\ w' -> dev-server URL).
+;; An agent session's preview opens in a pane at the right (`\ b' in its
+;; trace, `o b a'), and reloads when its turn ends.
 
 ;;; Code:
 
@@ -17,6 +18,10 @@
 
 (declare-function xwidget-webkit-browse-url "xwidget")
 
+(defun ygg-browser--webkit-p ()
+  "Non-nil when this Emacs has WebKit xwidgets."
+  (featurep 'xwidget-internal))
+
 (defun ygg-browser-open (url &optional new)
   "Open URL in an in-buffer browser: WebKit xwidget when available, else eww.
 With NEW non-nil (interactively, a prefix arg), spin up a fresh session
@@ -24,9 +29,68 @@ instead of reusing the current one, so several browsers can run at once."
   (interactive
    (list (read-string "Browse URL: " (or (thing-at-point 'url t) "https://"))
          current-prefix-arg))
-  (if (featurep 'xwidget-internal)
+  (if (ygg-browser--webkit-p)
       (xwidget-webkit-browse-url url new)
     (eww url new)))
+
+(declare-function xwidget-webkit-new-session "xwidget" (url))
+(declare-function xwidget-webkit-goto-uri "xwidget.c" (xwidget uri))
+(declare-function xwidget-webkit-reload "xwidget")
+(declare-function xwidget-at "xwidget" (pos))
+(declare-function eww-reload "eww" (&optional local encode))
+(defvar xwidget-webkit-last-session-buffer)
+(defvar xwidget-webkit-buffer-name-format)
+
+(defvar ygg-browser-pane-action
+  '(display-buffer-in-side-window (side . right) (slot . 1)
+                                  (window-width . 0.45) (preserve-size . (t . nil)))
+  "Where a browser pane goes: the frame's right side, beside what you read.")
+
+(defun ygg-browser--pane-buffer (name url)
+  "A new browser buffer called NAME at URL, shown nowhere yet.
+WebKit's own session is left alone, so `ygg-browser-open' never
+navigates the pane."
+  (if (ygg-browser--webkit-p)
+      (save-current-buffer
+        (require 'xwidget)
+        (let ((xwidget-webkit-last-session-buffer xwidget-webkit-last-session-buffer))
+          (cl-letf (((symbol-function 'switch-to-buffer) #'set-buffer))
+            (xwidget-webkit-new-session url))
+          (rename-buffer name t)
+          ;; a loaded page renames its buffer after its title
+          (setq-local xwidget-webkit-buffer-name-format
+                      (string-replace "%" "%%" (buffer-name)))
+          (current-buffer)))
+    (with-current-buffer (generate-new-buffer name)
+      (eww-mode)
+      (current-buffer))))
+
+(defun ygg-browser--pane-visit (buf url)
+  "Point the browser in BUF at URL."
+  (with-current-buffer buf
+    (if (derived-mode-p 'eww-mode)
+        (cl-letf (((symbol-function 'pop-to-buffer-same-window) #'set-buffer))
+          (eww url))
+      (xwidget-webkit-goto-uri (xwidget-at (point-min)) url))))
+
+(defun ygg-browser-pane (url buffer-or-name)
+  "Show URL in a browser pane at the frame's right, and return its buffer.
+BUFFER-OR-NAME is a live pane buffer to reuse, or the name of a new one.
+WebKit when Emacs has it, else eww.  The selected window stays selected,
+and `q' in the pane closes the pane alone."
+  (let* ((fresh (not (buffer-live-p buffer-or-name)))
+         (buf (if fresh
+                  (ygg-browser--pane-buffer buffer-or-name url)
+                buffer-or-name))
+         (win (display-buffer buf ygg-browser-pane-action)))
+    (when (or (not fresh) (with-current-buffer buf (derived-mode-p 'eww-mode)))
+      (with-selected-window win (ygg-browser--pane-visit buf url)))
+    buf))
+
+(defun ygg-browser-pane-reload (buf)
+  "Reload the page in the browser pane buffer BUF."
+  (with-current-buffer buf
+    (if (derived-mode-p 'eww-mode) (eww-reload) (xwidget-webkit-reload))))
 
 (defun ygg-browser-open-new (url)
   "Spin up a fresh in-buffer browser at URL, never reusing an open session."
@@ -162,13 +226,16 @@ Reuses the current space's live browser, or spins up a fresh one and claims it."
   (interactive)
   (ygg-embr--side-by-side #'embr-browse-incognito))
 
+(declare-function ygg-aob-browser "layer-aob" (s url))
+
 (defvar ygg-browser-map (make-sparse-keymap) "The o b prefix: browsers.")
 
 (yggdrasil-define-keys 'ygg-browser-map
   "w" #'ygg-browser-open :label "webkit"
   "W" #'ygg-browser-open-new :label "webkit (new)"
   "e" #'ygg-browser-embr :label "embr (side by side)"
-  "i" #'ygg-browser-embr-incognito :label "embr incognito")
+  "i" #'ygg-browser-embr-incognito :label "embr incognito"
+  "a" #'ygg-aob-browser :label "agent preview")
 
 (yggdrasil-define-keys 'ygg-leader-open-map
   "b" ygg-browser-map :label "browser")
