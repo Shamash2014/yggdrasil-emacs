@@ -104,43 +104,73 @@ asks for.  Where a comment leaves a choice open, ask me before deciding."
       (cl-rotatef newest oldest))
     (format "%s^..%s" oldest newest)))
 
+(defun ygg-magit-review--diff-range ()
+  "The range a diff buffer shows, when it is one and not a single commit."
+  (and (derived-mode-p 'magit-diff-mode)
+       (not (derived-mode-p 'magit-revision-mode))
+       magit-buffer-diff-range
+       (string-match-p "\\.\\." magit-buffer-diff-range)
+       (not (magit-section-value-if 'commit))
+       magit-buffer-diff-range))
+
 (defun ygg-magit-review--target ()
   "The commit hash, or a range string, the review is about."
   (let ((marked (magit-region-values 'commit t)))
-    (if marked
-        (ygg-magit-review--range
-         (mapcar (lambda (rev) (magit-commit-oid rev t)) marked))
-      (or (when-let* ((rev (or (magit-commit-at-point)
-                               (magit-branch-or-commit-at-point))))
-            (magit-commit-oid rev t))
-          (user-error "No commit at point")))))
+    (cond
+     (marked
+      (ygg-magit-review--range
+       (mapcar (lambda (rev) (magit-commit-oid rev t)) marked)))
+     ((ygg-magit-review--diff-range))
+     ((when-let* ((rev (or (magit-commit-at-point)
+                           (magit-branch-or-commit-at-point))))
+        (magit-commit-oid rev t)))
+     (t (user-error "No commit at point")))))
 
 (defun ygg-magit-review--range-p (target)
   (string-match-p "\\.\\." target))
 
+(defun ygg-magit-review--marked-range-p (target)
+  "Whether TARGET is oldest^..newest, as marked commits make it."
+  (string-match-p "\\^\\.\\." target))
+
+(defun ygg-magit-review--range-block (root target)
+  "Any other range TARGET in ROOT: the commits it adds, and its diff.
+A...B diffs from where the sides parted, so its log is A..B alone."
+  (concat "<commits>\nrepository " root " · range " target "\n"
+          (ygg-magit-review--git root "log" "--format=fuller"
+                                 (string-replace "..." ".." target))
+          "\n"
+          (ygg-magit-review--capped (ygg-magit-review--git root "diff" target))
+          "</commits>"))
+
 (defun ygg-magit-review--block (root target)
   "The commit TARGET in ROOT as git tells it, its diff cut to size."
-  (if (ygg-magit-review--range-p target)
-      (pcase-let* ((`(,oldest ,newest) (split-string target "\\^\\.\\."))
-                   (from-root (let ((default-directory root))
-                                (not (magit-commit-parents oldest))))
-                   (base (if from-root
-                             (string-trim (ygg-magit-review--git
-                                           root "hash-object" "-t" "tree"
-                                           null-device))
-                           (concat oldest "^"))))
-        (concat "<commits>\nrepository " root " · range " target "\n"
-                (ygg-magit-review--git root "log" "--format=fuller"
-                                       (if from-root newest target))
-                "\n"
-                (ygg-magit-review--capped
-                 (ygg-magit-review--git root "diff" base newest))
-                "</commits>"))
+  (cond
+   ((and (ygg-magit-review--range-p target)
+         (not (ygg-magit-review--marked-range-p target)))
+    (ygg-magit-review--range-block root target))
+   ((ygg-magit-review--range-p target)
+    (pcase-let* ((`(,oldest ,newest) (split-string target "\\^\\.\\."))
+                 (from-root (let ((default-directory root))
+                              (not (magit-commit-parents oldest))))
+                 (base (if from-root
+                           (string-trim (ygg-magit-review--git
+                                         root "hash-object" "-t" "tree"
+                                         null-device))
+                         (concat oldest "^"))))
+      (concat "<commits>\nrepository " root " · range " target "\n"
+              (ygg-magit-review--git root "log" "--format=fuller"
+                                     (if from-root newest target))
+              "\n"
+              (ygg-magit-review--capped
+               (ygg-magit-review--git root "diff" base newest))
+              "</commits>")))
+   (t
     (concat "<commit>\nrepository " root " · commit " target "\n"
             (ygg-magit-review--capped
              (ygg-magit-review--git root "show" "--stat" "--patch"
                                     "--format=fuller" target))
-            "</commit>")))
+            "</commit>"))))
 
 (defun ygg-magit-review-prompt (root target &optional elsewhere)
   "The review prompt for TARGET in ROOT.

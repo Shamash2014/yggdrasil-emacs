@@ -864,6 +864,25 @@ With a prefix arg, prompt for the target branch."
         (transient-append-suffix 'magit-worktree "b"
           '("W" "worktrunk switch" ygg-wt-switch))))))
 
+;;; Compare two sides — worktrees, branches, commits, pull requests
+
+(autoload 'ygg-git-compare "ygg-git-compare" nil t)
+(autoload 'ygg-git-compare-at-point "ygg-git-compare" nil t)
+
+(yggdrasil-define-keys 'ygg-leader-git-map
+  "C" #'ygg-git-compare :label "compare two sides")
+(yggdrasil-define-keys 'ygg-leader-worktree-map
+  "c" #'ygg-git-compare :label "compare two sides")
+
+(with-eval-after-load 'magit-mode
+  (define-key magit-mode-map (kbd "=") #'ygg-git-compare-at-point))
+
+(with-eval-after-load 'magit-worktree
+  (ignore-errors
+    (unless (ignore-errors (transient-get-suffix 'magit-worktree "="))
+      (transient-append-suffix 'magit-worktree "g"
+        '("=" "Compare with…" ygg-git-compare-at-point)))))
+
 ;;; Git menu = magit's own dispatch dialog (SPC g ?), closable with q
 
 (declare-function magit-dispatch "magit")
