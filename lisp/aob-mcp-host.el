@@ -47,6 +47,9 @@ the prefix above Emacs.app, not beside the executable."
 (defun aob-mcp-host--key-file ()
   (expand-file-name "aob-mcp-key" (locate-user-emacs-file "var/")))
 
+(defun aob-mcp-host--skill-index-file ()
+  (expand-file-name "skill-index.json" (locate-user-emacs-file "var/")))
+
 (defun aob-mcp-host--write-key ()
   "Make a secret for this run and leave it where only its owner reads it.
 One secret for the life of this Emacs: every session was handed it when
@@ -75,7 +78,8 @@ whatever Emacs happens to be first on PATH."
                                        aob-mcp-server-name ,(or (bound-and-true-p server-name)
                                                                 aob-mcp-server-name)
                                        aob-mcp-key-file ,(aob-mcp-host--key-file)
-                                       aob-mcp-emacsclient ,(aob-mcp-host--emacsclient))
+                                       aob-mcp-emacsclient ,(aob-mcp-host--emacsclient)
+                                       ygg-skill-index-file ,(aob-mcp-host--skill-index-file))
                                  ;; the tool set is optional: a server with no
                                  ;; tools still answers, and says so
                                  (require 'aob-mcp-tools nil t)))
@@ -157,22 +161,27 @@ too late for `aob-session-created-hook\=' to have seen it."
 (with-eval-after-load 'aob
   (add-hook 'aob-session-created-hook #'aob-mcp-host--claim))
 
-(defun aob-mcp-host-spec (token)
-  "The server entry a session spawned under TOKEN is handed.
+(defun aob-mcp-host-spec (token &optional project)
+  "The server entry a session spawned under TOKEN, working in PROJECT, is handed.
 The token says which session is calling; the key says it may call at
-all, and only sessions this Emacs opened are given it."
+all, and only sessions this Emacs opened are given it.  The directory
+says whose skills a search covers: a worktree\='s, not its main checkout\='s."
   (list :name aob-mcp-host-name
         :type "http"
-        :url (if aob-mcp-host--key
-                 (format "%s?key=%s&session=%s" (aob-mcp-url)
-                         (url-hexify-string aob-mcp-host--key) token)
-               (format "%s?session=%s" (aob-mcp-url) token))))
+        :url (concat (if aob-mcp-host--key
+                         (format "%s?key=%s&session=%s" (aob-mcp-url)
+                                 (url-hexify-string aob-mcp-host--key) token)
+                       (format "%s?session=%s" (aob-mcp-url) token))
+                     (if (stringp project)
+                         (concat "&project="
+                                 (url-hexify-string (expand-file-name project)))
+                       ""))))
 
 (defun aob-mcp-host--around-spawn (fn &rest args)
   "Give every session this Emacs opens the sidecar, under its own token."
   (aob-mcp-host-start)
   (let* ((token (aob-mcp-host--token))
-         (aob-acp-mcp-servers (cons (aob-mcp-host-spec token)
+         (aob-acp-mcp-servers (cons (aob-mcp-host-spec token (or (nth 3 args) (nth 2 args)))
                                     (bound-and-true-p aob-acp-mcp-servers)))
          (aob-acp-session-refs (append (list :mcp-token token)
                                        (bound-and-true-p aob-acp-session-refs))))

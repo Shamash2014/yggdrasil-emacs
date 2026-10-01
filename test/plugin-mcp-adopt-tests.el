@@ -259,6 +259,19 @@
       (should (time-equal-p past (file-attribute-modification-time
                                   (file-attributes path)))))))
 
+(ert-deftest ygg-agent-seed-keeps-non-ascii-text-as-written ()
+  (plugin-mcp-adopt-tests--with
+    (plugin-mcp-adopt-tests--file "home/settings.json"
+                                  "{\"skillOverrides\":{\"s\":\"off\"}}")
+    (let ((path (plugin-mcp-adopt-tests--settings
+                 "{\"autoMode\":{\"note\":\"ask first \u2014 always\"}}")))
+      (should (plugin-mcp-adopt-tests--seed))
+      (let ((text (with-temp-buffer
+                    (insert-file-contents path)
+                    (buffer-string))))
+        (should (string-search "ask first \u2014 always" text))
+        (should-not (string-search "\\342" text))))))
+
 (ert-deftest ygg-agent-seed-keeps-other-keys-and-leaves-hooks ()
   (plugin-mcp-adopt-tests--with
     (plugin-mcp-adopt-tests--file

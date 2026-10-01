@@ -76,20 +76,26 @@ one it is already talking over.")
 (defvar aob-mcp-session nil
   "Which agent session is calling, bound for the length of one call.")
 
+(defvar aob-mcp-project nil
+  "The project the calling session was opened in, bound like `aob-mcp-session'.")
+
 (defconst aob-mcp-deferred '&aob-mcp-deferred
   "Returned by a handler that will answer later.")
 
 ;;; Tools
 
-(cl-defun aob-mcp-deftool (&key name description args handler)
+(cl-defun aob-mcp-deftool (&key name description args handler meta instructions)
   "Register HANDLER as the tool NAME.
 ARGS is a list of plists: :name :type :description, and optionally
 :optional, :enum, :items, :properties.  HANDLER is called with one
 plist, keyword per argument — never positionally, so an argument left
-out is absent rather than a nil in the wrong seat."
+out is absent rather than a nil in the wrong seat.  META is the tool's
+_meta in the listing; INSTRUCTIONS is what the server tells a client
+about the tool as it connects."
   (unless (and name handler) (error "aob-mcp: a tool needs a name and a handler"))
   (puthash name (list :name name :description (or description "")
-                      :args args :handler handler)
+                      :args args :handler handler
+                      :meta meta :instructions instructions)
            aob-mcp--tools)
   name)
 
@@ -125,10 +131,20 @@ out is absent rather than a nil in the wrong seat."
   (vconcat
    (mapcar (lambda (name)
              (let ((spec (gethash name aob-mcp--tools)))
-               (list :name name
-                     :description (plist-get spec :description)
-                     :inputSchema (aob-mcp--schema spec))))
+               (append (list :name name
+                             :description (plist-get spec :description)
+                             :inputSchema (aob-mcp--schema spec))
+                       (when-let* ((meta (plist-get spec :meta)))
+                         (list :_meta meta)))))
            (aob-mcp-tool-names))))
+
+(defun aob-mcp--instructions ()
+  "What the tools have to tell a client as it connects, or nil."
+  (when-let* ((said (delq nil (mapcar (lambda (name)
+                                        (plist-get (gethash name aob-mcp--tools)
+                                                   :instructions))
+                                      (aob-mcp-tool-names)))))
+    (string-join said "\n\n")))
 
 ;;; Answering
 
@@ -249,6 +265,18 @@ pays for in tokens and reads around."
 (defun aob-mcp--content (text)
   `(:content [(:type "text" :text ,(aob-mcp--cap (aob-mcp--lines text)))]))
 
+(defun aob-mcp-structured (data)
+  "A handler's value answering with DATA, a JSON object, as structured content."
+  (list 'aob-mcp--structured data))
+
+(defun aob-mcp--answer (value)
+  "The result a handler's VALUE becomes."
+  (if (eq (car-safe value) 'aob-mcp--structured)
+      (let ((data (cadr value)))
+        `(:content [(:type "text" :text ,(aob-mcp--cap (decode-coding-string (json-serialize data) 'utf-8)))]
+          :structuredContent ,data))
+    (aob-mcp--content value)))
+
 (defun aob-mcp-defer (conn id &optional timeout)
   "Park CONN and ID under a fresh key for `aob-mcp-complete' to answer.
 Nothing is parked forever: whatever was going to complete the call may
@@ -341,7 +369,7 @@ answered and the text instead of answering CONN."
       (condition-case err
           (let ((value (funcall (plist-get spec :handler) args conn id)))
             (unless (eq value aob-mcp-deferred)
-              (aob-mcp--result conn id (aob-mcp--content value))))
+              (aob-mcp--result conn id (aob-mcp--answer value))))
         (error (aob-mcp--error conn id -32000 (error-message-string err)))))))
 
 (defun aob-mcp--dispatch (conn req)
@@ -351,12 +379,15 @@ answered and the text instead of answering CONN."
     (pcase method
       ("initialize"
        (aob-mcp--result
-        conn id `(:protocolVersion ,(let ((want (plist-get params :protocolVersion)))
-                                      (if (member want aob-mcp-protocol-versions)
-                                          want
-                                        aob-mcp-protocol-version))
-                  :capabilities (:tools (:listChanged :false))
-                  :serverInfo (:name "aob" :version "0.1"))))
+        conn id (append
+                 `(:protocolVersion ,(let ((want (plist-get params :protocolVersion)))
+                                       (if (member want aob-mcp-protocol-versions)
+                                           want
+                                         aob-mcp-protocol-version))
+                   :capabilities (:tools (:listChanged :false))
+                   :serverInfo (:name "aob" :version "0.1"))
+                 (when-let* ((said (aob-mcp--instructions)))
+                   (list :instructions said)))))
       ("notifications/initialized" (aob-mcp--accepted conn))
       ("ping" (aob-mcp--result conn id (list)))
       ("tools/list" (aob-mcp--result conn id `(:tools ,(aob-mcp--listing))))
@@ -415,6 +446,7 @@ token that scopes which session is calling is not a password.")
                  (target (and (string-match "^[A-Z]+ +\\([^ ]+\\)" headers)
                               (match-string 1 headers)))
                  (aob-mcp-session (and target (aob-mcp--query target "session")))
+                 (aob-mcp-project (and target (aob-mcp--query target "project")))
                  (req (condition-case nil
                           (json-parse-string body :object-type 'plist
                                              :array-type 'list

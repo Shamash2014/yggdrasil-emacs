@@ -17,6 +17,8 @@
     ("session_list" () ())
     ("session_read" ("id") ("id"))
     ("session_say" ("id" "text") ("id" "text"))
+    ("skill_load" ("name") ("name"))
+    ("skill_search" ("query" "k") ("query"))
     ("todo_add" ("text" "section" "file") ("text"))
     ("todo_list" ("file" "all") ())
     ("todo_remove" ("id" "expect" "file") ("id"))
@@ -29,7 +31,7 @@
 
 (ert-deftest aob-trim-tools-list-is-short-and-keeps-every-argument ()
   (let ((listing (aob-mcp--listing)))
-    (should (< (length (json-serialize `(:tools ,listing))) 5500))
+    (should (< (length (json-serialize `(:tools ,listing))) 5800))
     (should (equal (mapcar (lambda (tool) (plist-get tool :name)) listing)
                    (mapcar #'car aob-trim-tests--schemas)))
     (seq-doseq (tool listing)

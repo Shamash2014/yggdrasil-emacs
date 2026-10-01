@@ -410,7 +410,8 @@ either the old file or the new one, never half of each."
         (let ((coding-system-for-write 'utf-8-unix)
               (modes (file-modes path)))
           (with-temp-file tmp
-            (insert (json-serialize table :null-object nil :false-object :false))
+            ;; json-serialize hands back UTF-8 bytes, which the pretty printer escapes
+            (json-insert table :null-object nil :false-object :false)
             (json-pretty-print-buffer)
             (goto-char (point-max))
             (insert "\n"))
@@ -897,5 +898,126 @@ where it earns its place back."
            (term-mode)
            (term-char-mode)
            (current-buffer)))))))
+
+;;; Skill listing
+
+(declare-function ygg-skill-index-skills "ygg-skill-index" (&optional project all))
+(declare-function ygg-skill-index-read "ygg-skill-index" (file dir prefix))
+(defvar ygg-skill-index-agents-dir)
+
+(defcustom ygg-agent-skill-core
+  '("code-review" "claiming-a-device" "100czk-pr-format" "cog2" "cog3"
+    "debug-mantra" "show-me" "figma-build-design" "create-pr" "grill-me"
+    "unslop" "explain-architecture" "scrutinize" "differential-review"
+    "agent-browser" "daemon")
+  "Skills whose descriptions every agent is always shown.
+Every other skill is listed by name alone, and found through skill_search."
+  :type '(repeat string) :group 'yggdrasil)
+
+(defun ygg-agent--skill-core-p (name)
+  (or (member name ygg-agent-skill-core)
+      (member (car (last (split-string name ":"))) ygg-agent-skill-core)))
+
+(defun ygg-agent-skill-overrides (current skills)
+  "CURRENT skillOverrides, with SKILLS outside the core listed by name.
+A skill already off or hidden from the model stays so, one explicitly on
+stays on, and a core skill named only is given its description back.
+Plugin skills get no entry: the CLI ignores overrides for them.  Neither
+do skills the model may not invoke, which are never listed."
+  (let ((out (if (hash-table-p current) (copy-hash-table current)
+               (make-hash-table :test #'equal))))
+    (dolist (skill skills)
+      (let* ((name (plist-get skill :name))
+             (have (gethash name out)))
+        (unless (or (equal (plist-get skill :kind) "plugin")
+                    (eq t (plist-get skill :dmi))
+                    (member have '("off" "user-invocable-only" "on")))
+          (if (ygg-agent--skill-core-p name)
+              (when (equal have "name-only") (remhash name out))
+            (puthash name "name-only" out)))))
+    out))
+
+(defun ygg-agent--table-changes (old new)
+  "Keys whose value differs between OLD and NEW, as (KEY OLD-VALUE NEW-VALUE)."
+  (let (keys)
+    (dolist (table (list old new))
+      (when (hash-table-p table)
+        (maphash (lambda (k _) (cl-pushnew k keys :test #'equal)) table)))
+    (seq-keep (lambda (k)
+                (let ((a (and (hash-table-p old) (gethash k old)))
+                      (b (gethash k new)))
+                  (unless (equal a b) (list k a b))))
+              (sort keys #'string<))))
+
+;;;###autoload
+(defun ygg-agent-write-skill-overrides (file &optional project)
+  "Write the name-only skill listing into the settings FILE.
+PROJECT's own skills count too.  Returns what changed, as (NAME OLD NEW)."
+  (interactive
+   (list (read-file-name "Settings file: " "~/.claude/" nil t "settings.json")
+         (and current-prefix-arg (read-directory-name "Project whose skills count too: "))))
+  (require 'ygg-skill-index)
+  (let* ((json (or (ygg-agent--read-json file) (user-error "Not readable as JSON: %s" file)))
+         (current (gethash "skillOverrides" json))
+         (new (ygg-agent-skill-overrides current (ygg-skill-index-skills project t)))
+         (changes (ygg-agent--table-changes current new)))
+    (when changes
+      (puthash "skillOverrides" new json)
+      (unless (ygg-agent--replace-json file json)
+        (error "Could not write %s" file)))
+    (when (called-interactively-p 'interactive)
+      (message "%d skill override(s) changed in %s" (length changes) file))
+    changes))
+
+(defun ygg-agent--implicit-off (yaml)
+  "YAML, an agents/openai.yaml, saying the skill is not offered unasked."
+  (let ((block "policy:\n  allow_implicit_invocation: false"))
+    (cond ((null yaml) (concat block "\n"))
+          ((string-match "^\\([ \t]+allow_implicit_invocation:\\).*$" yaml)
+           (replace-match "\\1 false" t nil yaml))
+          ((string-match "^policy:[ \t]*\n\\([ \t]+\\)" yaml)
+           (replace-match "policy:\n\\1allow_implicit_invocation: false\n\\1" t nil yaml))
+          ((string-match "^policy:.*$" yaml)
+           (replace-match block t t yaml))
+          (t (concat yaml (if (string-suffix-p "\n" yaml) "" "\n") block "\n")))))
+
+(defun ygg-agent-codex-skill-policies (&optional dir)
+  "Edits to agents/openai.yaml keeping DIR\='s non-core skills from codex.
+Codex has no name-only listing; a skill it is not offered is still one
+the user can name.  A skill DIR only links to lives elsewhere, and is
+left alone.  Each edit is (FILE OLD NEW), OLD nil for a new file."
+  (require 'ygg-skill-index)
+  (let* ((dir (expand-file-name (or dir ygg-skill-index-agents-dir)))
+         (true (file-name-as-directory (file-truename dir)))
+         out)
+    (dolist (skill-dir (and (file-directory-p dir)
+                            (directory-files dir t directory-files-no-dot-files-regexp)))
+      (let ((md (expand-file-name "SKILL.md" skill-dir)))
+        (when (and (file-regular-p md)
+                   (string-prefix-p true (file-truename skill-dir))
+                   (not (ygg-agent--skill-core-p
+                         (plist-get (ygg-skill-index-read md skill-dir nil) :name))))
+          (let* ((file (expand-file-name "agents/openai.yaml" skill-dir))
+                 (old (when (file-readable-p file)
+                        (with-temp-buffer
+                          (let ((coding-system-for-read 'utf-8)) (insert-file-contents file))
+                          (buffer-string))))
+                 (new (ygg-agent--implicit-off old)))
+            (unless (equal old new) (push (list file old new) out))))))
+    (nreverse out)))
+
+;;;###autoload
+(defun ygg-agent-write-codex-skill-policies (&optional dir)
+  "Keep DIR's non-core skills out of codex's model-visible list.
+Returns the files written."
+  (interactive)
+  (let ((edits (ygg-agent-codex-skill-policies dir))
+        (coding-system-for-write 'utf-8-unix))
+    (pcase-dolist (`(,file ,_old ,new) edits)
+      (make-directory (file-name-directory file) t)
+      (with-temp-file file (insert new)))
+    (when (called-interactively-p 'interactive)
+      (message "%d codex skill polic(ies) written" (length edits)))
+    (mapcar #'car edits)))
 
 (provide 'ygg-agent-conf)

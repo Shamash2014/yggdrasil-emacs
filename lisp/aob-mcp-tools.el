@@ -22,6 +22,7 @@
 ;;; Code:
 
 (require 'aob-mcp)
+(require 'ygg-skill-index)
 
 (defconst aob-mcp-tools-limit 200
   "How many lines an answer may run to before it is cut short.")
@@ -317,6 +318,50 @@ open is refused rather than read."
      (if names
          (mapconcat #'identity names "\n")
        "no tools registered"))))
+
+;;; Skills
+
+(defconst aob-mcp-tools-always-load '(:anthropic/alwaysLoad t)
+  "The _meta that keeps a tool out from behind the client's tool search.")
+
+(aob-mcp-deftool
+ :name "skill_search"
+ :description "Rank the skills this agent can use against a task; best first."
+ :args '((:name "query" :type string
+          :description "The task in your own words: goal, domain, tools involved.")
+         (:name "k" :type integer :optional t
+          :description "How many results; 5 if omitted."))
+ :meta aob-mcp-tools-always-load
+ :instructions "Before starting any non-trivial task, call skill_search with a query written from the task. When a result fits, use it before anything else: call the Skill tool with its name if you have one, otherwise call skill_load with the name and follow what it returns."
+ :handler
+ (lambda (args _conn _id)
+   (aob-mcp-structured
+    (list :results
+          (vconcat (ygg-skill-index-search (plist-get args :query)
+                                           (aob-mcp-tools--int (plist-get args :k))
+                                           aob-mcp-project))))))
+
+(aob-mcp-deftool
+ :name "skill_load"
+ :description "A skill's instructions and the names of the files beside them."
+ :args '((:name "name" :type string
+          :description "Skill name as skill_search gave it."))
+ :meta aob-mcp-tools-always-load
+ :handler
+ (lambda (args _conn _id)
+   (let* ((name (plist-get args :name))
+          (found (ygg-skill-index-find name aob-mcp-project)))
+     (if-let* ((skill (car found)))
+         (let ((files (ygg-skill-index-files skill)))
+           (concat (ygg-skill-index-body skill)
+                   (format "\n\n---\nskill %s, in %s\n" (plist-get skill :name)
+                           (file-name-directory (plist-get skill :path)))
+                   (if files
+                       (concat "files beside it (read them when the skill points at them):\n"
+                               (mapconcat (lambda (f) (concat "- " f)) files "\n"))
+                     "no other files")))
+       (format "no skill named %s; closest: %s" name
+               (string-join (cdr found) ", "))))))
 
 
 ;;; Other conversations
