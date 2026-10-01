@@ -793,51 +793,21 @@ Nothing is started: writing to it is what brings its agent back."
   (and (aob-session-ref s :asleep) t))
 
 (declare-function aob-trace--name "aob-trace" (s))
-(declare-function aob-trace--render "aob-trace" (&optional full))
-(defvar aob-trace--blocks)
-(defvar aob-trace--session-id)
-(defvar aob-buffer-session-id)
 
-(defun aob-transcript--hand-over (old live)
-  "Give OLD\='s trace buffer to LIVE, and its windows with it.
-A resumed conversation is a new session object under a new name, and
-a new name is a new buffer: what you were reading would be left in a
-buffer nothing writes to, beside a fresh one that looks empty."
-  (when-let* ((buf (get-buffer (aob-trace--name old))))
-    (let* ((wanted (aob-trace--name live))
-           (clash (unless (equal wanted (buffer-name buf)) (get-buffer wanted)))
-           (wins (and clash (get-buffer-window-list clash nil t))))
-      (when clash (kill-buffer clash))
-      (with-current-buffer buf
-        (unless (equal (buffer-name) wanted) (rename-buffer wanted))
-        (setq aob-trace--session-id (aob-session-id live))
-        (setq aob-buffer-session-id (aob-session-id live))
-        (setq aob-trace--blocks nil)
-        (let ((inhibit-read-only t)) (erase-buffer))
-        (aob-trace--render t))
-      (setf (aob-session-buffer live) buf)
-      ;; the window the resume opened shows what we already have open:
-      ;; one conversation, one window, rather than the same trace twice
-      (dolist (win wins)
-        (when (window-live-p win)
-          (if (get-buffer-window buf (window-frame win))
-              (unless (eq win (frame-root-window (window-frame win)))
-                (ignore-errors (delete-window win)))
-            (set-window-buffer win buf))))
-      buf)))
+(defun aob-transcript--revive (s)
+  "Bring asleep S's agent back; return the session that takes S\='s place.
+The resume succeeds S: its trace, still showing what you were reading in
+the windows it was in, its row in every list, and its events until the
+agent says more."
+  (let ((live (aob-acp-resume-entry (aob-session-ref s :asleep))))
+    (unless live
+      (user-error "aob: %s would not come back" (aob-session-name s)))
+    live))
 
 (defun aob-transcript--wake (fn s &rest args)
-  "Bring S's agent back before sending to it, if it is asleep.
-The session the resume makes is the live one; this one has served its
-purpose and would otherwise sit in every list beside it."
-  (if-let* ((entry (aob-session-ref s :asleep)))
-      (let ((live (aob-acp-resume-entry entry)))
-        (unless live
-          (user-error "aob: %s would not come back" (aob-session-name s)))
-        (aob-session-put s :asleep nil)
-        (aob-transcript--hand-over s live)
-        (ignore-errors (aob-remove-session s))
-        (apply fn live args))
+  "Bring S's agent back before sending to it, if it is asleep."
+  (if (aob-session-ref s :asleep)
+      (apply fn (aob-transcript--revive s) args)
     (apply fn s args)))
 
 (advice-add 'aob-prompt :around #'aob-transcript--wake)
@@ -849,16 +819,13 @@ Writing to a sleeping conversation wakes it anyway; this is for when
 you want it awake first — to set a mode or a model, or just to have it
 there."
   (interactive (list (aob-target)))
-  (let ((entry (or (aob-session-ref s :asleep)
-                   (user-error "aob: %s is already awake" (aob-session-name s)))))
-    (let ((live (aob-acp-resume-entry entry)))
-      (unless live
-        (user-error "aob: %s would not come back" (aob-session-name s)))
-      (aob-session-put s :asleep nil)
-      (aob-transcript--hand-over s live)
-      (ignore-errors (aob-remove-session s))
-      (when (fboundp 'aob-trace) (aob-trace live))
-      live)))
+  (unless (aob-session-ref s :asleep)
+    (user-error "aob: %s is already awake" (aob-session-name s)))
+  (let ((live (aob-transcript--revive s)))
+    (when (and (fboundp 'aob-trace)
+               (not (get-buffer-window (aob-trace--name live) 'visible)))
+      (aob-trace live))
+    live))
 
 (provide 'aob-transcript)
 ;;; aob-transcript.el ends here

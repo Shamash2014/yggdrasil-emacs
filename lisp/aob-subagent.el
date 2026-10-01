@@ -255,10 +255,83 @@ its trace."
          (kid (or (aob-session-get (gethash sid (aob-subagent--native-kids root)))
                   (aob-subagent--native-open root owner ev))))
     (aob-session-put kid :announced t)
+    (aob-session-put kid :ended nil)
     (aob-subagent--native-sync kid ev)
     (dolist (call (aob-session-subagents owner))
       (aob-subagent--pair-call owner call))
+    (unless (aob-session-ref kid :paired-call)
+      (aob-subagent--stand-in-open owner kid ev))
     kid))
+
+(defun aob-subagent--stand-in (owner kid)
+  "The row in OWNER's trace that stands in for the call that sent KID, or nil."
+  (let ((sid (aob-session-ref kid :native-tool-id)))
+    (seq-find (lambda (e) (and (plist-get e :stand-in) (equal sid (plist-get e :tool-id))))
+              (aob-session-events owner))))
+
+(defun aob-subagent--stand-in-open (owner kid ev)
+  "Give OWNER a row for KID, from its announcement EV, unless it has one.
+An agent that announces its subagents sends none of the calls that made
+them, and a sender whose trace has no row for its delegation reads as
+one working alone."
+  (if-let* ((row (aob-subagent--stand-in owner kid)))
+      (progn (plist-put row :status "in_progress")
+             (plist-put row :done-ts nil)
+             (plist-put row :line nil)
+             (aob--dirty owner))
+    (aob-event owner 'tool :tool-id (plist-get ev :tool-id)
+               :kind "think" :title (aob-session-name kid) :raw (plist-get ev :raw)
+               :subagent t :stand-in t :status "in_progress")))
+
+(defun aob-subagent--stand-in-drop (owner kid)
+  "Take KID's stand-in row out of OWNER's trace: the real call came."
+  (when-let* ((row (aob-subagent--stand-in owner kid)))
+    (setf (aob-session-events owner) (delq row (aob-session-events owner)))
+    (cl-decf (aob-session-nevents owner))
+    (aob--dirty owner)))
+
+(defun aob-subagent--last-words (s)
+  "What S said last, or nil."
+  (when-let* ((ev (seq-find (lambda (e) (eq (plist-get e :type) 'message))
+                            (aob-session-events s)))
+              (text (string-trim (aob-event-text ev)))
+              ((not (string-empty-p text))))
+    text))
+
+(defun aob-subagent--stand-in-follow (kid _old new)
+  "Keep the row standing in for KID's call level with KID's state NEW."
+  (when-let* (((aob-session-ref kid :announced))
+              (owner (aob-subagent-parent kid))
+              (row (aob-subagent--stand-in owner kid)))
+    (let ((status (pcase new
+                    ((or 'working 'blocked 'starting) "in_progress")
+                    ('done (if (equal (aob-session-ref kid :ended) "cancelled")
+                               "cancelled"
+                             "completed"))
+                    (_ "failed"))))
+      (unless (equal status (plist-get row :status))
+        (plist-put row :status status)
+        (plist-put row :ended (aob-session-ref kid :ended))
+        (unless (equal status "in_progress")
+          (plist-put row :done-ts (float-time))
+          (when-let* ((said (aob-subagent--last-words kid)))
+            (plist-put row :content
+                       (list (list :type "content"
+                                   :content (list :type "text" :text said))))))
+        (plist-put row :line nil)
+        (aob--dirty owner)))))
+
+(add-hook 'aob-state-change-hook #'aob-subagent--stand-in-follow)
+
+(defun aob-subagent-announced-settle (root)
+  "End every subagent ROOT's agent announced that is still working, as
+cancelled: the runtime that ran them is gone and will not say so."
+  (when-let* ((kids (aob-session-ref root :native-kids)))
+    (dolist (id (delete-dups (hash-table-values kids)))
+      (when-let* ((kid (aob-session-get id))
+                  ((aob-session-ref kid :announced))
+                  ((memq (aob-session-state kid) '(working blocked))))
+        (aob-subagent-announced-end kid 'done "cancelled")))))
 
 (defun aob-subagent--pair-call (owner ev)
   "Trace OWNER's subagent call EV in the announced subagent of the same
@@ -273,11 +346,17 @@ name, which is the call's description, is all the two share."
                                                   (equal name (aob-session-name c))))
                                  (aob-subagent-children owner))))
         (aob-session-put kid :paired-call (plist-get ev :tool-id))
-        (puthash (plist-get ev :tool-id) (aob-session-id kid) kids)))))
+        (puthash (plist-get ev :tool-id) (aob-session-id kid) kids)
+        (aob-subagent--stand-in-drop owner kid)))))
 
-(defun aob-subagent-announced-end (kid state)
-  "End KID, a subagent its agent announced, in STATE."
+(defun aob-subagent-announced-end (kid state &optional why)
+  "End KID, a subagent its agent announced, in STATE.
+WHY, such as cancelled or disconnected, is how it stopped when STATE
+alone does not say."
   (unless (eq state (aob-session-state kid))
+    (aob-session-put kid :ended why)
+    (when why
+      (aob-event kid 'state :title (format "subagent %s" why)))
     (aob-turn-end kid)
     (aob-set-state kid state)))
 

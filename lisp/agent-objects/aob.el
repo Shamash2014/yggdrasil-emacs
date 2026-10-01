@@ -85,19 +85,89 @@ session taking the first one's key is a session that disappears."
 
 (defun aob-remove-session (s)
   (remhash (aob-session-id s) aob--sessions)
-  (setq aob--order (delete (aob-session-id s) aob--order))
-  (run-hook-with-args 'aob-session-removed-hook s)
-  ;; gc: views of the dead object die with it, and the struct sheds its
-  ;; bulk so closures still holding it keep only a husk
-  (dolist (b (buffer-list))
-    (when (and (equal (buffer-local-value 'aob-buffer-session-id b)
-                      (aob-session-id s))
-               (buffer-live-p b))
-      (kill-buffer b)))
-  (setf (aob-session-events s) nil)
-  (setf (aob-session-decisions s) nil)
-  (aob-session-put s :queued nil)
-  (aob--dirty))
+  (aob--retire s))
+
+(defun aob--retire (s &optional heir)
+  "See S, already out of the registry, out of every list and view.
+HEIR, the session that took S\='s place under S\='s own id, keeps that
+id in the order and every view that answers to it."
+  (let ((id (aob-session-id s))
+        (same (and heir (equal (aob-session-id heir) (aob-session-id s)))))
+    (unless same (setq aob--order (delete id aob--order)))
+    (run-hook-with-args 'aob-session-removed-hook s)
+    ;; gc: views of the dead object die with it, and the struct sheds its
+    ;; bulk so closures still holding it keep only a husk
+    (unless same
+      (dolist (b (buffer-list))
+        (when (and (equal (buffer-local-value 'aob-buffer-session-id b) id)
+                   (buffer-live-p b))
+          (kill-buffer b))))
+    (setf (aob-session-events s) nil)
+    (setf (aob-session-decisions s) nil)
+    (aob-session-put s :queued nil)
+    (aob--dirty)))
+
+(defvar aob-session-succession-functions nil
+  "Abnormal hook run with OLD and NEW as NEW is made to take OLD\='s place.
+It runs before anything else hears of NEW, so a view of OLD handed over
+here is the one that shows NEW: the same buffer, in the same windows.")
+
+(defvar aob--succeeding nil
+  "The session the next one made takes the place of, inside `aob-succeed'.")
+
+(defvar aob--successor nil
+  "The session made to take another\='s place, inside `aob-succeed'.")
+
+(defun aob-succeed (old make)
+  "Call MAKE for the session that takes OLD\='s place, and return it.
+The one MAKE makes is handed OLD\='s events, marked :seeded, and through
+`aob-session-succession-functions' OLD\='s views, so a conversation
+brought back reads as it did until its agent says more.  OLD\='s id is
+free while MAKE runs, for a successor that keeps OLD\='s name.  OLD goes
+only once MAKE has answered with a session; when it signals or answers
+anything else, OLD is where it was, its views handed back, and every
+list still has it."
+  (let* ((id (aob-session-id old))
+         (next (cadr (member id aob--order)))
+         (aob--successor nil)
+         (made nil))
+    (remhash id aob--sessions)
+    (unwind-protect
+        (let ((aob--succeeding old))
+          (setq made (funcall make)))
+      (if (and (aob-session-p made) (not (eq made old)))
+          (progn (aob--retire old made)
+                 (aob--order-before (aob-session-id made) next))
+        (when-let* ((heir aob--successor))
+          (run-hook-with-args 'aob-session-succession-functions heir old)
+          (remhash (aob-session-id heir) aob--sessions)
+          (aob--retire heir old))
+        (puthash id old aob--sessions)
+        (aob--order-before id next)))
+    made))
+
+(defun aob--order-before (id next)
+  "Put ID in `aob--order' right before NEXT, or last when NEXT is nil."
+  (let ((order (delete id aob--order)))
+    (setq aob--order
+          (if-let* ((tail (and next (member next order))))
+              (append (seq-take order (- (length order) (length tail)))
+                      (cons id tail))
+            (append order (list id))))))
+
+(defun aob--take-place (s)
+  "Give S the events and views of the session it succeeds, if any."
+  (when-let* ((old aob--succeeding))
+    (setq aob--succeeding nil
+          aob--successor s)
+    (unless (aob-session-events s)
+      (setf (aob-session-events s)
+            (mapcar (lambda (ev) (plist-put (copy-sequence ev) :seeded t))
+                    (aob-session-events old))
+            (aob-session-nevents s) (length (aob-session-events s))))
+    (run-hook-with-args 'aob-session-succession-functions old s)))
+
+(add-hook 'aob-session-created-hook #'aob--take-place -90)
 
 (defun aob-session-put (s key val)
   (setf (aob-session-extra s) (plist-put (aob-session-extra s) key val)))

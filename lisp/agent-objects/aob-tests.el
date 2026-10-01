@@ -879,6 +879,160 @@ a current_model_update names another model."
         (should-not picked)
         (should (= (length aob-state-change-hook) depth))))))
 
+(ert-deftest aob-model-waits-on-a-working-session-with-no-options ()
+  ;; a spawn with an intent is working before its handshake: M then must
+  ;; wait for the options, not report a session that advertises nothing
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (let (picked)
+      (cl-letf* (((symbol-function 'run-at-time)
+                  (lambda (_ _ fn &rest args) (apply fn args)))
+                 ((symbol-function 'aob-acp--model-1)
+                  (lambda (_s) (setq picked t))))
+        (aob-acp-model s)
+        (should-not picked)
+        (aob-set-state s 'blocked)
+        (should-not picked)
+        (cl-letf (((symbol-function 'aob-acp--flush-queue) #'ignore))
+          (aob-acp--session-opened
+           s (list :sessionId "sess-test"
+                   :configOptions (vector aob-tests--codex-model-option))))
+        (should picked)))))
+
+(ert-deftest aob-model-on-an-opened-session-with-no-options-does-not-wait ()
+  ;; an agent that never advertises a model must be told so at once, not
+  ;; waited on across every working and blocked turn
+  (aob-tests--with-session s
+    (aob-session-put s :opened t)
+    (aob-set-state s 'working)
+    (let ((hooks aob-state-change-hook))
+      (should-error (aob-acp-model s) :type 'user-error)
+      (should (equal aob-state-change-hook hooks)))))
+
+(ert-deftest aob-model-on-an-asleep-session-keeps-it-for-the-wake ()
+  ;; asleep there is no connection to ask: the choice goes where the
+  ;; resume reads it, and nothing is sent
+  (let ((s (aob-create-session :id "acp:test:asleep" :backend 'acp
+                               :name "asleep" :project "/tmp/proj/"
+                               :dir "/tmp/proj/" :state 'done))
+        sent)
+    (unwind-protect
+        (progn
+          (aob-session-put s :agent "claude")
+          (aob-session-put s :mode-id "default")
+          (aob-session-put s :asleep (list :acp-id "sess-asleep" :agent "claude"))
+          (cl-letf (((symbol-function 'aob-acp--request)
+                     (lambda (&rest args) (push args sent)))
+                    ((symbol-function 'completing-read)
+                     (lambda (&rest _) "haiku")))
+            (aob-acp-model s))
+          (should-not sent)
+          (should (equal (aob-session-ref s :want-model) "haiku"))
+          (should (equal (plist-get (aob-session-ref s :asleep) :model) "haiku")))
+      (aob-remove-session s))))
+
+(ert-deftest aob-model-switch-that-lands-elsewhere-is-traced ()
+  ;; the reply carries the model the agent is on; one other than asked
+  ;; for, or a refusal, is a line in the trace naming what it runs
+  (aob-tests--with-session s
+    (aob-acp--config-apply s (list aob-tests--codex-model-option))
+    (let (sent)
+      (cl-letf (((symbol-function 'aob-acp--send-proc)
+                 (lambda (_proc msg) (push msg sent))))
+        (aob-acp--set-model s "gpt-5.2")
+        (aob-tests--answer s (car sent)
+                           (list :configOptions (vector aob-tests--codex-model-option)))
+        (let ((ev (seq-find (lambda (e) (plist-get e :warning)) (aob-session-events s))))
+          (should ev)
+          (should (string-match-p "gpt-5.2" (plist-get ev :title)))
+          (should (string-match-p "GPT-5.2 Codex" (plist-get ev :title))))
+        (setf (aob-session-events s) nil)
+        (aob-acp--set-model s "gpt-5.2")
+        (aob-tests--feed s (json-serialize
+                            (list :jsonrpc "2.0" :id (plist-get (car sent) :id)
+                                  :error (list :code -32602 :message "Invalid params"))))
+        (let ((ev (seq-find (lambda (e) (plist-get e :warning)) (aob-session-events s))))
+          (should ev)
+          (should (string-match-p "Invalid params" (plist-get ev :title)))
+          (should (string-match-p "GPT-5.2 Codex" (plist-get ev :title))))))))
+
+(ert-deftest aob-want-model-ambiguous-names ()
+  ;; a name several models carry is not the first of them: codex takes
+  ;; exact ids only and is refused, claude resolves the name itself
+  (aob-tests--with-session s
+    (let (set info)
+      (cl-letf (((symbol-function 'aob-acp--model-info) (lambda (_s) info))
+                ((symbol-function 'aob-acp--set-model)
+                 (lambda (_s id) (setq set id))))
+        (setq info (cons "gpt-5.5"
+                         (list (list :value "gpt-5.5" :name "GPT-5.5")
+                               (list :value "gpt-5.6-sol" :name "GPT-5.6 Sol")
+                               (list :value "gpt-5.6-terra" :name "GPT-5.6 Terra"))))
+        (aob-session-put s :agent "codex")
+        (aob-acp--want-model s "gpt-5.6")
+        (should-not set)
+        (let ((ev (seq-find (lambda (e) (plist-get e :warning)) (aob-session-events s))))
+          (should ev)
+          (should (string-match-p "gpt-5.6-sol" (plist-get ev :title)))
+          (should (string-match-p "gpt-5.6-terra" (plist-get ev :title))))
+        (setq info (cons "default"
+                         (list (list :value "default" :name "Default")
+                               (list :value "sonnet" :name "Sonnet")
+                               (list :value "sonnet[1m]" :name "Sonnet (1M context)"))))
+        (aob-acp--want-model s "sonn")
+        (should (equal set "sonnet"))
+        (setq set nil)
+        (setq info (cons "default"
+                         (list (list :value "default" :name "Default")
+                               (list :value "sonnet" :name "Sonnet 4.6")
+                               (list :value "opus" :name "Opus 4.6"))))
+        (aob-session-put s :agent "claude")
+        (aob-acp--want-model s "4.6")
+        (should (equal set "4.6"))))))
+
+(ert-deftest aob-usage-model-meta-is-the-live-model ()
+  ;; the model that answered rides usage_update's _meta; the header names
+  ;; it only when it is not the one picked
+  (aob-tests--with-session s
+    (aob-session-put s :model-id "sonnet")
+    (aob-tests--update s (list :sessionUpdate "usage_update" :used 10 :size 1000
+                               :_meta (list :_claude/model "claude-opus-4-7")))
+    (should (equal (aob-session-ref s :model-live) "claude-opus-4-7"))
+    (should (string-match-p "claude-opus-4-7" (aob-trace--header s)))
+    (aob-session-put s :model-id "opus")
+    (should-not (string-match-p "claude-opus-4-7" (aob-trace--header s)))
+    (aob-tests--update s (list :sessionUpdate "notice" :severity "info"
+                               :title "Model rerouted"
+                               :description "Switched from gpt-5.6-sol to gpt-5.5 (high load)."))
+    (should (equal (aob-session-ref s :model-live) "gpt-5.5"))
+    (aob-set-state s 'idle)
+    (cl-letf (((symbol-function 'aob-acp--request) #'ignore))
+      (aob-acp--prompt-1 s "again"))
+    (should-not (aob-session-ref s :model-live))))
+
+(ert-deftest aob-model-alias-names-its-live-model-without-warning ()
+  ;; default and opusplan pick no one model, so the one answering never
+  ;; contradicts them; a family that is not the live one still does
+  (aob-tests--with-session s
+    (aob-session-put s :model-live "claude-opus-4-7")
+    (let ((warns (lambda ()
+                   (let ((h (aob-trace--model s)))
+                     (text-property-any 0 (length h) 'face 'warning h)))))
+      (aob-session-put s :model-id "default")
+      (aob-session-put s :model-name "Default (recommended)")
+      (should-not (funcall warns))
+      (should (equal (substring-no-properties (aob-trace--model s))
+                     "default (opus-4-7)"))
+      (aob-session-put s :model-id "opusplan")
+      (aob-session-put s :model-name "Opus Plan Mode")
+      (should-not (funcall warns))
+      (aob-session-put s :model-id "sonnet")
+      (aob-session-put s :model-name "Sonnet")
+      (should (funcall warns))
+      (aob-session-put s :model-id "claude-sonnet-4-6")
+      (aob-session-put s :model-name "Sonnet 4.6")
+      (should (funcall warns)))))
+
 (ert-deftest aob-trace-target-from-anywhere ()
   ;; tail-follow parks point past all propertized text — verbs must
   ;; still resolve the trace's own session there
@@ -1419,9 +1573,17 @@ working, and ends only when the turn that sent it does."
              (or on "sess-test") sid)))
 
 (defun aob-tests--child-says (s sid text)
+  "Feed S what the subagent SID says, stamped with the Agent call that
+spawned it, as claude-agent-acp routes it."
   (aob-tests--feed
-   s (format "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"%s\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"%s\"}}}}"
+   s (format "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"%s\",\"update\":{\"sessionUpdate\":\"agent_message_chunk\",\"content\":{\"type\":\"text\",\"text\":\"%s\"},\"_meta\":{\"claudeCode\":{\"parentToolUseId\":\"toolu_A\"}}}}}"
              sid text)))
+
+(defun aob-tests--child-tool (s sid id title &optional stamp tool)
+  "Feed S the tool call ID the subagent SID makes, stamped STAMP or toolu_A."
+  (aob-tests--feed
+   s (format "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"%s\",\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"%s\",\"title\":\"%s\",\"kind\":\"execute\",\"status\":\"in_progress\",\"rawInput\":{\"description\":\"%s\"},\"_meta\":{\"claudeCode\":{\"toolName\":\"%s\",\"parentToolUseId\":\"%s\"}}}}}"
+             sid id title title (or tool "Bash") (or stamp "toolu_A"))))
 
 (defun aob-tests--child-ends (s sid state)
   (aob-tests--feed
@@ -1445,8 +1607,8 @@ leaves the connection announcing, and one that takes neither does not."
         (aob-acp--initialize proc)
         (let* ((caps (plist-get (plist-get (car sent) :params) :clientCapabilities))
                (json (json-serialize caps)))
-          (should (hash-table-p (plist-get caps :subagents)))
-          (should (string-match-p "\"subagents\":{}" json))
+          (should-not (plist-member caps :subagents))
+          (should-not (string-match-p "\"subagents\"" json))
           (should (string-match-p (regexp-quote "\"subagent-transcript\":true,\"terminal_output_delta\":true,\"jetbrains\":{\"air\":{\"version\":1,\"capabilities\":[\"nativeSubagentSessions\"]}}")
                                   json))))
       (aob-tests--feed s (format "{\"jsonrpc\":\"2.0\",\"id\":%d,\"result\":{\"protocolVersion\":1,\"agentCapabilities\":{\"sessionCapabilities\":{\"subagents\":{}}},\"_meta\":{\"jetbrains\":{\"air\":{\"version\":1,\"capabilities\":[\"nativeSubagentSessions\"]}}}}}"
@@ -1520,12 +1682,146 @@ each subagent comes back once, with its words and its end."
             (should (eq 'done (aob-session-state (car kids))))))
       (aob-tests--kill-views))))
 
-(ert-deftest aob-announced-subagent-that-stops-otherwise-fails ()
+(ert-deftest aob-announced-subagent-ends-as-it-was-stopped ()
+  "Cancelled is done and says so; disconnected and failed fail, the one
+that lost its agent saying that too."
+  (pcase-dolist (`(,state ,ends ,row) '(("cancelled" done "cancelled")
+                                         ("disconnected" failed "disconnected")
+                                         ("failed" failed "failed")))
+    (aob-tests--with-session s
+      (unwind-protect
+          (progn
+            (process-put (aob-session-conn s) 'aob-subagents t)
+            (aob-tests--announce s "child-1")
+            (aob-tests--child-ends s "child-1" state)
+            (let ((kid (car (aob-subagent-children s))))
+              (should (eq ends (aob-session-state kid)))
+              (unless (equal state "failed")
+                (should (seq-find (lambda (e) (and (eq (plist-get e :type) 'state)
+                                                   (string-match-p state (plist-get e :title))))
+                                  (aob-session-events kid))))
+              (with-current-buffer (aob-subagents-buffer s)
+                (aob-subagents--render t)
+                (should (string-match-p (concat "^" row " ") (buffer-string))))))
+        (aob-tests--kill-views)))))
+
+(ert-deftest aob-announced-subagent-trace-shows-its-own-stamped-steps ()
+  "Every step claude routes to a subagent is stamped with the Agent call
+that spawned it; that stamp is the subagent's own, so its trace shows
+its words, steps and plan, and only a call it made itself nests."
   (aob-tests--with-session s
-    (process-put (aob-session-conn s) 'aob-subagents t)
-    (aob-tests--announce s "child-1")
-    (aob-tests--child-ends s "child-1" "cancelled")
-    (should (eq 'failed (aob-session-state (car (aob-subagent-children s)))))))
+    (unwind-protect
+        (progn
+          (process-put (aob-session-conn s) 'aob-subagents t)
+          (aob-tests--announce s "child-1")
+          (aob-tests--child-says s "child-1" "There are 12 files.")
+          (aob-tests--child-tool s "child-1" "toolu_c1" "find src | wc -l")
+          (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"sessionId\":\"child-1\",\"update\":{\"sessionUpdate\":\"plan\",\"entries\":[{\"content\":\"a\",\"status\":\"completed\",\"priority\":\"medium\"},{\"content\":\"b\",\"status\":\"pending\",\"priority\":\"medium\"}],\"_meta\":{\"claudeCode\":{\"parentToolUseId\":\"toolu_A\"}}}}}")
+          (aob-tests--child-tool s "child-1" "toolu_N" "Look deeper" "toolu_A" "Agent")
+          (aob-tests--child-tool s "child-1" "toolu_g" "rg deeper" "toolu_N")
+          (let ((kid (car (aob-subagent-children s))))
+            (should (equal '(1 . 2) (aob-session-ref kid :plan-progress)))
+            (should (equal "toolu_N"
+                           (plist-get (seq-find (lambda (e) (equal (plist-get e :tool-id) "toolu_g"))
+                                                (aob-session-events kid))
+                                      :parent)))
+            (with-current-buffer (aob-trace-buffer kid)
+              (aob-trace--render t)
+              (let ((text (buffer-string)))
+                (should (string-match-p "There are 12 files" text))
+                (should (string-match-p "find src" text))
+                (should (string-match-p "Look deeper" text))))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-announced-subagent-stands-in-for-its-hidden-call ()
+  "With native subagents the adapter sends no Agent call; the announcement
+gives the sender a row of its own, listed while the subagent works and
+holding its last words once it ends."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (process-put (aob-session-conn s) 'aob-subagents t)
+          (aob-set-state s 'working)
+          (aob-tests--announce s "child-1")
+          (aob-tests--child-says s "child-1" "There are 12 files.")
+          (let* ((kid (car (aob-subagent-children s)))
+                 (calls (aob-session-subagents s))
+                 (call (car calls)))
+            (should (= 1 (length calls)))
+            (should (equal "Count files" (plist-get call :title)))
+            (should (equal "in_progress" (plist-get call :status)))
+            (should (eq kid (aob-session-native-child s call)))
+            (with-current-buffer (aob-subagents-buffer s)
+              (aob-subagents--render t)
+              (should (string-match-p "^running .*Count files" (buffer-string))))
+            (with-current-buffer (aob-trace-buffer s)
+              (aob-trace--render t)
+              (should (string-match-p "Count files" (buffer-string))))
+            (aob-tests--child-ends s "child-1" "completed")
+            (should (equal "completed" (plist-get call :status)))
+            (should (plist-get call :done-ts))
+            (should (string-match-p "There are 12 files" (aob-trace--content-text call)))
+            (with-current-buffer (aob-subagents-buffer s)
+              (aob-subagents--render t)
+              (should (string-match-p "^done .*Count files" (buffer-string))))
+            (aob-tests--announce s "child-1")
+            (should (= 1 (length (aob-session-subagents s))))
+            (should (equal "in_progress" (plist-get call :status)))
+            (aob-tests--announce s "child-2" "child-1")
+            (let ((grandkid (car (aob-subagent-children kid))))
+              (should (equal (aob-session-id kid) (aob-session-ref grandkid :parent-session)))
+              (should (= 1 (length (aob-session-subagents s))))
+              (should (eq grandkid (aob-session-native-child
+                                    kid (car (aob-session-subagents kid))))))
+            (aob-set-state s 'dead)
+            (should (equal "failed" (plist-get call :status)))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-plan-cleared-context-settles-announced-subagents ()
+  "Accepting a plan into a fresh context replaces the agent's runtime, and
+the subagents it ran are never told to end: the answer ends them."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (process-put (aob-session-conn s) 'aob-subagents t)
+          (aob-set-state s 'working)
+          (aob-tests--announce s "child-1")
+          (let ((kid (car (aob-subagent-children s))))
+            (aob-tests--claude-plan s 11)
+            (should (eq 'working (aob-session-state kid)))
+            (aob-tests--capturing sent
+              (aob--call s :resolve (car (aob-session-decisions s)) "exit-plan-clear-accept-edits"))
+            (should (eq 'done (aob-session-state kid)))
+            (should (equal "cancelled" (plist-get (car (aob-session-subagents s)) :status)))))
+      (aob-tests--kill-views))))
+
+(ert-deftest aob-removed-subagent-frames-reach-no-one ()
+  "Once an announced subagent is let go, what its agent still sends for it
+lands nowhere: not in the sender, and its requests are cancelled."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (process-put (aob-session-conn s) 'aob-subagents t)
+          (aob-tests--announce s "child-1")
+          (aob-remove-session (car (aob-subagent-children s)))
+          (aob-tests--child-says s "child-1" "late words")
+          (should-not (string-match-p "late words" (aob-tests--said s)))
+          (aob-tests--capturing sent
+            (aob-tests--request s 12 "session/request_permission"
+                                (list :sessionId "child-1"
+                                      :toolCall (list :toolCallId "toolu_c9" :title "rm -rf build")
+                                      :options [(:optionId "allow" :name "Allow" :kind "allow_once")]))
+            (aob-tests--request s 13 "elicitation/create"
+                                (list :sessionId "child-1" :mode "form" :message "pick"
+                                      :requestedSchema (list :type "object")))
+            (should (equal (aob-tests--replies sent)
+                           '("{\"jsonrpc\":\"2.0\",\"id\":12,\"result\":{\"outcome\":{\"outcome\":\"cancelled\"}}}"
+                             "{\"jsonrpc\":\"2.0\",\"id\":13,\"result\":{\"action\":\"cancel\"}}"))))
+          (should-not (aob-session-decisions s))
+          (aob-tests--announce s "child-1")
+          (aob-tests--child-says s "child-1" "back again")
+          (should (string-match-p "back again" (aob-tests--said (car (aob-subagent-children s))))))
+      (aob-tests--kill-views))))
 
 (ert-deftest aob-announced-subagent-asks-its-own-permission ()
   "A permission a subagent asks lands as a Decision on it, whichever session
@@ -6018,6 +6314,31 @@ MAIN\='s index goes with it, so the tree starts out clean."
         (should-error (aob-acp-add-folder s extra) :type 'user-error))
       (should-not (aob-session-ref s :extra-dirs)))))
 
+(ert-deftest aob-trace-names-its-task-once ()
+  "The task is the header line's; the mode line calls the buffer a trace."
+  (aob-tests--with-trace-session s
+    (with-current-buffer (aob-trace-buffer s)
+      (should (equal ygg-modeline-name "trace")))))
+
+(ert-deftest aob-trace-marks-sit-level-with-their-text ()
+  "A mark is drawn from the top of its row, padded to the middle of a
+line of text, so the gap a row's newline carries stays below it."
+  (should (equal (aob-trace--mark-bits [1 2] 8) [0 0 0 1 2]))
+  (should (equal (aob-trace--mark-bits [1 2 3] 2) [1 2 3]))
+  (let ((aob-trace--marks-line nil) (defined nil))
+    (cl-letf (((symbol-function 'display-graphic-p) (lambda (&rest _) t))
+              ((symbol-function 'frame-char-height) (lambda (&rest _) 17))
+              ((symbol-function 'define-fringe-bitmap)
+               (lambda (name bits _h _w align) (push (list name bits align) defined))))
+      (aob-trace--define-marks)
+      (should (= (length defined) (length aob-trace--marks)))
+      (dolist (d defined)
+        (should (eq (nth 2 d) 'top))
+        (should (zerop (aref (nth 1 d) 0))))
+      (setq defined nil)
+      (aob-trace--define-marks)
+      (should-not defined))))
+
 (ert-deftest aob-trace-gutter-cells-are-one-width ()
   "Every mark in the gutter takes the same cell and keeps the same gap
 before the text: fringe marks draw inside one eight-pixel width and keep
@@ -7704,3 +8025,231 @@ initialize declares both."
       (should (plist-get (car states) :warning))
       (should (equal (plist-get (cadr states) :title) "context compacted"))
       (should (equal (aob-event-text (cadr states)) "Summary here")))))
+
+;;; Bringing a conversation back keeps the trace you were reading
+
+(defmacro aob-tests--reviving (spec &rest body)
+  "Run BODY with `aob-acp--connect' doing what SPEC says, held in a window.
+SPEC is `quiet' (nothing answers), `fail' (the agent refuses) or
+`signal' (the connection cannot be made).  BODY sees `listed', which
+says whether the conversation was in the registry while it opened, and
+`dir', a folder that exists."
+  (declare (indent 1))
+  `(let* ((dir (file-name-as-directory (make-temp-file "aob-revive" t)))
+          (aob-acp-persist-file nil)
+          (listed 'never-asked))
+     (unwind-protect
+         (cl-letf (((symbol-function 'aob-acp--connect)
+                    (lambda (sess &rest _)
+                      (setq listed (and (seq-find (lambda (x)
+                                                    (equal (aob-session-ref x :acp-id)
+                                                           (aob-session-ref sess :acp-id)))
+                                                  (aob-sessions))
+                                        t))
+                      (pcase ,spec
+                        ('fail (aob-acp--fail sess '(:message "would not open")))
+                        ('signal (error "no such agent"))))))
+           (save-window-excursion ,@body))
+       (dolist (x (aob-sessions))
+         (when (string-prefix-p "revive-" (or (aob-session-ref x :acp-id) ""))
+           (aob-remove-session x)))
+       (aob-tests--kill-views)
+       (delete-directory dir t))))
+
+(defun aob-tests--dead-session (dir acp-id)
+  "A dead session on DIR that ran conversation ACP-ID, its trace on screen."
+  (let ((s (aob-create-session :id (concat "acp:" acp-id) :backend 'acp
+                               :name acp-id :project dir :dir dir :state 'dead
+                               :refs (list :agent "claude" :acp-id acp-id))))
+    (aob-event s 'message :text "what was said before")
+    (set-window-buffer (selected-window) (aob-trace-buffer s))
+    s))
+
+(defun aob-tests--asleep-session (dir acp-id)
+  "A conversation ACP-ID on DIR opened for reading, its trace on screen.
+No transcript on disk: what it shows is only what it holds."
+  (let ((s (aob-create-session
+            :id (concat "acp:" acp-id) :backend 'acp :name "claude:9 · Sep 30"
+            :project dir :dir dir :state 'done
+            :refs (list :agent "claude" :acp-id acp-id
+                        :asleep (list :agent "claude" :name "claude:9" :dir dir
+                                      :project dir :acp-id acp-id)))))
+    (aob-event s 'message :text "what was said before")
+    (set-window-buffer (selected-window) (aob-trace-buffer s))
+    s))
+
+(defun aob-tests--holding (s buf)
+  "Assert S is the one session for its conversation, BUF its trace on screen."
+  (should (eq (aob-session-get (aob-session-id s)) s))
+  (should (= 1 (seq-count (lambda (x) (equal (aob-session-ref x :acp-id)
+                                             (aob-session-ref s :acp-id)))
+                          (aob-sessions))))
+  (should (buffer-live-p buf))
+  (should (eq (aob-trace-buffer s) buf))
+  (should (eq (window-buffer (selected-window)) buf))
+  (should (string-match-p "what was said before"
+                          (with-current-buffer buf (buffer-string)))))
+
+(ert-deftest aob-a-restart-keeps-the-trace-and-the-window-it-was-in ()
+  (aob-tests--reviving 'quiet
+    (let* ((s (aob-tests--dead-session dir "revive-r1"))
+           (buf (aob-trace-buffer s))
+           (live (aob-acp-restart s)))
+      (should (eq listed t))
+      (should-not (eq live s))
+      (should (eq (aob-session-state live) 'starting))
+      (should (equal (aob-session-name live) "revive-r1"))
+      (aob-tests--holding live buf))))
+
+(ert-deftest aob-a-restart-the-agent-refuses-stays-listed-failed-in-its-trace ()
+  (aob-tests--reviving 'fail
+    (let* ((s (aob-tests--dead-session dir "revive-r2"))
+           (buf (aob-trace-buffer s))
+           (live (aob-acp-restart s)))
+      (should (eq listed t))
+      (should (eq (aob-session-state live) 'failed))
+      (aob-tests--holding live buf)
+      ;; and failed with its id, so it can be restarted again
+      (should (equal (plist-get (aob-acp--entry live) :acp-id) "revive-r2")))))
+
+(ert-deftest aob-a-restart-that-cannot-start-leaves-the-session-where-it-was ()
+  (aob-tests--reviving 'signal
+    (let* ((s (aob-tests--dead-session dir "revive-r3"))
+           (buf (aob-trace-buffer s)))
+      (should-error (aob-acp-restart s))
+      (should (eq listed t))
+      (should-not (aob-session-ref s :restarting))
+      (aob-tests--holding s buf))))
+
+(ert-deftest aob-resuming-a-session-failed-on-a-live-agent-lets-the-agent-go ()
+  ;; a turn error fails the session but leaves its agent up: bringing it
+  ;; back must answer what it held, stop it and drop its connection,
+  ;; and still come back in the trace it failed in
+  (aob-tests--reviving 'quiet
+    (let* ((proc (make-process :name "aob-test-cat" :command '("cat")
+                               :connection-type 'pipe :noquery t))
+           (s (aob-tests--dead-session dir "revive-f1"))
+           (buf (aob-trace-buffer s))
+           (table (make-hash-table :test #'equal))
+           answered told reaped)
+      (unwind-protect
+          (progn
+            (process-put proc 'aob-sessions table)
+            (setf (aob-session-conn s) proc)
+            (aob-acp--register proc "revive-f1" s)
+            (aob-set-state s 'failed)
+            (setf (aob-session-decisions s)
+                  (list (list :reply-id 7 :kind 'permission :title "Edit a.el")))
+            (cl-letf (((symbol-function 'aob-acp--respond)
+                       (lambda (_s id result &rest _) (push (cons id result) answered)))
+                      ((symbol-function 'aob-acp--notify)
+                       (lambda (_s method &rest _) (push method told)))
+                      ((symbol-function 'aob-acp--kill-tree)
+                       (lambda (p) (push p reaped))))
+              (let ((live (aob-acp-resume-entry (aob-acp--entry s))))
+                (should (eq listed t))
+                (should-not (eq live s))
+                (should (equal answered '((7 :outcome (:outcome "cancelled")))))
+                (should (member "session/cancel" told))
+                (should-not (gethash "revive-f1" table))
+                (should (equal reaped (list proc)))
+                (aob-tests--holding live buf))))
+        (delete-process proc)))))
+
+(ert-deftest aob-a-session-brought-back-keeps-its-row ()
+  ;; a restart or a wake is the same conversation: its row stays put
+  ;; rather than jumping to the top of every list
+  (aob-tests--reviving 'quiet
+    (let* ((top (aob-tests--dead-session dir "revive-o1"))
+           (mid (aob-tests--dead-session dir "revive-o2"))
+           (low (aob-tests--asleep-session dir "revive-o3"))
+           (bottom (aob-tests--dead-session dir "revive-o4"))
+           (rows (lambda ()
+                   (seq-filter (lambda (id) (string-search "revive-o" id))
+                               (mapcar (lambda (s) (aob-session-ref s :acp-id))
+                                       (aob-sessions)))))
+           (before (funcall rows)))
+      (ignore top bottom)
+      (should (equal before '("revive-o4" "revive-o3" "revive-o2" "revive-o1")))
+      (aob-acp-restart mid)
+      (should (eq listed t))
+      (should (equal (funcall rows) before))
+      (aob-transcript-wake low)
+      (should (equal (funcall rows) before)))))
+
+(ert-deftest aob-waking-a-conversation-keeps-the-trace-you-were-reading ()
+  (aob-tests--reviving 'quiet
+    (let* ((s (aob-tests--asleep-session dir "revive-w1"))
+           (buf (aob-trace-buffer s))
+           (live (aob-transcript-wake s)))
+      (should (eq listed t))
+      (should-not (aob-session-get (aob-session-id s)))
+      (should-not (aob-session-ref live :asleep))
+      (should (equal (buffer-name buf) (aob-trace--name live)))
+      (aob-tests--holding live buf))))
+
+(ert-deftest aob-writing-to-a-sleeping-conversation-wakes-it-in-its-own-trace ()
+  (aob-tests--reviving 'quiet
+    (let* ((s (aob-tests--asleep-session dir "revive-w2"))
+           (buf (aob-trace-buffer s)))
+      (aob-prompt s "and now?")
+      (let ((live (aob-session-get (buffer-local-value 'aob-trace--session-id buf))))
+        (should (eq listed t))
+        (should-not (eq live s))
+        (should (seq-find (lambda (ev) (equal (plist-get ev :text) "and now?"))
+                          (aob-session-events live)))
+        (aob-tests--holding live buf)))))
+
+(ert-deftest aob-a-conversation-that-will-not-wake-stays-listed-failed ()
+  (aob-tests--reviving 'fail
+    (let* ((s (aob-tests--asleep-session dir "revive-w3"))
+           (buf (aob-trace-buffer s))
+           (live (aob-transcript-wake s)))
+      (should (eq listed t))
+      (should (eq (aob-session-state live) 'failed))
+      (aob-tests--holding live buf))))
+
+(ert-deftest aob-a-conversation-that-cannot-start-stays-asleep-in-its-trace ()
+  (aob-tests--reviving 'signal
+    (let* ((s (aob-tests--asleep-session dir "revive-w4"))
+           (buf (aob-trace-buffer s)))
+      (should-error (aob-transcript-wake s))
+      (should (aob-session-ref s :asleep))
+      (aob-tests--holding s buf))))
+
+(ert-deftest aob-modal-waking-a-conversation-leaves-you-where-you-read-it ()
+  "With the glue that puts traces on screen and makes spaces: the window
+the trace was read in still shows it, and no space is landed in."
+  (aob-tests--modal
+   '(progn
+      (require 'yggdrasil-spacetree nil t)
+      (let ((noninteractive nil))
+        (aob-tests--reviving 'quiet
+          (let* ((s (aob-tests--asleep-session dir "revive-m1"))
+                 (buf (aob-trace-buffer s))
+                 (wins (get-buffer-window-list buf nil t))
+                 (tabs (lambda () (list (tab-bar--current-tab-index)
+                                        (length (funcall tab-bar-tabs-function)))))
+                 (tab (funcall tabs))
+                 (live (aob-transcript-wake s)))
+            (should wins)
+            (dolist (w wins)
+              (should (window-live-p w))
+              (should (eq (window-buffer w) buf)))
+            (should (equal tab (funcall tabs)))
+            (aob-tests--holding live buf)))))))
+
+(ert-deftest aob-a-conversation-brought-back-is-written-down-once ()
+  (dolist (how '(restart wake))
+    (aob-tests--reviving 'quiet
+      (let* ((aob-acp-persist-file (make-temp-file "aob-revive-" nil ".eld"))
+             (aob-acp--opened-any t)
+             (acp-id (format "revive-p-%s" how)))
+        (unwind-protect
+            (progn
+              (if (eq how 'restart)
+                  (aob-acp-restart (aob-tests--dead-session dir acp-id))
+                (aob-transcript-wake (aob-tests--asleep-session dir acp-id)))
+              (should (= 1 (seq-count (lambda (e) (equal (plist-get e :acp-id) acp-id))
+                                      (aob-acp--persisted-entries)))))
+          (delete-file aob-acp-persist-file))))))

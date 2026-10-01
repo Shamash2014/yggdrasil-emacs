@@ -58,9 +58,13 @@
         ((buffer-modified-p) (propertize " +" 'face 'mode-line-emphasis))
         (t "")))
 
+(defvar-local ygg-modeline-name nil
+  "What the mode line calls this buffer, when its name is already shown
+elsewhere, as a header line that carries it.")
+
 (defun ygg-modeline-buffer ()
   "The buffer's name, with a modified mark or a read-only glyph."
-  (concat (propertize (buffer-name) 'face 'mode-line-buffer-id)
+  (concat (propertize (or ygg-modeline-name (buffer-name)) 'face 'mode-line-buffer-id)
           (ygg-modeline--marks)))
 
 (defun ygg-modeline-state ()

@@ -188,6 +188,7 @@
 (declare-function ygg-ex--cmd-write "yggdrasil-ex" (range bang args))
 (declare-function aob-trace-send "aob-trace")
 (declare-function aob-trace-comment-send-now "aob-trace")
+(declare-function aob-trace--name "aob-trace" (s))
 
 (defun ygg-aob--write-sends (fn &rest args)
   "Make :w send, where the buffer is a prompt rather than a file.
@@ -736,14 +737,25 @@ you out of that one."
              (not (aob-session-ref s :asleep))
              (not (memq (aob-session-state s) '(done dead failed))))
     (condition-case err
-        (if-let* ((tab (ygg-aob--agent-tab s)))
-            (progn (ygg-space--goto-id (ygg-space--id-of tab))
-                   (ygg-aob--claim-tab s tab))
-          (ygg-aob--spawn-space s))
+        (let ((read-here (ygg-aob--trace-on-screen-p s)))
+          (if-let* ((tab (ygg-aob--agent-tab s)))
+              (progn (unless read-here (ygg-space--goto-id (ygg-space--id-of tab)))
+                     (ygg-aob--claim-tab s tab))
+            (unless read-here (ygg-aob--spawn-space s))))
       (error (message "aob: no space for %s (%s)"
                       (aob-session-name s) (error-message-string err))))))
 
 (add-hook 'aob-session-created-hook #'ygg-aob--space-for-agent 90)
+
+(defun ygg-aob--trace-on-screen-p (s)
+  "Whether S already has a trace in a window here: one it took over.
+A conversation brought back while you read it stays where you read it;
+landing in a space made for it is the trace going out from under you.
+Its space is made when it is next opened, as for a session whose own
+space is gone."
+  (when-let* (((fboundp 'aob-trace--name))
+              (buf (get-buffer (aob-trace--name s))))
+    (and (get-buffer-window buf) t)))
 
 (defun ygg-aob-ensure-space (s)
   "The space S works in, made now when S is top-level and its own is gone.
@@ -818,6 +830,7 @@ up nineteen columns wide in a frame with room for four of them."
         (window--display-buffer buffer widest 'reuse alist)))))
 
 (setq aob-acp-show-trace nil)
+(setq aob-acp-native-subagents t)
 
 (defvar ygg-aob--compose-sending nil
   "Non-nil while a draft is on its way out.
@@ -873,12 +886,14 @@ neighbours — never from a side window, which is pinned."
 
 (defun ygg-aob--show-trace (s)
   "Show S's trace in the window conversations are read in.
-A subagent opens beside the conversation that sent it instead: what it
-was sent to do is read against what was being done, and taking the
-window would hide the one you were reading."
+A window already showing it is where it stays.  A subagent opens
+beside the conversation that sent it instead: what it was sent to do
+is read against what was being done, and taking the window would hide
+the one you were reading."
   (unless noninteractive
     (when-let* ((buf (ignore-errors (aob-trace-buffer s)))
-                (win (or (and (ygg-aob--subagent-p s)
+                (win (or (get-buffer-window buf)
+                         (and (ygg-aob--subagent-p s)
                               (ignore-errors
                                 (display-buffer buf ygg-aob-subagent-action)))
                          (when-let* ((w (and (not (ygg-aob--subagent-p s))

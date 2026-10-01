@@ -73,7 +73,7 @@
   (process-get proc 'aob-init))
 
 (ert-deftest aob-conf-initialize-declares-boolean-config-options ()
-  (should (string-match-p "\"session\":{\"configOptions\":{\"boolean\":{}}}"
+  (should (string-match-p "\"session\":{\"configOptions\":{\"boolean\":{}}"
                           (json-serialize (aob-acp--client-capabilities)))))
 
 (ert-deftest aob-conf-version-one-is-accepted ()
@@ -182,11 +182,11 @@
           (aob-conf--feed proc (list :jsonrpc "2.0" :id rid :result (make-hash-table)))
           (should-not (gethash rid (aob-acp--request-owners proc))))))))
 
-(ert-deftest aob-conf-elicitation-mode-other-than-form-is-invalid ()
+(ert-deftest aob-conf-elicitation-mode-other-than-form-or-url-is-invalid ()
   (aob-conf--with-conn proc sessions
     (aob-conf--capturing sent
       (aob-conf--feed proc (list :jsonrpc "2.0" :id 12 :method "elicitation/create"
-                                 :params (list :sessionId "sess-1" :mode "url"
+                                 :params (list :sessionId "sess-1" :mode "carrier-pigeon"
                                                :url "https://example.com"
                                                :elicitationId "e1"
                                                :message "Sign in")))

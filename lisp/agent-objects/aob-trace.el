@@ -15,6 +15,7 @@
 (require 'ygg-diagram nil t)
 
 (declare-function ygg-ui-markdown "ygg-ui" (text))
+(defvar ygg-modeline-name)
 (declare-function ygg-diagram-fence-at-point "ygg-diagram" ())
 (declare-function ygg-diagram-toggle-at-point "ygg-diagram" ())
 (declare-function ygg-diagram-replace "ygg-diagram" ())
@@ -120,6 +121,7 @@ window as following and pulls the page back down."
 (define-derived-mode aob-trace-mode special-mode "aob-trace"
   "Operation trace of one agent session."
   (ygg-ui-plain-layout)
+  (setq-local ygg-modeline-name "trace")
   (setq truncate-lines nil)
   (setq-local char-property-alias-alist '((face font-lock-face)))
   (visual-line-mode 1)
@@ -173,6 +175,7 @@ widened is not that window."
                     0)))
       (set-window-margins win gutter slack)
       (set-window-fringes win (if aob-trace-status-gutter 8 0) 0)
+      (aob-trace--define-marks (window-frame win))
       (with-current-buffer (window-buffer win)
         (setq-local fill-column (max 20 (- total gutter slack)))
         ;; a word broken in half is a window that stopped wrapping on
@@ -339,10 +342,30 @@ whose text moved, which is all the incremental render compares.  BITS
 draw the eight-pixel fringe and leave its two columns nearest the text
 blank, the one gap every mark keeps before the line it marks.")
 
+(defvar aob-trace--marks-line nil)
+
+(defun aob-trace--mark-bits (bits line)
+  "BITS padded above to sit mid-way down a LINE pixels tall."
+  (vconcat (make-vector (max 0 (/ (- line (length bits)) 2)) 0) bits))
+
+(defun aob-trace--define-marks (&optional frame)
+  "Draw the fringe marks from the top of the row, level with its text.
+Centred, a row whose newline carries the gap to the next block would
+draw its mark down in that gap, under the text it marks."
+  (when (and (fboundp 'define-fringe-bitmap) (display-graphic-p frame))
+    (let ((line (round (* (frame-char-height frame) aob-trace-tool-height))))
+      (unless (eql line aob-trace--marks-line)
+        (setq aob-trace--marks-line line)
+        (ignore-errors
+          (dolist (m aob-trace--marks)
+            (define-fringe-bitmap (nth 2 m) (aob-trace--mark-bits (nth 4 m) line)
+                                  nil nil 'top)))))))
+
 (when (fboundp 'define-fringe-bitmap)
   (ignore-errors
     (dolist (m aob-trace--marks)
-      (define-fringe-bitmap (nth 2 m) (nth 4 m) nil nil 'center))))
+      (define-fringe-bitmap (nth 2 m) (nth 4 m) nil nil 'top)))
+  (aob-trace--define-marks))
 
 (defun aob-trace--mark (state str)
   "STR with STATE marked in the fringe beside its first line."
@@ -2227,9 +2250,11 @@ them, grouped and in order, or in their own trace."
 (defun aob-subagents--name (s) (aob--buffer-name "subs" s))
 
 (defun aob-subagents--status (ev)
-  "Running, done or failed, as the subagent call EV last reported."
+  "Running, done, cancelled or failed, as the subagent call EV last
+reported; a subagent that lost its agent says disconnected."
   (pcase (plist-get ev :status)
-    ("failed" "failed")
+    ("failed" (if (equal (plist-get ev :ended) "disconnected") "disconnected" "failed"))
+    ("cancelled" "cancelled")
     ((or "completed" "success") "done")
     (_ "running")))
 
@@ -2248,8 +2273,9 @@ them, grouped and in order, or in their own trace."
     (propertize
      (concat (propertize (format "%-8s" status)
                          'face (pcase status
-                                 ("failed" 'error)
+                                 ((or "failed" "disconnected") 'error)
                                  ("running" 'warning)
+                                 ("cancelled" 'shadow)
                                  (_ 'success)))
              (propertize (format "%7s" (if secs (aob-duration-short secs) "·"))
                          'face 'shadow)
@@ -3288,14 +3314,56 @@ and what the header counts against — not the window the agent claims."
         ((>= n 1000) (format "%dk" (round n 1000)))
         (t (number-to-string n))))
 
+(defconst aob-trace--model-families '("opus" "sonnet" "haiku" "fable")
+  "Words that pick one model of a family, where default or opusplan pick none.")
+
+(defun aob-trace--model-key (name)
+  "NAME as two model names compare: lower case, no context hint, vendor or date."
+  (thread-last (downcase name)
+               (replace-regexp-in-string "\\[.*\\]\\'" "")
+               (replace-regexp-in-string "\\`claude-" "")
+               (replace-regexp-in-string "-[0-9]\\{8\\}\\'" "")))
+
+(defun aob-trace--model-one-p (name)
+  "Whether NAME picks one model — a version, a date or a family — not an alias."
+  (let ((key (aob-trace--model-key name)))
+    (or (string-match-p "[0-9]" key)
+        (member key aob-trace--model-families))))
+
+(defun aob-trace--model (s)
+  "S's model as the header names it, and the one that answered if another.
+The model picked is often a family or an alias — opus, sonnet[1m] — and
+the one that answers its concrete name; only a live model that neither
+holds nor is held by the picked one counts as another.  An alias that
+picks no one model — default, opusplan — can never be contradicted, so
+the model behind it is named quietly beside it."
+  (let ((picked (or (aob-session-ref s :model-id) (aob-session-ref s :model-name)))
+        (live (aob-session-ref s :model-live)))
+    (cond
+     ((not (and picked live)) picked)
+     ((seq-some (lambda (name)
+                  (and (stringp name)
+                       (let ((a (downcase (replace-regexp-in-string
+                                           "\\[.*\\]\\'" "" name)))
+                             (b (downcase live)))
+                         (and (not (string-empty-p a))
+                              (or (string-search a b) (string-search b a))))))
+                (list (aob-session-ref s :model-id)
+                      (aob-session-ref s :model-name)))
+      picked)
+     ((aob-trace--model-one-p picked)
+      (concat (propertize (concat picked " → ") 'face 'shadow)
+              (propertize live 'face 'warning)))
+     (t (concat picked (propertize (format " (%s)" (aob-trace--model-key live))
+                                   'face 'shadow))))))
+
 (defun aob-trace--header (s)
   "S's header: name, model, login, state, clock, cost, context and todo.
 All but the name are grey.
 A subagent's names the agent it works for instead of cost and context.
 The full account is \\ u; the header carries only what is looked at."
   (let* ((grey (lambda (str) (propertize (string-replace "%" "%%" str) 'face 'shadow)))
-         (model (or (aob-session-ref s :model-id)
-                    (aob-session-ref s :model-name)))
+         (model (aob-trace--model s))
          (mode (aob-session-ref s :mode-id))
          (parent (and aob-trace--own-parent
                       (aob-session-get (aob-session-ref s :native-root))))
@@ -3721,6 +3789,29 @@ LINE is where to land; without one, SEARCH is text to land on."
       (let ((inhibit-read-only t)) (aob-trace--render t))
       (goto-char (point-max)))
     buf))
+
+(defun aob-trace--succeed (old new)
+  "Hand OLD\='s trace to NEW: the same buffer, in the windows it was in.
+NEW took over OLD\='s events, so drawing it there changes nothing you can
+see; a fresh buffer would be empty until its agent spoke, and would put
+the one you were reading out of its window."
+  (when-let* ((buf (get-buffer (aob-trace--name old)))
+              ((equal (buffer-local-value 'aob-trace--session-id buf)
+                      (aob-session-id old)))
+              (wanted (aob-trace--name new)))
+    (let ((stray (and (not (equal (buffer-name buf) wanted))
+                      (get-buffer wanted))))
+      ;; a name another live session answers to is not this one's to take
+      (unless (and stray (aob-session-get
+                          (buffer-local-value 'aob-buffer-session-id stray)))
+        (when stray (kill-buffer stray))
+        (with-current-buffer buf
+          (unless (equal (buffer-name) wanted) (rename-buffer wanted))
+          (setq aob-trace--session-id (aob-session-id new)
+                aob-buffer-session-id (aob-session-id new))
+          (aob-trace--render t))))))
+
+(add-hook 'aob-session-succession-functions #'aob-trace--succeed)
 
 ;;;###autoload
 (defun aob-trace (s)
