@@ -1218,32 +1218,63 @@ work is filed somewhere, and the sidebar should say so at a glance."
         (propertize name 'face 'ygg-aob-tree-task)
       name)))
 
+(defun ygg-aob--tree-line (s depth)
+  (let ((line (truncate-string-to-width
+               (format "   %s%s %s%s %s"
+                       (make-string (* 2 depth) ?\s)
+                       (concat (ygg-aob--tree-glyph s)
+                               (when-let* ((quiet (aob-session-quiet s)))
+                                 (propertize (concat " " quiet) 'face 'shadow)))
+                       (ygg-aob--tree-name s)
+                       (let ((q (length (aob-session-ref s :queued))))
+                         (if (> q 0)
+                             (propertize (format " »%d" q) 'face 'shadow)
+                           ""))
+                       (propertize
+                        (or (car (split-string (or (aob-session-ctx s) "") "/")) "")
+                        'face 'shadow))
+               (or (bound-and-true-p ygg-space-tree-width) 18))))
+    (propertize (if (ygg-projects--ended-subagent-p s)
+                    (propertize line 'face 'shadow)
+                  line)
+                'aob-session (aob-session-id s)
+                'keymap ygg-aob--tree-line-map
+                'mouse-face 'highlight)))
+
+(defvar ygg-aob--tree-finished-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m (kbd "RET") #'ygg-aob-tree-toggle-finished)
+    m))
+
+(defun ygg-aob-tree-toggle-finished ()
+  "Show or fold the finished subagents this sidebar row stands for."
+  (interactive)
+  (when-let* ((id (get-text-property (point) 'aob-finished-of)))
+    (ygg-aob-toggle-finished id)
+    (when (fboundp 'ygg-space-tree--queue) (ygg-space-tree--queue))))
+
+(defun ygg-aob--tree-finished-line (row depth)
+  (propertize (truncate-string-to-width
+               (concat "   " (make-string (* 2 depth) ?\s) (ygg-aob--finished-label row))
+               (or (bound-and-true-p ygg-space-tree-width) 18))
+              'aob-finished-of (nth 1 row)
+              'keymap ygg-aob--tree-finished-map
+              'mouse-face 'highlight))
+
 (defun ygg-aob--tree-details (space-id)
   (when ygg-aob--tree-agents-on
-    (mapcar
-     (lambda (s)
-       (propertize
-        (truncate-string-to-width
-         (format "   %s %s%s %s"
-                 (concat (ygg-aob--tree-glyph s)
-                         (when-let* ((quiet (aob-session-quiet s)))
-                           (propertize (concat " " quiet) 'face 'shadow)))
-                 (ygg-aob--tree-name s)
-                 (let ((q (length (aob-session-ref s :queued))))
-                   (if (> q 0)
-                       (propertize (format " »%d" q) 'face 'shadow)
-                     ""))
-                 (propertize
-                  (or (car (split-string (or (aob-session-ctx s) "") "/")) "")
-                  'face 'shadow))
-         (or (bound-and-true-p ygg-space-tree-width) 18))
-        'aob-session (aob-session-id s)
-        'keymap ygg-aob--tree-line-map
-        'mouse-face 'highlight))
-     (seq-sort-by #'ygg-aob--score #'>
-                  (seq-filter
-                   (lambda (s) (eql (ygg-aob-session-space s) space-id))
-                   (aob-live-sessions))))))
+    (let* ((here (seq-filter (lambda (s)
+                               (eql (ygg-aob-session-space (aob-subagent-lead s)) space-id))
+                             (ygg-aob--listed-sessions)))
+           (tops (seq-sort-by #'ygg-aob--score #'>
+                              (seq-filter (lambda (s) (ygg-aob--pick-top-p s here)) here))))
+      (mapcan (lambda (tree)
+                (mapcar (lambda (row)
+                          (if (aob-session-p (car row))
+                              (ygg-aob--tree-line (car row) (cdr row))
+                            (ygg-aob--tree-finished-line (car row) (cdr row))))
+                        (cdr tree)))
+              (ygg-aob--forest tops here)))))
 
 (add-to-list 'ygg-space-detail-functions #'ygg-aob--tree-details)
 
@@ -1514,8 +1545,21 @@ a name two projects share is told apart by where it is."
 
 ;;; Agents in the zone picker — SPC p z lists each space's agents under it
 
+(defun ygg-aob--listed-sessions ()
+  "The live sessions, and every subagent of a live lead, finished or not.
+A put-down lead takes its subagents with it."
+  (let* ((live (aob-live-sessions))
+         (open (seq-remove #'ygg-aob--put-down-p live)))
+    (seq-filter (lambda (s)
+                  (let ((lead (aob-subagent-lead s)))
+                    (if (and (not (eq lead s)) (memq lead live))
+                        (and (memq lead open)
+                             (not (aob-session-ref s :hidden)))
+                      (memq s live))))
+                (aob-sessions))))
+
 (defun ygg-aob--pick-sessions (space)
-  "Live agents filed under SPACE, or under no live space when SPACE is nil.
+  "Agents filed under SPACE, or under no live space when SPACE is nil.
 A subagent is filed where its lead is, since that is where it works."
   (seq-filter (lambda (s)
                 (and (not (ygg-aob--put-down-p s))
@@ -1523,7 +1567,68 @@ A subagent is filed where its lead is, since that is where it works."
                        (if space
                            (eql id space)
                          (not (ygg-aob--space-live-p id))))))
-              (aob-live-sessions)))
+              (ygg-aob--listed-sessions)))
+
+(defcustom ygg-aob-finished-subagents-shown 5
+  "How many of a parent's finished subagents its rows show, newest first.
+The rest fold into one row that unfolds them; a working one always shows."
+  :type 'integer :group 'aob)
+
+(defvar ygg-aob--finished-unfolded nil
+  "Ids of the parents whose finished subagents all show.")
+
+(defun ygg-aob-toggle-finished (id)
+  "Show all of the finished subagents of the parent ID, or fold them again."
+  (setq ygg-aob--finished-unfolded
+        (if (member id ygg-aob--finished-unfolded)
+            (delete id ygg-aob--finished-unfolded)
+          (cons id ygg-aob--finished-unfolded))))
+
+(defun ygg-aob--forest (tops here)
+  "Each of TOPS as (TOP . ROWS): TOP and what it sent among HERE, oldest
+sending first, a level deeper per sending, each row (SESSION . DEPTH).
+Past `ygg-aob-finished-subagents-shown' a parent's older finished
+subagents fold into one row ((finished ID N) . DEPTH), N of them, nil
+N once unfolded.  A session already drawn is not drawn again, so a loop
+in the refs ends."
+  (let ((seen nil)
+        (oldest-first (reverse here)))
+    (cl-labels ((sent (s) (seq-filter (lambda (kid) (eq (aob-subagent-parent kid) s))
+                                      oldest-first))
+                (busy-p (s trail)
+                  (and (not (memq s trail))
+                       (or (not (ygg-projects--ended-subagent-p s))
+                           (seq-some (lambda (kid) (busy-p kid (cons s trail)))
+                                     (sent s)))))
+                (tree (s depth)
+                  (unless (memq s seen)
+                    (push s seen)
+                    (let* ((kids (sent s))
+                           (finished (seq-remove (lambda (kid) (busy-p kid nil)) kids))
+                           (folded (seq-difference
+                                    finished
+                                    (last finished (max 0 ygg-aob-finished-subagents-shown))
+                                    #'eq))
+                           (id (aob-session-id s))
+                           (unfolded (member id ygg-aob--finished-unfolded)))
+                      (cons (cons s depth)
+                            (append
+                             (mapcan (lambda (kid) (tree kid (1+ depth)))
+                                     (if unfolded
+                                         kids
+                                       (seq-difference kids folded #'eq)))
+                             (when folded
+                               (list (cons (list 'finished id
+                                                 (unless unfolded (length folded)))
+                                           (1+ depth))))))))))
+      (mapcar (lambda (s) (cons s (tree s 0))) tops))))
+
+(defun ygg-aob--finished-label (row)
+  "What the folding ROW, (finished ID N), says."
+  (propertize (if-let* ((n (nth 2 row)))
+                  (format "+%d finished" n)
+                "− fold finished")
+              'face 'shadow))
 
 (defun ygg-aob--entry-space (e)
   "The space for the longest folder holding persisted entry E's, or nil."
@@ -1549,8 +1654,11 @@ A subagent is filed where its lead is, since that is where it works."
                       (ignore-errors (aob-acp-resumable-entries))))))
 
 (defun ygg-aob--pick-agent-row (s mark)
-  (cons (concat mark (ygg-aob--switch-label s))
-        (lambda () (ygg-aob--goto s))))
+  (let ((label (concat mark (ygg-aob--switch-label s))))
+    (cons (if (ygg-projects--ended-subagent-p s)
+              (propertize label 'face 'shadow)
+            label)
+          (lambda () (ygg-aob--goto s)))))
 
 (defun ygg-aob--pick-entry-row (e mark)
   (cons (concat mark
@@ -1574,26 +1682,36 @@ first, each with what it sent under it, a level deeper per sending."
          (pinned (seq-filter #'ygg-projects--pinned-p tops))
          (ended (seq-filter (lambda (p) (eql (ygg-aob--entry-space (cdr p)) space))
                             (ygg-aob--pinned-ended)))
-         (seen nil))
-    (cl-labels ((tree (s mark depth)
-                  (unless (memq s seen)
-                    (push s seen)
-                    (cons (ygg-aob--pick-agent-row
-                           s (concat mark (make-string (* 2 depth) ?\s)))
-                          (mapcan (lambda (kid) (tree kid "  " (1+ depth)))
-                                  (seq-filter (lambda (kid)
-                                                (eq (aob-subagent-parent kid) s))
-                                              here))))))
+         (heads (sort (append (mapcar (lambda (s) (cons (ygg-projects--pin-rank s) s)) pinned)
+                              ended)
+                      (lambda (a b) (< (car a) (car b)))))
+         (rest (seq-sort-by #'ygg-aob--score #'> (seq-difference tops pinned #'eq)))
+         (trees (ygg-aob--forest (append (seq-filter #'aob-session-p (mapcar #'cdr heads))
+                                         rest)
+                                 here)))
+    (cl-flet ((rows (s mark)
+                (mapcar (lambda (row)
+                          (let ((indent (concat (if (eq (car row) s) mark "  ")
+                                                (make-string (* 2 (cdr row)) ?\s))))
+                            (if (aob-session-p (car row))
+                                (ygg-aob--pick-agent-row (car row) indent)
+                              (cons (concat indent (ygg-aob--finished-label (car row))
+                                            (propertize
+                                             (format " of %s"
+                                                     (aob-session-name
+                                                      (aob-session-get (nth 1 (car row)))))
+                                             'face 'shadow))
+                                    (lambda ()
+                                      (ygg-aob-toggle-finished (nth 1 (car row)))
+                                      (ygg-space-pick))))))
+                        (alist-get s trees))))
       (append
        (mapcan (lambda (p)
                  (if (aob-session-p (cdr p))
-                     (tree (cdr p) pin 0)
+                     (rows (cdr p) pin)
                    (list (ygg-aob--pick-entry-row (cdr p) pin))))
-               (sort (append (mapcar (lambda (s) (cons (ygg-projects--pin-rank s) s)) pinned)
-                             ended)
-                     (lambda (a b) (< (car a) (car b)))))
-       (mapcan (lambda (s) (tree s "  " 0))
-               (seq-sort-by #'ygg-aob--score #'> (seq-difference tops pinned #'eq)))))))
+               heads)
+       (mapcan (lambda (s) (rows s "  ")) rest)))))
 
 (defun ygg-aob--pick-top-p (s here)
   "Whether S heads a tree among HERE: nothing in HERE sent it, or the
