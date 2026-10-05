@@ -2884,23 +2884,65 @@ and again after a branch switch or a worktree added or removed."
 
 (defconst aob-acp--new-worktree "new worktree…")
 
+(defun aob-acp--worktree-short-name (folder main)
+  "FOLDER named for a picker: inside MAIN relative to it, else to MAIN's parent."
+  (let ((main (directory-file-name main))
+        (folder (directory-file-name folder)))
+    (if (and (file-in-directory-p folder main) (not (equal folder main)))
+        (file-relative-name folder main)
+      (file-relative-name folder (file-name-directory main)))))
+
+(defun aob-acp--worktree-head (folder branch)
+  "BRANCH, or detached and FOLDER's short commit when there is none."
+  (or branch
+      (let ((default-directory folder))
+        (format "detached %s"
+                (string-trim
+                 (with-output-to-string
+                   (with-current-buffer standard-output
+                     (ignore-errors
+                       (call-process "git" nil t nil "rev-parse" "--short" "HEAD")))))))))
+
+(defun aob-acp--worktree-rows (wts)
+  "WTS as (LABEL . FOLDER), each LABEL unique, leading with branch and name."
+  (let ((seen (make-hash-table :test #'equal)))
+    (mapcar (lambda (w)
+              (let* ((label (format "%s  %s"
+                                    (aob-acp--worktree-head (car w) (cdr w))
+                                    (aob-acp--worktree-short-name (car w) (caar wts))))
+                     (n (puthash label (1+ (gethash label seen 0)) seen)))
+                (cons (if (> n 1) (format "%s #%d" label n) label) (car w))))
+            wts)))
+
+(defun aob-acp--worktree-table (rows)
+  "A completion table over ROWS' labels, in order, annotated with each folder."
+  (let ((notes (mapcar (lambda (r)
+                         (cons (car r)
+                               (propertize (format "  %s" (abbreviate-file-name (cdr r)))
+                                           'face 'shadow)))
+                       (seq-filter #'cdr rows))))
+    (lambda (string pred action)
+      (if (eq action 'metadata)
+          `(metadata (category . aob-worktree)
+                     (display-sort-function . identity)
+                     (cycle-sort-function . identity)
+                     (annotation-function . ,(lambda (c) (cdr (assoc c notes)))))
+        (complete-with-action action (mapcar #'car rows) string pred)))))
+
 (defun aob-acp-read-worktree (dir)
   "Ask which worktree of DIR's repository a session works in.
 Nil without asking when the repository has one worktree or DIR is in
 none, and nil for DIR's own.  Answers a folder, or (FOLDER . BRANCH)
-for one still to be made."
+for one still to be made.  Rows lead with the branch and a short name,
+the folder is the annotation."
   (when-let* ((wts (aob-acp--worktree-choices dir)))
     (let* ((here (file-truename (file-name-as-directory
                                  (or (locate-dominating-file dir ".git") dir))))
            (mine (seq-find (lambda (w) (equal (file-truename (car w)) here)) wts))
-           (rows (mapcar (lambda (w)
-                           (cons (format "%s  %s" (abbreviate-file-name (car w))
-                                         (or (cdr w) "detached"))
-                                 (car w)))
-                         (if mine (cons mine (remq mine wts)) wts)))
-           (pick (completing-read "Worktree: "
-                                  (append (mapcar #'car rows)
-                                          (list aob-acp--new-worktree))
+           (rows (aob-acp--worktree-rows
+                  (if mine (cons mine (remq mine wts)) wts)))
+           (rows (append rows (list (cons aob-acp--new-worktree nil))))
+           (pick (completing-read "Worktree: " (aob-acp--worktree-table rows)
                                   nil t nil nil (caar rows))))
       (if (equal pick aob-acp--new-worktree)
           (let ((branch (string-trim (read-string "Branch for the new worktree: "))))

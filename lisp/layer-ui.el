@@ -203,6 +203,19 @@ extra lines of a multi-line prompt up to 0.8 of the frame."
           :min-height height
           :min-width width)))
 
+(defun ygg--vertico-posframe-fit-row (args)
+  "Filter ARGS of `vertico--format-candidate' so its row fits the floating picker.
+An over-long candidate is cut with an ellipsis, keeping prefix and suffix."
+  (if (not (bound-and-true-p vertico-posframe-mode))
+      args
+    (pcase-let* ((`(,cand ,prefix ,suffix . ,rest) args)
+                 (room (- (plist-get (ygg--vertico-posframe-size (current-buffer)) :width)
+                          1 (string-width prefix) (string-width suffix))))
+      (if (<= (string-width cand) room)
+          args
+        (cons (truncate-string-to-width cand (max 8 room) nil nil "…")
+              (cons prefix (cons suffix rest)))))))
+
 (defun ygg--vertico-posframe-enable (&optional frame)
   "Float the picker, once there is a FRAME that can show one."
   (with-selected-frame (or (and (frame-live-p frame) frame) (selected-frame))
@@ -228,6 +241,7 @@ extra lines of a multi-line prompt up to 0.8 of the frame."
                vertico-posframe-border-width 1
                vertico-posframe-size-function #'ygg--vertico-posframe-size
                vertico-posframe-parameters '((left-fringe . 0) (right-fringe . 0)))
+         (advice-add 'vertico--format-candidate :filter-args #'ygg--vertico-posframe-fit-row)
          (ygg--vertico-posframe-enable))))))
 
 (defun ygg-vertico-posframe-toggle ()
