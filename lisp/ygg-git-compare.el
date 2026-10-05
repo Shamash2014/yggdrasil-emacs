@@ -1037,19 +1037,52 @@ saying why when it is not."
                    (user-error "No %s one" (if back "previous" "next"))))
     (ygg-git-compare--reveal)))
 
+(defun ygg-git-compare--unwashed-p ()
+  "Whether this diff shows only its diffstat, too large to wash into hunks."
+  (not (seq-some (lambda (s) (eq (oref s type) 'file)) (oref magit-root-section children))))
+
 (defun ygg-git-compare--diffed-file-p (section)
   (and (magit-section-match 'file section)
-       (eq (oref section parent) magit-root-section)))
+       (or (eq (oref section parent) magit-root-section)
+           (and (eq (oref (oref section parent) type) 'diffstat)
+                (ygg-git-compare--unwashed-p)))))
+
+(defun ygg-git-compare--hunk-across-files (list back)
+  "From LIST's right pane, go to the next hunk, or the one before with BACK,
+on to the following file's when the one shown has none left."
+  (with-current-buffer list (ygg-git-compare--follow list))
+  (let ((window (buffer-local-value 'ygg-git-compare--file-window list)))
+    (unless (window-live-p window) (user-error "No right pane"))
+    (select-window window)
+    (condition-case nil
+        (ygg-git-compare--goto-section #'ygg-git-compare--hunk-p back)
+      (user-error
+       (with-current-buffer list
+         (ygg-git-compare--goto-section #'ygg-git-compare--diffed-file-p back)
+         (ygg-git-compare--follow list))
+       (select-window window)
+       (goto-char (if back (point-max) (point-min)))
+       (ygg-git-compare--goto-section #'ygg-git-compare--hunk-p back)))))
+
+(defun ygg-git-compare--hunk-p (section)
+  (magit-section-match 'hunk section))
+
+(defun ygg-git-compare--goto-hunk (back)
+  "Go to the next hunk, or the one before with BACK, across files."
+  (let ((list (ygg-git-compare--list)))
+    (if (with-current-buffer list (ygg-git-compare--unwashed-p))
+        (ygg-git-compare--hunk-across-files list back)
+      (ygg-git-compare--goto-section #'ygg-git-compare--hunk-p back))))
 
 (defun ygg-git-compare-next-hunk ()
   "Go to the next hunk."
   (interactive)
-  (ygg-git-compare--goto-section (lambda (s) (magit-section-match 'hunk s)) nil))
+  (ygg-git-compare--goto-hunk nil))
 
 (defun ygg-git-compare-previous-hunk ()
   "Go to the hunk before."
   (interactive)
-  (ygg-git-compare--goto-section (lambda (s) (magit-section-match 'hunk s)) t))
+  (ygg-git-compare--goto-hunk t))
 
 (defun ygg-git-compare-next-file ()
   "Go to the next file's diff."
