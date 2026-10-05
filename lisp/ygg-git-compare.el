@@ -1145,6 +1145,9 @@ around past the end."
   "[" (cons "previous" ygg-git-compare-previous-map)
   "}" #'ygg-git-compare-next-file
   "{" #'ygg-git-compare-previous-file
+  "C-j" #'ygg-git-compare-next-hunk
+  "<remap> <magit-diff-visit-worktree-file>" #'ygg-git-compare-next-hunk
+  "C-k" #'ygg-git-compare-previous-hunk
   "m" #'ygg-git-compare-comment-next
   "M" #'ygg-git-compare-comment-previous
   "/" #'isearch-forward-regexp

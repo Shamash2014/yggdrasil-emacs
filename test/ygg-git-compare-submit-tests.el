@@ -238,6 +238,31 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                          (:path "a.txt" :line 18 :side "RIGHT" :body "range"
                           :start_line 12 :start_side "RIGHT"))))))))
 
+(defconst ygg-git-compare-submit-tests--hunk-comment
+  (ygg-git-compare-submit-tests--c "hunk" :level 'range :file "a.txt" :old-path "a.txt"
+                                   :new-path "a.txt" :start-side 'old :start-line 11
+                                   :side 'new :line 14)
+  "A comment on the whole hunk of the diff below, from its removed line to its last added.")
+
+(ert-deftest ygg-git-compare-submit-github-hunk-comment-spans-both-sides ()
+  (ygg-git-compare-submit-tests--with (list ygg-git-compare-submit-tests--hunk-comment)
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'comment)
+    (should (equal (plist-get (nth 2 (car (ygg-git-compare-submit-tests--posts))) :comments)
+                   '((:path "a.txt" :line 14 :side "RIGHT" :body "hunk"
+                      :start_line 11 :start_side "LEFT"))))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-hunk-comment-has-a-line-range ()
+  (cl-letf (((symbol-function 'magit-git-lines)
+             (lambda (&rest _) ygg-git-compare-submit-tests--diff)))
+    (let ((position (ygg-git-compare-submit--gitlab-position
+                     ygg-git-compare-submit-tests--hunk-comment
+                     ygg-git-compare-submit-tests--gitlab-pr))
+          (hash (sha1 "a.txt")))
+      (should (equal (plist-get position :line_range)
+                     `(:start (:line_code ,(concat hash "_11_0") :type "old")
+                       :end (:line_code ,(concat hash "_0_14") :type "new")))))))
+
 (ert-deftest ygg-git-compare-submit-github-events ()
   (dolist (case '((draft nil) (approve "APPROVE") (request-changes "REQUEST_CHANGES")))
     (ygg-git-compare-submit-tests--with

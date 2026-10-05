@@ -213,6 +213,23 @@ the file's path on each side, and a context line's old line."
                           (save-excursion (goto-char beg) (line-beginning-position))
                           (save-excursion (goto-char end) (line-end-position)))))))
 
+(defun ygg-git-compare--hunk-anchor ()
+  "The hunk around point as a comment's level and place: a range from its first
+changed line to its last, a line when it changed only one."
+  (let* ((hunk (let ((section (magit-current-section)))
+                 (while (and section (not (magit-section-match 'hunk section)))
+                   (setq section (oref section parent)))
+                 section))
+         (changed (and hunk (oref hunk from-range) (oref hunk to-range)
+                       (seq-remove (lambda (line) (nth 3 line))
+                                   (ygg-git-compare--hunk-lines hunk))))
+         (beg (car (car changed)))
+         (end (car (car (last changed)))))
+    (unless changed (user-error "Not in a hunk with changes"))
+    (if (= beg end)
+        (cons 'line (save-excursion (goto-char beg) (ygg-git-compare--anchor)))
+      (cons 'range (ygg-git-compare--range-anchor beg end)))))
+
 (defun ygg-git-compare--file-anchor (section)
   (let ((new (oref section value)))
     (list :file new
@@ -443,8 +460,8 @@ saving keeps it on the compare.  Answer that buffer."
 ;;; Commenting
 
 (defun ygg-git-compare-comment ()
-  "Comment on the diff line at point, on the lines selected, or on the file
-whose heading point is on."
+  "Comment on the diff line at point, on the lines selected, on the file whose
+heading point is on, or on the hunk whose heading it is."
   (interactive)
   (let ((section (magit-current-section)))
     (cond
@@ -462,8 +479,17 @@ whose heading point is on."
      ((and section (magit-section-match 'file section))
       (ygg-git-compare--compose
        (ygg-git-compare--new-comment 'file (ygg-git-compare--file-anchor section))))
+     ((and section (magit-section-match 'hunk section)
+           (= (line-beginning-position) (oref section start)))
+      (ygg-git-compare-comment-hunk))
      (t (ygg-git-compare--compose
          (ygg-git-compare--new-comment 'line (ygg-git-compare--anchor)))))))
+
+(defun ygg-git-compare-comment-hunk ()
+  "Comment on the hunk at point as a whole."
+  (interactive)
+  (pcase-let ((`(,level . ,anchor) (ygg-git-compare--hunk-anchor)))
+    (ygg-git-compare--compose (ygg-git-compare--new-comment level anchor))))
 
 (defun ygg-git-compare-comment-file ()
   "Comment on the file at point as a whole."
@@ -1012,8 +1038,9 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
   [["Comment"
     ("c" "on the review" ygg-git-compare-comment-review)
     ("l" "on the line or lines" ygg-git-compare-comment)
+    ("h" "on the hunk" ygg-git-compare-comment-hunk)
     ("f" "on the file" ygg-git-compare-comment-file)
-    ("L" "list them" ygg-git-compare-comments-summary)
+    ("L""list them" ygg-git-compare-comments-summary)
     ("A" "accept all pending" ygg-git-compare-comments-accept-all)
     ("X" "dismiss all pending" ygg-git-compare-comments-dismiss-all)]
    ["Navigate"

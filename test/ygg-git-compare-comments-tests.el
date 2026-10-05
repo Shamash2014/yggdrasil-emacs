@@ -379,6 +379,8 @@ and adds b.txt; main stays checked out."
                        ("m" ygg-git-compare-comment-next)
                        ("M" ygg-git-compare-comment-previous)
                        ("] c" ygg-git-compare-next-hunk)
+                       ("C-j" ygg-git-compare-next-hunk)
+                       ("C-k" ygg-git-compare-previous-hunk)
                        ("[ c" ygg-git-compare-previous-hunk)
                        ("] f" ygg-git-compare-next-file)
                        ("[ f" ygg-git-compare-previous-file)
