@@ -395,12 +395,16 @@ bare unmodified letter (ghostel's own self-insert sends strings too)."
                         (with-current-buffer buf (ghostel-semi-char-mode))))
                     (current-buffer))))
 
+(defun ygg--ghostel-insert-elsewhere ()
+  (setq-local ygg-insert-elsewhere t))
+
 (with-eval-after-load 'ghostel
   (advice-add 'ghostel-semi-char-mode :after #'ygg--ghostel-state-insert)
   (advice-add 'ghostel-emacs-mode :after #'ygg--ghostel-state-normal)
   (when (fboundp 'ghostel-copy-mode)
     (advice-add 'ghostel-copy-mode :after #'ygg--ghostel-state-normal))
-  (add-hook 'ygg-insert-entry-hook #'ygg--ghostel-insert-redirect))
+  (add-hook 'ygg-insert-entry-hook #'ygg--ghostel-insert-redirect)
+  (add-hook 'ghostel-mode-hook #'ygg--ghostel-insert-elsewhere))
 
 ;;; comint shells/REPLs: land in insert at the prompt so typing is
 ;;; immediate; jk/ESC drops to normal for vim scroll + output nav.

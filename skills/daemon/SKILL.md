@@ -1,6 +1,6 @@
 ---
 name: daemon
-description: "Entry command: restates the ask, routes it to a playbook (feature, bugfix, exploration, architecture, testing, qa, review, ice), then leads it."
+description: "Entry command: restates the ask, routes it to a playbook (feature, bugfix, exploration, architecture, testing, qa, review, correct, ice), then leads it."
 ---
 
 # Daemon
@@ -31,6 +31,7 @@ skip it. Then classify the ask and pick one playbook:
 | a built change needs a break-it pass | playbooks/qa.md |
 | is it secure, or qa.md calls for it | playbooks/bughunt.md |
 | review a diff, PR, design, or comments | playbooks/review.md |
+| /correct, or the same agent mistake corrected again | playbooks/correct.md |
 
 Can span two: a bug found mid-QA is its own bugfix item (qa.md says
 so); an approved architecture is a feature or ice item; a feature

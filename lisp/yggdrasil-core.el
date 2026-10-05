@@ -210,7 +210,14 @@ mode change drops them, so a mode hook is the place to call this."
              (def (if (stringp from) (local-key-binding (kbd from)) from)))
         (when def (define-key keep (kbd key) def))))
     (setq ygg--special-keep-map keep))
+  (add-hook 'ygg-visual-exit-hook #'ygg--drop-region 90 t)
   (yggdrasil-local-mode 1))
+
+(defun ygg--drop-region ()
+  "Collapse the region to point, so no selection outlives visual state."
+  (when mark-active
+    (set-mark (point))
+    (deactivate-mark)))
 
 (defvar ygg-normal-entry-hook nil)
 (defvar ygg-visual-entry-hook nil)
@@ -361,6 +368,11 @@ Read-only modal buffers that send keys to another target (e.g. embr, which
 types into a web page) set this so j reaches that target instead of being
 self-inserted — where `insert' would signal `buffer-read-only'.")
 
+(defvar-local ygg-insert-elsewhere nil
+  "Non-nil where insert state types somewhere other than this buffer's text.
+Read-only buffers that send keys on (a terminal's pty, embr's web page)
+set it so the insert verbs enter insert there instead of refusing.")
+
 (defun ygg--jk-escape ()
   "Insert j; if k follows within `ygg-escape-delay', escape to normal.
 With `ygg-jk-forward-function' set, route j through it rather than inserting,
@@ -499,6 +511,16 @@ point is not in a minibuffer and the prompt survives."
         (t (keyboard-quit))))
 
 (global-set-key [escape] #'ygg-escape-everything)
+
+(defun ygg--ctrl-bracket-escapes (frame)
+  "Read C-[ as <escape> in graphic FRAME rather than as the Meta prefix.
+A terminal sends the Escape key as that same ESC, so tty frames keep it."
+  (when (display-graphic-p frame)
+    (with-selected-frame frame
+      (define-key input-decode-map [?\e] [escape]))))
+
+(mapc #'ygg--ctrl-bracket-escapes (frame-list))
+(add-hook 'after-make-frame-functions #'ygg--ctrl-bracket-escapes)
 
 (dolist (map (list minibuffer-local-map
                    minibuffer-local-ns-map

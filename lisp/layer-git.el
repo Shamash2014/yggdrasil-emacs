@@ -43,9 +43,6 @@
 (declare-function magit-file-relative-name "magit-git")
 (declare-function magit-stage-files "magit-apply")
 (declare-function magit-get-current-branch "magit-git")
-(declare-function forge-dispatch "forge-commands")
-(declare-function forge-list-pullreqs "forge-topics")
-(declare-function forge-list-issues "forge-topics")
 (declare-function lab-list-project-merge-requests "lab")
 (declare-function lab-act-on-last-project-pipeline "lab")
 (declare-function lab-approve-merge-request "lab")
@@ -54,14 +51,16 @@
 
 (defvar magit-section-mode-map)
 (defvar magit-mode-map)
+(defvar transient-base-map)
+(defvar transient-sticky-map)
+(declare-function transient-quit-one "transient")
+(declare-function transient-quit-seq "transient")
+(declare-function magit-revert-no-commit "magit-sequence")
 (defvar magit-status-mode-map)
 (defvar magit-log-mode-map)
 (defvar magit-diff-mode-map)
 (defvar magit-revision-mode-map)
 (defvar with-editor-mode-map)
-(defvar forge-topics-mode-map)
-(defvar forge-topic-mode-map)
-(defvar forge-post-mode-map)
 (defvar lab-merge-request-diff-prefix-map)
 
 (defvar magit-status-sections-hook)
@@ -69,11 +68,11 @@
 (declare-function magit-auto-revert-repository-buffer-p "magit-autorevert")
 
 (declare-function magit-add-section-hook "magit-section")
-(declare-function magit-insert-worktrees "magit-worktree")
+(autoload 'ygg-git-worktree-insert-section "ygg-git-worktree")
 
-;; magit-insert-worktrees inserts nothing when the repository has one worktree
+;; it inserts nothing when the repository has one worktree
 (with-eval-after-load 'magit-status
-  (magit-add-section-hook 'magit-status-sections-hook #'magit-insert-worktrees
+  (magit-add-section-hook 'magit-status-sections-hook #'ygg-git-worktree-insert-section
                           #'magit-insert-status-headers t))
 
 (declare-function magit-blame-next-chunk "magit-blame")
@@ -118,12 +117,14 @@
     ;; stat-ing its whole CONTAINING directory on every revert tick — bursty
     ;; CPU in big project roots. Poll the file's own mtime instead (O(1)).
     (setq auto-revert-use-notify nil))
-  (elpaca forge
-    (setq forge-database-file (locate-user-emacs-file "var/forge-database.sqlite"))
-    (with-eval-after-load 'magit (require 'forge)))
   (elpaca (lab :host github :repo "isamert/lab.el")
     (with-eval-after-load 'lab
       (setq lab-host (or (getenv "LAB_HOST") ygg-lab-host)))))
+
+;; Esc quits a transient menu like C-g, as it backs out of anything else
+(with-eval-after-load 'transient
+  (keymap-set transient-base-map "<escape>" #'transient-quit-one)
+  (keymap-set transient-sticky-map "<escape>" #'transient-quit-seq))
 
 ;;; Huge changes: the status buffer washes every hunk it inserts — ~1s per
 ;;; 1000 changed lines, paid again on every refresh.  Past a limit, insert
@@ -256,9 +257,6 @@
              '(difftastic-mode ("<tab>" . "TAB") ("] c" . "n") ("[ c" . "p")
                                ("] f" . "N") ("[ f" . "P")))
 
-(add-to-list 'ygg-modal-special-modes 'forge-topics-mode)
-(add-to-list 'ygg-modal-special-modes 'forge-topic-mode)
-(add-to-list 'ygg-modal-special-modes 'forge-repository-list-mode)
 
 (when (fboundp 'elpaca)
   (elpaca diff-hl
@@ -407,7 +405,8 @@ without a verdict: a cancelled ask says nothing about the file."
 ;; Yggdrasil states stay off there (magit derives from special-mode), so
 ;; keys go straight into magit's maps.  Displacements: g -> g r (refresh),
 ;; k -> K (delete thing), K's magit-file-untrack stays in magit-file-dispatch,
-;; per-mode j jump commands -> J.
+;; per-mode j jump commands -> J, v revert/reverse -> _ (v and x select lines),
+;; x reset-quickly -> the X menu.  V stays magit-revert, a confirmed menu.
 
 (defvar ygg-magit-goto-map (make-sparse-keymap)
   "The g prefix inside magit section buffers.")
@@ -462,7 +461,33 @@ so it rendered two lines for a mode with a hundred keys."
   ;; magit-mode-map is the child of magit-section-mode-map, so magit's own
   ;; G shadowed the buffer-end this config puts there
   (define-key magit-mode-map (kbd "G") #'end-of-buffer)
-  (define-key magit-mode-map (kbd "C-w") ygg-window-map))
+  (define-key magit-mode-map (kbd "C-w") ygg-window-map)
+  ;; hunk and file maps remap revert-no-commit to magit-reverse, so _ reverses
+  (define-key magit-mode-map (kbd "v") #'ygg-magit-select-lines)
+  (define-key magit-mode-map (kbd "x") #'ygg-magit-select-lines)
+  (define-key magit-mode-map (kbd "_") #'magit-revert-no-commit))
+
+(defvar-keymap ygg-magit-selection-map
+  "j" #'next-line
+  "k" #'previous-line
+  "x" #'next-line
+  "<down>" #'next-line
+  "<up>" #'previous-line
+  "v" #'ygg-magit-select-lines
+  "<escape>" #'ygg-magit-select-lines)
+
+(defun ygg-magit-select-lines ()
+  "Select diff lines from this one for s, u or K to act on.
+Pressed again, as v or Esc, it ends the selection."
+  (interactive)
+  (if (region-active-p)
+      (deactivate-mark)
+    (let ((buffer (current-buffer)))
+      (beginning-of-line)
+      (push-mark (point) t t)
+      (set-transient-map ygg-magit-selection-map
+                         (lambda () (and (eq (current-buffer) buffer)
+                                         (region-active-p)))))))
 
 (declare-function magit-copy-section-value "magit-mode")
 (define-key ygg-magit-goto-map (kbd "y") (cons "copy section value" #'magit-copy-section-value))
@@ -708,9 +733,6 @@ LABEL is the worktree's name, branch and path."
   "W" #'ygg-git-worktree-status :label "worktree status"
   "x" ygg-git-conflict-map :label "conflicts"
   "y" #'ygg-git-yank-branch :label "yank branch"
-  "F" #'forge-dispatch :label "forge menu"
-  "I" #'forge-list-issues :label "forge issues"
-  "P" #'forge-list-pullreqs :label "forge PRs"
   "M" #'lab-list-project-merge-requests :label "lab MRs"
   "R" #'lab-act-on-last-project-pipeline :label "lab last pipeline"
   "A" #'lab-approve-merge-request :label "lab approve MR")
@@ -862,18 +884,52 @@ With a prefix arg, prompt for the target branch."
         (transient-append-suffix 'magit-worktree "b"
           '("W" "worktrunk switch" ygg-wt-switch))))))
 
+;;; Run what is at point in a worktree of its own
+
+(autoload 'ygg-git-worktree-run "ygg-git-worktree" nil t)
+(autoload 'ygg-git-worktree-remove "ygg-git-worktree" nil t)
+
+(yggdrasil-define-keys 'ygg-leader-worktree-map
+  "r" #'ygg-git-worktree-run :label "run at point in a worktree"
+  "x" #'ygg-git-worktree-remove :label "remove worktree + space")
+
+(defvar magit-worktree-section-map)
+
+(with-eval-after-load 'magit-worktree
+  (keymap-set magit-worktree-section-map "<remap> <magit-delete-thing>"
+              #'ygg-git-worktree-remove)
+  (ignore-errors
+    (unless (ignore-errors (transient-get-suffix 'magit-worktree "r"))
+      (transient-append-suffix 'magit-worktree "c"
+        '("r" "Run at point in a worktree" ygg-git-worktree-run)))
+    (unless (ignore-errors (transient-get-suffix 'magit-worktree "x"))
+      (transient-append-suffix 'magit-worktree "k"
+        '("x" "Remove worktree, space and buffers" ygg-git-worktree-remove)))))
+
 ;;; Compare two sides — worktrees, branches, commits, pull requests
 
 (autoload 'ygg-git-compare "ygg-git-compare" nil t)
 (autoload 'ygg-git-compare-at-point "ygg-git-compare" nil t)
+(autoload 'ygg-git-compare-interdiff "ygg-git-compare-interdiff" nil t)
+(with-eval-after-load 'ygg-git-compare
+  (require 'ygg-git-compare-interdiff)
+  (require 'ygg-git-compare-marks))
+(autoload 'ygg-git-compare-review-branch "ygg-git-compare" nil t)
+(autoload 'ygg-git-compare-comments-receive "ygg-git-compare-comments")
 
 (yggdrasil-define-keys 'ygg-leader-git-map
-  "C" #'ygg-git-compare :label "compare two sides")
+  "C" #'ygg-git-compare :label "compare two sides"
+  "r" #'ygg-git-compare-review-branch :label "review branch PR/MR")
 (yggdrasil-define-keys 'ygg-leader-worktree-map
   "c" #'ygg-git-compare :label "compare two sides")
 
+(defvar ygg-magit-compare-map (make-sparse-keymap)
+  "The = prefix inside magit buffers: compares.")
+(define-key ygg-magit-compare-map (kbd "=") (cons "compare at point" #'ygg-git-compare-at-point))
+(define-key ygg-magit-compare-map (kbd "r") (cons "review branch PR/MR" #'ygg-git-compare-review-branch))
+
 (with-eval-after-load 'magit-mode
-  (define-key magit-mode-map (kbd "=") #'ygg-git-compare-at-point))
+  (define-key magit-mode-map (kbd "=") ygg-magit-compare-map))
 
 (with-eval-after-load 'magit-worktree
   (ignore-errors

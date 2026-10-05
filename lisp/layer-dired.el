@@ -218,8 +218,13 @@
 
 ;; wdired's exit path sets major-mode by hand, skipping run-mode-hooks, so the
 ;; globalized mode never refires there — drive the round trip explicitly.
+(defun ygg-dired--wdired-edit ()
+  "Edit the names at once: the i that opened wdired was the insert."
+  (yggdrasil-local-mode 1)
+  (ygg-insert-state))
+
 (with-eval-after-load 'wdired
-  (add-hook 'wdired-mode-hook (lambda () (yggdrasil-local-mode 1)))
+  (add-hook 'wdired-mode-hook #'ygg-dired--wdired-edit)
   (advice-add 'wdired-change-to-dired-mode :after
               (lambda (&rest _) (yggdrasil-local-mode -1))))
 

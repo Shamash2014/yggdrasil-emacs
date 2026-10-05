@@ -1364,7 +1364,7 @@ the change itself, cut to `aob-trace-diff-lines\=' unless opened."
 (defconst aob-trace--agent-art-size '(112 . 95)
   "The grid `aob-trace--agent-art' is drawn on.")
 
-(defcustom aob-trace-agent-mark-scale 0.62
+(defcustom aob-trace-agent-mark-scale 1.0
   "How much of a line's height the agent's mark takes."
   :type 'number :group 'aob)
 
@@ -1373,14 +1373,14 @@ the change itself, cut to `aob-trace-diff-lines\=' unless opened."
 
 (defun aob-trace--agent-size (lh cw)
   "Width and height of the agent's mark beside a line LH pixels high:
-the whole animal inside the line, and no wider than CW, the one cell
-every other gutter glyph takes."
+the whole animal inside the line, and no wider than two cells of CW."
   (let* ((gw (car aob-trace--agent-art-size))
          (gh (cdr aob-trace--agent-art-size))
+         (cap (* 2 cw))
          (w (max 1 (round (* gw (/ (float lh) gh))))))
-    (if (<= w cw)
+    (if (<= w cap)
         (cons w lh)
-      (cons cw (max 1 (round (* gh (/ (float cw) gw))))))))
+      (cons cap (max 1 (round (* gh (/ (float cap) gw))))))))
 
 (defun aob-trace--agent-icon ()
   "The agent's mark, drawn to fit one line, or nil without image support."

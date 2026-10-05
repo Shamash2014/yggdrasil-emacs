@@ -6437,7 +6437,7 @@ off its two columns nearest the text, row glyphs are no bigger than the
 text, a narrow window keeps a margin for the speaker's mark, a thought
 mid-turn carries no glyph of its own, nor does any other delta row or
 the folded reads, which show no clock either, the agent's mark is no
-wider than one cell, wrapped command output hangs under the command,
+wider than two cells, wrapped command output hangs under the command,
 and copying a line leaves its mark behind."
   (dolist (m aob-trace--marks)
     (should (vectorp (nth 4 m)))
@@ -6445,7 +6445,7 @@ and copying a line leaves its mark behind."
       (should (< row 256))
       (should (zerop (logand row 3)))))
   (should (eq 'unspecified (face-attribute 'aob-trace-icon :height nil t)))
-  (should (<= (car (aob-trace--agent-size 27 8)) 8))
+  (should (<= (car (aob-trace--agent-size 27 8)) 16))
   (should (<= (cdr (aob-trace--agent-size 27 8)) 27))
   (should (equal (aob-trace--agent-size 6 8) '(7 . 6)))
   (dolist (style '(delta log))

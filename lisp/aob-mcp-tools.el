@@ -486,6 +486,196 @@ FOUND is the form answering once it is found, with it bound to s."
               (split-string (aob-session-tail s) "\n")
             (list "no way to read it here"))))))))
 
+;;; review
+
+(defun aob-mcp-tools--json (value)
+  "VALUE, or the JSON it spells when it is a string; `unparsed' if it is not JSON."
+  (if (stringp value)
+      (condition-case nil
+          (json-parse-string value :object-type 'plist :array-type 'list
+                             :null-object nil :false-object nil)
+        (error 'unparsed))
+    value))
+
+(defun aob-mcp-tools--object-p (value)
+  (and (consp value) (keywordp (car value))))
+
+(defun aob-mcp-tools--review-comment (raw)
+  "RAW, one comment as the agent sent it, as the plist the compare view takes.
+A string instead says what is wrong with it."
+  (let* ((text (plist-get raw :text))
+         (file (plist-get raw :file))
+         (line-raw (plist-get raw :line))
+         (start-raw (plist-get raw :start_line))
+         (line (aob-mcp-tools--int line-raw))
+         (start (aob-mcp-tools--int start-raw))
+         (side (or (plist-get raw :side) "new"))
+         (type (plist-get raw :type))
+         (title (plist-get raw :title))
+         (priority-raw (plist-get raw :priority))
+         (priority (aob-mcp-tools--int priority-raw))
+         (confidence (plist-get raw :confidence))
+         (level (or (plist-get raw :level)
+                    (cond ((and (null file) (null line-raw)) "review")
+                          ((null line-raw) "file")
+                          ((and start-raw (not (eql start line))) "range")
+                          (t "line"))))
+         (problems
+          (delq nil
+                (list
+                 (unless (and (stringp text) (not (string-blank-p text))) "text missing")
+                 (unless (member level '("line" "range" "file" "review"))
+                   (format "level %S is not line, range, file or review" level))
+                 (unless (or (equal level "review") (and (stringp file) (not (string-blank-p file))))
+                   "file missing")
+                 (when (and line-raw (not (and line (> line 0)))) "line is not a positive integer")
+                 (when (and start-raw (not (and start (> start 0)))) "start_line is not a positive integer")
+                 (when (and (member level '("line" "range")) (null line-raw)) "line missing")
+                 (when (and (equal level "range") (null start-raw)) "start_line missing")
+                 (unless (member side '("new" "old")) (format "side %S is not new or old" side))
+                 (when (and type (not (stringp type))) "type is not a string")
+                 (when (and title (not (stringp title))) "title is not a string")
+                 (when (and priority-raw (not (and priority (<= 0 priority 3))))
+                   "priority is not 0 to 3")
+                 (when (and confidence (not (and (numberp confidence) (<= 0 confidence 1))))
+                   "confidence is not a number from 0 to 1")))))
+    (if problems
+        (string-join problems ", ")
+      (let ((side (intern side)))
+        (list :level (intern level)
+              :type (and type (not (string-blank-p type)) (intern type))
+              :text text
+              :file file :new-path file
+              :side side :line line
+              :start-line start :start-side side
+              :title title :priority priority :confidence confidence)))))
+
+(defun aob-mcp-tools--review-verdict (raw)
+  "RAW, a verdict on the whole patch, as a review-level comment, or why not."
+  (let ((correctness (plist-get raw :correctness))
+        (made (aob-mcp-tools--review-comment
+               (list :level "review" :text (plist-get raw :explanation)
+                     :confidence (plist-get raw :confidence)))))
+    (cond ((not (member correctness '("patch is correct" "patch is incorrect")))
+           "correctness is not \"patch is correct\" or \"patch is incorrect\"")
+          ((stringp made) made)
+          (t (append made (list :correctness correctness))))))
+
+(defun aob-mcp-tools--codex-finding (finding dir)
+  "FINDING from a Codex review as an agent's comment, its path relative to DIR."
+  (let* ((where (plist-get finding :code_location))
+         (path (plist-get where :absolute_file_path))
+         (range (plist-get where :line_range))
+         (start (plist-get range :start))
+         (end (or (plist-get range :end) start))
+         (root (file-name-as-directory (expand-file-name dir))))
+    (list :file (if (and (stringp path) (string-prefix-p root (expand-file-name path)))
+                    (file-relative-name path root)
+                  path)
+          :line end
+          :start_line (and start (not (equal start end)) start)
+          :side "new"
+          :title (plist-get finding :title)
+          :text (plist-get finding :body)
+          :priority (plist-get finding :priority)
+          :confidence (plist-get finding :confidence_score))))
+
+(defun aob-mcp-tools--review-entries (args)
+  "Every comment ARGS carries as (LABEL . RAW), LABEL naming it in a complaint.
+A string stands where an argument could not be read."
+  (let ((comments (aob-mcp-tools--json (plist-get args :comments)))
+        (verdict (aob-mcp-tools--json (plist-get args :verdict)))
+        (codex (aob-mcp-tools--json (plist-get args :codex_review)))
+        entries)
+    (cond ((eq comments 'unparsed) (push "comments is not a JSON array" entries))
+          ((not (listp comments)) (push "comments is not an array" entries))
+          (t (seq-do-indexed (lambda (raw i) (push (cons (format "comment %d" (1+ i)) raw) entries))
+                             comments)))
+    (when verdict
+      (push (cons "verdict" (and (aob-mcp-tools--object-p verdict) (list :verdict verdict)))
+            entries))
+    (when codex
+      (if (not (aob-mcp-tools--object-p codex))
+          (push "codex_review is not a JSON object" entries)
+        (seq-do-indexed
+         (lambda (finding i)
+           (push (cons (format "finding %d" (1+ i))
+                       (and (aob-mcp-tools--object-p finding)
+                            (aob-mcp-tools--codex-finding finding (plist-get args :dir))))
+                 entries))
+         (plist-get codex :findings))
+        (when (plist-get codex :overall_correctness)
+          (push (cons "codex verdict"
+                      (list :verdict (list :correctness (plist-get codex :overall_correctness)
+                                           :explanation (plist-get codex :overall_explanation)
+                                           :confidence (plist-get codex :overall_confidence_score))))
+                entries))))
+    (nreverse entries)))
+
+(defun aob-mcp-tools--review-comments (args)
+  "The comments ARGS carries as (GOOD . BAD).
+GOOD are compare-view plists; BAD are lines naming each rejected entry."
+  (let (good bad)
+    (dolist (entry (aob-mcp-tools--review-entries args))
+      (let* ((raw (cdr-safe entry))
+             (made (cond ((stringp entry) entry)
+                         ((not (aob-mcp-tools--object-p raw)) "not an object")
+                         ((plist-member raw :verdict)
+                          (aob-mcp-tools--review-verdict (plist-get raw :verdict)))
+                         (t (aob-mcp-tools--review-comment raw)))))
+        (cond ((stringp entry) (push entry bad))
+              ((stringp made) (push (format "%s: %s" (car entry) made) bad))
+              (t (push made good)))))
+    (when (and (null good) (null bad)) (push "no comments given" bad))
+    (cons (nreverse good) (nreverse bad))))
+
+(aob-mcp-deftool
+ :name "review_submit"
+ :description "After reviewing a branch's diff, submit your comments; the user checks them as pending drafts, nothing is posted anywhere."
+ :args '((:name "dir" :type string
+          :description "Absolute path of the repository.")
+         (:name "branch" :type string
+          :description "Branch reviewed.")
+         (:name "comments" :type array :items (:type "object") :optional t
+          :description "[{file, line (end), side: new|old, start_line, level: line|range|file|review, type: issue|nit|question, title, priority: 0-3, confidence: 0-1, text}]; only text required for a review-level comment.")
+         (:name "verdict" :type object :optional t
+          :description "{correctness: \"patch is correct\"|\"patch is incorrect\", explanation, confidence}.")
+         (:name "codex_review" :type object :optional t
+          :description "A Codex review output as-is, instead of or beside comments.")
+         (:name "author" :type string :optional t
+          :description "Who reviewed; your session's name if omitted."))
+ :handler
+ (lambda (args conn id)
+   (let* ((dir (plist-get args :dir))
+          (branch (plist-get args :branch))
+          (parsed (and (stringp dir) (aob-mcp-tools--review-comments args)))
+          (good (car parsed))
+          (bad (cdr parsed))
+          (author (plist-get args :author)))
+     (cond
+      ((not (and (stringp dir) (not (string-blank-p dir)))) "which repository? pass dir")
+      ((not (and (stringp branch) (not (string-blank-p branch)))) "which branch? pass branch")
+      ((null good)
+       (string-join (cons "nothing submitted:" bad) "\n"))
+      (t
+       (aob-mcp-relay
+        conn id
+        `(progn
+           (ignore-errors (require 'ygg-git-compare))
+           (if (not (fboundp 'ygg-git-compare-comments-receive))
+               (list "review comments not available in this Emacs")
+             (condition-case err
+                 (let* ((author (or ,(and (stringp author) (not (string-blank-p author)) author)
+                                    (when-let* ((s ,(aob-mcp-tools--parent-form aob-mcp-session)))
+                                      (aob-session-name s))
+                                    "agent"))
+                        (got (ygg-git-compare-comments-receive ,dir ,branch ',good author)))
+                   (cons (let ((n (if (integerp (car-safe got)) (car got) ,(length good))))
+                           (format "%d comment%s submitted for review on %s; the user will check them"
+                                   n (if (= n 1) "" "s") ,branch))
+                         ',(and bad (cons "skipped:" bad))))
+               (error (list (error-message-string err))))))))))))
+
 ;;; todo list
 
 (aob-mcp-deftool

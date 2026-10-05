@@ -89,6 +89,7 @@
 (declare-function vui-region "vui")
 (declare-function vui-text "vui")
 (declare-function yggdrasil-local-mode "yggdrasil-core")
+(declare-function yggdrasil-define-local-keys "yggdrasil-core" (states &rest bindings))
 
 (defgroup ygg-projects nil
   "The projects sidebar."
@@ -1673,7 +1674,8 @@ row, else nowhere."
   "Redraw the sidebar from what the projects are running now.
 Point is kept on the row it was on rather than at the offset that row
 used to occupy: a redraw that lands the cursor somewhere else reads as
-the sidebar moving on its own."
+the sidebar moving on its own.  A visual selection's other end is kept
+on its row the same way."
   (interactive)
   (setq ygg-projects--on-screen (ygg-projects--traced-ids))
   (when-let* ((buf (get-buffer ygg-projects-buffer-name)))
@@ -1685,11 +1687,19 @@ the sidebar moving on its own."
           (let ((cards (ygg-projects--fresh-picture)))
             (unless (ygg-projects--same-p cards ygg-projects--drawn)
               (let* ((row (ygg-projects--row-at-point))
+                     (anchor (and (ygg-projects--selecting-p)
+                                  (save-excursion (goto-char (mark t))
+                                                  (ygg-projects--row-at-point))))
                      (win (get-buffer-window buf 'visible))
                      (start (and (window-live-p win) (window-start win))))
                 (vui-update-props ygg-projects--instance (list :cards cards))
                 (setq ygg-projects--drawn cards)
                 (ygg-projects--goto-row row)
+                (when anchor
+                  (save-excursion
+                    (ygg-projects--goto-row anchor)
+                    (set-marker (mark-marker) (point))))
+                (ygg-projects--paint-selection)
                 (ygg-projects--follow-point)
                 (when (and (window-live-p win) start (<= start (point-max)))
                   (set-window-start win start t))))))))))
@@ -2526,9 +2536,6 @@ umbrella's Folders row moves that repository."
   "The sidebar's own verbs, ahead of yggdrasil's normal state.")
 
 (defvar-local ygg-projects--modal nil)
-(defvar ygg-projects--emulation-alist
-  (list (cons 'ygg-projects--modal ygg-projects-map)))
-(add-to-list 'emulation-mode-map-alists 'ygg-projects--emulation-alist)
 
 (defun ygg-projects--follow-point ()
   "Stand the sidebar in the project point is on.
@@ -2739,7 +2746,9 @@ windows around, the width it was opened at is the width it keeps."
                         ygg-sel ygg-fake-cursor))
       (when (facep f) (face-remap-set-base f nil)))
     (face-remap-add-relative 'fringe 'ygg-projects-gutter)
-    (when (fboundp 'yggdrasil-local-mode) (yggdrasil-local-mode 1))
+    (when (fboundp 'yggdrasil-local-mode)
+      (yggdrasil-local-mode 1)
+      (yggdrasil-define-local-keys '(normal visual) ygg-projects-map))
     ;; after the modal layer, which sets a cursor per state
     (setq-local cursor-type nil)
     (setq-local hl-line-face 'ygg-projects-current)

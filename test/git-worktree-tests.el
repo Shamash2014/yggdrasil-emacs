@@ -45,9 +45,15 @@ the files git itself leaves on disk for one, without asking git to make it."
 
 (ert-deftest ygg-git-status-shows-worktrees-after-the-headers ()
   (let ((hook (default-value 'magit-status-sections-hook)))
-    (should (memq #'magit-insert-worktrees hook))
+    (should (memq #'ygg-git-worktree-insert-section hook))
     (should (eq (cadr (memq #'magit-insert-status-headers hook))
-                #'magit-insert-worktrees))))
+                #'ygg-git-worktree-insert-section))
+    (should-not (memq #'magit-insert-worktrees hook))))
+
+(ert-deftest ygg-git-worktree-section-removes-with-K ()
+  (require 'ygg-git-worktree)
+  (should (eq (keymap-lookup magit-worktree-section-map "<remap> <magit-delete-thing>")
+              #'ygg-git-worktree-remove)))
 
 (ert-deftest ygg-git-status-hides-worktrees-in-a-single-tree-repo ()
   (git-worktree-tests--in-repo root

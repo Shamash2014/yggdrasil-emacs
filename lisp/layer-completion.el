@@ -114,6 +114,24 @@
     (advice-add 'corfu--teardown :after #'ygg-corfu--ghost-clear)
     (advice-add 'corfu--preview-current :after #'ygg-corfu--ghost-show)))
 
+(defvar-local ygg-corfu--keys nil
+  "Corfu's keys over insert state's here, live while its popup is up.
+Corfu's own map sits below every emulation map, so insert state's Esc,
+C-g and C-u would never reach the popup.")
+(add-to-list 'emulation-mode-map-alists 'ygg-corfu--keys)
+
+(defun ygg-corfu--keys-up (&rest _)
+  (setq ygg-corfu--keys `((completion-in-region-mode . ,corfu-map))))
+
+(defun ygg-corfu--keys-down (buffer)
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer (setq ygg-corfu--keys nil))))
+
+(with-eval-after-load 'corfu
+  (define-key corfu-map [escape] #'corfu-quit)
+  (advice-add 'corfu--setup :after #'ygg-corfu--keys-up)
+  (advice-add 'corfu--teardown :after #'ygg-corfu--keys-down))
+
 (defvar corfu--index)
 (defvar corfu--candidates)
 (defvar corfu--base)

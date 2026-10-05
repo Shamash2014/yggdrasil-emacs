@@ -108,6 +108,7 @@ and `q' in the pane closes the pane alone."
 (declare-function embr-paste "embr")
 (declare-function ygg-space--current-id "yggdrasil-spacetree")
 (defvar ygg-jk-forward-function)
+(defvar ygg-insert-elsewhere)
 (defvar ygg-paste-function)
 (defvar embr-browser-engine)
 (defvar embr-display-method)
@@ -169,9 +170,10 @@ and `q' in the pane closes the pane alone."
                 #'embr--action-callback)))
 
 (defun ygg-embr--enable-modal-io ()
-  "Route read-only-unsafe modal actions to the embr page: jk-escape and paste."
+  "Route the read-only-unsafe jk-escape, insert and paste to the embr page."
   (setq-local ygg-jk-forward-function #'ygg-embr--forward-key
-              ygg-paste-function #'embr-paste))
+              ygg-paste-function #'embr-paste
+              ygg-insert-elsewhere t))
 
 (add-hook 'embr-mode-hook #'ygg-embr--enable-modal-io)
 

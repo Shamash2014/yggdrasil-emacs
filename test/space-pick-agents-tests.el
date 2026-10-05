@@ -374,5 +374,18 @@
           (should (equal "     − fold finished"
                          (substring-no-properties (car (last (ygg-aob--tree-details 2)))))))))))
 
+(ert-deftest space-pick-subagent-answers-with-its-leads-space ()
+  (space-pick-tests--with
+    (let* ((lead (space-pick-tests--agent "lead" 2))
+           (kid (space-pick-tests--agent "kid" 3 :parent-session "acp:lead"))
+           (grandkid (space-pick-tests--agent "grandkid" 99 :parent-session "acp:kid")))
+      (aob-set-state kid 'blocked)
+      (should (eql 2 (ygg-aob-session-space kid)))
+      (should (eql 2 (ygg-aob-session-space grandkid)))
+      (should (eql 2 (aob-session-ref grandkid :space)))
+      (should (eq 'error (ygg-aob--space-state-face 2)))
+      (should-not (ygg-aob--space-state-face 3))
+      (ignore lead))))
+
 (provide 'space-pick-agents-tests)
 ;;; space-pick-agents-tests.el ends here

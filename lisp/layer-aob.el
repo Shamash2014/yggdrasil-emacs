@@ -112,17 +112,10 @@
 (dolist (map (list aob-context-mode-map aob-acp-mcp-mode-map))
   (set-keymap-parent map ygg-aob--special-keep))
 
-;; read-only agent buffers: region in visual only.  normal collapses the mark
-;; to point (verb bounds stay the cell) so no stale Helix span highlights.
-(defun ygg-aob--visual-only-selection ()
-  (when (and (bound-and-true-p ygg--normal-p) mark-active)
-    (set-mark (point))
-    (deactivate-mark)))
-
 (defun ygg-aob--modalize ()
   "Put this buffer in the modal layer; its mode keys are lifted above it."
   (yggdrasil-local-mode 1)
-  (add-hook 'post-command-hook #'ygg-aob--visual-only-selection 90 t))
+  (add-hook 'ygg-visual-exit-hook #'ygg--drop-region 90 t))
 
 (defun ygg-aob--modalize-trace ()
   (ygg-aob--modalize)
@@ -581,7 +574,7 @@ keeps every delegation, finished ones included."
                 (and (equal key (alist-get 'ygg-task tab)) (ygg-space--id-of tab)))
               (ygg-space--tabs))))
 
-(defun ygg-aob-session-space (s)
+(defun ygg-aob--own-space (s)
   "The live space S belongs to, re-attaching it when its own has closed.
 A space closes while its agent is still working — archiving a task closes
 the whole subtree — and an agent left filed under an id nothing answers
@@ -598,6 +591,14 @@ swept, so an orphan heals the moment anything looks for it."
           (when (fboundp 'ygg-cockpit-rename-buffers)
             (ygg-cockpit-rename-buffers s)))
         heir))))
+
+(defun ygg-aob-session-space (s)
+  "The live space S works in: its lead's, since a subagent works there."
+  (let* ((lead (aob-subagent-lead s))
+         (space (ygg-aob--own-space lead)))
+    (unless (or (eq lead s) (eql space (aob-session-ref s :space)))
+      (aob-session-put s :space space))
+    space))
 
 (add-hook 'aob-session-created-hook #'ygg-aob--remember-space)
 
@@ -1264,7 +1265,7 @@ work is filed somewhere, and the sidebar should say so at a glance."
 (defun ygg-aob--tree-details (space-id)
   (when ygg-aob--tree-agents-on
     (let* ((here (seq-filter (lambda (s)
-                               (eql (ygg-aob-session-space (aob-subagent-lead s)) space-id))
+                               (eql (ygg-aob-session-space s) space-id))
                              (ygg-aob--listed-sessions)))
            (tops (seq-sort-by #'ygg-aob--score #'>
                               (seq-filter (lambda (s) (ygg-aob--pick-top-p s here)) here))))

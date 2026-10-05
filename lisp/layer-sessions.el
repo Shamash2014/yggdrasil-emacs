@@ -23,6 +23,7 @@
 (declare-function easysession-add-load-handler "easysession")
 (defvar easysession-save-interval)
 (defvar easysession-after-load-hook)
+(defvar easysession--session-loaded)
 
 ;;; Sessions (resession.nvim feel)
 
@@ -35,12 +36,23 @@
     (add-hook 'kill-emacs-hook #'ygg-session--save-on-exit)))
 
 (defun ygg-session--save-on-exit ()
-  "Autosave on exit, resession.nvim style: the active session when one
-exists (save-mode also covers this), else this project's session."
-  (cond
-   ((not (fboundp 'easysession-get-session-name)))
-   ((easysession-get-session-name) (easysession-save))
-   ((project-current) (ygg-session-save-project))))
+  "On exit with no session active, start this project's, resession.nvim
+style, unless it has one already that was never loaded.  An active
+session is save-mode's to keep, which declines when no frame is left
+to save a layout from."
+  (when (and (fboundp 'easysession-get-session-name)
+             (not (easysession-get-session-name))
+             (project-current)
+             (not (file-exists-p
+                   (easysession-get-session-file-path (ygg-session--project-name)))))
+    (ygg-session-save-project)))
+
+(defun ygg-session--adopt (name)
+  "Make NAME the active session, one save-mode keeps saving.
+Only a load marks a session loaded, and save-mode's autosave passes over
+any that is not."
+  (easysession-set-current-session-name name)
+  (setq easysession--session-loaded t))
 
 (defun ygg-session-save ()
   "Save the current session under its existing name (quick save).
@@ -54,7 +66,7 @@ the name itself; later calls save quietly under it."
     (when (string-empty-p name)
       (user-error "Session name must not be empty"))
     (easysession-save name)
-    (easysession-set-current-session-name name)
+    (ygg-session--adopt name)
     (message "[ygg-session] Saved session: %s" name)))
 
 (defun ygg-session-save-as ()
@@ -67,7 +79,7 @@ becomes the new active session."
     (when (string-empty-p name)
       (user-error "Session name must not be empty"))
     (easysession-save name)
-    (easysession-set-current-session-name name)
+    (ygg-session--adopt name)
     (message "[ygg-session] Saved session: %s" name)))
 
 ;; q l belongs to the loclist (nvim parity); sessions load via SPC p m/r
@@ -127,7 +139,7 @@ layout carries over under the new branch's name."
             (easysession-switch-to name)
           (easysession-save current)
           (easysession-save name)
-          (easysession-set-current-session-name name))))))
+          (ygg-session--adopt name))))))
 
 (defun ygg-session--follow-soon ()
   ;; loading a frameset from inside magit's refresh or a focus event pulls windows from under them
@@ -148,7 +160,7 @@ layout carries over under the new branch's name."
   (require 'easysession)
   (let ((name (ygg-session--project-name)))
     (easysession-save name)
-    (easysession-set-current-session-name name)
+    (ygg-session--adopt name)
     (message "[ygg-session] Saved project session: %s" name)))
 
 (defvar ygg-session--deferred-vc nil
@@ -267,7 +279,7 @@ signs and nobody reads a path that way."
 (ygg-spacetree-setup)
 
 ;; The tab-bar tabs (each space + its window-state) persist inside the
-;; easysession frameset for free; on restore we only reseed the id counter
+;; easysession frameset for free; on restore we reseed the id counter
 ;; so freshly created spaces never collide with restored ones.
 (declare-function ygg-agent-respawn-persisted "layer-agent")
 
@@ -424,6 +436,71 @@ per-space table so it stays isolated to the space that opened it."
     (mapcar #'buffer-name (delete-dups bufs))))
 
 (add-hook 'window-buffer-change-functions #'ygg--space-track-buffer)
+
+;;; Buckets saved with the session: space ids repeat across sessions
+
+(defvar easysession-buffer-list-function)
+(declare-function easysession-visible-buffer-list "easysession")
+
+(defvar ygg--space-buffers-loaded nil
+  "Nil, or a list holding the buckets of the session file being loaded,
+as (ID . BUFFERS), each buffer a (FILE . NAME), kept until they exist.")
+
+(defun ygg--space-session-ids ()
+  (delq nil (mapcan (lambda (frame)
+                      (mapcar #'ygg-space--id-of (funcall tab-bar-tabs-function frame)))
+                    (frame-list))))
+
+(defun ygg--space-buffers-session-save (buffers)
+  "Each space's bucket as easysession keeps it, a buffer by its file.
+Worktrees of one repository share file names, so a name alone finds
+another session's copy.  BUFFERS go on untouched for the next handler."
+  (let ((ids (ygg--space-session-ids))
+        saved)
+    (maphash (lambda (id bufs)
+               (when-let* (((memql id ids))
+                           (kept (mapcar (lambda (buf)
+                                           (cons (buffer-file-name buf) (buffer-name buf)))
+                                         (seq-filter #'buffer-live-p bufs))))
+                 (push (cons id kept) saved)))
+             ygg--space-buffers)
+    `((key . "ygg-space-buffers")
+      (value . ,saved)
+      (remaining-buffers . ,buffers))))
+
+(defun ygg--space-buffers-session-load (session-data)
+  "Hold SESSION-DATA's buckets until its buffers have been restored."
+  (setq ygg--space-buffers-loaded
+        (list (assoc-default "ygg-space-buffers" session-data))))
+
+(defun ygg--space-buffers-restore ()
+  "Refill the buckets from the session file just loaded, and only from it.
+A session switched to with no file yet carries the layout over, and its
+buckets with it."
+  (when-let* ((loaded ygg--space-buffers-loaded))
+    (setq ygg--space-buffers-loaded nil)
+    (clrhash ygg--space-buffers)
+    (pcase-dolist (`(,id . ,kept) (car loaded))
+      (when-let* ((bufs (delq nil (mapcar (pcase-lambda (`(,file . ,name))
+                                            (if file
+                                                (find-buffer-visiting file)
+                                              (get-buffer name)))
+                                          kept))))
+        (puthash id bufs ygg--space-buffers)))))
+
+(defun ygg-session--buffer-list ()
+  "The buffers a session saves: those its spaces show or have filed.
+Buffers of a session switched away from stay alive, and are not this one's."
+  (delete-dups
+   (append (easysession-visible-buffer-list)
+           (seq-filter #'buffer-live-p
+                       (apply #'append (hash-table-values ygg--space-buffers))))))
+
+(with-eval-after-load 'easysession
+  (setq easysession-buffer-list-function #'ygg-session--buffer-list)
+  (easysession-add-save-handler #'ygg--space-buffers-session-save)
+  (easysession-add-load-handler #'ygg--space-buffers-session-load)
+  (add-hook 'easysession-after-load-hook #'ygg--space-buffers-restore))
 
 (defun ygg-space-claim-buffer (buf id &optional move)
   "Assign BUF to space ID, before a window can claim it for another.

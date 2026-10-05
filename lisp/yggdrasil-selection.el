@@ -821,7 +821,13 @@ the group holding the primary stays primary."
 With one position this is a plain insert entry; with several, typed text
 is mirrored at every cursor until insert state exits.  A COUNT above one
 repeats the session's edits on exit, each extra copy on a line opened by
-OPEN-LINE (called with point twice) when that is given (vim 3o)."
+OPEN-LINE (called with point twice) when that is given (vim 3o).
+Read-only text refuses, unless `ygg-insert-elsewhere' sends the typing on."
+  (when (and (not (or ygg-insert-elsewhere inhibit-read-only))
+             (or buffer-read-only
+                 (seq-some (lambda (pos) (get-pos-property pos 'read-only))
+                           positions)))
+    (user-error "Read-only"))
   (let ((count (or ygg--repeat-count count)))
     (setq ygg--insert-count (and count (> count 1) (cons count open-line))))
   (setq ygg--repeat-insert-entry

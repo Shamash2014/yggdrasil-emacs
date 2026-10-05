@@ -2,6 +2,7 @@
 
 (require 'ert)
 (require 'cl-lib)
+(require 'yggdrasil)
 (require 'ygg-projects)
 
 (defvar ygg-projects-tests--state 'working
@@ -476,6 +477,46 @@ beta's subagent scout.  a, b and kid are bound to the sessions."
       (should-not ygg--visual-p)
       (should (memq b opened))
       (should-not (memq a opened)))))
+
+(ert-deftest ygg-projects-redraw-keeps-the-selection-where-it-began ()
+  "A redraw mid-selection leaves both ends on their rows, still painted."
+  (skip-unless (require 'vui nil t))
+  (require 'aob-trace)
+  (let* ((tick 0)
+         (row (lambda (name)
+                (propertize (format "  %s %ds" name tick) 'ygg-project "/tmp/p/"
+                            'ygg-row 'agents 'ygg-entry (list :name name))))
+         (cards (lambda ()
+                  (list (list "/tmp/p/" t
+                              (list (propertize " p" 'ygg-project "/tmp/p/" 'ygg-row 'project)
+                                    (propertize "  Sessions" 'ygg-project "/tmp/p/"
+                                                'ygg-row 'agents)
+                                    (funcall row "alpha") (funcall row "beta")
+                                    (funcall row "gamma"))))))
+         (names (lambda () (mapcar (lambda (e) (plist-get e :name))
+                                   (ygg-projects--selected-entries)))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ygg-projects--fresh-picture) cards))
+          (let* ((drawn (funcall cards))
+                 (inst (save-window-excursion
+                         (vui-mount (vui-component 'ygg-projects-view :cards drawn)
+                                    ygg-projects-buffer-name))))
+            (switch-to-buffer ygg-projects-buffer-name)
+            (setq ygg-projects--instance inst ygg-projects--drawn drawn)
+            (ygg-projects--setup (current-buffer))
+            (goto-char (point-min))
+            (forward-line 3)
+            (execute-kbd-macro (kbd "V j"))
+            (should (equal (funcall names) '("beta" "gamma")))
+            (setq tick 1)
+            (ygg-projects-refresh)
+            (should ygg--visual-p)
+            (should (= (line-number-at-pos) 5))
+            (should (equal (funcall names) '("beta" "gamma")))
+            (should (= (line-number-at-pos (overlay-start ygg-projects--selection-overlay))
+                       4))))
+      (when (get-buffer ygg-projects-buffer-name)
+        (kill-buffer ygg-projects-buffer-name)))))
 
 ;;; A session in a linked worktree
 

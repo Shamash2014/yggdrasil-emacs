@@ -13,8 +13,10 @@
 (require 'subr-x)
 (require 'seq)
 (require 'magit)
+(require 'url-util)
 
 (defvar ygg-magit-diff-line-limit)
+(defvar ygg-lab-host)
 (defvar aob-acp-agents)
 (defvar aob-acp-start-dir)
 (defvar aob-prompt-typed)
@@ -65,7 +67,7 @@ left out of a review."
 (defvar-local ygg-git-compare--shown nil "(RANGE . FILE) the right pane shows.")
 (defvar-local ygg-git-compare--timer nil)
 (defvar-local ygg-git-compare--comments nil
-  "Review comments held on this compare until it is sent, newest first.")
+  "This compare's review comments as kept, newest first.")
 (defvar-local ygg-git-compare--list-buffer nil
   "In the right pane, the diff of every file it belongs to.")
 
@@ -290,26 +292,31 @@ default branch."
          '(rev . "HEAD"))
         (t (cons 'rev (ygg-git-compare--default-branch)))))
 
+(defun ygg-git-compare-table (cands category)
+  "A completion table of CANDS, (LABEL . VALUE) in the order given, of
+CATEGORY; each LABEL's group and note are read from its text properties."
+  (lambda (str pred action)
+    (if (eq action 'metadata)
+        `(metadata
+          (category . ,category)
+          (group-function
+           . ,(lambda (cand transform)
+                (if transform cand
+                  (get-text-property 0 'ygg-git-compare-group cand))))
+          (annotation-function
+           . ,(lambda (cand)
+                (when-let* ((note (get-text-property 0 'ygg-git-compare-note cand)))
+                  (concat "  " (propertize note 'face 'completions-annotations)))))
+          (display-sort-function . identity)
+          (cycle-sort-function . identity))
+      (complete-with-action action cands str pred))))
+
 (defun ygg-git-compare--read (prompt cands default)
   "Read a side with PROMPT among CANDS, DEFAULT the spec RET takes."
   (let* ((default-label (ygg-git-compare--label default cands))
-         (table (lambda (str pred action)
-                  (if (eq action 'metadata)
-                      `(metadata
-                        (group-function
-                         . ,(lambda (cand transform)
-                              (if transform cand
-                                (get-text-property 0 'ygg-git-compare-group cand))))
-                        (annotation-function
-                         . ,(lambda (cand)
-                              (when-let* ((note (get-text-property
-                                                 0 'ygg-git-compare-note cand)))
-                                (concat "  " (propertize note 'face 'shadow)))))
-                        (display-sort-function . identity)
-                        (cycle-sort-function . identity))
-                    (complete-with-action action cands str pred))))
          (choice (completing-read (format-prompt prompt default-label)
-                                  table nil nil nil nil default-label)))
+                                  (ygg-git-compare-table cands 'ygg-review-side)
+                                  nil nil nil nil default-label)))
     (or (cdr (assoc choice cands))
         (and (equal choice default-label) default)
         (cons 'rev choice))))
@@ -592,6 +599,16 @@ an untracked one against nothing."
   (with-current-buffer (ygg-git-compare--list)
     (ygg-git-compare--redraw ygg-git-compare--b-spec ygg-git-compare--a-spec)))
 
+(defun ygg-git-compare-switch-base ()
+  "Pick another side A, the base B is compared against."
+  (interactive)
+  (with-current-buffer (ygg-git-compare--list)
+    (let ((cands (ygg-git-compare-candidates t)))
+      (ygg-git-compare--redraw
+       (ygg-git-compare--read (format "Compare %s against (A)"
+                                      (ygg-git-compare--label ygg-git-compare--b-spec cands))
+                              cands (ygg-git-compare-default-a ygg-git-compare--b-spec))))))
+
 (defun ygg-git-compare-toggle-dots ()
   "Diff A...B, from where the sides parted, or A..B, one against the other."
   (interactive)
@@ -627,33 +644,29 @@ an untracked one against nothing."
         (kill-buffer b)))
     config))
 
-(defun ygg-git-compare--drop-comments (list)
-  "Ask before LIST's held review comments go unsent; a user error keeps them."
-  (when-let* ((n (length (buffer-local-value 'ygg-git-compare--comments list)))
-              ((> n 0)))
-    (unless (y-or-n-p (format "Drop %d unsent review comment%s? " n (if (= n 1) "" "s")))
-      (user-error "%s" (substitute-command-keys
-                        "Comments kept; \\<ygg-git-compare-mode-map>\\[ygg-git-compare-review] sends them")))
-    (with-current-buffer list (setq ygg-git-compare--comments nil))))
-
 (defun ygg-git-compare-quit ()
-  "Leave the compare and bring back the windows it replaced, asking first
-when review comments are held unsent."
+  "Leave the compare and bring back the windows it replaced; its review
+comments are kept for the next time it is opened."
   (interactive)
   (let ((list (ygg-git-compare--list)))
-    (ygg-git-compare--drop-comments list)
     (when-let* ((config (ygg-git-compare--close list)))
       (set-window-configuration config))))
 
 ;;; Review
 
 (defcustom ygg-git-compare-review-instructions
-  "Review the change from A to B below as a strict reviewer.  List each
-finding as path:line, a severity (blocker, major, minor, nit), what is
-wrong and a concrete fix.  My comments, each anchored to a file and line
-with the lines around it, are instructions, not suggestions: work out the
-change each asks for, and ask me where one leaves a choice open.  Do not
-change any files."
+  "Review the change from A to B below as a strict reviewer.  First read
+the \"Review guidelines\" or \"Code Review Rules\" sections of AGENTS.md
+and AGENTS.override.md where they exist.  Deliver your findings by
+calling the MCP tool review_submit with the branch named below and
+comments: [{file, line, side \"new\"|\"old\", start_line?, level?, type?,
+priority 0-3, confidence 0-1, title, text}], a short imperative title and,
+in text, what is wrong and a concrete fix; add one comment of level
+\"review\" whose correctness is \"patch is correct\" or \"patch is
+incorrect\", with its confidence and why.  Then summarise them.  My
+comments, each anchored to a file and line with the lines around it, are
+instructions, not suggestions: work out the change each asks for, and ask
+me where one leaves a choice open.  Do not change any files."
   "What an agent is asked to do with a compare it is sent."
   :type 'string)
 
@@ -663,76 +676,6 @@ change any files."
 
 (defconst ygg-git-compare-review-preset "review"
   "The preset a new session that plans from a review runs under.")
-
-(defun ygg-git-compare--hunk-lines (hunk)
-  "Each diff line of HUNK as (POS SIDE LINE); a removed line is on the old side."
-  (save-excursion
-    (goto-char (oref hunk content))
-    (let ((old (car (oref hunk from-range)))
-          (new (car (oref hunk to-range)))
-          lines)
-      (while (< (point) (oref hunk end))
-        (pcase (char-after)
-          (?- (push (list (point) 'old old) lines) (cl-incf old))
-          (?+ (push (list (point) 'new new) lines) (cl-incf new))
-          (?\s (push (list (point) 'new new) lines) (cl-incf old) (cl-incf new)))
-        (forward-line))
-      (nreverse lines))))
-
-(defun ygg-git-compare--anchor ()
-  "The diff line at point as a comment's place: file, side, line and quote."
-  (let* ((hunk (magit-current-section))
-         (lines (and hunk (magit-section-match 'hunk hunk)
-                     (oref hunk from-range) (oref hunk to-range)
-                     (ygg-git-compare--hunk-lines hunk)))
-         (at (or (cl-position (line-beginning-position) lines :key #'car)
-                 (user-error "Not on a diff line")))
-         (side (nth 1 (nth at lines)))
-         (file (oref hunk parent)))
-    (list :file (or (and (eq side 'old) (oref file source)) (oref file value))
-          :side side
-          :line (nth 2 (nth at lines))
-          :quote (buffer-substring-no-properties
-                  (car (nth (max 0 (- at 2)) lines))
-                  (save-excursion
-                    (goto-char (car (nth (min (1- (length lines)) (+ at 2)) lines)))
-                    (line-end-position))))))
-
-(defun ygg-git-compare--where (comment)
-  (format "%s:%d%s" (plist-get comment :file) (plist-get comment :line)
-          (if (eq (plist-get comment :side) 'old) " (removed line)" "")))
-
-(defun ygg-git-compare--read-comment (where &optional initial)
-  (let ((text (string-trim (read-string (format "Comment on %s: " where) initial))))
-    (if (string-empty-p text) (user-error "Empty comment") text)))
-
-(defun ygg-git-compare-comment ()
-  "Hold a review comment on the diff line at point until the compare is sent."
-  (interactive)
-  (let* ((anchor (ygg-git-compare--anchor))
-         (comment (cons :text (cons (ygg-git-compare--read-comment
-                                     (ygg-git-compare--where anchor))
-                                    anchor))))
-    (with-current-buffer (ygg-git-compare--list)
-      (push (append comment (list :range (ygg-git-compare--range-label)))
-            ygg-git-compare--comments))))
-
-(defun ygg-git-compare-comments ()
-  "Pick a held review comment to edit or drop."
-  (interactive)
-  (with-current-buffer (ygg-git-compare--list)
-    (let* ((rows (or (mapcar (lambda (c)
-                               (cons (format "%s  %s" (ygg-git-compare--where c)
-                                             (plist-get c :text))
-                                     c))
-                             (reverse ygg-git-compare--comments))
-                     (user-error "No review comments held")))
-           (c (cdr (assoc (completing-read "Review comment: " rows nil t) rows))))
-      (pcase (car (read-multiple-choice (ygg-git-compare--where c)
-                                        '((?e "edit") (?d "drop"))))
-        (?e (plist-put c :text (ygg-git-compare--read-comment
-                                (ygg-git-compare--where c) (plist-get c :text))))
-        (?d (setq ygg-git-compare--comments (delq c ygg-git-compare--comments)))))))
 
 (defun ygg-git-compare--capped (text)
   (if (> (length text) ygg-git-compare-review-max-chars)
@@ -745,25 +688,30 @@ change any files."
   (format "A: %s ↔ B: %s  %s" (ygg-git-compare--side-label ygg-git-compare--a)
           (ygg-git-compare--side-label ygg-git-compare--b) (ygg-git-compare--range)))
 
+(defun ygg-git-compare--agent-comments ()
+  "The checked comments held for an agent, oldest first."
+  (and ygg-git-compare--comments
+       (seq-remove #'ygg-git-compare--forge-p (ygg-git-compare-comments-list))))
+
 (defun ygg-git-compare-review-prompt ()
-  "This compare's held comments, its commits and its diff, as one message.
-A comment made on another range than the one sent says which."
+  "This compare's comments for an agent, its commits and its diff, as one
+message.  A comment made on another range than the one sent says which."
   (concat
    ygg-git-compare-review-instructions
-   (when ygg-git-compare--comments
+   (when-let* ((comments (ygg-git-compare--agent-comments)))
      (concat "\n\n<review-comments>\n"
              (mapconcat (lambda (c)
-                          (concat (ygg-git-compare--where c)
-                                  (unless (equal (plist-get c :range)
-                                                 (ygg-git-compare--range-label))
-                                    (concat " · made on " (plist-get c :range)))
-                                  "\n"
-                                  (replace-regexp-in-string
-                                   "^" "> " (plist-get c :quote))
-                                  "\n" (plist-get c :text)))
-                        (reverse ygg-git-compare--comments) "\n\n")
+                          (ygg-git-compare--for-prompt c (ygg-git-compare--range-label)))
+                        comments "\n\n")
              "\n</review-comments>"))
-   "\n\n<compare>\nrepository " (ygg-git-compare-agent-path default-directory)
+   "\n\n" (ygg-git-compare-compare-block)))
+
+(defun ygg-git-compare-compare-block ()
+  "The compared range, its commits and its diff, as an agent reads them."
+  (concat
+   "<compare>\nrepository " (ygg-git-compare-agent-path default-directory)
+   (when-let* ((branch (ignore-errors (ygg-git-compare--b-branch))))
+     (concat "\nbranch " branch))
    "\n" (ygg-git-compare--range-label) "\n\n"
    (ygg-git-compare--capped
     (concat (ygg-git-compare--git "log" "--no-color" "--format=%h %an: %s" "-n" "200"
@@ -798,17 +746,21 @@ in its place when it is a nested repository or too large to send."
 
 (defun ygg-git-compare--reviewers ()
   "Labels to what a review goes to: a new session under the review preset,
-a live session, or a new agent as (new . NAME)."
-  (append
-   (list (cons (format "new: review plan (preset %s)" ygg-git-compare-review-preset)
-               'review))
-   (mapcar (lambda (s) (cons (format "%s · %s · %s" (aob-session-name s)
-                                     (aob-session-state s)
-                                     (or (aob-session-cwd s) "?"))
-                             s))
-           (aob-live-sessions))
-   (mapcar (lambda (a) (cons (concat "new: " (car a)) (cons 'new (car a))))
-           aob-acp-agents)))
+a live session, or a new agent as (new . NAME); each label notes its
+group and a live session's state."
+  (let (labels)
+    (cl-flet ((add (label group note value)
+                (while (assoc label labels) (setq label (concat label "'")))
+                (push (cons (ygg-git-compare--group label group note) value) labels)))
+      (add (format "new: review plan (preset %s)" ygg-git-compare-review-preset)
+           "New session" "plans from the review" 'review)
+      (dolist (s (aob-live-sessions))
+        (add (aob-session-name s) "Live sessions"
+             (format "%s · %s" (aob-session-state s) (or (aob-session-cwd s) "?"))
+             s))
+      (dolist (a aob-acp-agents)
+        (add (concat "new: " (car a)) "New agent" nil (cons 'new (car a)))))
+    (nreverse labels)))
 
 (defun ygg-git-compare--spawn-review (root text)
   "A new session in ROOT under the review preset, TEXT its first turn.
@@ -830,65 +782,446 @@ Only the preset is expanded, never a name TEXT happens to mention."
                    (concat at " " text (substring preset (length at)))))
         (user-error "Could not start a review session"))))
 
+(defun ygg-git-compare-send-to-reviewer (root text)
+  "Send TEXT to a reviewer picked among `ygg-git-compare--reviewers', one
+started in ROOT when new; answer its session."
+  (let* ((reviewers (ygg-git-compare--reviewers))
+         (choice (cdr (assoc (completing-read
+                              "Review by: "
+                              (ygg-git-compare-table reviewers 'ygg-review-reviewer)
+                              nil t)
+                             reviewers)))
+         (session
+          (pcase choice
+            ('nil (user-error "No reviewer picked"))
+            ('review (ygg-git-compare--spawn-review root text))
+            (`(new . ,agent)
+             (let ((aob-acp-start-dir root))
+               (or (aob-acp-spawn agent) (user-error "Could not start %s" agent))))
+            (_ choice))))
+    (unless (eq choice 'review)
+      (let ((aob-prompt-typed t))
+        (aob-prompt session text)))
+    session))
+
 (defun ygg-git-compare-review ()
-  "Send the held review comments and the compared range to an agent."
+  "Send the review comments held for an agent and the compared range to one."
   (interactive)
   (require 'aob)
   (require 'aob-acp)
   (with-current-buffer (ygg-git-compare--list)
-    (let* ((root default-directory)
-           (text (ygg-git-compare-review-prompt))
-           (reviewers (ygg-git-compare--reviewers))
-           (table (lambda (str pred action)
-                    (if (eq action 'metadata)
-                        '(metadata (display-sort-function . identity)
-                                   (cycle-sort-function . identity))
-                      (complete-with-action action reviewers str pred))))
-           (choice (cdr (assoc (completing-read "Review by: " table nil t) reviewers)))
-           (session
-            (pcase choice
-              ('nil (user-error "No reviewer picked"))
-              ('review (ygg-git-compare--spawn-review root text))
-              (`(new . ,agent)
-               (let ((aob-acp-start-dir root))
-                 (or (aob-acp-spawn agent) (user-error "Could not start %s" agent))))
-              (_ choice))))
-      (unless (eq choice 'review)
-        (let ((aob-prompt-typed t))
-          (aob-prompt session text)))
-      (setq ygg-git-compare--comments nil)
+    (let* ((sent (ygg-git-compare--agent-comments))
+           (session (ygg-git-compare-send-to-reviewer default-directory
+                                                      (ygg-git-compare-review-prompt))))
+      (when sent
+        (ygg-git-compare-comments-drop (mapcar (lambda (c) (plist-get c :id)) sent)))
       (aob-trace session))))
+
+;;; Posting to the pull request
+
+(defun ygg-git-compare--forge-run (program &rest args)
+  "What PROGRAM ARGS prints, run on this machine; a user error naming its
+complaint on failure."
+  (with-temp-buffer
+    (let* ((default-directory (if (file-remote-p default-directory)
+                                  temporary-file-directory
+                                default-directory))
+           (err (make-temp-file "ygg-git-compare-forge-"))
+           (status (apply #'call-process program nil (list t err) nil args)))
+      (unwind-protect
+          (unless (eql status 0)
+            (user-error "%s %s: %s" program (car args)
+                        (string-trim (concat (with-temp-buffer
+                                               (insert-file-contents err)
+                                               (buffer-string))
+                                             "\n" (buffer-string)))))
+        (delete-file err)))
+    (buffer-string)))
+
+(defun ygg-git-compare--forge-json (program body &rest args)
+  "What PROGRAM ARGS prints, read as JSON; BODY, when non-nil, is posted
+as JSON through api's --input."
+  (let ((input (and body (let ((coding-system-for-write 'utf-8))
+                           (make-temp-file "ygg-git-compare-body-" nil ".json"
+                                           (json-serialize body))))))
+    (unwind-protect
+        (let ((out (string-trim
+                    (apply #'ygg-git-compare--forge-run program
+                           (append args
+                                   (and input (list "--method" "POST"
+                                                    "--header" "Content-Type: application/json"
+                                                    "--input" input)))))))
+          (unless (string-empty-p out)
+            (json-parse-string out :object-type 'plist :array-type 'list
+                               :null-object nil :false-object nil)))
+      (when input (delete-file input)))))
+
+(defun ygg-git-compare--lab-host ()
+  (ygg-git-compare--url-key (or (getenv "LAB_HOST")
+                                (bound-and-true-p ygg-lab-host)
+                                "https://gitlab.com")))
+
+(defun ygg-git-compare--forge-repo (&optional remote)
+  "REMOTE's repository as (FORGE HOST PATH), FORGE github or gitlab;
+REMOTE defaults to the one pull requests are taken from."
+  (let* ((remote (or remote (ygg-git-compare--pr-remote)
+                     (user-error "No remote to post to")))
+         (url (or (magit-get "remote" remote "url")
+                  (user-error "Remote %s has no URL" remote)))
+         (key (ygg-git-compare--url-key url))
+         (host (car (split-string key "/")))
+         (path (substring key (min (length key) (1+ (length host))))))
+    (list (cond ((or (equal host (ygg-git-compare--lab-host))
+                     (string-search "gitlab" host))
+                 'gitlab)
+                ((string-search "github" host) 'github)
+                (t (user-error "%s is neither GitHub nor GitLab" host)))
+          host path)))
+
+(defun ygg-git-compare--forge-pr (repo selector)
+  "The open pull or merge request of REPO, as `--forge-repo' gives it, that
+SELECTOR names, a number or a source branch; nil when a branch has none.
+A plist: :forge :host :path :number :head :base, the commit where it
+parted from its target, :start, the target's tip, :base-ref and :url."
+  (pcase-let ((`(,forge ,host ,path) repo)
+              (by-branch (stringp selector)))
+    (pcase forge
+      ('github
+       (when-let* ((pr (condition-case err
+                           (ygg-git-compare--forge-json
+                            "gh" nil "pr" "view" (format "%s" selector)
+                            "--repo" (concat host "/" path) "--json"
+                            "number,state,baseRefOid,headRefOid,baseRefName,url")
+                         (user-error
+                          (unless (and by-branch
+                                       (string-search "no pull requests found"
+                                                      (error-message-string err)))
+                            (signal (car err) (cdr err))))))
+                   ((or (not by-branch) (equal (plist-get pr :state) "OPEN"))))
+         (list :forge 'github :host host :path path
+               :number (plist-get pr :number)
+               :head (plist-get pr :headRefOid)
+               :base (magit-git-string "merge-base" (plist-get pr :baseRefOid)
+                                       (plist-get pr :headRefOid))
+               :start (plist-get pr :baseRefOid)
+               :base-ref (plist-get pr :baseRefName)
+               :url (plist-get pr :url))))
+      ('gitlab
+       (let* ((project (concat "projects/" (url-hexify-string path)))
+              (iid (if by-branch
+                       (plist-get (car (ygg-git-compare--forge-json
+                                        "glab" nil "api" "--hostname" host
+                                        (format "%s/merge_requests?state=opened&source_branch=%s"
+                                                project (url-hexify-string selector))))
+                                  :iid)
+                     selector))
+              (mr (and iid (ygg-git-compare--forge-json
+                            "glab" nil "api" "--hostname" host
+                            (format "%s/merge_requests/%s" project iid))))
+              (refs (plist-get mr :diff_refs)))
+         (when mr
+           (list :forge 'gitlab :host host :path path :number iid
+                 :head (plist-get refs :head_sha)
+                 :base (plist-get refs :base_sha)
+                 :start (plist-get refs :start_sha)
+                 :base-ref (plist-get mr :target_branch)
+                 :url (plist-get mr :web_url))))))))
+
+(defun ygg-git-compare--pr-name (pr)
+  (format (if (eq (plist-get pr :forge) 'gitlab) "%s MR !%s" "%s PR #%s")
+          (plist-get pr :forge) (plist-get pr :number)))
+
+(defun ygg-git-compare--b-branch ()
+  "The branch side B stands for, as its remote names it."
+  (pcase ygg-git-compare--b-spec
+    (`(pr . ,pr) (plist-get pr :head))
+    (`(worktree . ,dir) (let ((default-directory dir)) (magit-get-current-branch)))
+    (`(rev . ,rev) (cond ((magit-local-branch-p rev) rev)
+                         ((magit-remote-branch-p rev)
+                          (cdr (magit-split-branch-name rev)))))))
+
+(defun ygg-git-compare--this-pr ()
+  "The pull or merge request this compare is the range of; a user error
+saying why when it is not."
+  (let* ((spec (cdr-safe ygg-git-compare--b-spec))
+         (pr-spec (eq (car ygg-git-compare--b-spec) 'pr))
+         (repo (ygg-git-compare--forge-repo (and pr-spec (plist-get spec :remote))))
+         (pr (if pr-spec
+                 (ygg-git-compare--forge-pr repo (plist-get spec :number))
+               (let ((branch (or (ygg-git-compare--b-branch)
+                                 (user-error "B is not a branch, so it has no pull request"))))
+                 (or (ygg-git-compare--forge-pr repo branch)
+                     (user-error "No open pull request for %s" branch)))))
+         (name (ygg-git-compare--pr-name pr)))
+    (cond ((not (equal ygg-git-compare--dots "..."))
+           (user-error "%s is diffed A...B; this compare is A..B" name))
+          ((plist-get ygg-git-compare--plan :work)
+           (user-error "This compare shows uncommitted changes %s does not have" name))
+          ((not (equal (plist-get ygg-git-compare--b :diff) (plist-get pr :head)))
+           (user-error "B is at %s, %s's head at %s"
+                       (plist-get ygg-git-compare--b :diff) name (plist-get pr :head)))
+          ((not (plist-get pr :base))
+           (user-error "%s's base %s is not here; fetch it" name (plist-get pr :start)))
+          ((not (equal (magit-git-string "merge-base" (plist-get ygg-git-compare--a :diff)
+                                         (plist-get ygg-git-compare--b :diff))
+                       (plist-get pr :base)))
+           (user-error "A does not part from B where %s's base does" name)))
+    pr))
+
+(defun ygg-git-compare--gitlab-position (comment pr)
+  (append (list :position_type "text"
+                :base_sha (plist-get pr :base)
+                :start_sha (plist-get pr :start)
+                :head_sha (plist-get pr :head)
+                :old_path (plist-get comment :old-path)
+                :new_path (plist-get comment :new-path))
+          (if (eq (plist-get comment :side) 'old)
+              (list :old_line (plist-get comment :line))
+            (append (list :new_line (plist-get comment :line))
+                    (when-let* ((old (plist-get comment :old-line)))
+                      (list :old_line old))))))
 
 (autoload 'ygg-git-compare-visit-b "ygg-git-compare-explain" nil t)
 (autoload 'ygg-git-compare-explain "ygg-git-compare-explain" nil t)
+(autoload 'ygg-git-compare-mark-file-reviewed "ygg-git-compare-marks" nil t)
+(autoload 'ygg-git-compare-mark-hunk-reviewed "ygg-git-compare-marks" nil t)
+(autoload 'ygg-git-compare-next-unreviewed "ygg-git-compare-marks" nil t)
+(autoload 'ygg-git-compare-previous-unreviewed "ygg-git-compare-marks" nil t)
+(autoload 'ygg-git-compare-toggle-unreviewed "ygg-git-compare-marks" nil t)
+(autoload 'ygg-git-compare-interdiff "ygg-git-compare-interdiff" nil t)
+(autoload 'ygg-git-compare-export-markdown "ygg-git-compare-submit" nil t)
+(autoload 'ygg-git-compare-submit "ygg-git-compare-submit" nil t)
+(autoload 'ygg-git-compare-comment "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comment-file "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-select-lines "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comment-next "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comment-previous "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comment-edit "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comment-append "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comment-delete "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comment-copy "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comment-toggle-destination "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comment-accept "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comments-summary "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-dispatch "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comments-receive "ygg-git-compare-comments")
+(declare-function ygg-git-compare-comments-list "ygg-git-compare-comments"
+                  (&optional include-pending))
+(declare-function ygg-git-compare-comments-drop "ygg-git-compare-comments" (ids))
+(declare-function ygg-git-compare--forge-p "ygg-git-compare-comments" (comment))
+(declare-function ygg-git-compare--for-prompt "ygg-git-compare-comments" (comment here))
+(declare-function ygg-git-compare--load-comments "ygg-git-compare-comments" ())
+(declare-function ygg-git-compare--draw-comments "ygg-git-compare-comments" ())
+
+(defun ygg-git-compare--reveal ()
+  "Open every folded section point is in."
+  (let ((section (magit-current-section)))
+    (while section
+      (when (oref section hidden) (magit-section-show section))
+      (setq section (oref section parent)))))
+
+(defun ygg-git-compare--goto-section (pred back)
+  "Go to the next section PRED holds for, or the one before with BACK."
+  (let ((here (line-beginning-position))
+        starts)
+    (magit-map-sections (lambda (s) (when (funcall pred s) (push (oref s start) starts))))
+    (setq starts (sort starts #'<))
+    (goto-char (or (if back
+                       (car (last (seq-filter (lambda (p) (< p here)) starts)))
+                     (seq-find (lambda (p) (> p here)) starts))
+                   (user-error "No %s one" (if back "previous" "next"))))
+    (ygg-git-compare--reveal)))
+
+(defun ygg-git-compare--diffed-file-p (section)
+  (and (magit-section-match 'file section)
+       (eq (oref section parent) magit-root-section)))
+
+(defun ygg-git-compare-next-hunk ()
+  "Go to the next hunk."
+  (interactive)
+  (ygg-git-compare--goto-section (lambda (s) (magit-section-match 'hunk s)) nil))
+
+(defun ygg-git-compare-previous-hunk ()
+  "Go to the hunk before."
+  (interactive)
+  (ygg-git-compare--goto-section (lambda (s) (magit-section-match 'hunk s)) t))
+
+(defun ygg-git-compare-next-file ()
+  "Go to the next file's diff."
+  (interactive)
+  (ygg-git-compare--goto-section #'ygg-git-compare--diffed-file-p nil))
+
+(defun ygg-git-compare-previous-file ()
+  "Go to the diff of the file before."
+  (interactive)
+  (ygg-git-compare--goto-section #'ygg-git-compare--diffed-file-p t))
+
+(defun ygg-git-compare-search-next (&optional back)
+  "Go to the next match of the last search, or the one before with BACK;
+around past the end."
+  (interactive)
+  (let* ((regexp (or (car regexp-search-ring) (user-error "Nothing searched yet")))
+         (at (save-excursion
+               (if back
+                   (or (re-search-backward regexp nil t)
+                       (progn (goto-char (point-max)) (re-search-backward regexp nil t)))
+                 (unless (eobp) (forward-char))
+                 (or (and (re-search-forward regexp nil t) (match-beginning 0))
+                     (progn (goto-char (point-min))
+                            (and (re-search-forward regexp nil t) (match-beginning 0))))))))
+    (goto-char (or at (user-error "No match for %s" regexp)))
+    (ygg-git-compare--reveal)))
+
+(defun ygg-git-compare-search-previous ()
+  "Go to the match of the last search before point, around past the start."
+  (interactive)
+  (ygg-git-compare-search-next t))
+
+(defvar-keymap ygg-git-compare-next-map
+  "c" (cons "next hunk" #'ygg-git-compare-next-hunk)
+  "f" (cons "next file" #'ygg-git-compare-next-file)
+  "u" (cons "next unreviewed hunk" #'ygg-git-compare-next-unreviewed)
+  "m" (cons "next comment" #'ygg-git-compare-comment-next))
+
+(defvar-keymap ygg-git-compare-previous-map
+  "c" (cons "previous hunk" #'ygg-git-compare-previous-hunk)
+  "f" (cons "previous file" #'ygg-git-compare-previous-file)
+  "u" (cons "previous unreviewed hunk" #'ygg-git-compare-previous-unreviewed)
+  "m" (cons "previous comment" #'ygg-git-compare-comment-previous))
+
+(defvar-keymap ygg-git-compare-delete-map
+  "d" (cons "delete comment" #'ygg-git-compare-comment-delete))
+
+(defun ygg-git-compare-read-only ()
+  "Refuse to change the worktree or index from a compare."
+  (interactive)
+  (user-error "Read-only compare: stage, discard and apply from magit status"))
 
 (defvar-keymap ygg-git-compare-mode-map
   "~" #'ygg-git-compare-swap
+  "b" #'ygg-git-compare-switch-base
   "." #'ygg-git-compare-toggle-dots
   "#" #'ygg-git-compare-log
   "q" #'ygg-git-compare-quit
-  "C" #'ygg-git-compare-comment
-  "<remap> <magit-commit-add-log>" #'ygg-git-compare-comment
-  ";" #'ygg-git-compare-comments
-  "@" #'ygg-git-compare-review
+  "]" (cons "next" ygg-git-compare-next-map)
+  "[" (cons "previous" ygg-git-compare-previous-map)
+  "}" #'ygg-git-compare-next-file
+  "{" #'ygg-git-compare-previous-file
+  "m" #'ygg-git-compare-comment-next
+  "M" #'ygg-git-compare-comment-previous
+  "/" #'isearch-forward-regexp
+  "n" #'ygg-git-compare-search-next
+  "N" #'ygg-git-compare-search-previous
+  "c" #'ygg-git-compare-comment
+  "C" #'ygg-git-compare-comment-file
+  "<remap> <magit-commit-add-log>" #'ygg-git-compare-comment-file
+  "v" #'ygg-git-compare-select-lines
+  "V" #'ygg-git-compare-select-lines
+  "x" #'ygg-git-compare-select-lines
+  "i" #'ygg-git-compare-comment-edit
+  "A" #'ygg-git-compare-comment-append
+  "d" (cons "delete" ygg-git-compare-delete-map)
+  "K" #'ygg-git-compare-comment-delete
+  "y" #'ygg-git-compare-export-markdown
+  "Y" #'ygg-git-compare-comment-copy
+  "t" #'ygg-git-compare-comment-toggle-destination
+  "a" #'ygg-git-compare-comment-accept
+  "s" #'ygg-git-compare-read-only
+  "S" #'ygg-git-compare-read-only
+  "u" #'ygg-git-compare-read-only
+  "U" #'ygg-git-compare-read-only
+  "r" #'ygg-git-compare-mark-file-reviewed
+  "R" #'ygg-git-compare-mark-hunk-reviewed
+  "I" #'ygg-git-compare-interdiff
+  "e" #'ygg-git-compare-visit-b
   "'" #'ygg-git-compare-visit-b
-  "N" #'ygg-git-compare-explain
+  ";" #'ygg-git-compare-dispatch
+  "?" #'ygg-git-compare-dispatch
+  "@" #'ygg-git-compare-review
+  "&" #'ygg-git-compare-submit
+  "<remap> <magit-do-async-shell-command>" #'ygg-git-compare-submit
   "<remap> <magit-refresh>" #'ygg-git-compare-refresh)
 
 (define-minor-mode ygg-git-compare-mode
   "A magit buffer that is part of a compare of two sides.
 \\<ygg-git-compare-mode-map>
 \\[ygg-git-compare-swap] swaps the sides.
+\\[ygg-git-compare-switch-base] picks another base, side A.
 \\[ygg-git-compare-toggle-dots] switches between A...B and A..B.
 \\[ygg-git-compare-log] shows the commits only in A and only in B.
 \\[ygg-git-compare-refresh] diffs worktrees as they stand now.
-\\[ygg-git-compare-comment] holds a review comment on the diff line at point.
-\\[ygg-git-compare-comments] edits or drops a held comment.
-\\[ygg-git-compare-review] sends the held comments and the compare to an agent.
+] c and [ c go to the next and previous hunk, ] f and [ f (or } and {)
+to the next and previous file, ] u and [ u to the next and previous
+unreviewed hunk, and
+] m and [ m (or \\[ygg-git-compare-comment-next] and \\[ygg-git-compare-comment-previous]) to the next and previous comment.
+\\[isearch-forward-regexp] searches the diff; \\[ygg-git-compare-search-next] and \\[ygg-git-compare-search-previous] repeat it forward and back.
+\\[ygg-git-compare-comment] comments on the line at point, the lines selected or the file.
+v, x or V select lines for a range comment; x, j and k extend it, Esc ends it.
+\\[ygg-git-compare-comment-file] comments on the file at point.
+On a comment, i and A edit it, d d and K delete it, Y copies it, t sends
+it to the pull request or an agent instead, and a accepts one an agent
+proposed; off one they say so.  Staging, discarding and applying are
+refused: a compare is read-only.
+\\[ygg-git-compare-export-markdown] copies the review as markdown.
+\\[ygg-git-compare-mark-file-reviewed] and \\[ygg-git-compare-mark-hunk-reviewed] mark the file or hunk reviewed.
+\\[ygg-git-compare-interdiff] shows what changed since the last review.
 \\[ygg-git-compare-visit-b] opens B's own file at the line, for the language server.
-\\[ygg-git-compare-explain] starts a session explaining the change.
+\\[ygg-git-compare-dispatch] comments on the review, lists, checks and sends the comments.
+\\[ygg-git-compare-review] sends the comments for an agent and the compare to one.
+\\[ygg-git-compare-submit] submits the comments to the pull request.
 \\[ygg-git-compare-quit] leaves, bringing back the windows from before."
-  :lighter " Compare")
+  :lighter " Compare"
+  (if (not ygg-git-compare-mode)
+      (progn (remove-function (local 'imenu-create-index-function)
+                              #'ygg-git-compare--imenu-index)
+             (remove-hook 'imenu-after-jump-hook #'ygg-git-compare--reveal t))
+    (require 'ygg-git-compare-comments)
+    (add-function :override (local 'imenu-create-index-function)
+                  #'ygg-git-compare--imenu-index)
+    (add-hook 'imenu-after-jump-hook #'ygg-git-compare--reveal nil t)
+    (add-hook 'magit-refresh-buffer-hook #'ygg-git-compare--draw-comments nil t)
+    (ygg-git-compare--draw-comments)))
+
+(defun ygg-git-compare--imenu-comments (beg end texts)
+  "The comments shown from BEG to END as (LABEL . POS), TEXTS their texts by id."
+  (let (items)
+    (dolist (ov (overlays-in beg end))
+      (when (and (>= (overlay-start ov) beg) (< (overlay-start ov) end))
+        (dolist (id (overlay-get ov 'ygg-git-compare-comments))
+          (push (cons (concat "▎ " (car (split-string (or (gethash id texts) id) "\n")))
+                      (overlay-start ov))
+                items))))
+    (sort items (lambda (a b) (< (cdr a) (cdr b))))))
+
+(defun ygg-git-compare--imenu-index ()
+  "The diffed files, their hunks and the comments under each, for imenu."
+  (when-let* ((root (bound-and-true-p magit-root-section)))
+    (let ((texts (make-hash-table :test #'equal)))
+      (when-let* ((list (ignore-errors (ygg-git-compare--list))))
+        (dolist (c (buffer-local-value 'ygg-git-compare--comments list))
+          (puthash (plist-get c :id) (plist-get c :text) texts)))
+      (seq-keep
+       (lambda (file)
+         (when (magit-section-match 'file file)
+           (let ((head-end (or (oref file content) (oref file end))))
+             (cons (oref file value)
+                   (or
+                    (append
+                     (ygg-git-compare--imenu-comments (oref file start) head-end texts)
+                     (mapcar (lambda (hunk)
+                               (let ((name (save-excursion
+                                             (goto-char (oref hunk start))
+                                             (buffer-substring-no-properties
+                                              (point) (line-end-position))))
+                                     (comments (ygg-git-compare--imenu-comments
+                                                (oref hunk start) (oref hunk end) texts)))
+                                 (if comments
+                                     (cons name (cons (cons name (oref hunk start)) comments))
+                                   (cons name (oref hunk start)))))
+                             (seq-filter (lambda (s) (magit-section-match 'hunk s))
+                                         (oref file children))))
+                    (oref file start))))))
+       (oref root children)))))
 
 ;;; Opening
 
@@ -923,6 +1256,7 @@ Only the preset is expanded, never a name TEXT happens to mention."
             (ygg-git-compare--b b-side)
             (ygg-git-compare--dots dots)))
       (ygg-git-compare-mode 1)
+      (ygg-git-compare--load-comments)
       (add-hook 'magit-refresh-buffer-hook #'ygg-git-compare--header nil t)
       (add-hook 'post-command-hook #'ygg-git-compare--schedule nil t)
       (ygg-git-compare--header)
@@ -931,14 +1265,8 @@ Only the preset is expanded, never a name TEXT happens to mention."
 
 (defun ygg-git-compare-open (a b)
   "Compare sides A and B of this repository in the whole frame.
-From inside a compare of the same sides its held review comments carry
-over; of other sides, dropping them is asked first."
+Its review comments are the ones kept for these sides."
   (let* ((old (and (bound-and-true-p ygg-git-compare-mode) (ygg-git-compare--list)))
-         (comments (and old
-                        (equal a (buffer-local-value 'ygg-git-compare--a-spec old))
-                        (equal b (buffer-local-value 'ygg-git-compare--b-spec old))
-                        (buffer-local-value 'ygg-git-compare--comments old)))
-         (_ (when (and old (not comments)) (ygg-git-compare--drop-comments old)))
          (root (or (and old (buffer-local-value 'ygg-git-compare--root old))
                    (magit-toplevel)
                    (user-error "Not in a git repository")))
@@ -948,7 +1276,6 @@ over; of other sides, dropping them is asked first."
          (buffer (ygg-git-compare-buffer root a b)))
     (when (and old (buffer-live-p old) (not (eq old buffer)))
       (ygg-git-compare--close old))
-    (with-current-buffer buffer (setq ygg-git-compare--comments comments))
     (delete-other-windows)
     (switch-to-buffer buffer)
     (let ((right (split-window nil (round (* ygg-git-compare-list-width
@@ -987,6 +1314,97 @@ uncommitted changes, else the repository's default branch."
                                                (ygg-git-compare--label b cands))
                                        cands (ygg-git-compare-default-a b))))
         (ygg-git-compare-open a b)))))
+
+(defun ygg-git-compare--merge-requests (repo)
+  "REPO's open merge requests as `ygg-git-compare-candidates' lists pull
+requests, or nil when glab cannot list them."
+  (pcase-let ((`(,_forge ,host ,path) repo))
+    (mapcar (lambda (mr)
+              (list :number (plist-get mr :iid) :title (plist-get mr :title)
+                    :headRefName (plist-get mr :source_branch)
+                    :baseRefName (plist-get mr :target_branch)))
+            (ignore-errors
+              (ygg-git-compare--forge-json
+               "glab" nil "api" "--hostname" host
+               (format "projects/%s/merge_requests?state=opened&per_page=100"
+                       (url-hexify-string path)))))))
+
+(defun ygg-git-compare--review-targets ()
+  "Branches and open pull or merge requests to review, as (LABEL . SPEC)."
+  (let* ((repo (ignore-errors (ygg-git-compare--forge-repo)))
+         (gitlab (eq (car repo) 'gitlab))
+         (cands (seq-filter
+                 (lambda (c) (member (get-text-property 0 'ygg-git-compare-group (car c))
+                                     '("Branches" "Remote branches" "Pull requests")))
+                 (ygg-git-compare-candidates (not gitlab)))))
+    (append cands
+            (mapcar (lambda (mr)
+                      (cons (ygg-git-compare--group
+                             (format "!%s %s" (plist-get mr :number) (plist-get mr :title))
+                             "Merge requests"
+                             (format "%s → %s" (plist-get mr :headRefName)
+                                     (plist-get mr :baseRefName)))
+                            (cons 'pr (list :number (plist-get mr :number)
+                                            :head (plist-get mr :headRefName)
+                                            :base (plist-get mr :baseRefName)))))
+                    (and gitlab (ygg-git-compare--merge-requests repo))))))
+
+;;;###autoload
+(defun ygg-git-compare-review-branch (&optional target)
+  "Compare TARGET as its open pull or merge request has it, so held
+comments go there; a branch without one, against the default branch.
+TARGET is a branch or a (pr . PLIST) side; nil takes the branch at
+point, else the current one.  Interactively, pick among branches and
+open pull and merge requests, the branch at point first."
+  (interactive
+   (progn
+     (require 'magit)
+     (let ((here (or (magit-branch-at-point) (magit-get-current-branch))))
+       (list (pcase (ygg-git-compare--read "Review" (ygg-git-compare--review-targets)
+                                           (and here (cons 'rev here)))
+               (`(rev . ,branch) branch)
+               (spec spec))))))
+  (require 'magit)
+  (let* ((by-number (eq (car-safe target) 'pr))
+         (branch (cond (by-number (plist-get (cdr target) :head))
+                       (target)
+                       ((or (magit-branch-at-point) (magit-get-current-branch)))
+                       (t (user-error "No branch here"))))
+         (name (if (and branch (magit-remote-branch-p branch))
+                   (cdr (magit-split-branch-name branch))
+                 branch))
+         (remote (ygg-git-compare--pr-remote))
+         (why nil)
+         (pr (condition-case err
+                 (ygg-git-compare--forge-pr (ygg-git-compare--forge-repo remote)
+                                            (if by-number (plist-get (cdr target) :number) name))
+               (user-error (setq why (error-message-string err)) nil))))
+    (if (not pr)
+        (let ((base (ygg-git-compare--default-branch)))
+          (when by-number
+            (user-error "Could not read request %s%s" (plist-get (cdr target) :number)
+                        (if why (format " (%s)" why) "")))
+          (message "No open pull request for %s%s; comparing it with %s"
+                   name (if why (format " (%s)" why) "") base)
+          (ygg-git-compare-open (cons 'rev base) (cons 'rev branch)))
+      (let* ((head (plist-get pr :head))
+             (start (plist-get pr :start))
+             (number (plist-get pr :number))
+             (gitlab (eq (plist-get pr :forge) 'gitlab)))
+        (unless (magit-commit-p head)
+          (ygg-git-compare--git "fetch" "--quiet" "--no-tags" remote
+                                (format (if gitlab "merge-requests/%s/head" "pull/%s/head")
+                                        number)))
+        (unless (magit-commit-p start)
+          (ygg-git-compare--git "fetch" "--quiet" "--no-tags" remote
+                                (plist-get pr :base-ref)))
+        (ygg-git-compare-open
+         (cons 'rev (or (if gitlab
+                            (plist-get pr :base)
+                          (magit-git-string "merge-base" start head))
+                        (ygg-git-compare--pr-base (plist-get pr :base-ref) remote)))
+         (cons 'pr (list :number number :sha head :head name
+                         :base (plist-get pr :base-ref) :remote remote)))))))
 
 (provide 'ygg-git-compare)
 ;;; ygg-git-compare.el ends here
