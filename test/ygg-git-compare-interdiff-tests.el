@@ -132,5 +132,16 @@
   (should (equal (ygg-git-compare-interdiff-key '(pr :number 12 :sha "x")) "#12"))
   (should (equal (ygg-git-compare-interdiff-key '(rev . "feature")) "feature")))
 
+(ert-deftest ygg-git-compare-interdiff-keeps-the-latest-sides ()
+  (ygg-git-compare-interdiff-tests--with-repo root
+    (let ((ygg-git-compare-interdiff-keep-sides 3))
+      (dotimes (n 5)
+        (ygg-git-compare-interdiff-remember (format "side-%d" n) (format "sha%d" n)))
+      (ygg-git-compare-interdiff-remember "side-2" "sha2b")
+      (should (equal (mapcar #'car (ygg-git-compare-interdiff--load
+                                    (ygg-git-compare-interdiff--file)))
+                     '("side-2" "side-4" "side-3")))
+      (should-not (ygg-git-compare-interdiff-seen "side-0")))))
+
 (provide 'ygg-git-compare-interdiff-tests)
 ;;; ygg-git-compare-interdiff-tests.el ends here

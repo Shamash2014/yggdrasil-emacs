@@ -146,9 +146,6 @@ and the arguments the compare view was handed."
   '((:level range :type nil :text "x may be nil" :file "src/a.el" :new-path "src/a.el"
      :side new :line 14 :start-line 10 :start-side new
      :title "[P1] Null deref" :priority 1 :confidence 0.9)
-    (:level line :type nil :text "rename y" :file "/elsewhere/b.el" :new-path "/elsewhere/b.el"
-     :side new :line 7 :start-line nil :start-side new
-     :title "[P3] Name" :priority 3 :confidence 0.4)
     (:level review :type nil :text "a nil deref" :file nil :new-path nil
      :side new :line nil :start-line nil :start-side new
      :title nil :priority nil :confidence 0.85 :correctness "patch is incorrect"))
@@ -160,7 +157,8 @@ and the arguments the compare view was handed."
                 `(:dir "/repo/" :branch "feat" :codex_review ,aob-mcp-review-submit-tests--codex))))
     (should relayed)
     (should (equal comments aob-mcp-review-submit-tests--codex-converted))
-    (should (equal (car answer) "3 comments submitted for review on feat; the user will check them"))))
+    (should (equal answer '("2 comments submitted for review on feat; the user will check them"
+                            "skipped:" "finding 2: file is outside the repository")))))
 
 (defconst aob-mcp-review-submit-tests--codex-json
   "{\"findings\": [{\"title\": \"[P1] Null deref\", \"body\": \"x may be nil\", \"confidence_score\": 0.9, \"priority\": 1, \"code_location\": {\"absolute_file_path\": \"/repo/src/a.el\", \"line_range\": {\"start\": 10, \"end\": 14}}}, {\"title\": \"[P3] Name\", \"body\": \"rename y\", \"confidence_score\": 0.4, \"priority\": 3, \"code_location\": {\"absolute_file_path\": \"/elsewhere/b.el\", \"line_range\": {\"start\": 7, \"end\": 7}}}], \"overall_correctness\": \"patch is incorrect\", \"overall_explanation\": \"a nil deref\", \"overall_confidence_score\": 0.85}"
@@ -171,6 +169,37 @@ and the arguments the compare view was handed."
                                 `(:dir "/repo" :branch "feat"
                                   :codex_review ,aob-mcp-review-submit-tests--codex-json))))
                  aob-mcp-review-submit-tests--codex-converted)))
+
+(ert-deftest aob-mcp-review-submit-refuses-a-start-after-the-line ()
+  (pcase-let ((`(,answer ,relayed ,_)
+               (aob-mcp-review-submit-tests--call
+                '(:dir "/repo" :branch "feat"
+                  :comments ((:file "a.el" :line 5 :start_line 9 :text "x"))))))
+    (should-not relayed)
+    (should (string-search "comment 1: start_line is after line" answer))))
+
+(ert-deftest aob-mcp-review-submit-makes-files-under-dir-relative-through-symlinks ()
+  (let* ((real (file-name-as-directory (make-temp-file "repo" t)))
+         (link (concat (directory-file-name real) "-link")))
+    (unwind-protect
+        (progn
+          (make-symbolic-link (directory-file-name real) link)
+          (pcase-let ((`(,answer ,_ (,_ ,_ ,comments ,_))
+                       (aob-mcp-review-submit-tests--call
+                        `(:dir ,link :branch "feat"
+                          :comments ((:file ,(concat real "src/a.el") :line 3 :text "x")
+                                     (:file "/nowhere/else.el" :line 3 :text "y"))
+                          :codex_review
+                          (:findings ((:title "t" :body "z" :priority 1
+                                       :code_location
+                                       (:absolute_file_path ,(concat real "src/b.el")
+                                        :line_range (:start 1 :end 1)))))))))
+            (should (equal (mapcar (lambda (c) (plist-get c :file)) comments)
+                           '("src/a.el" "src/b.el")))
+            (should (equal (cdr answer)
+                           '("skipped:" "comment 2: file is outside the repository")))))
+      (delete-file link)
+      (delete-directory real t))))
 
 (provide 'aob-mcp-review-submit-tests)
 ;;; aob-mcp-review-submit-tests.el ends here

@@ -39,9 +39,11 @@
 
 (defun ygg-git-compare--branch-review-key (branch)
   "The key BRANCH's review comments are kept under, however a remote names it."
-  (concat "branch " (if (magit-remote-branch-p branch)
-                        (cdr (magit-split-branch-name branch))
-                      branch)))
+  (concat "branch "
+          (if-let* ((remote (seq-find (lambda (r) (string-prefix-p (concat r "/") branch))
+                                      (magit-list-remotes))))
+              (substring branch (1+ (length remote)))
+            branch)))
 
 (defun ygg-git-compare--compare-key ()
   "The key this compare's comments are kept under: B's branch when it is one."
@@ -50,11 +52,21 @@
     (format "%s ↔ %s" (plist-get ygg-git-compare--a :label)
             (plist-get ygg-git-compare--b :label))))
 
-(defun ygg-git-compare--store-read (file)
+(defun ygg-git-compare--store-read (file &optional lenient)
+  "What FILE keeps, by key.  A file that cannot be read is copied aside and
+is a user error, or with LENIENT keeps nothing."
   (and (file-readable-p file)
        (with-temp-buffer
          (insert-file-contents file)
-         (ignore-errors (read (current-buffer))))))
+         (condition-case nil
+             (and (re-search-forward "[^[:space:]]" nil t)
+                  (progn (goto-char (point-min)) (read (current-buffer))))
+           (error
+            (unless lenient
+              (let ((aside (format "%s.corrupt-%s" file
+                                   (format-time-string "%Y%m%dT%H%M%S"))))
+                (copy-file file aside t)
+                (user-error "Review comments unreadable, kept as %s" aside))))))))
 
 (defun ygg-git-compare--store-update (file key fn)
   "Give FN KEY's comments in FILE, oldest first, keep what it answers and
@@ -63,15 +75,17 @@ answer that."
          (comments (funcall fn (cdr (assoc key stored))))
          (alist (assoc-delete-all key stored)))
     (let ((print-length nil) (print-level nil) (coding-system-for-write 'utf-8))
-      (with-temp-file file
-        (prin1 (if comments (cons (cons key comments) alist) alist) (current-buffer))
-        (insert "\n")))
+      (let ((temp (make-temp-file file)))
+        (with-temp-file temp
+          (prin1 (if comments (cons (cons key comments) alist) alist) (current-buffer))
+          (insert "\n"))
+        (rename-file temp file t)))
     comments))
 
 (defun ygg-git-compare--reload ()
   (setq ygg-git-compare--comments
         (reverse (cdr (assoc (cdr ygg-git-compare--store)
-                             (ygg-git-compare--store-read (car ygg-git-compare--store)))))))
+                             (ygg-git-compare--store-read (car ygg-git-compare--store) t))))))
 
 (defun ygg-git-compare--load-comments ()
   "Read the comments kept for this compare and show them."
@@ -112,11 +126,21 @@ with INCLUDE-PENDING."
 
 ;;; Comments
 
+(defvar ygg-git-compare--id-count 0
+  "Comment ids made this session.")
+
 (defun ygg-git-compare--new-id ()
-  (format "%x%04x" (truncate (* 1000 (float-time))) (random #x10000)))
+  (format "%x%04x%x" (truncate (* 1000 (float-time))) (random #x10000)
+          (cl-incf ygg-git-compare--id-count)))
 
 (defun ygg-git-compare--pending-p (comment)
   (eq (plist-get comment :status) 'pending))
+
+(defun ygg-git-compare--stale-p (comment)
+  "Whether COMMENT was made on another range than this compare's."
+  (when-let* ((range (plist-get comment :range)))
+    (not (equal range (with-current-buffer (ygg-git-compare--list)
+                        (ygg-git-compare--range-label))))))
 
 (defun ygg-git-compare--forge-p (comment)
   "Whether COMMENT goes to the pull request rather than an agent."
@@ -357,6 +381,11 @@ saving keeps it on the compare.  Answer that buffer."
   (let ((list (ygg-git-compare--list))
         (buffer (get-buffer-create "*ygg-git-compare comment*")))
     (with-current-buffer buffer
+      (when (and ygg-git-compare--draft
+                 (not (equal (string-trim (buffer-string))
+                             (string-trim (or (plist-get ygg-git-compare--draft :text) ""))))
+                 (not (y-or-n-p "Discard the unsaved comment? ")))
+        (user-error "The unsaved comment is kept"))
       (ygg-git-compare-draft-mode)
       (erase-buffer)
       (setq ygg-git-compare--draft (copy-sequence comment)
@@ -482,6 +511,16 @@ whose heading point is on."
       (setq-local ygg--modeline-tag (or ygg-git-compare--tag-before "")))
     (force-mode-line-update)))
 
+(defvar-local ygg-git-compare--selection-exit nil
+  "Drops the selection's keys.")
+
+(defun ygg-git-compare--selection-end ()
+  "Drop the selection's keys now, not after the next key has used them."
+  (remove-hook 'deactivate-mark-hook #'ygg-git-compare--selection-end t)
+  (when-let* ((exit (prog1 ygg-git-compare--selection-exit
+                      (setq ygg-git-compare--selection-exit nil))))
+    (funcall exit)))
+
 (defun ygg-git-compare-select-lines ()
   "Select diff lines from this one for a range comment; again, v or Esc
 ends it."
@@ -492,13 +531,15 @@ ends it."
       (beginning-of-line)
       (push-mark (point) t t)
       (ygg-git-compare--selection-tag t)
-      (set-transient-map ygg-git-compare-selection-map
-                         (lambda () (and (eq (current-buffer) buffer)
-                                         (bound-and-true-p ygg-git-compare-mode)
-                                         (region-active-p)))
-                         (lambda () (when (buffer-live-p buffer)
-                                      (with-current-buffer buffer
-                                        (ygg-git-compare--selection-tag nil))))))))
+      (add-hook 'deactivate-mark-hook #'ygg-git-compare--selection-end nil t)
+      (setq ygg-git-compare--selection-exit
+            (set-transient-map ygg-git-compare-selection-map
+                               (lambda () (and (eq (current-buffer) buffer)
+                                               (bound-and-true-p ygg-git-compare-mode)
+                                               (region-active-p)))
+                               (lambda () (when (buffer-live-p buffer)
+                                            (with-current-buffer buffer
+                                              (ygg-git-compare--selection-tag nil)))))))))
 
 (defun ygg-git-compare-select-down ()
   "Take the next diff line into the selection."
@@ -546,6 +587,10 @@ when given."
                            (when-let* ((author (plist-get comment :author)))
                              (propertize author 'face 'shadow))
                            (and pending (propertize "pending" 'face 'shadow))
+                           (and (ygg-git-compare--stale-p comment)
+                                (propertize (format "stale · made on %s"
+                                                    (plist-get comment :range))
+                                            'face 'warning))
                            (and (not (plist-get comment :correctness))
                                 (plist-get comment :confidence)
                                 (propertize (format "%s" (plist-get comment :confidence))
@@ -570,8 +615,10 @@ when given."
                 (when-let* (((magit-section-match 'hunk hunk))
                             ((oref hunk from-range))
                             ((oref hunk to-range))
-                            (hit (seq-find (lambda (l) (and (eq (nth 1 l) side)
-                                                            (eql (nth 2 l) line)))
+                            (hit (seq-find (lambda (l) (if (and (eq side 'old) (nth 3 l))
+                                                           (eql (nth 3 l) line)
+                                                         (and (eq (nth 1 l) side)
+                                                              (eql (nth 2 l) line))))
                                            (ygg-git-compare--hunk-lines hunk))))
                   (save-excursion (goto-char (car hit)) (line-end-position))))
               (oref file children))))
@@ -589,22 +636,29 @@ it has no place for at the top of the diff of every file."
                              (oref magit-root-section children)))
           (default-to (ygg-git-compare--default-to))
           (places nil)
+          (stale nil)
           (top nil))
       (dolist (c comments)
         (let* ((level (plist-get c :level))
                (file (and (plist-get c :new-path)
                           (seq-find (lambda (s) (equal (oref s value) (plist-get c :new-path)))
                                     files)))
-               (pos (and file (memq level '(line range)) (ygg-git-compare--line-pos file c)))
+               (stale-p (ygg-git-compare--stale-p c))
+               (pos (and file (not stale-p) (memq level '(line range))
+                         (ygg-git-compare--line-pos file c)))
                (target (unless (eq (plist-get c :to) default-to)
                          (if (ygg-git-compare--forge-p c) "→ PR" "→ agent")))
-               (place (cond (pos pos)
+               (place (cond (stale-p nil)
+                            (pos pos)
                             (file (save-excursion (goto-char (oref file start))
                                                   (line-end-position)))))
                (block (ygg-git-compare--comment-block
                        c (unless (or pos (memq level '(file review))) (ygg-git-compare--where c))
                        target)))
-          (cond (place (push (list (plist-get c :id) block)
+          (cond (stale-p
+                 (when (eq (current-buffer) list)
+                   (push (list (plist-get c :id) block) stale)))
+                (place (push (list (plist-get c :id) block)
                              (alist-get place places nil nil #'eql)))
                 ((eq (current-buffer) list)
                  (push (list (plist-get c :id) block) top)))))
@@ -613,11 +667,15 @@ it has no place for at the top of the diff of every file."
           (overlay-put ov 'ygg-git-compare-comments (mapcar #'car shown))
           (overlay-put ov 'after-string
                        (concat "\n" (mapconcat #'cadr (reverse shown) "\n")))))
-      (when top
+      (when (or stale top)
         (let ((ov (make-overlay (point-min) (point-min))))
-          (overlay-put ov 'ygg-git-compare-comments (mapcar #'car top))
+          (overlay-put ov 'ygg-git-compare-comments (mapcar #'car (append stale top)))
           (overlay-put ov 'before-string
-                       (concat (mapconcat #'cadr (reverse top) "\n") "\n")))))))
+                       (concat (when stale
+                                 (concat (propertize "Made on another range" 'face 'warning)
+                                         "\n" (mapconcat #'cadr (reverse stale) "\n") "\n"))
+                               (when top
+                                 (concat (mapconcat #'cadr (reverse top) "\n") "\n")))))))))
 
 (defun ygg-git-compare--redraw-comments (list)
   "Show LIST's comments again wherever they are shown."
@@ -818,7 +876,9 @@ past the last."
                                                (and (plist-get c :priority)
                                                     (<= (plist-get c :priority) max))))
                                (ygg-git-compare-comments-list t)))
-         (pending (seq-filter #'ygg-git-compare--pending-p comments)))
+         (stale (seq-filter #'ygg-git-compare--stale-p comments))
+         (current (seq-difference comments stale #'eq))
+         (pending (seq-filter #'ygg-git-compare--pending-p current)))
     (erase-buffer)
     (magit-insert-section (ygg-git-compare-comments-summary)
       (magit-insert-heading
@@ -830,7 +890,13 @@ past the last."
             (propertize (format "Pending your check (%d)" (length pending))
                         'font-lock-face 'warning))
           (ygg-git-compare--summary-insert-files pending)))
-      (ygg-git-compare--summary-insert-files (seq-remove #'ygg-git-compare--pending-p comments)))
+      (when stale
+        (magit-insert-section (ygg-git-compare-comments-stale)
+          (magit-insert-heading
+            (propertize (format "Made on another range (%d)" (length stale))
+                        'font-lock-face 'warning))
+          (ygg-git-compare--summary-insert-files stale)))
+      (ygg-git-compare--summary-insert-files (seq-remove #'ygg-git-compare--pending-p current)))
     (goto-char (point-min))
     (forward-line (1- line))))
 

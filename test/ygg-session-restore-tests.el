@@ -168,4 +168,28 @@
       (should (equal (with-temp-buffer (insert-file-contents file) (buffer-string))
                      "(saved earlier)")))))
 
+(ert-deftest ygg-session-failed-load-leaves-no-buckets-for-a-new-session ()
+  (ygg-session-restore-tests--fresh
+    (easysession-switch-to "A")
+    (ygg-session-restore-tests--visit "a1")
+    (get-buffer-create "stale-bucket-buffer")
+    (setq ygg--space-buffers-loaded
+          `(((,(ygg-space--current-id) (nil . "stale-bucket-buffer")))))
+    (easysession-switch-to "Fresh")
+    (should (equal (ygg-session-restore-tests--bucket (ygg-space--current-id))
+                   '("a1")))
+    (kill-buffer "stale-bucket-buffer")))
+
+(ert-deftest ygg-session-restore-skips-a-namesake-another-space-holds ()
+  (ygg-session-restore-tests--fresh
+    (easysession-switch-to "A")
+    (let ((root (ygg-space--current-id))
+          (namesake (get-buffer-create "shared-name")))
+      (ygg-space-child)
+      (puthash (ygg-space--current-id) (list namesake) ygg--space-buffers)
+      (setq ygg--space-buffers-loaded `(((,root (nil . "shared-name")))))
+      (ygg--space-buffers-restore)
+      (should-not (gethash root ygg--space-buffers))
+      (kill-buffer namesake))))
+
 ;;; ygg-session-restore-tests.el ends here

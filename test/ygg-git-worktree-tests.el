@@ -356,5 +356,80 @@ questions put, answered from `answers'."
               (should-not (eq (key-binding "=") #'ygg-git-worktree-compare)))
           (kill-buffer))))))
 
+(defmacro ygg-git-worktree-tests--with-spaces (&rest body)
+  "BODY with space functions stubbed; `closed' holds the spaces closed."
+  (declare (indent 0))
+  `(let ((closed nil))
+     (cl-letf (((symbol-function 'ygg-space--for-dir) (lambda (dir) (list 'tab dir)))
+               ((symbol-function 'ygg-space--id-of) #'cadr)
+               ((symbol-function 'ygg-space--goto-id) #'ignore)
+               ((symbol-function 'ygg-space-close) (lambda () (push t closed))))
+       ,@body)))
+
+(ert-deftest ygg-git-worktree-remove-keeps-space-when-git-refuses ()
+  (ygg-git-worktree-tests--with-repo (outer root)
+    (let ((locked (expand-file-name "locked" outer)))
+      (git root "worktree" "add" "-q" locked "-b" "locked")
+      (git root "worktree" "lock" locked)
+      (ygg-git-worktree-tests--with-spaces
+        (setq answers '(t))
+        (ygg-git-worktree-tests--finish (ygg-git-worktree-remove locked))
+        (should-not closed)
+        (should (file-directory-p locked))))))
+
+(ert-deftest ygg-git-worktree-remove-closes-space-once-gone ()
+  (ygg-git-worktree-tests--with-repo (outer root)
+    (let ((other (expand-file-name "other" outer)))
+      (git root "worktree" "add" "-q" other "-b" "other")
+      (ygg-git-worktree-tests--with-spaces
+        (setq answers '(t))
+        (ygg-git-worktree-tests--finish (ygg-git-worktree-remove other))
+        (should closed)
+        (should-not (file-directory-p other))))))
+
+(defun ygg-git-worktree-tests--lock-and-lose (root outer name)
+  "A locked worktree NAME beside ROOT, its directory deleted; its path."
+  (let ((path (expand-file-name name outer)))
+    (ygg-git-worktree-tests--git root "worktree" "add" "-q" path "-b" name)
+    (ygg-git-worktree-tests--git root "worktree" "lock" path)
+    (delete-directory path t)
+    path))
+
+(ert-deftest ygg-git-worktree-missing-locked-keeps-the-section ()
+  (ygg-git-worktree-tests--with-repo (outer root)
+    (let ((gone (ygg-git-worktree-tests--lock-and-lose root outer "gone")))
+      (let* ((rows (ygg-git-worktree-tests--rows root))
+             (heading (ygg-git-worktree-tests--heading (cadr rows))))
+        (unwind-protect
+            (progn
+              (should (= (length rows) 2))
+              (should (equal (directory-file-name (oref (cadr rows) value))
+                             gone))
+              (should (string-match-p "\\`gone .*  missing\n" heading))
+              (should-not (string-match-p "[+~?][0-9]" heading)))
+          (kill-buffer (marker-buffer (oref (car rows) start))))))))
+
+(ert-deftest ygg-git-worktree-missing-locked-in-the-remove-picker ()
+  (ygg-git-worktree-tests--with-repo (outer root)
+    (let ((gone (ygg-git-worktree-tests--lock-and-lose root outer "gone")))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt table &rest _)
+                   (let ((meta (cdr (funcall table "" nil 'metadata))))
+                     (should (equal (substring-no-properties
+                                     (funcall (alist-get 'annotation-function meta) gone))
+                                    "  gone missing")))
+                   gone)))
+        (should (equal (ygg-git-worktree--read-removable) gone))))))
+
+(ert-deftest ygg-git-worktree-remove-missing-locked ()
+  (ygg-git-worktree-tests--with-repo (outer root)
+    (let ((gone (ygg-git-worktree-tests--lock-and-lose root outer "gone")))
+      (setq answers '(t))
+      (ygg-git-worktree-tests--finish (ygg-git-worktree-remove gone))
+      (should (= (length asked) 1))
+      (should (string-match-p "missing" (car asked)))
+      (should (equal (ygg-git-worktree-tests--list root)
+                     (list (list (directory-file-name root) "main" nil)))))))
+
 (provide 'ygg-git-worktree-tests)
 ;;; ygg-git-worktree-tests.el ends here

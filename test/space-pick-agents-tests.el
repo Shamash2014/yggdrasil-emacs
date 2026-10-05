@@ -387,5 +387,23 @@
       (should-not (ygg-aob--space-state-face 3))
       (ignore lead))))
 
+(ert-deftest space-pick-subagent-keeps-its-space-when-its-lead-has-none ()
+  (space-pick-tests--with
+    (space-pick-tests--agent "lead" 99)
+    (let ((kid (space-pick-tests--agent "kid" 3 :parent-session "acp:lead")))
+      (cl-letf (((symbol-function 'ygg-space--current-id) (lambda () nil)))
+        (should-not (ygg-aob-session-space kid))
+        (should (eql 3 (aob-session-ref kid :space)))))))
+
+(ert-deftest space-pick-subagent-renames-its-buffers-when-its-space-changes ()
+  (space-pick-tests--with
+    (space-pick-tests--agent "lead" 2)
+    (let ((kid (space-pick-tests--agent "kid" 3 :parent-session "acp:lead"))
+          renamed)
+      (cl-letf (((symbol-function 'ygg-cockpit-rename-buffers)
+                 (lambda (s) (push s renamed))))
+        (ygg-aob-session-space kid)
+        (should (equal (list kid) renamed))))))
+
 (provide 'space-pick-agents-tests)
 ;;; space-pick-agents-tests.el ends here

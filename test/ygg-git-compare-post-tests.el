@@ -330,4 +330,32 @@ a function of (PROGRAM ARGS BODY), says what it prints."
           (should (assoc "feature" targets))
           (should-not (seq-find (lambda (c) (eq (cadr c) 'worktree)) targets)))))))
 
+(ert-deftest ygg-git-compare-review-branch-refuses-an-empty-pick ()
+  (ygg-git-compare-post-tests--with-repo (_root _base _head) "git@github.com:o/r.git"
+    (cl-letf (((symbol-function 'ygg-git-compare--review-targets) #'ignore)
+              ((symbol-function 'ygg-git-compare--read)
+               (lambda (&rest _) (cons 'rev ""))))
+      (should (equal (cadr (should-error (call-interactively #'ygg-git-compare-review-branch)
+                                         :type 'user-error))
+                     "No branch here")))))
+
+(ert-deftest ygg-git-compare-forge-repo-ignores-the-port-in-a-url ()
+  (dolist (url '("ssh://git@gitlab.example.com:2222/g/p.git"
+                 "https://gitlab.example.com:8443/g/p.git"
+                 "git@gitlab.example.com:g/p.git"))
+    (ygg-git-compare-post-tests--with-repo (_root _base _head) url
+      (should (equal (ygg-git-compare--forge-repo "origin")
+                     '(gitlab "gitlab.example.com" "g/p"))))))
+
+(ert-deftest ygg-git-compare-forge-run-names-a-program-that-will-not-start ()
+  (let* ((temporary-file-directory (file-name-as-directory (make-temp-file "forge-run-" t)))
+         (program (expand-file-name "ygg-no-such-program" temporary-file-directory)))
+    (unwind-protect
+        (progn
+          (should (string-search program
+                                 (cadr (should-error (ygg-git-compare--forge-run program "pr")
+                                                     :type 'user-error))))
+          (should-not (directory-files temporary-file-directory nil "forge")))
+      (delete-directory temporary-file-directory t))))
+
 ;;; ygg-git-compare-post-tests.el ends here

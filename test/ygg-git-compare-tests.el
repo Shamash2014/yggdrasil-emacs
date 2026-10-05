@@ -885,5 +885,10 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
         (ygg-git-compare--header)
         (should (string-search "A..B" (format "%s" header-line-format)))))))
 
+(ert-deftest ygg-git-compare-url-key-leaves-out-the-port ()
+  (dolist (url '("ssh://git@h.example:2222/g/p.git" "https://h.example:8443/g/p.git"
+                 "git@H.example:g/p.git" "https://h.example/g/p/"))
+    (should (equal (ygg-git-compare--url-key url) "h.example/g/p"))))
+
 (provide 'ygg-git-compare-tests)
 ;;; ygg-git-compare-tests.el ends here

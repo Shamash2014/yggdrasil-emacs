@@ -596,8 +596,10 @@ swept, so an orphan heals the moment anything looks for it."
   "The live space S works in: its lead's, since a subagent works there."
   (let* ((lead (aob-subagent-lead s))
          (space (ygg-aob--own-space lead)))
-    (unless (or (eq lead s) (eql space (aob-session-ref s :space)))
-      (aob-session-put s :space space))
+    (when (and space (not (eq lead s)) (not (eql space (aob-session-ref s :space))))
+      (aob-session-put s :space space)
+      (when (fboundp 'ygg-cockpit-rename-buffers)
+        (ygg-cockpit-rename-buffers s)))
     space))
 
 (add-hook 'aob-session-created-hook #'ygg-aob--remember-space)

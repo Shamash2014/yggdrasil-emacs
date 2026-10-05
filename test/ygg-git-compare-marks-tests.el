@@ -105,8 +105,8 @@
       (should (= 0 (hash-table-count (ygg-git-compare-marks--read))))
       (ygg-git-compare-marks-tests--mark "fifteen")
       (let ((key (ygg-git-compare-marks--key (ygg-git-compare-marks-tests--hunk "fifteen"))))
-        (should (equal (with-temp-buffer (insert-file-contents path)
-                                         (read (current-buffer)))
+        (should (equal (mapcar #'car (with-temp-buffer (insert-file-contents path)
+                                                       (read (current-buffer))))
                        (list key)))
         (should (gethash key (ygg-git-compare-marks--read)))
         (ygg-git-compare-marks-tests--mark "fifteen")
@@ -174,6 +174,46 @@
         (should (ygg-git-compare-marks-tests--marked-p
                  (ygg-git-compare-marks-tests--hunk "fifteen"))))
       (should (eq list (current-buffer))))))
+
+(ert-deftest ygg-git-compare-marks-identical-hunks-are-marked-apart ()
+  (ygg-git-compare-marks-tests--with-compare root
+    (let ((file (expand-file-name "a.txt" root)))
+      (with-temp-file file
+        (insert (ygg-git-compare-marks-tests--lines '(3 . "same") '(18 . "same"))))
+      (ygg-git-compare-marks-tests--git root "commit" "-q" "-am" "twins")
+      (with-temp-file file
+        (insert (ygg-git-compare-marks-tests--lines '(3 . "other") '(18 . "other")))))
+    (ygg-git-compare-refresh)
+    (let ((first (nth 0 (ygg-git-compare-marks--hunks)))
+          (second (nth 1 (ygg-git-compare-marks--hunks))))
+      (should-not (equal (ygg-git-compare-marks--key first)
+                         (ygg-git-compare-marks--key second)))
+      (goto-char (oref second start))
+      (ygg-git-compare-mark-hunk-reviewed)
+      (let ((marks (ygg-git-compare-marks--read)))
+        (should-not (gethash (ygg-git-compare-marks--key first) marks))
+        (should (gethash (ygg-git-compare-marks--key second) marks)))
+      (should-not (ygg-git-compare-marks-tests--marked-p (nth 0 (ygg-git-compare-marks--hunks))))
+      (should (ygg-git-compare-marks-tests--marked-p (nth 1 (ygg-git-compare-marks--hunks)))))))
+
+(ert-deftest ygg-git-compare-marks-keep-the-newest ()
+  (ygg-git-compare-marks-tests--with-compare root
+    (let ((marks (make-hash-table :test #'equal))
+          (ygg-git-compare-marks-keep 3))
+      (dotimes (n 5) (puthash (format "k%d" n) (* 10 n) marks))
+      (ygg-git-compare-marks--write marks)
+      (should (equal (sort (hash-table-keys (ygg-git-compare-marks--read)) #'string<)
+                     '("k2" "k3" "k4"))))))
+
+(ert-deftest ygg-git-compare-marks-read-keys-kept-without-times ()
+  (ygg-git-compare-marks-tests--with-compare root
+    (with-temp-file (ygg-git-compare-marks--path) (insert "(\"old\" (\"new\" . 5))"))
+    (let ((marks (ygg-git-compare-marks--read)))
+      (should (gethash "old" marks))
+      (should (= (gethash "new" marks) 5)))
+    (let ((ygg-git-compare-marks-keep 1))
+      (ygg-git-compare-marks--write (ygg-git-compare-marks--read)))
+    (should (equal (hash-table-keys (ygg-git-compare-marks--read)) '("new")))))
 
 (provide 'ygg-git-compare-marks-tests)
 ;;; ygg-git-compare-marks-tests.el ends here

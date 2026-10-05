@@ -473,19 +473,30 @@ another session's copy.  BUFFERS go on untouched for the next handler."
   (setq ygg--space-buffers-loaded
         (list (assoc-default "ygg-space-buffers" session-data))))
 
+(defun ygg--space-buffers-forget ()
+  "Drop buckets held from an earlier load, which may have failed."
+  (setq ygg--space-buffers-loaded nil))
+
 (defun ygg--space-buffers-restore ()
   "Refill the buckets from the session file just loaded, and only from it.
 A session switched to with no file yet carries the layout over, and its
-buckets with it."
+buckets with it.  A buffer without a file is found by name only while no
+other space holds it, so a namesake is not taken for it."
   (when-let* ((loaded ygg--space-buffers-loaded))
     (setq ygg--space-buffers-loaded nil)
-    (clrhash ygg--space-buffers)
-    (pcase-dolist (`(,id . ,kept) (car loaded))
-      (when-let* ((bufs (delq nil (mapcar (pcase-lambda (`(,file . ,name))
-                                            (if file
-                                                (find-buffer-visiting file)
-                                              (get-buffer name)))
-                                          kept))))
+    (let (refilled)
+      (pcase-dolist (`(,id . ,kept) (car loaded))
+        (when-let* ((bufs (delq nil (mapcar (pcase-lambda (`(,file . ,name))
+                                              (if file
+                                                  (find-buffer-visiting file)
+                                                (when-let* ((buf (get-buffer name))
+                                                            ((memql (ygg--space-buffer-owner buf)
+                                                                    (list nil id))))
+                                                  buf)))
+                                            kept))))
+          (push (cons id bufs) refilled)))
+      (clrhash ygg--space-buffers)
+      (pcase-dolist (`(,id . ,bufs) refilled)
         (puthash id bufs ygg--space-buffers)))))
 
 (defun ygg-session--buffer-list ()
@@ -500,6 +511,8 @@ Buffers of a session switched away from stay alive, and are not this one's."
   (setq easysession-buffer-list-function #'ygg-session--buffer-list)
   (easysession-add-save-handler #'ygg--space-buffers-session-save)
   (easysession-add-load-handler #'ygg--space-buffers-session-load)
+  (add-hook 'easysession-before-load-hook #'ygg--space-buffers-forget)
+  (add-hook 'easysession-new-session-hook #'ygg--space-buffers-forget)
   (add-hook 'easysession-after-load-hook #'ygg--space-buffers-restore))
 
 (defun ygg-space-claim-buffer (buf id &optional move)

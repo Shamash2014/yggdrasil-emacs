@@ -545,6 +545,7 @@ With PICK, join a running REPL instead."
 
 (defun ygg-nb--repl-setup ()
   "Type at the prompt from the start, as comint REPLs do."
+  (setq-local ygg-insert-elsewhere t)
   (add-hook 'ygg-insert-entry-hook #'ygg-nb--repl-insert-at-prompt nil t)
   (let ((buffer (current-buffer)))
     (run-with-timer 0 nil

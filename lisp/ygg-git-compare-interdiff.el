@@ -36,6 +36,11 @@
   :type 'natnum
   :group 'ygg-git-compare)
 
+(defcustom ygg-git-compare-interdiff-keep-sides 200
+  "How many sides B are remembered; the longest unchanged go first."
+  :type 'natnum
+  :group 'ygg-git-compare)
+
 (defun ygg-git-compare-interdiff--file ()
   "The file this repository's seen versions are kept in, shared by its worktrees."
   (expand-file-name "ygg-review-seen.eld" (magit-gitdir nil t)))
@@ -64,13 +69,14 @@
          (all (ygg-git-compare-interdiff--load file))
          (seen (alist-get key all nil nil #'equal)))
     (unless (equal (caar seen) sha)
-      (setf (alist-get key all nil nil #'equal)
-            (seq-take (cons (cons sha (truncate (float-time)))
-                            (seq-remove (lambda (e) (equal (car e) sha)) seen))
-                      ygg-git-compare-interdiff-keep))
-      (with-temp-file file
-        (let ((print-length nil) (print-level nil))
-          (prin1 all (current-buffer)))))))
+      (let ((versions (seq-take (cons (cons sha (truncate (float-time)))
+                                      (seq-remove (lambda (e) (equal (car e) sha)) seen))
+                                ygg-git-compare-interdiff-keep)))
+        (with-temp-file file
+          (let ((print-length nil) (print-level nil))
+            (prin1 (seq-take (cons (cons key versions) (assoc-delete-all key all #'equal))
+                             ygg-git-compare-interdiff-keep-sides)
+                   (current-buffer))))))))
 
 (defun ygg-git-compare-interdiff-record ()
   "Remember the commit side B of the compare here stands at."

@@ -201,9 +201,11 @@ those `ygg-git-worktree-run' made come first, the newest as the default."
          (annotate (lambda (path)
                      (with-memoization (alist-get path annotations nil nil #'equal)
                        (concat "  " (or (cdr (assoc path branches)) "detached")
-                               (when (let ((default-directory (file-name-as-directory path)))
-                                       (magit-git-string "--no-optional-locks" "status" "--porcelain"))
-                                 (propertize " *" 'face 'warning)))))))
+                               (cond ((not (file-directory-p path))
+                                      (propertize " missing" 'face 'warning))
+                                     ((let ((default-directory (file-name-as-directory path)))
+                                        (magit-git-string "--no-optional-locks" "status" "--porcelain"))
+                                      (propertize " *" 'face 'warning))))))))
     (unless ordered (user-error "No worktree to remove"))
     (completing-read (format-prompt "Remove worktree" (car made))
                      (lambda (str pred action)
@@ -217,11 +219,16 @@ those `ygg-git-worktree-run' made come first, the newest as the default."
 (defun ygg-git-worktree--confirm (dir)
   "Ask before DIR goes; return non-nil when its changes are to be discarded.
 A user error keeps it."
-  (let ((changes (length (let ((default-directory (file-name-as-directory dir)))
-                           (magit-git-lines "--no-optional-locks" "status" "--porcelain"))))
+  (let ((changes (if (file-directory-p dir)
+                     (length (let ((default-directory (file-name-as-directory dir)))
+                               (magit-git-lines "--no-optional-locks" "status" "--porcelain")))
+                   0))
         (name (abbreviate-file-name dir)))
     (unless (if (zerop changes)
-                (y-or-n-p (format "Remove worktree %s? " name))
+                (y-or-n-p (format (if (file-directory-p dir)
+                                      "Remove worktree %s? "
+                                    "Worktree %s is missing; forget it? ")
+                                  name))
               (and (y-or-n-p (format "%s has %d uncommitted change%s; remove it? "
                                      name changes (if (= changes 1) "" "s")))
                    (y-or-n-p (format "Discard those %d change%s for good? "
@@ -242,7 +249,9 @@ A user error keeps it."
 ;;;###autoload
 (defun ygg-git-worktree-remove (dir)
   "Remove the worktree DIR with its space and buffers, after asking.
-One with uncommitted changes is asked about twice."
+One with uncommitted changes is asked about twice; one whose directory
+is gone is forgotten, even when locked.  The space and buffers stay when
+git refuses."
   (interactive (list (or (magit-section-value-if 'worktree)
                          (ygg-git-worktree--read-removable))))
   (setq dir (ygg-git-worktree--norm dir))
@@ -256,18 +265,21 @@ One with uncommitted changes is asked about twice."
                 (abbreviate-file-name dir)))
   (let* ((force (ygg-git-worktree--confirm dir))
          (default-directory (file-name-as-directory (ygg-git-worktree--main)))
+         (missing (not (file-directory-p dir)))
          (forget (ygg-git-worktree--here
                   (lambda ()
+                    (ygg-git-worktree--close dir)
                     (ygg-git-worktree--remember
                      (delete dir (ygg-git-worktree--made)))))))
-    (ygg-git-worktree--close dir)
-    (if (ygg-git-worktree--wt-p)
+    (if (and (ygg-git-worktree--wt-p) (not missing))
         (ygg-wt--run (append '("remove" "--foreground" "--no-delete-branch")
                              (and force '("--force"))
                              (list dir))
                      forget)
       (ygg-git-worktree--git
-       (append '("worktree" "remove") (and force '("--force")) (list dir))
+       (append '("worktree" "remove")
+               (cond (missing '("-f" "-f")) (force '("--force")))
+               (list dir))
        forget))))
 
 ;;; In magit status
@@ -365,14 +377,15 @@ One with uncommitted changes is asked about twice."
                (shown 0))
           (cl-mapc
            (lambda (config head path)
-             (pcase-let ((`(,dir ,commit ,_branch ,bare ,_detached ,_locked ,prunable) config))
+             (pcase-let* ((`(,dir ,commit ,_branch ,bare ,_detached ,_locked ,prunable) config)
+                          (missing (not (file-directory-p dir))))
                (magit-insert-section (worktree dir t)
                  (insert
                   head (make-string (- align (string-width head)) ?\s)
                   (string-join
                    (delete
                     "" (list (propertize (abbreviate-file-name (directory-file-name dir)) 'font-lock-face 'shadow)
-                             (if (or bare prunable
+                             (if (or bare prunable missing
                                      (> (cl-incf shown) ygg-git-worktree-status-limit))
                                  ""
                                (ygg-git-worktree--state (ygg-git-worktree--counts dir)))
@@ -382,6 +395,7 @@ One with uncommitted changes is asked about twice."
                                                (and (equal path here) "here")
                                                (and (member path made) "made")
                                                (and prunable "prunable")
+                                               (and missing (not prunable) "missing")
                                                (and (fboundp 'ygg-space--for-dir)
                                                     (ygg-space--for-dir path)
                                                     "space")))

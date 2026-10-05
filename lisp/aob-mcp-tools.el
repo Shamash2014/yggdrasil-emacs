@@ -500,11 +500,24 @@ FOUND is the form answering once it is found, with it bound to s."
 (defun aob-mcp-tools--object-p (value)
   (and (consp value) (keywordp (car value))))
 
-(defun aob-mcp-tools--review-comment (raw)
+(defun aob-mcp-tools--repo-relative (file dir)
+  "FILE relative to DIR, symlinks resolved; nil when it lies outside.
+A relative FILE is returned as it is."
+  (if (not (file-name-absolute-p file))
+      file
+    (let ((root (file-name-as-directory (file-truename dir)))
+          (path (file-truename file)))
+      (and (string-prefix-p root path) (file-relative-name path root)))))
+
+(defun aob-mcp-tools--review-comment (raw &optional dir)
   "RAW, one comment as the agent sent it, as the plist the compare view takes.
-A string instead says what is wrong with it."
+Absolute files are made relative to DIR.  A string instead says what is wrong
+with it."
   (let* ((text (plist-get raw :text))
-         (file (plist-get raw :file))
+         (file-raw (plist-get raw :file))
+         (file (if (and (stringp file-raw) (stringp dir))
+                   (aob-mcp-tools--repo-relative file-raw dir)
+                 file-raw))
          (line-raw (plist-get raw :line))
          (start-raw (plist-get raw :start_line))
          (line (aob-mcp-tools--int line-raw))
@@ -526,12 +539,14 @@ A string instead says what is wrong with it."
                  (unless (and (stringp text) (not (string-blank-p text))) "text missing")
                  (unless (member level '("line" "range" "file" "review"))
                    (format "level %S is not line, range, file or review" level))
-                 (unless (or (equal level "review") (and (stringp file) (not (string-blank-p file))))
+                 (unless (or (equal level "review") (and (stringp file-raw) (not (string-blank-p file-raw))))
                    "file missing")
+                 (when (and (stringp file-raw) (null file)) "file is outside the repository")
                  (when (and line-raw (not (and line (> line 0)))) "line is not a positive integer")
                  (when (and start-raw (not (and start (> start 0)))) "start_line is not a positive integer")
                  (when (and (member level '("line" "range")) (null line-raw)) "line missing")
                  (when (and (equal level "range") (null start-raw)) "start_line missing")
+                 (when (and line start (> start line)) "start_line is after line")
                  (unless (member side '("new" "old")) (format "side %S is not new or old" side))
                  (when (and type (not (stringp type))) "type is not a string")
                  (when (and title (not (stringp title))) "title is not a string")
@@ -561,17 +576,14 @@ A string instead says what is wrong with it."
           ((stringp made) made)
           (t (append made (list :correctness correctness))))))
 
-(defun aob-mcp-tools--codex-finding (finding dir)
-  "FINDING from a Codex review as an agent's comment, its path relative to DIR."
+(defun aob-mcp-tools--codex-finding (finding)
+  "FINDING from a Codex review as an agent's comment."
   (let* ((where (plist-get finding :code_location))
          (path (plist-get where :absolute_file_path))
          (range (plist-get where :line_range))
          (start (plist-get range :start))
-         (end (or (plist-get range :end) start))
-         (root (file-name-as-directory (expand-file-name dir))))
-    (list :file (if (and (stringp path) (string-prefix-p root (expand-file-name path)))
-                    (file-relative-name path root)
-                  path)
+         (end (or (plist-get range :end) start)))
+    (list :file path
           :line end
           :start_line (and start (not (equal start end)) start)
           :side "new"
@@ -601,7 +613,7 @@ A string stands where an argument could not be read."
          (lambda (finding i)
            (push (cons (format "finding %d" (1+ i))
                        (and (aob-mcp-tools--object-p finding)
-                            (aob-mcp-tools--codex-finding finding (plist-get args :dir))))
+                            (aob-mcp-tools--codex-finding finding)))
                  entries))
          (plist-get codex :findings))
         (when (plist-get codex :overall_correctness)
@@ -622,7 +634,7 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
                          ((not (aob-mcp-tools--object-p raw)) "not an object")
                          ((plist-member raw :verdict)
                           (aob-mcp-tools--review-verdict (plist-get raw :verdict)))
-                         (t (aob-mcp-tools--review-comment raw)))))
+                         (t (aob-mcp-tools--review-comment raw (plist-get args :dir))))))
         (cond ((stringp entry) (push entry bad))
               ((stringp made) (push (format "%s: %s" (car entry) made) bad))
               (t (push made good)))))

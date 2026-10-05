@@ -105,6 +105,7 @@ left out of a review."
 (defun ygg-git-compare--url-key (url)
   "URL as host/owner/name, however git or gh spells it."
   (thread-last url
+               (replace-regexp-in-string "\\`\\([a-z+]+://\\(?:[^@/]+@\\)?[^/:]+\\):[0-9]+" "\\1")
                (replace-regexp-in-string "\\`[a-z+]+://" "")
                (replace-regexp-in-string "\\`[^@/]+@" "")
                (replace-regexp-in-string "\\`\\([^/:]+\\):" "\\1/")
@@ -826,15 +827,18 @@ complaint on failure."
     (let* ((default-directory (if (file-remote-p default-directory)
                                   temporary-file-directory
                                 default-directory))
-           (err (make-temp-file "ygg-git-compare-forge-"))
-           (status (apply #'call-process program nil (list t err) nil args)))
+           (err (make-temp-file "ygg-git-compare-forge-")))
       (unwind-protect
-          (unless (eql status 0)
-            (user-error "%s %s: %s" program (car args)
-                        (string-trim (concat (with-temp-buffer
-                                               (insert-file-contents err)
-                                               (buffer-string))
-                                             "\n" (buffer-string)))))
+          (let ((status (condition-case failure
+                            (apply #'call-process program nil (list t err) nil args)
+                          (file-error (user-error "%s did not start: %s" program
+                                                  (error-message-string failure))))))
+            (unless (eql status 0)
+              (user-error "%s %s: %s" program (car args)
+                          (string-trim (concat (with-temp-buffer
+                                                 (insert-file-contents err)
+                                                 (buffer-string))
+                                               "\n" (buffer-string))))))
         (delete-file err)))
     (buffer-string)))
 
@@ -857,9 +861,10 @@ as JSON through api's --input."
       (when input (delete-file input)))))
 
 (defun ygg-git-compare--lab-host ()
-  (ygg-git-compare--url-key (or (getenv "LAB_HOST")
-                                (bound-and-true-p ygg-lab-host)
-                                "https://gitlab.com")))
+  (car (split-string (ygg-git-compare--url-key (or (getenv "LAB_HOST")
+                                                    (bound-and-true-p ygg-lab-host)
+                                                    "https://gitlab.com"))
+                     "/")))
 
 (defun ygg-git-compare--forge-repo (&optional remote)
   "REMOTE's repository as (FORGE HOST PATH), FORGE github or gitlab;
@@ -1362,6 +1367,7 @@ open pull and merge requests, the branch at point first."
      (let ((here (or (magit-branch-at-point) (magit-get-current-branch))))
        (list (pcase (ygg-git-compare--read "Review" (ygg-git-compare--review-targets)
                                            (and here (cons 'rev here)))
+               (`(rev . ,(pred string-empty-p)) (user-error "No branch here"))
                (`(rev . ,branch) branch)
                (spec spec))))))
   (require 'magit)

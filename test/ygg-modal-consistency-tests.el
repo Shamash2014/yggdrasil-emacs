@@ -11,6 +11,7 @@
 (require 'layer-git)
 (require 'layer-sessions)
 (require 'layer-aob)
+(require 'layer-notebook)
 (require 'ygg-projects)
 (require 'magit)
 (require 'magit-apply)
@@ -244,5 +245,24 @@
     (should-not (eq (let ((completion-in-region-mode t))
                       (ygg-modal-tests--cmd "<escape>"))
                     'corfu-quit))))
+
+;;; A jupyter REPL types at its prompt from read-only output
+
+(ert-deftest ygg-modal-repl-insert-in-output-moves-to-the-prompt ()
+  (ygg-modal-tests--in #'text-mode ""
+    (let ((inhibit-read-only t))
+      (insert (propertize "out\n" 'read-only t 'front-sticky '(read-only)
+                          'rear-nonsticky '(read-only)))
+      (insert "in"))
+    (cl-letf (((symbol-function 'run-with-timer) #'ignore)
+              ((symbol-function 'jupyter-repl-cell-code-beginning-position)
+               (lambda () (- (point-max) 2))))
+      (ygg-nb--repl-setup)
+      (dolist (key '("i" "a" "I"))
+        (goto-char (point-min))
+        (ygg-normal-state)
+        (call-interactively (key-binding (kbd key) t))
+        (should (eq ygg--state 'insert))
+        (should (>= (point) (- (point-max) 2)))))))
 
 ;;; ygg-modal-consistency-tests.el ends here

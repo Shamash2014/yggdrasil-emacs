@@ -17,6 +17,11 @@
 (defconst ygg-git-compare-marks-file "ygg-review-marks.eld"
   "The file in the repository's common git directory that keeps its marks.")
 
+(defcustom ygg-git-compare-marks-keep 5000
+  "How many marks a repository keeps; the oldest go first."
+  :type 'natnum
+  :group 'ygg-git-compare)
+
 (defvar-local ygg-git-compare-marks--unreviewed-only nil
   "Whether this compare hides the hunks and files already reviewed.")
 
@@ -27,34 +32,54 @@
                     (or (magit-gitdir nil t) (user-error "Not in a git repository"))))
 
 (defun ygg-git-compare-marks--read ()
-  "The repository's marks as a set, empty when the file is missing or unreadable."
+  "The repository's marks as key to time marked, empty when the file is missing
+or unreadable.  A key kept without a time is the oldest."
   (let ((marks (make-hash-table :test #'equal))
-        (keys (ignore-errors
-                (with-temp-buffer
-                  (insert-file-contents (ygg-git-compare-marks--path))
-                  (read (current-buffer))))))
-    (dolist (key (and (proper-list-p keys) keys) marks)
-      (when (stringp key) (puthash key t marks)))))
+        (entries (ignore-errors
+                   (with-temp-buffer
+                     (insert-file-contents (ygg-git-compare-marks--path))
+                     (read (current-buffer))))))
+    (dolist (entry (and (proper-list-p entries) entries) marks)
+      (pcase entry
+        ((pred stringp) (puthash entry 0 marks))
+        (`(,(and key (pred stringp)) . ,(and time (pred numberp)))
+         (puthash key time marks))))))
 
 (defun ygg-git-compare-marks--write (marks)
-  (let ((print-length nil) (print-level nil))
+  "Keep the newest `ygg-git-compare-marks-keep' of MARKS."
+  (let ((print-length nil) (print-level nil)
+        (entries nil))
+    (maphash (lambda (key time) (push (cons key time) entries)) marks)
     (with-temp-file (ygg-git-compare-marks--path)
-      (prin1 (hash-table-keys marks) (current-buffer)))))
+      (prin1 (seq-take (seq-sort-by #'cdr #'> entries) ygg-git-compare-marks-keep)
+             (current-buffer)))))
 
 ;;; Hunks
 
-(defun ygg-git-compare-marks--key (hunk)
+(defvar ygg-git-compare-marks--bases (make-hash-table :test #'eq :weakness 'key)
+  "Hunk section to its changed-lines hash.")
+
+(defun ygg-git-compare-marks--base (hunk)
   "HUNK's file and its added and removed lines, hashed."
-  (save-excursion
-    (goto-char (oref hunk content))
-    (let (changed)
-      (while (< (point) (oref hunk end))
-        (when (memq (char-after) '(?+ ?-))
-          (push (buffer-substring-no-properties (point) (line-end-position)) changed))
-        (forward-line))
-      (secure-hash 'sha1 (string-join (cons (oref (oref hunk parent) value)
-                                            (nreverse changed))
-                                      "\n")))))
+  (with-memoization (gethash hunk ygg-git-compare-marks--bases)
+    (save-excursion
+      (goto-char (oref hunk content))
+      (let (changed)
+        (while (< (point) (oref hunk end))
+          (when (memq (char-after) '(?+ ?-))
+            (push (buffer-substring-no-properties (point) (line-end-position)) changed))
+          (forward-line))
+        (secure-hash 'sha1 (string-join (cons (oref (oref hunk parent) value)
+                                              (nreverse changed))
+                                        "\n"))))))
+
+(defun ygg-git-compare-marks--key (hunk)
+  "HUNK's hash, numbered among the hunks of its file with the same changed lines."
+  (let* ((base (ygg-git-compare-marks--base hunk))
+         (twins (seq-count (lambda (h) (equal (ygg-git-compare-marks--base h) base))
+                           (seq-take-while (lambda (h) (not (eq h hunk)))
+                                           (ygg-git-compare-marks--hunks (oref hunk parent))))))
+    (if (zerop twins) base (format "%s#%d" base twins))))
 
 (defun ygg-git-compare-marks--hunks (&optional file)
   "Every hunk section of FILE's section, or of the buffer, in order."
@@ -161,7 +186,7 @@ compare is too large to hold its hunks."
          (keys (mapcar #'ygg-git-compare-marks--key hunks))
          (done (seq-every-p (lambda (k) (gethash k marks)) keys)))
     (dolist (key keys)
-      (if done (remhash key marks) (puthash key t marks)))
+      (if done (remhash key marks) (puthash key (truncate (float-time)) marks)))
     (ygg-git-compare-marks--write marks)
     (ygg-git-compare-marks--apply-all marks)
     (when done

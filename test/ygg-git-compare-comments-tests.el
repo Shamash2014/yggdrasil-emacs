@@ -559,4 +559,116 @@ and adds b.txt; main stays checked out."
           (should (eq (plist-get props :exclusive) 'no)))
         (ygg-git-compare-draft-cancel)))))
 
+(ert-deftest ygg-git-compare-comments-selection-keys-end-with-the-selection ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto " 1")
+      (ygg-git-compare-select-lines)
+      (ygg-git-compare-select-down)
+      (let ((draft (ygg-git-compare-comment)))
+        (with-current-buffer draft
+          (should-not (eq (key-binding "j") #'ygg-git-compare-select-down))
+          (should-not (eq (key-binding "c") #'ygg-git-compare-comment))
+          (ygg-git-compare-draft-cancel)))
+      (ygg-git-compare-select-lines)
+      (should (eq (key-binding "j") #'ygg-git-compare-select-down))
+      (ygg-git-compare-select-lines)
+      (should-not (eq (key-binding "j") #'ygg-git-compare-select-down))
+      (should-not (eq (key-binding (kbd "<escape>")) #'ygg-git-compare-select-lines)))))
+
+(ert-deftest ygg-git-compare-comments-unsaved-draft-is-not-discarded-silently ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (with-current-buffer (ygg-git-compare-comment)
+        (insert "half written"))
+      (ygg-git-compare-comments-tests--goto "+three")
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+        (should-error (ygg-git-compare-comment) :type 'user-error))
+      (with-current-buffer "*ygg-git-compare comment*"
+        (should (equal (buffer-string) "half written")))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (with-current-buffer (ygg-git-compare-comment)
+          (should (equal (buffer-string) "")))))))
+
+(ert-deftest ygg-git-compare-comments-ids-are-unique-within-a-millisecond ()
+  (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 1.0))
+            ((symbol-function 'random) (lambda (&rest _) 5)))
+    (let ((ids (cl-loop repeat 200 collect (ygg-git-compare--new-id))))
+      (should (= (length (delete-dups (copy-sequence ids))) 200)))))
+
+(ert-deftest ygg-git-compare-comments-of-another-range-are-not-drawn-on-a-line ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on two")
+      (should-not (string-search "Made on another range"
+                                 (ygg-git-compare-comments-tests--shown)))
+      (ygg-git-compare-swap)
+      (let ((shown (ygg-git-compare-comments-tests--shown)))
+        (should (string-search "Made on another range" shown))
+        (should (string-search "stale" shown))
+        (should (string-search "on two" shown)))
+      (should (equal (mapcar #'overlay-start
+                             (seq-filter (lambda (ov) (overlay-get ov 'ygg-git-compare-comments))
+                                         (overlays-in (point-min) (point-max))))
+                     (list (point-min))))
+      (with-current-buffer (ygg-git-compare-comments-summary)
+        (should (string-search "Made on another range (1)" (buffer-string))))
+      (should (string-search "made on" (ygg-git-compare-review-prompt)))
+      (ygg-git-compare-swap)
+      (should-not (string-search "Made on another range"
+                                 (ygg-git-compare-comments-tests--shown))))))
+
+(ert-deftest ygg-git-compare-comments-old-side-line-is-found-on-a-context-line ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-receive
+       root "feature" '((:file "a.txt" :line 1 :side "old" :text "on context")) "claude")
+      (let ((ov (seq-find (lambda (ov) (overlay-get ov 'ygg-git-compare-comments))
+                          (overlays-in (point-min) (point-max)))))
+        (should-not (string-search "removed line" (overlay-get ov 'after-string)))
+        (goto-char (overlay-start ov))
+        (should (looking-at-p " 1"))))))
+
+(ert-deftest ygg-git-compare-comments-key-drops-a-remote-without-its-ref ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--git root "remote" "add" "origin" "git@example.invalid:o/r.git")
+    (should (equal (ygg-git-compare--branch-review-key "origin/feature") "branch feature"))
+    (should (equal (ygg-git-compare--branch-review-key "origin/topic/x") "branch topic/x"))
+    (should (equal (ygg-git-compare--branch-review-key "feature") "branch feature"))
+    (should (equal (ygg-git-compare--branch-review-key "topic/x") "branch topic/x"))))
+
+(ert-deftest ygg-git-compare-comments-unreadable-store-is-kept-not-overwritten ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (let ((file (car ygg-git-compare--store)))
+        (with-temp-file file (insert "((\"branch feature\" (:id"))
+        (should-error (ygg-git-compare--put (list :id "x" :level 'review :text "t"))
+                      :type 'user-error)
+        (should (equal (with-temp-buffer (insert-file-contents file) (buffer-string))
+                       "((\"branch feature\" (:id"))
+        (should (directory-files (file-name-directory file) nil "\\.corrupt-"))))))
+
+(ert-deftest ygg-git-compare-comments-store-is-replaced-whole ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare--put (list :id "x" :level 'review :text "first"))
+      (let ((file (car ygg-git-compare--store))
+            (rename (symbol-function 'rename-file))
+            seen)
+        (cl-letf (((symbol-function 'rename-file)
+                   (lambda (from to &rest args)
+                     (push (list (file-name-directory from) (file-name-directory to)
+                                 (with-temp-buffer (insert-file-contents to) (buffer-string)))
+                           seen)
+                     (apply rename from to args))))
+          (ygg-git-compare--put (list :id "y" :level 'review :text "second")))
+        (pcase-let ((`((,from-dir ,to-dir ,old)) seen))
+          (should (equal from-dir to-dir))
+          (should (string-search "first" old))
+          (should-not (string-search "second" old)))
+        (should (string-search "second" (with-temp-buffer (insert-file-contents file)
+                                                          (buffer-string))))))))
+
 ;;; ygg-git-compare-comments-tests.el ends here

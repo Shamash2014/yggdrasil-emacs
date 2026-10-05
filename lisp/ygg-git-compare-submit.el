@@ -276,9 +276,48 @@ old number, and the line's type, nil for context."
   (pcase-let ((`(,code ,type) (ygg-git-compare-submit--line-code path side line old-line)))
     (append (list :line_code code) (and type (list :type type)))))
 
+(defun ygg-git-compare-submit--context-old-line (diff line)
+  "The old number of the context line of DIFF, a file's diff lines, that is
+new LINE; nil when LINE is not a context line there."
+  (let (old new found)
+    (dolist (text diff)
+      (cond ((string-match "\\`@@ -\\([0-9]+\\)\\(?:,[0-9]+\\)? \\+\\([0-9]+\\)" text)
+             (setq old (string-to-number (match-string 1 text))
+                   new (string-to-number (match-string 2 text))))
+            ((null old))
+            ((string-prefix-p "-" text) (cl-incf old))
+            ((string-prefix-p "+" text) (cl-incf new))
+            ((string-prefix-p " " text)
+             (when (eql new line) (setq found old))
+             (cl-incf old)
+             (cl-incf new))))
+    found))
+
+(defun ygg-git-compare-submit--with-old-lines (comment pr)
+  "COMMENT, the old numbers of the context lines it sits on added from PR's diff."
+  (let (diff)
+    (cl-flet ((old-line (side line known)
+                (or known
+                    (and line (not (eq side 'old))
+                         (ygg-git-compare-submit--context-old-line
+                          (or diff
+                              (setq diff (ignore-errors
+                                           (magit-git-lines
+                                            "diff" "--no-color" "--no-ext-diff"
+                                            (plist-get pr :base) (plist-get pr :head) "--"
+                                            (plist-get comment :new-path)))))
+                          line)))))
+      (append (list :old-line (old-line (plist-get comment :side) (plist-get comment :line)
+                                        (plist-get comment :old-line))
+                    :start-old-line (old-line (plist-get comment :start-side)
+                                              (plist-get comment :start-line)
+                                              (plist-get comment :start-old-line)))
+              comment))))
+
 (defun ygg-git-compare-submit--gitlab-position (comment pr &optional single)
   "COMMENT's position on PR, a range spanning its lines unless SINGLE."
-  (let ((position (ygg-git-compare--gitlab-position comment pr))
+  (let* ((comment (ygg-git-compare-submit--with-old-lines comment pr))
+         (position (ygg-git-compare--gitlab-position comment pr))
         (path (plist-get comment :new-path)))
     (if (or single (not (eq (ygg-git-compare-submit--level comment) 'range)))
         position
@@ -351,7 +390,7 @@ request changes when every one went; the ones posted, and the first failure."
     (cl-flet ((try (done thunk)
                 (condition-case err
                     (progn (funcall thunk) (setq posted (append posted done)))
-                  (user-error (unless failure (setq failure (error-message-string err)))))))
+                  (error (unless failure (setq failure (error-message-string err)))))))
       (when summary-comments
         (try summary-comments
              (lambda () (ygg-git-compare-submit--gitlab-note
@@ -426,6 +465,7 @@ out findings less urgent than it."
   (require 'aob-acp)
   (with-current-buffer (ygg-git-compare--list)
     (let* ((comments (ygg-git-compare-submit--select (or to 'agent) max-priority))
+           (_ (unless comments (user-error "No comments held for an agent")))
            (text (ygg-git-compare-submit--agent-prompt comments))
            (session (ygg-git-compare-send-to-reviewer default-directory text)))
       (ygg-git-compare-submit--drop comments)

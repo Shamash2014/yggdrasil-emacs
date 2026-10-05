@@ -422,6 +422,52 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
     (should (equal ygg-git-compare-submit-tests--dropped '("s")))
     (should (string-search "not a reviewer" (car ygg-git-compare-submit-tests--messages)))))
 
+(ert-deftest ygg-git-compare-submit-gitlab-keeps-only-what-failed-on-a-non-user-error ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
+      ygg-git-compare-submit-tests--gitlab-pr
+      (lambda (_program _args body)
+        (if (equal (plist-get body :body) "**nit:** line")
+            (signal 'file-missing '("Opening input file" "No such file" "/tmp/gone"))
+          "{\"id\":1}"))
+    (ygg-git-compare-submit-forge 'approve)
+    (should (equal (ygg-git-compare-submit-tests--ids) '("line" "proposed")))
+    (should (equal (sort (copy-sequence ygg-git-compare-submit-tests--dropped) #'string<)
+                   '("range" "summary" "whole")))
+    (should (string-search "No such file" (car ygg-git-compare-submit-tests--messages)))))
+
+(defconst ygg-git-compare-submit-tests--diff
+  '("diff --git a/a.txt b/a.txt" "index 1..2 100644" "--- a/a.txt" "+++ b/a.txt"
+    "@@ -10,4 +12,5 @@ fn" " keep" "-gone" "+new one" "+new two" " tail" " last")
+  "A diff in which new lines 12 and 15 and 16 are context for old 10, 12 and 13.")
+
+(ert-deftest ygg-git-compare-submit-context-old-line-reads-the-hunk ()
+  (let ((diff ygg-git-compare-submit-tests--diff))
+    (should (eql (ygg-git-compare-submit--context-old-line diff 12) 10))
+    (should (eql (ygg-git-compare-submit--context-old-line diff 15) 12))
+    (should (eql (ygg-git-compare-submit--context-old-line diff 16) 13))
+    (should-not (ygg-git-compare-submit--context-old-line diff 13))
+    (should-not (ygg-git-compare-submit--context-old-line diff 40))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-position-numbers-a-context-line-on-both-sides ()
+  (cl-letf (((symbol-function 'magit-git-lines)
+             (lambda (&rest _) ygg-git-compare-submit-tests--diff)))
+    (let* ((agent (ygg-git-compare-submit-tests--c "a" :level 'range :new-path "a.txt"
+                                                   :old-path "a.txt" :side 'new :line 15
+                                                   :start-side 'new :start-line 12))
+           (position (ygg-git-compare-submit--gitlab-position
+                      agent ygg-git-compare-submit-tests--gitlab-pr))
+           (hash (sha1 "a.txt")))
+      (should (equal (plist-get position :old_line) 12))
+      (should (equal (plist-get position :new_line) 15))
+      (should (equal (plist-get position :line_range)
+                     `(:start (:line_code ,(concat hash "_10_12"))
+                       :end (:line_code ,(concat hash "_12_15"))))))
+    (let ((added (ygg-git-compare-submit--gitlab-position
+                  (ygg-git-compare-submit-tests--c "n" :level 'line :new-path "a.txt"
+                                                   :side 'new :line 13)
+                  ygg-git-compare-submit-tests--gitlab-pr)))
+      (should-not (plist-member added :old_line)))))
+
 ;;; Agent
 
 (ert-deftest ygg-git-compare-submit-agent-sends-markdown-and-drops-agent-comments ()
@@ -444,5 +490,20 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
       (should-not (string-search "for pr" (cdar sent)))
       (should (equal ygg-git-compare-submit-tests--dropped '("for agent")))
       (should-not ygg-git-compare-submit-tests--calls))))
+
+(ert-deftest ygg-git-compare-submit-agent-refuses-when-nothing-qualifies ()
+  (let ((comments (list (ygg-git-compare-submit-tests--c "for pr")
+                        (ygg-git-compare-submit-tests--c "unchecked" :to 'agent :level 'file
+                                                         :file "a.txt" :status 'pending)))
+        sent)
+    (ygg-git-compare-submit-tests--with comments nil #'ignore
+      (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session))))
+                ((symbol-function 'completing-read) (lambda (&rest _) "live"))
+                ((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>"))
+                ((symbol-function 'aob-prompt) (lambda (&rest args) (push args sent)))
+                ((symbol-function 'aob-trace) #'ignore))
+        (should-error (ygg-git-compare-submit-agent) :type 'user-error)
+        (should-not sent)
+        (should-not ygg-git-compare-submit-tests--dropped)))))
 
 ;;; ygg-git-compare-submit-tests.el ends here
