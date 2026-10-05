@@ -20,7 +20,8 @@ Report: regressions first, findings by severity, scenarios, claims
 last, pass or fail per the qa preset's closing line.
 
 Ends on: findings with evidence; a confirmed bug becomes a new
-playbooks/bugfix.md item.
+playbooks/bugfix.md item. QA workers never fix; the recheck after a
+fix is a fresh QA worker (lead-howto/checking.md).
 
 Escalate: any other blocker goes back to the playbook that built the
 change. Secure question: hand off to playbooks/bughunt.md as its own
