@@ -866,6 +866,102 @@ as JSON through api's --input."
                                                     "https://gitlab.com"))
                      "/")))
 
+(defvar ygg-git-compare--ssh-hostnames (make-hash-table :test #'equal))
+
+(defun ygg-git-compare--unquote (string)
+  (string-trim string "[\"']+" "[\"']+"))
+
+(defun ygg-git-compare--bare-host (value)
+  (car (split-string (ygg-git-compare--url-key (ygg-git-compare--unquote value)) "/")))
+
+(defun ygg-git-compare--host-with-port (value)
+  (car (split-string (replace-regexp-in-string
+                      "\\`\\(?:[a-z+]+://\\)?\\(?:[^@/]+@\\)?" ""
+                      (downcase (ygg-git-compare--unquote value)))
+                     "/")))
+
+(defun ygg-git-compare--glab-global-config ()
+  (seq-find #'file-exists-p
+            (delq nil (list (when-let* ((dir (getenv "GLAB_CONFIG_DIR")))
+                              (expand-file-name "config.yml" dir))
+                            (when-let* ((dir (getenv "XDG_CONFIG_HOME")))
+                              (expand-file-name "glab-cli/config.yml" dir))
+                            "~/.config/glab-cli/config.yml"
+                            "~/Library/Application Support/glab-cli/config.yml"))))
+
+(defun ygg-git-compare--glab-hosts ()
+  "Each host glab is configured for, as (KEY API-HOST SSH-HOST ...)."
+  (let (hosts)
+    (dolist (file (list (when-let* ((gitdir (magit-gitdir)))
+                          (expand-file-name "glab-cli/config.yml" gitdir))
+                        (ygg-git-compare--glab-global-config)))
+      (when (and file (file-readable-p file))
+        (with-temp-buffer
+          (insert-file-contents file)
+          (when (re-search-forward "^hosts:" nil t)
+            (let (current
+                  (end (or (save-excursion
+                             (and (re-search-forward "^[^ \n#]" nil t) (match-beginning 0)))
+                           (point-max))))
+              (while (re-search-forward
+                      "^\\(?:    \\([^ \n]+\\): *\\(?:#.*\\)?$\\|        \\(?:api\\|ssh\\)_host: *\\([^ \n#]+\\)\\)"
+                      end t)
+                (if (match-string 1)
+                    (let ((key (downcase (ygg-git-compare--unquote (match-string 1)))))
+                      (setq current (list key (ygg-git-compare--bare-host key)))
+                      (push current hosts))
+                  (when current
+                    (push (ygg-git-compare--bare-host (match-string 2)) (cdr current))))))))))
+    (dolist (var '("GITLAB_HOST" "GL_HOST"))
+      (when-let* ((value (getenv var)))
+        (push (list (ygg-git-compare--host-with-port value) (ygg-git-compare--bare-host value))
+              hosts)))
+    (nreverse hosts)))
+
+(defun ygg-git-compare--gh-hosts ()
+  (when-let* ((file (seq-find #'file-readable-p
+                              (delq nil (list (when-let* ((dir (getenv "GH_CONFIG_DIR")))
+                                                (expand-file-name "hosts.yml" dir))
+                                              (when-let* ((dir (getenv "XDG_CONFIG_HOME")))
+                                                (expand-file-name "gh/hosts.yml" dir))
+                                              "~/.config/gh/hosts.yml")))))
+    (with-temp-buffer
+      (insert-file-contents file)
+      (let (hosts)
+        (while (re-search-forward "^\\([^ #\n]+\\):" nil t)
+          (push (ygg-git-compare--bare-host (match-string 1)) hosts))
+        hosts))))
+
+(defun ygg-git-compare--ssh-hostname (alias)
+  "The HostName ssh resolves ALIAS to, nil when it cannot say."
+  (let ((hostname (gethash alias ygg-git-compare--ssh-hostnames)))
+    (unless hostname
+      (setq hostname
+            (or (ignore-errors
+                  (let ((default-directory temporary-file-directory))
+                    (with-temp-buffer
+                      (and (zerop (call-process "ssh" nil t nil "-G" alias))
+                           (progn (goto-char (point-min))
+                                  (re-search-forward "^hostname \\(.+\\)$" nil t))
+                           (downcase (match-string 1))))))
+                :none))
+      (puthash alias hostname ygg-git-compare--ssh-hostnames))
+    (and (stringp hostname) hostname)))
+
+(defun ygg-git-compare--configured-forge (host)
+  "(FORGE . NAME) for HOST from glab's, gh's or the lab host's settings, NAME being
+what glab or gh calls it; nil if none knows it."
+  (if-let* ((entry (seq-find (lambda (entry) (member host entry))
+                             (ygg-git-compare--glab-hosts))))
+      (cons 'gitlab (car entry))
+    (cond ((member host (ygg-git-compare--gh-hosts)) (cons 'github host))
+          ((equal host (ygg-git-compare--lab-host)) (cons 'gitlab host)))))
+
+(defun ygg-git-compare--named-forge (host)
+  "(FORGE . HOST) when HOST's name says which forge it is."
+  (cond ((string-search "gitlab" host) (cons 'gitlab host))
+        ((string-search "github" host) (cons 'github host))))
+
 (defun ygg-git-compare--forge-repo (&optional remote)
   "REMOTE's repository as (FORGE HOST PATH), FORGE github or gitlab;
 REMOTE defaults to the one pull requests are taken from."
@@ -875,13 +971,12 @@ REMOTE defaults to the one pull requests are taken from."
                   (user-error "Remote %s has no URL" remote)))
          (key (ygg-git-compare--url-key url))
          (host (car (split-string key "/")))
-         (path (substring key (min (length key) (1+ (length host))))))
-    (list (cond ((or (equal host (ygg-git-compare--lab-host))
-                     (string-search "gitlab" host))
-                 'gitlab)
-                ((string-search "github" host) 'github)
-                (t (user-error "%s is neither GitHub nor GitLab" host)))
-          host path)))
+         (path (substring key (min (length key) (1+ (length host)))))
+         (hosts (delq nil (list host (ygg-git-compare--ssh-hostname host))))
+         (forge (or (seq-some #'ygg-git-compare--configured-forge hosts)
+                    (seq-some #'ygg-git-compare--named-forge hosts)
+                    (user-error "%s is neither GitHub nor GitLab" host))))
+    (list (car forge) (cdr forge) path)))
 
 (defun ygg-git-compare--forge-pr (repo selector)
   "The open pull or merge request of REPO, as `--forge-repo' gives it, that
