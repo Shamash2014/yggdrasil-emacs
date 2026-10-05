@@ -1729,6 +1729,7 @@ on its row the same way."
 (declare-function ygg-project-folders "ygg-project-scan" (root))
 (declare-function ygg-project-add-folder "ygg-project-scan" (root dir))
 (declare-function ygg-project-add "ygg-project-scan" (dir))
+(declare-function ygg-project-setup "ygg-project-setup" (&optional root))
 (declare-function ygg-project-remove "ygg-project-scan" (dir))
 
 (defun ygg-projects-add (dir)
@@ -2516,6 +2517,7 @@ umbrella's Folders row moves that repository."
     (define-key map "{" #'ygg-projects-prev-project)
     (define-key map "+" #'project-switch-project)
     (define-key map "A" #'ygg-projects-add)
+    (define-key map "T" #'ygg-project-setup)
     (define-key map "I" #'ygg-projects-import)
     (define-key map "z" #'ygg-projects-toggle-past)
     (define-key map "Z" #'ygg-projects-toggle-archived)

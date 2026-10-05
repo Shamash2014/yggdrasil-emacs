@@ -258,7 +258,7 @@
               ((symbol-function 'jupyter-repl-cell-code-beginning-position)
                (lambda () (- (point-max) 2))))
       (ygg-nb--repl-setup)
-      (dolist (key '("i" "a" "I"))
+      (dolist (key '("i" "a" "I" "o" "O"))
         (goto-char (point-min))
         (ygg-normal-state)
         (call-interactively (key-binding (kbd key) t))

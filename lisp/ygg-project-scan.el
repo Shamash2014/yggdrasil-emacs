@@ -11,6 +11,7 @@
 (require 'cl-lib)
 (require 'seq)
 (require 'project)
+(require 'ygg-project-setup)
 
 (defgroup ygg-project nil
   "Finding repositories rather than remembering them."
@@ -374,6 +375,7 @@ Nothing here blocks."
             (project-remember-project (project-current nil child))))
         (ygg-project-import dir (ygg-project--import-each children))))
     (message "ygg: remembered %s" (abbreviate-file-name dir))
+    (ygg-project-setup-offer dir)
     dir))
 
 (defun ygg-project--import-each (roots)

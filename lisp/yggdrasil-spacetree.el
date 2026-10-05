@@ -486,7 +486,8 @@ separate work."
   (let ((dir (ygg-space-root dir)))
     (let ((default-directory dir))
       (ygg-space--spawn ygg-space--root-id))
-    (ygg-space-cd dir)))
+    (ygg-space-cd dir)
+    (when (fboundp 'ygg-project-setup-offer) (ygg-project-setup-offer dir))))
 
 ;;; A worktree is a space
 

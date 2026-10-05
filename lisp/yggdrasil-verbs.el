@@ -680,10 +680,19 @@ Returns position of the first inserted space, or nil if no join occurred."
     (indent-to indent)
     (point)))
 
+(defvar-local ygg-open-line-redirect-function nil
+  "Function run before o and O to move point off read-only text.
+Buffers that keep typing at a prompt (a REPL's output above it) set it.")
+
+(defun ygg--open-line-redirect ()
+  (when ygg-open-line-redirect-function
+    (funcall ygg-open-line-redirect-function)))
+
 (defun ygg-open-below (&optional count)
   "Open a new line below each selection's end line, then insert there.
 COUNT opens that many lines, each holding the inserted text (vim 3o)."
   (interactive "p")
+  (ygg--open-line-redirect)
   (let (points)
     (ygg-with-verb
       (setq points (ygg--collect-insert-points
@@ -694,6 +703,7 @@ COUNT opens that many lines, each holding the inserted text (vim 3o)."
   "Open a new line above each selection's start line, then insert there.
 COUNT opens that many lines, each holding the inserted text (vim 3O)."
   (interactive "p")
+  (ygg--open-line-redirect)
   (let (points)
     (ygg-with-verb
       (setq points (ygg--collect-insert-points

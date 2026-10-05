@@ -23,6 +23,7 @@
 (declare-function easysession-add-load-handler "easysession")
 (defvar easysession-save-interval)
 (defvar easysession-after-load-hook)
+(defvar easysession-directory)
 (defvar easysession--session-loaded)
 
 ;;; Sessions (resession.nvim feel)
@@ -201,16 +202,60 @@ buffer costs, a tenth of a second each, and a session is many buffers."
 (with-eval-after-load 'easysession
   (advice-add 'easysession-switch-to :around #'ygg-session--load-fast))
 
+(defun ygg-session--saved-name (root)
+  "The saved session of the project at ROOT, on its branch or without one."
+  (seq-find (lambda (n) (file-exists-p (easysession-get-session-file-path n)))
+            (list (ygg-session--project-name root) (ygg-session--base-name root))))
+
 (defun ygg-session-load-project ()
   "Load this project's session if one was saved before."
   (interactive)
   (require 'easysession)
-  (let* ((root (ygg-session--root))
-         (name (seq-find (lambda (n) (file-exists-p (easysession-get-session-file-path n)))
-                         (list (ygg-session--project-name root) (ygg-session--base-name root)))))
-    (if name
-        (easysession-switch-to name)
-      (user-error "No session saved for this project (SPC p w to create)"))))
+  (if-let* ((name (ygg-session--saved-name (ygg-session--root))))
+      (easysession-switch-to name)
+    (user-error "No session saved for this project (SPC p w to create)")))
+
+(defcustom ygg-session-restore-on-start 'project-or-last
+  "What startup loads: the project's session, else the latest, or only the first.
+Nil loads none."
+  :type '(choice (const :tag "Project's, else latest" project-or-last)
+                 (const :tag "Project's only" project)
+                 (const :tag "None" nil))
+  :group 'convenience)
+
+(defvar ygg-session--started nil)
+
+(defun ygg-session--start-directory ()
+  (if-let* (((not (daemonp)))
+            (file (seq-find (lambda (a) (and (not (string-prefix-p "-" a)) (file-exists-p a)))
+                            (cdr command-line-args))))
+      (file-name-directory (expand-file-name file))
+    default-directory))
+
+(defun ygg-session--latest-name ()
+  (when (file-directory-p easysession-directory)
+    (when-let* ((files (directory-files easysession-directory t "\\`[^.]")))
+      (file-name-nondirectory
+       (car (seq-sort-by (lambda (f) (file-attribute-modification-time (file-attributes f)))
+                         (lambda (a b) (time-less-p b a))
+                         files))))))
+
+(defun ygg-session-restore-on-start ()
+  "Load the session `ygg-session-restore-on-start' names, once."
+  (unless ygg-session--started
+    (setq ygg-session--started t)
+    (remove-hook 'server-after-make-frame-hook #'ygg-session-restore-on-start)
+    (when ygg-session-restore-on-start
+      (require 'easysession)
+      (when-let* ((name (or (let ((default-directory (ygg-session--start-directory)))
+                              (and (project-current) (ygg-session--saved-name (ygg-session--root))))
+                            (and (eq ygg-session-restore-on-start 'project-or-last)
+                                 (ygg-session--latest-name)))))
+        (easysession-switch-to name)))))
+
+(if (daemonp)
+    (add-hook 'server-after-make-frame-hook #'ygg-session-restore-on-start)
+  (add-hook 'elpaca-after-init-hook #'ygg-session-restore-on-start))
 
 ;;; Annotated session picker: readable path + save time per candidate
 
@@ -352,6 +397,7 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
   "f" #'ygg-project-add-folder :label "add a folder to this project"
   "F" #'ygg-project-remove-folder :label "drop a folder from this project"
   "a" #'ygg-project-add :label "remember a project"
+  "T" #'ygg-project-setup :label "install the project's toolchain"
   "D" #'ygg-project-remove :label "forget a project")
 
 (yggdrasil-leader-def "p" ygg-leader-workspace-map "zones")

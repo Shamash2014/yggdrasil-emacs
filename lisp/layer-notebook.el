@@ -543,9 +543,17 @@ With PICK, join a running REPL instead."
   (when-let* ((start (ygg-nb--repl-input-start)))
     (when (< (point) start) (goto-char (point-max)))))
 
+(defun ygg-nb--repl-open-line-at-prompt ()
+  "Put the cursor at the end of the input when point is in read-only output."
+  (when-let* ((start (ygg-nb--repl-input-start)))
+    (when (< (point) start)
+      (goto-char (point-max))
+      (ygg-set-selection (point) (point)))))
+
 (defun ygg-nb--repl-setup ()
   "Type at the prompt from the start, as comint REPLs do."
-  (setq-local ygg-insert-elsewhere t)
+  (setq-local ygg-insert-elsewhere t
+              ygg-open-line-redirect-function #'ygg-nb--repl-open-line-at-prompt)
   (add-hook 'ygg-insert-entry-hook #'ygg-nb--repl-insert-at-prompt nil t)
   (let ((buffer (current-buffer)))
     (run-with-timer 0 nil
