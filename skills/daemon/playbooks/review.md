@@ -7,6 +7,9 @@ Owner review comments on a diff: the review preset, interactive,
 turns them into an approved checkpoint list; work that list once
 approved, one item per checkpoint.
 
+Bot or reviewer comments: verify each claim against the code; real
+ones become items, noise is dismissed with a concrete reason.
+
 No comments yet, just "review this":
 1. scrutinize, review level: outsider read of intent, then whether the
    code does what it claims.

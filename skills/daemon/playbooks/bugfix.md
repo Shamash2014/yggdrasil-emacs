@@ -7,11 +7,15 @@ wanted, not just an explanation.
    failing output, when a cheap local test path exists; trace the
    fail path, falsify hypotheses, cross-reference. Evidence: the
    reproduction and the traced cause.
-2. fix-it, build level: root-cause fix from that trace.
-3. test-behavior-not-implementation, build level: a test that would
-   have caught it, through the public surface, always a regression
-   test since it changes existing behaviour.
-4. prove-it-works, build level: rerun the reproduction, now green.
+2. build level: the failing reproduction as a test, committed before
+   the fix and seen red. test-behavior-not-implementation, through
+   the public surface.
+3. fix-it, build level: root-cause fix from that trace. Every line
+   traces to evidence; a change a refuted hypothesis motivated is
+   reverted.
+4. prove-it-works, build level: rerun the reproduction, now green, on
+   the surface it failed on. Inconclusive or wrong-surface is not a
+   pass.
 
 Report: root cause, the fix, the new test, the rerun.
 

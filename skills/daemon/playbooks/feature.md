@@ -9,7 +9,11 @@ Pick when: new behaviour is asked for, not a fix or a lookup.
    state:
    a. Prototype first when the shape or feasibility is uncertain:
       playbooks/prototype.md. Skip when the shape is already known.
-   b. build level: make the change.
+   b. build level: name the data shape first (types, states, owners;
+      domain-modeling), then make the change.
+   UI: nothing jumps or reorders, toggles stay in place, no new key
+   or view unasked, reuse the existing modal keys (check the key is
+   free).
    c. prove-it-works, build level: run the real artifact against what
       restate said the owner wanted. Evidence: the actual output.
    d. a diff check: git diff read by you, inside SCOPE only.

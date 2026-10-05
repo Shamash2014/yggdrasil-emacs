@@ -23,6 +23,8 @@ Code and features:
 3. Check the full chain: does data flow from input to output?
 4. For integrations, test the full communication path end-to-end
 
+UI work: rerun the owner's exact repro in a throwaway instance of the app, never the owner's live one (e.g. a separate Emacs daemon, a simulator, a fresh browser profile), and attach the screenshot path. "Fixed" without it is not done.
+
 Delegation: trust artifacts, not self-reports.
 When verifying delegated work, inspect the actual output artifact (git diff, file contents, runtime behavior), not the delegate's summary. Agents report what they intended, not always what happened.
 

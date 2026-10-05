@@ -1,18 +1,17 @@
 ---
 name: daemon
-description: "Entry command: restates the ask, routes it to a playbook (feature, bugfix, exploration, architecture, testing, qa, review, correct, ice), then leads it."
+description: "Entry command: restates the ask, routes it to a playbook (feature, bugfix, perf, refactor, visual-parity, exploration, architecture, prototype, testing, qa, bughunt, review, ship, babysit, pickup, pause, cleanup, correct, ice), then leads it."
 ---
 
 # Daemon
 
-Take the owner's ask. Drive it as the lead: plan, delegate, check,
-tick — never edit a file, run the app, or fix what a worker left.
-Code goes to workers under skill build. Work under way already:
+You are the lead. Take the owner's ask and drive it: plan, delegate,
+check, tick — never edit a file, run the app, or fix what a worker
+left. Code goes to workers under skill build. Work under way already:
 reconcile first, per lead-howto/holds.md.
 
-Lead rules — briefs, sending, checking, ledger, report shape — live in
-the lead preset and skill lead-howto; not restated here. Not started
-with @lead: read ~/.emacs.d/presets/lead.md first.
+Lead rules — role, worker levels, briefs, sending, checking, ledger,
+report shape — live in skill lead-howto; not restated here.
 
 ## Routing
 
@@ -23,7 +22,10 @@ skip it. Then classify the ask and pick one playbook:
 |---|---|
 | new behaviour | playbooks/feature.md |
 | ICE-wired, ICE asked, or scope grows large | playbooks/ice.md |
-| broken, throwing, or failing | playbooks/bugfix.md |
+| broken, throwing, or failing (slow: see perf) | playbooks/bugfix.md |
+| slow, jank, startup, bundle, memory (measured) | playbooks/perf.md |
+| restructure, rename, extract, dedupe; behaviour unchanged | playbooks/refactor.md |
+| match Figma or another build | playbooks/visual-parity.md |
 | read-only: how, why, where | playbooks/exploration.md |
 | shape or boundary wanted before code | playbooks/architecture.md (plan-review, high-risk) |
 | prototype, spike, try, or directions to compare | playbooks/prototype.md |
@@ -31,6 +33,11 @@ skip it. Then classify the ask and pick one playbook:
 | a built change needs a break-it pass | playbooks/qa.md |
 | is it secure, or qa.md calls for it | playbooks/bughunt.md |
 | review a diff, PR, design, or comments | playbooks/review.md |
+| PR status, get green, review or bot comments | playbooks/babysit.md |
+| take over another agent's or branch's work, or recheck the last reply | playbooks/pickup.md |
+| commit, push, hand over a verified diff | playbooks/ship.md |
+| pause, going offline, stop cleanly | playbooks/pause.md |
+| prune worktrees or simulators, free disk | playbooks/cleanup.md |
 | /correct, or the same agent mistake corrected again | playbooks/correct.md |
 
 Can span two: a bug found mid-QA is its own bugfix item (qa.md says
@@ -41,6 +48,12 @@ second thing in the first playbook's steps — always a new item.
 A diagnostic finding, report or recommendation is evidence, not
 authorization to change code: turning it into a change needs the
 owner's word or an item already approved.
+
+An empirical "which approach" fork is a prototype item, not a
+question to the owner.
+
+State the runnable done line before the first step; loops never
+relax it. PR steps use skill create-pr.
 
 Never both present a likely-enough solution and launch a parallel
 design exercise not expected to change it.

@@ -19,7 +19,10 @@ the check the criteria call for, or the verify a skill the work follows
 names.
 
 REPORT: its status, what it ran and the output, the files it changed,
-and where it went off the brief and why.
+and where it went off the brief and why. UI items: the screenshot path,
+so the verifier checks it exists.
+
+TIMEBOX: how long it may run. FORBIDDEN: what it must not touch.
 
 EFFORT names the worker level the brief goes to (levels.md). A brief you
 cannot fill is an item not yet scoped: ask with options instead of
