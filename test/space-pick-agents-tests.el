@@ -28,6 +28,7 @@
          (aob--order nil)
          (aob-session-created-hook nil)
          (ygg-projects--pin-list nil)
+         (ygg-aob-pick-subagents t)
          (ygg-space-pick-rows-functions (list #'ygg-aob--pick-rows))
          (tab-bar-tabs-function (lambda (&optional _) space-pick-tests--tabs)))
      (cl-letf (((symbol-function 'ygg-space-dir)
@@ -142,6 +143,66 @@
       (let* ((labels (space-pick-tests--labels))
              (at (space-pick-tests--index "lead " labels)))
         (should (string-match-p "\\`        helper" (nth (1+ at) labels)))))))
+
+(ert-deftest space-pick-agents-subagents-hidden-by-default ()
+  (space-pick-tests--with
+    (let ((lead (space-pick-tests--agent "lead" 2))
+          (ygg-aob-pick-subagents nil))
+      (space-pick-tests--agent "helper" 2 :parent-session (aob-session-id lead))
+      (let ((labels (space-pick-tests--labels)))
+        (should (space-pick-tests--index "lead " labels))
+        (should-not (space-pick-tests--index "helper" labels))))))
+
+(ert-deftest space-pick-agents-subagents-shown-by-everything-or-option ()
+  (space-pick-tests--with
+    (let ((lead (space-pick-tests--agent "lead" 2))
+          (ygg-aob-pick-subagents nil))
+      (space-pick-tests--agent "helper" 2 :parent-session (aob-session-id lead))
+      (let ((ygg-space-pick-all t))
+        (should (space-pick-tests--index "helper" (space-pick-tests--labels))))
+      (let ((ygg-aob-pick-subagents t))
+        (should (space-pick-tests--index "helper" (space-pick-tests--labels)))))))
+
+(ert-deftest space-pick-agents-everything-command-lists-subagents ()
+  (space-pick-tests--with
+    (let ((lead (space-pick-tests--agent "lead" 2))
+          (ygg-aob-pick-subagents nil)
+          (seen nil))
+      (space-pick-tests--agent "helper" 2 :parent-session (aob-session-id lead))
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (setq seen (space-pick-tests--labels)) "")))
+        (ygg-space-pick-everything))
+      (should (space-pick-tests--index "helper" seen))
+      (should-not ygg-space-pick-all))))
+
+(ert-deftest space-pick-agents-pick-takes-no-prefix-argument ()
+  (should-not (cadr (interactive-form 'ygg-space-pick)))
+  (should-not (help-function-arglist 'ygg-space-pick t)))
+
+(ert-deftest space-pick-agents-capital-z-is-bound-to-everything ()
+  (require 'layer-sessions nil t)
+  (skip-unless (boundp 'ygg-leader-workspace-map))
+  (should (eq (keymap-lookup ygg-leader-workspace-map "Z") #'ygg-space-pick-everything))
+  (should (eq (keymap-lookup ygg-leader-workspace-map "z") #'ygg-space-pick)))
+
+(ert-deftest space-pick-agents-child-of-unlisted-parent-shows-when-hidden ()
+  (space-pick-tests--with
+    (let ((dead (space-pick-tests--agent "deadparent" 2))
+          (ygg-aob-pick-subagents nil))
+      (setf (aob-session-state dead) 'dead)
+      (space-pick-tests--agent "orphan" 2 :parent-session (aob-session-id dead))
+      (should (space-pick-tests--index "orphan" (space-pick-tests--labels))))))
+
+(ert-deftest space-pick-agents-pinned-subagent-shows-when-hidden ()
+  (space-pick-tests--with
+    (let* ((lead (space-pick-tests--agent "lead" 2))
+           (kid (space-pick-tests--agent "helper" 2 :parent-session (aob-session-id lead)))
+           (ygg-projects--pin-list (list (aob-session-id kid)))
+           (ygg-aob-pick-subagents nil))
+      (space-pick-tests--agent "sibling" 2 :parent-session (aob-session-id lead))
+      (let ((labels (space-pick-tests--labels)))
+        (should (string-match-p "⊤ helper" (nth (space-pick-tests--index "helper" labels) labels)))
+        (should-not (space-pick-tests--index "sibling" labels))))))
 
 (ert-deftest space-pick-agents-grandchild-a-level-deeper ()
   (space-pick-tests--with

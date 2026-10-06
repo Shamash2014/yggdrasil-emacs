@@ -770,6 +770,9 @@ space.  No key: this is the colon line and M-x."
 and returns rows (LABEL . ACTION) the picker lists under that space.
 Picking a row switches to its space, then calls ACTION with no arguments.")
 
+(defvar ygg-space-pick-all nil
+  "Non-nil while the picker lists everything its row functions would hide.")
+
 (defun ygg-space--pick-rows (id)
   "The rows every function on ygg-space-pick-rows-functions gives for ID."
   (let ((rows nil))
@@ -818,6 +821,13 @@ Rows other layers hang under a space go there after the switch."
         (progn (when (car pick) (ygg-space--goto-id (car pick)))
                (funcall (cdr pick)))
       (when pick (ygg-space--goto-id pick)))))
+
+;;;###autoload
+(defun ygg-space-pick-everything ()
+  "Like `ygg-space-pick', also listing the rows it hides by default."
+  (interactive)
+  (let ((ygg-space-pick-all t))
+    (ygg-space-pick)))
 
 ;;; Reconciliation for tabs created/closed outside these commands
 

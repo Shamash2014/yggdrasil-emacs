@@ -384,6 +384,7 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
   "o" #'ygg-space-open :label "space for a place, here or on a host"
   "d" #'ygg-space-close :label "close subtree"
   "z" #'ygg-space-pick :label "pick zone or agent"
+  "Z" #'ygg-space-pick-everything :label "pick zone or agent, subagents too"
   "t" #'ygg-space-tree :label "tree sidebar"
   "p" #'project-switch-project :label "switch project"
   "u" #'ygg-project-switch-child :label "switch repo in this umbrella"

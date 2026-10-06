@@ -1182,6 +1182,7 @@ An already-visible trace is refocused; otherwise it opens in place."
 ;;; toggles the panel itself, SPC p a the rows.
 
 (defvar ygg-aob--tree-agents-on t)
+(defvar ygg-space-pick-all)
 (defvar ygg-space-tree-width)
 (defvar ygg-space-tree--on)
 (declare-function ygg-space-tree "yggdrasil-spacetree")
@@ -1577,6 +1578,11 @@ A subagent is filed where its lead is, since that is where it works."
 The rest fold into one row that unfolds them; a working one always shows."
   :type 'integer :group 'aob)
 
+(defcustom ygg-aob-pick-subagents nil
+  "Whether the picker lists subagents.  SPC p Z lists them for one call;
+a pinned subagent always shows."
+  :type 'boolean :group 'aob)
+
 (defvar ygg-aob--finished-unfolded nil
   "Ids of the parents whose finished subagents all show.")
 
@@ -1680,8 +1686,15 @@ in the refs ends."
 pinned conversations among them to resume, then the rest most in need
 first, each with what it sent under it, a level deeper per sending."
   (let* ((pin (propertize "⊤ " 'face 'shadow))
-         (here (ygg-aob--pick-sessions space))
-         (tops (seq-filter (lambda (s) (ygg-aob--pick-top-p s here)) here))
+         (all (or ygg-aob-pick-subagents ygg-space-pick-all))
+         (listed (ygg-aob--pick-sessions space))
+         (here (seq-filter (lambda (s) (or all
+                                           (not (memq (aob-subagent-parent s) listed))
+                                           (ygg-projects--pinned-p s)))
+                           listed))
+         (tops (seq-filter (lambda (s) (or (ygg-aob--pick-top-p s here)
+                                           (and (not all) (ygg-projects--pinned-p s))))
+                           here))
          (pinned (seq-filter #'ygg-projects--pinned-p tops))
          (ended (seq-filter (lambda (p) (eql (ygg-aob--entry-space (cdr p)) space))
                             (ygg-aob--pinned-ended)))
@@ -1706,7 +1719,8 @@ first, each with what it sent under it, a level deeper per sending."
                                              'face 'shadow))
                                     (lambda ()
                                       (ygg-aob-toggle-finished (nth 1 (car row)))
-                                      (ygg-space-pick))))))
+                                      (let ((ygg-space-pick-all all))
+                                        (ygg-space-pick)))))))
                         (alist-get s trees))))
       (append
        (mapcan (lambda (p)
