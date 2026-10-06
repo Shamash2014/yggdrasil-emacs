@@ -40,6 +40,7 @@
                                        process-environment)))
      (clrhash ygg-agent--config-dirs)
      (cl-letf (((symbol-function 'ygg-agent--logged-in-p) (lambda (&rest _) t))
+               ((symbol-function 'ygg-term--space-dir) (lambda () nil))
                ((symbol-function 'ygg-agent--adopt-plugin-mcp) #'ignore)
                ((symbol-function 'ygg-agent--share-mcp-auth) #'ignore)
                ((symbol-function 'ghostel) #'ygg-term-tests--ghostel)

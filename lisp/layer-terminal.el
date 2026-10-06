@@ -56,8 +56,6 @@
       (define-key map (kbd "C-o") #'ygg-jump-back)
       (define-key map (kbd "C-i") #'ygg-jump-forward))))
 
-(defconst ygg-term-buffer-name "*ygg-term*")
-
 (defvar ygg-term-height-fraction 0.3
   "Fraction of frame height a bottom terminal split gets.")
 
@@ -122,15 +120,11 @@ resolved PATH.  Needs the `mise' binary; a no-op without it."
   "Shell-command prefix injecting the project mise env, or an empty string."
   (if (and ygg-inject-mise (executable-find "mise")) "mise exec -- " ""))
 
-(defun ygg--term-buffer ()
-  "Return the dedicated terminal buffer if it is alive, else nil."
-  (let ((buf (get-buffer ygg-term-buffer-name)))
-    (and buf (buffer-live-p buf) buf)))
+(defvar-local ygg-term--buffer-root nil
+  "The project root this terminal belongs to.")
 
-(defun ygg--term-window ()
-  "Return the window showing the dedicated terminal buffer, if any."
-  (let ((buf (ygg--term-buffer)))
-    (and buf (get-buffer-window buf))))
+(defvar-local ygg-term--toggle-root nil
+  "The project root this terminal is the toggle terminal of.")
 
 (defconst ygg-term--ssh-methods '("ssh" "scp" "sshx" "scpx")
   "TRAMP methods whose host an ssh login shell can be opened on.")
@@ -156,12 +150,14 @@ inject.  Runs under `save-window-excursion' because `ghostel' pops its
 buffer, and disables title-driven renaming so NAME stays stable for
 lookups."
   (require 'ghostel)
+  (setq dir (or dir (ygg-term--root)))
   (when (and dir (file-remote-p dir) (not (ygg-term--remote-command dir)))
     (message "terminal: local shell, %s has no shell to open on"
              (file-remote-p dir 'method)))
   (ygg-call-with-buffer-env
    (lambda ()
-     (let* ((sh (or (getenv "SHELL") "/bin/zsh"))
+     (let* ((root (ygg-term--project-root dir))
+            (sh (or (getenv "SHELL") "/bin/zsh"))
             (over-there (ygg-term--remote-command dir))
             (ghostel-pre-spawn-hook (if over-there
                                         (remq #'ygg-agent--terminal-env
@@ -169,7 +165,7 @@ lookups."
                                       ghostel-pre-spawn-hook))
             (default-directory (if (and dir (not (file-remote-p dir))
                                         (file-directory-p dir))
-                                   (file-name-as-directory dir)
+                                   (ygg-term--normalize dir)
                                  default-directory))
             (mise (if over-there "" (ygg-mise-prefix)))
             ;; when injecting mise, drive the shell ourselves: a login shell
@@ -190,6 +186,7 @@ lookups."
        (with-current-buffer buf
          (setq-local ghostel-buffer-name-function nil)
          (setq-local mode-line-format nil)
+         (setq ygg-term--buffer-root root)
          (add-hook 'kill-buffer-hook #'ygg--term-delete-window nil t)
          (unless (equal (buffer-name) name)
            (rename-buffer name t)))
@@ -204,19 +201,6 @@ lookups."
                (not (frame-root-window-p win)))
       (ignore-errors (delete-window win)))))
 
-(defun ygg--term-create ()
-  "Start a fresh ghostel shell and claim it as the dedicated terminal buffer."
-  (ygg--ghostel-shell ygg-term-buffer-name))
-
-(defun ygg-term--space-name ()
-  "Default terminal buffer name, scoped to the current space.
-So each space toggles its OWN terminal: the home space keeps its
-terminal, a freshly-created space gets a new one on first toggle."
-  (if-let* (((fboundp 'ygg-space--current-id))
-            (id (ygg-space--current-id)))
-      (format "*ygg-term:sp%s*" id)
-    ygg-term-buffer-name))
-
 (defun ygg-term--space-dir ()
   "The folder the current space stands on, read off the tab and no further.
 Read as it was pinned, never probed: a remote folder must not cost a
@@ -224,23 +208,66 @@ connection on a keypress."
   (and (fboundp 'ygg-space--current)
        (ygg-space--dir-of (ygg-space--current))))
 
-(defun ygg-terminal-toggle (&optional n)
-  "Toggle a terminal split, toggleterm.nvim-style.
-A numeric prefix gives terminal N (`*ygg-term:N*') its OWN split, so
-numbered terminals stack as separate windows; without one, the current
-space's own terminal, which is claimed for this space whatever space
-first showed it.  Hides that terminal's split when already visible."
-  (interactive "P")
-  (let* ((num (and n (prefix-numeric-value n)))
-         (name (if num (format "*ygg-term:%d*" num) (ygg-term--space-name)))
-         (buf (get-buffer name))
+(defun ygg-term--normalize (dir)
+  "DIR as an absolute folder name, by its true path when it is local."
+  (file-name-as-directory
+   (if (file-remote-p dir) (expand-file-name dir) (file-truename dir))))
+
+(defun ygg-term--project-root (dir)
+  "The root of the project DIR is in, or DIR itself outside any.
+A remote DIR reached from a local buffer is taken as is: asking for its
+project would cost a connection."
+  (if (and (file-remote-p dir) (not (file-remote-p default-directory)))
+      (ygg-term--normalize dir)
+    (let* ((default-directory dir)
+           (proj (project-current)))
+      (ygg-term--normalize (if proj (project-root proj) dir)))))
+
+(defun ygg-term--root ()
+  "Where a terminal opened from this buffer starts.
+Inside a terminal, the project it belongs to, whatever folder its shell
+has moved to.  Otherwise the current project's root; outside a project
+the space's folder, then `default-directory'."
+  (or ygg-term--buffer-root
+      ygg-term--toggle-root
+      (let ((proj (project-current)))
+        (ygg-term--normalize (cond (proj (project-root proj))
+                                   ((ygg-term--space-dir))
+                                   (t default-directory))))))
+
+(defun ygg-term--label (root)
+  (let ((leaf (file-name-nondirectory (directory-file-name root))))
+    (if (string-empty-p leaf) "root" leaf)))
+
+(defun ygg-term--toggle-buffer (root)
+  "The live toggle terminal of the project at ROOT, or nil."
+  (seq-find (lambda (b)
+              (and (buffer-live-p b)
+                   (equal (buffer-local-value 'ygg-term--toggle-root b) root)))
+            (buffer-list)))
+
+(defun ygg-term--live-toggle-buffer (root)
+  "The toggle terminal of ROOT, with a dead one killed first."
+  (let ((buf (ygg-term--toggle-buffer root)))
+    (if (and buf (not (process-live-p (get-buffer-process buf))))
+        (progn (kill-buffer buf) nil)
+      buf)))
+
+(defun ygg-terminal-toggle ()
+  "Toggle the current project's terminal split, toggleterm.nvim-style.
+Shows or creates the terminal that belongs to this buffer's project,
+starting at its root, and hides it when already visible."
+  (interactive)
+  (let* ((root (ygg-term--root))
+         (buf (ygg-term--live-toggle-buffer root))
          (shown (and buf (get-buffer-window buf))))
     (if shown
         (delete-window shown)
-      (let ((b (or buf (ygg--ghostel-shell name (and (not num)
-                                                     (ygg-term--space-dir)))))
+      (let ((b (or buf (ygg--ghostel-shell
+                        (format "*ygg-term:%s*" (ygg-term--label root)) root)))
             (win (ygg--term-split-window)))
-        (when (and (not num) (fboundp 'ygg-space-claim-buffer)
+        (with-current-buffer b (setq ygg-term--toggle-root root))
+        (when (and (fboundp 'ygg-space-claim-buffer)
                    (fboundp 'ygg-space--current-id))
           (ygg-space-claim-buffer b (ygg-space--current-id) t))
         (set-window-buffer win b)
@@ -269,13 +296,17 @@ first showed it.  Hides that terminal's split when already visible."
   (interactive "sTerminal name: ")
   (when (string-empty-p name)
     (setq name (number-to-string (1+ (length (ygg--term-buffers))))))
-  (ygg--term-display (ygg--ghostel-shell (format "*ygg-term:%s*" name))))
+  (ygg--term-display (ygg--ghostel-shell (format "*ygg-term:%s*" name) (ygg-term--root))))
 
 (defun ygg-term-pick ()
-  "Pick any live terminal (named, toggle, agent) and show it in a split."
+  "Pick one of the current project's terminals and show it in a split."
   (interactive)
-  (let ((bufs (mapcar #'buffer-name (ygg--term-buffers))))
-    (unless bufs (user-error "No terminals; SPC o t or SPC o n"))
+  (let* ((root (ygg-term--root))
+         (bufs (mapcar #'buffer-name
+                       (seq-filter (lambda (b)
+                                     (equal (buffer-local-value 'ygg-term--buffer-root b) root))
+                                   (ygg--term-buffers)))))
+    (unless bufs (user-error "No terminals for this project; SPC o t or SPC o n"))
     (ygg--term-display (get-buffer (completing-read "Terminal: " bufs nil t)))))
 
 (defun ygg--job-candidates ()

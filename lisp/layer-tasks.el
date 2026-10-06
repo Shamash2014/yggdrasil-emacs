@@ -5,7 +5,7 @@
 (require 'compile)
 (require 'yggdrasil-core)
 
-(declare-function ygg--ghostel-shell "layer-terminal" (name))
+(declare-function ygg--ghostel-shell "layer-terminal" (name &optional dir))
 (declare-function ygg--term-display "layer-terminal" (buf))
 (declare-function ygg-call-with-buffer-env "layer-terminal" (thunk &optional extra-env))
 (declare-function ghostel-compile-global-mode "ghostel-compile")
@@ -259,11 +259,11 @@ Lands in a live `*task:…*' buffer, tracked by `ygg-jobs'/`ygg-job-kill'."
   (interactive)
   (let* ((file (ignore-errors (dired-get-filename nil t)))
          (dir (expand-file-name (if (and file (file-directory-p file)) file default-directory))))
-    (let ((default-directory dir))
-      (ygg--term-display
-       (ygg--ghostel-shell
-        (generate-new-buffer-name
-         (format "*ygg-term:%s*" (file-name-nondirectory (directory-file-name dir)))))))))
+    (ygg--term-display
+     (ygg--ghostel-shell
+      (generate-new-buffer-name
+       (format "*ygg-term:%s*" (file-name-nondirectory (directory-file-name dir))))
+      dir))))
 
 ;;; Unified command panel: tasks to run + running jobs + every command,
 ;;; one picker (merges the old SPC o c palette and SPC o r task runner).
