@@ -1,0 +1,169 @@
+#!/usr/bin/env node
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+
+const HELP = `usage: ice-feature-summary [--root DIR] [--file PATH] [--budget TOKENS]
+
+Prints one line per feature of lat.md/features.md:
+  - <Feature>: <lead> — keys: <top 3 keys> — code: <1-2 main files>
+within --budget tokens (ceil(chars/4), default 1200), then one line pointing
+at lat_search / lat_section on [[features]]. Over budget, detail is dropped
+from every line in a fixed order (second file, keys, lead length), then the
+last features. The output is deterministic and assumes nothing about the
+language or the key notation of the repository.`;
+
+process.stdout.on("error", (error) => process.exit(error.code === "EPIPE" ? 0 : 1));
+
+function fail(message) {
+  process.stderr.write(`ice-feature-summary: ${message}\n`);
+  process.exit(2);
+}
+
+function parseArgs(argv) {
+  const opts = { root: null, file: null, budget: 1200 };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const value = () => (i + 1 < argv.length ? argv[++i] : fail(`${arg} needs a value`));
+    if (arg === "--root") opts.root = value();
+    else if (arg === "--file") opts.file = value();
+    else if (arg === "--budget") opts.budget = Number(value());
+    else if (arg === "-h" || arg === "--help") {
+      process.stdout.write(`${HELP}\n`);
+      process.exit(0);
+    } else fail(`unknown argument ${arg}\n${HELP}`);
+  }
+  if (!Number.isFinite(opts.budget) || opts.budget <= 0) fail("--budget must be a positive number");
+  return opts;
+}
+
+function findRoot(root) {
+  if (root) return root;
+  try {
+    return execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {
+    return process.cwd();
+  }
+}
+
+function sections(markdown) {
+  const out = [];
+  let feature = null;
+  let h3 = null;
+  let inFence = false;
+  for (const line of markdown.split("\n")) {
+    if (/^```/.test(line)) inFence = !inFence;
+    if (!inFence) {
+      const h2 = line.match(/^## (.+?)\s*$/);
+      if (h2) {
+        feature = { name: h2[1], lead: [], parts: {} };
+        out.push(feature);
+        h3 = null;
+        continue;
+      }
+      const sub = line.match(/^### (.+?)\s*$/);
+      if (sub && feature) {
+        h3 = sub[1];
+        feature.parts[h3] = [];
+        continue;
+      }
+      if (/^#{1,2} /.test(line)) {
+        feature = null;
+        continue;
+      }
+    }
+    if (!feature) continue;
+    if (h3 === null) feature.lead.push(line);
+    else feature.parts[h3].push(line);
+  }
+  return out;
+}
+
+function firstParagraph(lines) {
+  const paragraph = [];
+  for (const line of lines) {
+    if (!line.trim()) {
+      if (paragraph.length) break;
+      continue;
+    }
+    paragraph.push(line.trim());
+  }
+  return paragraph.join(" ");
+}
+
+function bulletSpans(lines) {
+  const out = [];
+  for (const line of lines) {
+    const bullet = line.match(/^\s*[-*] `([^`]+)`/);
+    if (bullet) out.push(bullet[1]);
+  }
+  return out;
+}
+
+function trimLead(text, max) {
+  const flat = text.replace(/\s+/g, " ").trim();
+  const sentence = flat.match(/^.*?[.!?](?=\s|$)/);
+  const first = sentence ? sentence[0] : flat;
+  const candidate = first.length <= max ? first : flat;
+  if (candidate.length <= max) return candidate.replace(/\.$/, "");
+  const cut = candidate.slice(0, max - 1);
+  return `${cut.slice(0, cut.lastIndexOf(" ") > max / 2 ? cut.lastIndexOf(" ") : cut.length).replace(/[\s,;:—-]+$/, "")}…`;
+}
+
+const isTestPath = (path) => /(^|\/)(tests?|__tests__|spec)\/|[._-](test|tests|spec)\.[^/]+$|_test\.[^/]+$|^test_/.test(path);
+
+function parse(markdown) {
+  return sections(markdown).map((s) => {
+    const code = s.parts.Code ? bulletSpans(s.parts.Code).filter((path) => !isTestPath(path)) : [];
+    return {
+      name: s.name,
+      lead: firstParagraph(s.lead),
+      keys: bulletSpans(s.parts["How to get to it"] ?? []),
+      code,
+    };
+  });
+}
+
+const STEPS = [
+  { files: 2, keys: 3, lead: 140 },
+  { files: 1, keys: 3, lead: 140 },
+  { files: 1, keys: 3, lead: 100 },
+  { files: 0, keys: 3, lead: 80 },
+  { files: 0, keys: 3, lead: 60 },
+  { files: 0, keys: 2, lead: 60 },
+  { files: 0, keys: 2, lead: 45 },
+  { files: 0, keys: 1, lead: 45 },
+  { files: 0, keys: 1, lead: 30 },
+  { files: 0, keys: 0, lead: 30 },
+  { files: 0, keys: 0, lead: 0 },
+];
+
+function render(feature, step) {
+  const parts = [step.lead ? `${feature.name}: ${trimLead(feature.lead, step.lead)}` : feature.name];
+  const keys = feature.keys.slice(0, step.keys);
+  if (keys.length) parts.push(`keys: ${keys.join(", ")}`);
+  const files = feature.code.slice(0, step.files);
+  if (files.length) parts.push(`code: ${files.join(", ")}`);
+  return `- ${parts.join(" — ")}`;
+}
+
+const TAIL = "Details: query lat_search / lat_section on [[features]].";
+
+function summarize(features, budgetTokens) {
+  const limit = budgetTokens * 4;
+  const size = (lines) => lines.join("\n").length + 1 + (lines.length ? 1 : 0) + TAIL.length + 1;
+  for (const step of STEPS) {
+    const lines = features.map((feature) => render(feature, step));
+    if (size(lines) <= limit) return [...lines, TAIL];
+  }
+  const last = STEPS[STEPS.length - 1];
+  const lines = features.map((feature) => render(feature, last));
+  while (lines.length && size(lines) > limit) lines.pop();
+  return [...lines, TAIL];
+}
+
+const opts = parseArgs(process.argv.slice(2));
+const file = opts.file ?? join(findRoot(opts.root), "lat.md", "features.md");
+if (!existsSync(file)) fail(`${file} not found; write the feature map first`);
+const features = parse(readFileSync(file, "utf8"));
+process.stdout.write(`${summarize(features, opts.budget).join("\n")}\n`);

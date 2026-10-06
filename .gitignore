@@ -22,3 +22,5 @@ projects.eld
 /dape-breakpoints
 __pycache__/
 .claude/settings.local.json
+/lat.md/repo-map.md
+lat.md/.cache/

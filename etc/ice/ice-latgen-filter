@@ -1,0 +1,23 @@
+#!/bin/sh
+set -eu
+
+root=$(git -C "${1:-.}" rev-parse --show-toplevel)
+marker='<!-- ice-repo-map:generated -->'
+clean="grep -vF '$marker' || true"
+attr="lat.md/lat.md filter=latgen"
+
+if [ "$(git -C "$root" config --get filter.latgen.clean || true)" = "$clean" ] && [ "$(git -C "$root" config --get filter.latgen.smudge || true)" = cat ]; then
+  echo "git filter latgen (already current)"
+else
+  git -C "$root" config filter.latgen.clean "$clean"
+  git -C "$root" config filter.latgen.smudge cat
+  echo "git filter latgen set: lines holding $marker stay out of committed lat.md/lat.md"
+fi
+
+if grep -qxF -- "$attr" "$root/.gitattributes" 2>/dev/null; then
+  echo ".gitattributes: lat.md/lat.md uses the latgen filter (already current)"
+else
+  [ -s "$root/.gitattributes" ] && [ "$(tail -c 1 "$root/.gitattributes")" != "" ] && printf '\n' >> "$root/.gitattributes"
+  printf '%s\n' "$attr" >> "$root/.gitattributes"
+  echo ".gitattributes: lat.md/lat.md uses the latgen filter"
+fi

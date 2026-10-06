@@ -16,10 +16,10 @@
   "This checkout's ice-check.")
 
 (defconst ice-tests--files
-  '(("lat.md/lat.md" . "# Project\n\nThe map of this project.\n\n- [[architecture]] - how the pieces fit\n- [[auth]] - login and tokens\n")
+  `(("lat.md/lat.md" . "# Project\n\nThe map of this project.\n\n- [[architecture]] - how the pieces fit\n- [[auth]] - login and tokens\n")
     ("lat.md/architecture.md" . "# Architecture\n\nHow the system is built.\n\n## Request Pipeline\n\nRequests go through [[auth#OAuth Flow]] first, then [[src/server.ts#handle]].\n")
     ("lat.md/auth.md" . "# Auth\n\nLogin and token handling.\n\n## OAuth Flow\n\nThe OAuth flow validates tokens. See [[architecture#Request Pipeline|the pipeline]].\n\n```md\n# not a heading\n```\n")
-    ("src/server.ts" . "// @lat: [[architecture#Request Pipeline]]\nexport function handle() { return 1 }\n")
+    ("src/server.ts" . ,(concat "// @" "lat: [[architecture#Request Pipeline]]\nexport function handle() { return 1 }\n"))
     ("openspec/changes/add-login/proposal.md" . "## Why\nLogin. Touches [[auth#OAuth Flow]].\n")
     ("openspec/changes/add-login/tasks.md" . "## 1. Build\n- [x] 1.1 Write the form\n- [ ] 1.2 Wire [[auth#OAuth Flow]]\n")
     ("openspec/changes/add-login/specs/auth/spec.md" . "## ADDED Requirements\n### Requirement: Login\n")

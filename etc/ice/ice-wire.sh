@@ -132,7 +132,7 @@ done
 
 if [ ! -f lat.md/features.md ]; then
   printf '%s\n' "# Features" "" \
-    "One section per user-visible feature: sub-features, how to get there, driving it and gotchas, each as a subsection: what and why, invariants and code anchors, never the code restated." \
+    "One section per user-visible feature with five h3 subsections: Sub-features, How to get to it, Driving it, Gotchas and Code. Say what and why, invariants and code anchors, never the code restated." \
     > lat.md/features.md
   note x "lat.md/features.md feature map created"
 else
@@ -183,6 +183,11 @@ if missing or extra:
 write_if_changed(path, text)
 EOF
 note x "lat.md/lat.md indexes the feature map, rules and learnings, and lat.md/architecture.md links each C4 view"
+while IFS= read -r line; do note x "$line"; done <<FILTER
+$("$ice_dir/ice-latgen-filter" "$root")
+FILTER
+append_once .gitignore "lat.md/repo-map.md" "/lat.md/repo-map.md" && note x ".gitignore: lat.md/repo-map.md" || true
+append_once .gitignore "lat.md/.cache/" "lat.md/.cache/" && note x ".gitignore: lat.md/.cache/" || true
 if [ -f CONTEXT.md ]; then note x "CONTEXT.md linked from lat.md/lat.md"; else ask "CONTEXT.md: none yet; the first agreed term creates it (domain-modeling), then rerun ice-wire to link it"; fi
 if [ -d "$docs/adr" ]; then note x "$docs/adr linked from lat.md/lat.md"; else ask "$docs/adr: none yet; the first decision that is hard to reverse, surprising and a real trade-off creates it"; fi
 ask "$arch: replace the TODO titles and each container's metadata code and lat paths; rerun ice-wire after adding views so lat.md/architecture.md links them"

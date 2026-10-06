@@ -29,8 +29,17 @@ own declared scope closes that gap).
 commit_gate = off in .ice/config, set by the owner, turns this off for
 the repo. git commit --no-verify skips this the way it skips every
 hook; this script does not try to stop that, the same way git does
-not."""
+not.
 
+It also refuses a staged lat.md/lat.md that holds a line with the
+ice-repo-map marker (the generated index entry), for clones without the
+latgen git filter, and a staged lat.md/repo-map.md, which is generated and
+gitignored and only gets staged when forced."""
+
+GENERATED_INDEX = "lat.md/lat.md"
+GENERATED_MAP = "lat.md/repo-map.md"
+GENERATED_MARKER = "<!-- ice-repo-map:generated -->"
+FILTER_CLEAN = "grep -vF '%s' || true" % GENERATED_MARKER
 FILES_LINE = re.compile(r"^\s*-\s*Files:\s*(.+)$")
 
 
@@ -92,6 +101,16 @@ def main():
     staged = staged_paths(root)
     if not staged:
         return 0
+    if GENERATED_MAP in staged:
+        print("ice-commit-gate: refused, %s is generated and gitignored; unstage it with git rm --cached %s" % (GENERATED_MAP, GENERATED_MAP))
+        return 1
+    if GENERATED_INDEX in staged:
+        blob = subprocess.run(["git", "show", ":" + GENERATED_INDEX], cwd=root, capture_output=True, text=True)
+        if GENERATED_MARKER in blob.stdout:
+            print("ice-commit-gate: refused, staged %s holds a line with %s (the repo-map index entry)" % (GENERATED_INDEX, GENERATED_MARKER))
+            print("  run: git config filter.latgen.clean \"%s\" && git config filter.latgen.smudge cat"
+                  " (ice-wire does this), then git add --renormalize %s" % (FILTER_CLEAN, GENERATED_INDEX))
+            return 1
     branch = branch_of(root)
     current_hash = None
     for name, files in active_changes(root):

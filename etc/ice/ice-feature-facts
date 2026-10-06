@@ -1,0 +1,1580 @@
+#!/usr/bin/env node
+import { execFileSync } from "node:child_process";
+import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
+import { basename, dirname, extname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { compare, listFiles, maskSource } from "./ice-core.mjs";
+
+const HELP = `usage: ice-feature-facts [--root DIR] [--file PATH] [--keys PREFIX] [--triggers PREFIX] [--clusters]
+
+Prints JSON facts for the feature map of any git repository:
+  files     per file: rank, tests, entry points (sources and shebang scripts)
+  tests     the test files that are sources or scripts
+  notation  key, route and flag syntax of the ecosystems found, as regexes
+            (classes, groups, alternation, anchors only) for guards to read
+  skipped   counts of things an extractor could not resolve
+  clusters  candidate features, each with its files, tests and entry points.
+            Seeded by package boundaries (package.json, pyproject.toml, go.mod,
+            Cargo.toml, pubspec.yaml), then top-level source directories
+            (src/<x>, app/<x>, lib/<x>, internal/<x>, cmd/<x>, features/<x>).
+            Clusters over 40 files split by subdirectory, then by file-name
+            family, then by the reference graph. Single-file clusters merge
+            into their strongest reference neighbour inside the same package
+            unless the file is an entry file.
+  triggers  every entry point trigger (key, route, command, flag) -> entries
+
+Files, definitions and ranks come from ice-repo-map --json; when it fails one
+"ranks unavailable" warning goes to stderr and ranks are zero. Entry points
+come from small extractors, each enabled only when its marker file is present
+and gated on the framework being a dependency or imported by the file:
+  node    package.json bin and scripts; express/fastify/hono routes with a
+          literal "/path" and a handler, router.route() chains, app.use()
+          mount prefixes resolved inside the repo; NestJS @Controller with
+          @Get/@Post (and setGlobalPrefix); commander/yargs commands and
+          options; Next app/ routes, route-handler GET/POST exports and pages/
+          (only when next is a dependency); react-router path: entries
+  python  pyproject scripts; FastAPI/Flask/Quart/Sanic routes with APIRouter
+          prefix, include_router (positional or router=, factory calls,
+          constant prefixes) and Blueprint prefixes, route and api_route
+          methods=[...];
+          Django urls.py path() with include() prefixes; click/typer commands;
+          argparse subparsers
+  go      package main, cobra commands and flags; routes only when go.mod names
+          gin, echo, chi, fiber or gorilla/mux (or the file imports one), or
+          the file uses net/http HandleFunc/Handle
+  dart    main() as "flutter run" only for Flutter packages, GoRoute (nested
+          paths composed, simple string consts of the same package resolved),
+          route maps, onGenerateRoute names, *Screen/*Page classes
+  rust    Cargo [[bin]], src/main.rs and src/bin/* per workspace member, clap
+          derive Subcommand enums (nested as "parent child") and
+          #[arg(long)] fields as --flags, clap builder
+          Command::new only when clap is imported, axum Router routes with
+          .nest() prefixes, actix attribute routes
+  elisp   key bindings, commands, options, transients (plugin: yggdrasil)
+Comments and string literals are blanked before extraction, and vendored or
+environment directories (node_modules, vendor, target, build, dist, .venv,
+venv, site-packages, .direnv, .dart_tool, Pods) are never listed.
+Unknown ecosystems still get files, ranks, tests and clusters. Every entry is
+{kind, name, trigger, file, line}.
+
+--file PATH keeps one file. --keys PREFIX prints "trigger<TAB>name<TAB>label"
+lines for key triggers starting with PREFIX. --triggers PREFIX does the same
+for any kind. --clusters prints only the clusters.`;
+
+process.stdout.on("error", (error) => process.exit(error.code === "EPIPE" ? 0 : 1));
+
+function fail(message) {
+  process.stderr.write(`ice-feature-facts: ${message}\n`);
+  process.exit(2);
+}
+
+function parseArgs(argv) {
+  const opts = { root: null, file: null, keys: null, triggers: null, clusters: false };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    const value = () => (i + 1 < argv.length ? argv[++i] : fail(`${arg} needs a value`));
+    if (arg === "--root") opts.root = value();
+    else if (arg === "--file") opts.file = value();
+    else if (arg === "--keys") opts.keys = value();
+    else if (arg === "--triggers") opts.triggers = value();
+    else if (arg === "--clusters") opts.clusters = true;
+    else if (arg === "-h" || arg === "--help") {
+      process.stdout.write(`${HELP}\n`);
+      process.exit(0);
+    } else fail(`unknown argument ${arg}\n${HELP}`);
+  }
+  return opts;
+}
+
+function resolveRoot(root) {
+  try {
+    const dir = realpathSync(root ?? execFileSync("git", ["rev-parse", "--show-toplevel"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim());
+    execFileSync("git", ["-C", dir, "rev-parse", "--is-inside-work-tree"], { stdio: "ignore" });
+    return dir;
+  } catch {
+    return fail("not inside a git repository; pass --root");
+  }
+}
+
+function repoMap(root) {
+  const script = join(dirname(fileURLToPath(import.meta.url)), "ice-repo-map");
+  try {
+    return JSON.parse(execFileSync(script, ["--root", root, "--json"], { encoding: "utf8", maxBuffer: 1 << 28 })).files;
+  } catch (error) {
+    process.stderr.write(`ice-feature-facts: ranks unavailable: ${String(error.stderr || error.message).trim().split("\n")[0]}\n`);
+    return [];
+  }
+}
+
+const TEXT_EXT = new Set([".el", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".dart", ".rs", ".toml", ".json", ".c", ".h"]);
+const SOURCE_EXT = new Set([".el", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".py", ".go", ".dart", ".rs", ".c", ".h"]);
+const TEXT_NAMES = new Set(["go.mod", "pubspec.yaml", "requirements.txt", "Pipfile", "setup.py"]);
+const MAX_TEXT = 1 << 20;
+
+const LANGUAGE_OF = { ".ts": "js", ".tsx": "js", ".js": "js", ".jsx": "js", ".mjs": "js", ".cjs": "js", ".py": ".py", ".go": ".go", ".rs": ".rs", ".dart": ".dart" };
+
+function makeRepo(root) {
+  const files = listFiles(root);
+  const cache = new Map();
+  const masks = new Map();
+  const text = (path) => {
+    if (!cache.has(path)) {
+      let value = "";
+      try {
+        value = TEXT_EXT.has(extname(path)) || TEXT_NAMES.has(basename(path)) ? readFileSync(join(root, path), "utf8").slice(0, MAX_TEXT) : "";
+      } catch {}
+      cache.set(path, value);
+    }
+    return cache.get(path);
+  };
+  const mask = (path) => {
+    if (!masks.has(path)) {
+      const language = LANGUAGE_OF[extname(path)];
+      masks.set(path, language ? maskSource(text(path), language) : { code: text(path), inString: new Uint8Array(0) });
+    }
+    return masks.get(path);
+  };
+  const skipped = {};
+  return { root, files, fileSet: new Set(files), text, mask, code: (path) => mask(path).code, skipped, has: (pattern) => files.some((file) => pattern.test(file)) };
+}
+
+function isScript(root, file) {
+  if (/(^|\/)node_modules\//.test(file)) return false;
+  let fd;
+  try {
+    fd = openSync(join(root, file), "r");
+    const head = Buffer.alloc(2);
+    return readSync(fd, head, 0, 2, 0) === 2 && head.toString() === "#!";
+  } catch {
+    return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+  }
+}
+
+function lineOf(source, index) {
+  let line = 1;
+  for (let i = 0; i < index; i++) if (source.charCodeAt(i) === 10) line++;
+  return line;
+}
+
+function* matches(source, regex) {
+  const flagged = new RegExp(regex.source, regex.flags.includes("g") ? regex.flags : `${regex.flags}g`);
+  let m;
+  while ((m = flagged.exec(source))) {
+    yield { m, line: lineOf(source, m.index) };
+    if (m[0] === "") flagged.lastIndex++;
+  }
+}
+
+function* codeMatches(repo, file, regex) {
+  const { code, inString } = repo.mask(file);
+  for (const hit of matches(code, regex)) if (!inString[hit.m.index]) yield hit;
+}
+
+const entry = (kind, name, trigger, file, line, extra = {}) => ({ kind, name, trigger, file, line, ...extra });
+
+const IS_TEST = [
+  /(^|\/)(tests?|__tests__|spec)\//,
+  /\.(test|spec)\.[jt]sx?$/,
+  /\.(test|spec)\.mjs$/,
+  /(^|\/)test_[^/]+\.py$/,
+  /_test\.(py|go|dart|rs)$/,
+  /-tests?\.el$/,
+];
+
+function isTest(path) {
+  return IS_TEST.some((pattern) => pattern.test(path));
+}
+
+function stemOf(path) {
+  let stem = basename(path).replace(/\.[^.]+$/, "");
+  stem = stem.replace(/\.(test|spec)$/, "").replace(/^test_/, "").replace(/(_test|-tests?|_spec)$/, "");
+  return stem.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function stemVariants(path) {
+  const base = basename(path).replace(/\.[^.]+$/, "").replace(/\.(test|spec)$/, "").replace(/^test_/, "").replace(/(_test|-tests?|_spec)$/, "").toLowerCase();
+  const parts = base.split(/[-_.]/).filter(Boolean);
+  const out = new Set([parts.join("")]);
+  for (let skip = 1; skip < Math.min(parts.length, 3); skip++) out.add(parts.slice(skip).join(""));
+  return out;
+}
+
+function mapTests(repo, sources) {
+  const byStem = new Map();
+  for (const source of sources) {
+    for (const variant of stemVariants(source)) {
+      if (!byStem.has(variant)) byStem.set(variant, []);
+      byStem.get(variant).push(source);
+    }
+  }
+  const tests = new Map();
+  const required = new Map();
+  const attachTo = (store) => (source, test) => {
+    if (!store.has(source)) store.set(source, new Set());
+    store.get(source).add(test);
+  };
+  const attach = attachTo(tests);
+  const attachRequired = attachTo(required);
+  const featureOf = new Map();
+  for (const source of sources) {
+    if (extname(source) === ".el") {
+      for (const { m } of matches(repo.text(source), /\(provide '([^\s)]+)\)/)) featureOf.set(m[1], source);
+      featureOf.set(basename(source, ".el"), source);
+    }
+  }
+  for (const file of repo.files.filter(isTest)) {
+    const own = stemOf(file);
+    const direct = byStem.get(own);
+    if (direct) {
+      const sameDir = direct.filter((source) => dirname(source) === dirname(file));
+      for (const source of sameDir.length ? sameDir : direct) attach(source, file);
+    }
+    if (extname(file) === ".el") {
+      for (const { m } of matches(repo.text(file), /\((?:require|load-library)\s+'([^\s)]+)\)/)) {
+        const source = featureOf.get(m[1]);
+        if (source) attachRequired(source, file);
+      }
+    }
+  }
+  for (const source of sources) {
+    if (extname(source) === ".rs" && /#\[cfg\(test\)\]/.test(repo.text(source))) attach(source, source);
+  }
+  const sorted = (store) => new Map([...store].map(([source, set]) => [source, [...set].sort(compare)]));
+  return { named: sorted(tests), required: sorted(required) };
+}
+
+function packageJson(repo, path) {
+  try {
+    return JSON.parse(repo.text(path));
+  } catch {
+    return {};
+  }
+}
+
+function ancestors(file) {
+  const parts = dirname(file) === "." ? [] : dirname(file).split("/");
+  const out = [];
+  for (let i = parts.length; i > 0; i--) out.push(parts.slice(0, i).join("/"));
+  out.push(".");
+  return out;
+}
+
+function manifestTexts(repo, file, names) {
+  const out = [];
+  for (const dir of ancestors(file)) {
+    for (const name of names) {
+      const path = dir === "." ? name : `${dir}/${name}`;
+      if (repo.fileSet.has(path)) out.push(repo.text(path));
+    }
+  }
+  return out;
+}
+
+function marker(repo, file, manifests, depRe, srcRe) {
+  if (srcRe && srcRe.test(repo.code(file))) return true;
+  return manifestTexts(repo, file, manifests).some((text) => depRe.test(text));
+}
+
+function joinRoute(...parts) {
+  const clean = parts.map((part) => String(part ?? "").replace(/^\/+|\/+$/g, "")).filter(Boolean);
+  return `/${clean.join("/")}`;
+}
+
+function resolveRelative(repo, from, spec) {
+  if (!spec.startsWith(".")) return null;
+  const base = join(dirname(from), spec);
+  const exts = ["", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", "/index.ts", "/index.js", "/index.mjs"];
+  for (const ext of exts) if (repo.fileSet.has(base + ext)) return base + ext;
+  return null;
+}
+
+function mountPrefixes(mounts, file, seen = new Set()) {
+  const ups = mounts.get(file);
+  if (!ups || seen.has(file)) return [""];
+  const out = new Set();
+  for (const up of ups) {
+    for (const prefix of mountPrefixes(mounts, up.from, new Set([...seen, file]))) {
+      const full = joinRoute(prefix, up.prefix);
+      out.add(full === "/" ? "" : full);
+    }
+  }
+  return [...out].sort(compare);
+}
+
+function addMount(mounts, target, from, prefix) {
+  if (!target || target === from) return;
+  if (!mounts.has(target)) mounts.set(target, []);
+  mounts.get(target).push({ from, prefix });
+}
+
+function routeEntries(file, line, method, path, prefixes) {
+  return prefixes.map((prefix) => {
+    const full = joinRoute(prefix, path);
+    return entry("route", full, method ? `${method} ${full}` : full, file, line);
+  });
+}
+
+function statementEnd(source, from) {
+  let depth = 0;
+  for (let i = from; i < source.length; i++) {
+    const c = source[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === ";" && depth <= 0) return i;
+  }
+  return source.length;
+}
+
+function balanced(source, open, inString = null) {
+  let depth = 0;
+  for (let i = open; i < source.length; i++) {
+    if (inString?.[i]) continue;
+    if (source[i] === "(") depth++;
+    else if (source[i] === ")" && --depth === 0) return i;
+  }
+  return source.length;
+}
+
+const HTTP_NODE = {
+  manifests: ["package.json"],
+  dep: /"(?:express|fastify|hono|koa-router|@koa\/router|restify)"\s*:/,
+  src: /(?:from\s+|require\(\s*)['"](?:express|fastify|hono|koa-router|@koa\/router|restify)['"]/,
+};
+const CLI_NODE = {
+  manifests: ["package.json"],
+  dep: /"(?:commander|yargs|cac|@commander-js\/extra-typings)"\s*:/,
+  src: /(?:from\s+|require\(\s*)['"](?:commander|yargs|cac|@commander-js\/extra-typings)['"]/,
+};
+const ROUTE_RECEIVER = /^(?:app|router|server|fastify|api|route|routes|instance|\w*Router|\w*router|\w*App|\w*Server)$/;
+const NEXT_MARK = /"next"\s*:|\bnext\s+(?:dev|build|start)\b/;
+const REACT_ROUTER = /(?:from\s+|require\(\s*)['"]react-router(?:-dom)?['"]/;
+
+function nodeMounts(repo, files) {
+  const mounts = new Map();
+  for (const file of files) {
+    const source = repo.code(file);
+    if (!marker(repo, file, HTTP_NODE.manifests, HTTP_NODE.dep, HTTP_NODE.src)) continue;
+    const imports = new Map();
+    for (const { m } of codeMatches(repo, file, /import\s+(\w+)\s+from\s+['"]([^'"]+)['"]/)) imports.set(m[1], m[2]);
+    for (const { m } of codeMatches(repo, file, /import\s*\{([^}]*)\}\s*from\s+['"]([^'"]+)['"]/)) {
+      for (const part of m[1].split(",")) {
+        const [orig, alias] = part.trim().split(/\s+as\s+/);
+        if (orig) imports.set((alias ?? orig).trim(), m[2]);
+      }
+    }
+    for (const { m } of codeMatches(repo, file, /(?:const|let|var)\s+(\w+)\s*=\s*require\(\s*['"]([^'"]+)['"]\s*\)/)) imports.set(m[1], m[2]);
+    for (const { m } of codeMatches(repo, file, /\.use\(\s*['"`](\/[^'"`]*)['"`]\s*,\s*(?:[\w.]+\s*,\s*)*(?:(\w+)|require\(\s*['"]([^'"]+)['"]\s*\))\s*\)/)) {
+      const spec = m[3] ?? imports.get(m[2]);
+      if (spec) addMount(mounts, resolveRelative(repo, file, spec), file, m[1]);
+    }
+  }
+  return mounts;
+}
+
+const nodeExtractor = {
+  name: "node",
+  enabled: (repo) => repo.has(/(^|\/)package\.json$/),
+  extract(repo) {
+    const out = [];
+    const sources = repo.files.filter((file) => /\.(m?[jt]sx?|cjs)$/.test(file) && !isTest(file));
+    const mounts = nodeMounts(repo, sources);
+    let globalPrefix = null;
+    for (const file of sources) {
+      const found = repo.code(file).match(/\.setGlobalPrefix\(\s*['"`]([^'"`]*)['"`]/);
+      if (found) { globalPrefix = found[1]; break; }
+    }
+    for (const file of repo.files) {
+      if (/(^|\/)package\.json$/.test(file)) {
+        const pkg = packageJson(repo, file);
+        const bins = typeof pkg.bin === "string" ? { [pkg.name ?? basename(dirname(file))]: pkg.bin } : pkg.bin ?? {};
+        for (const [name, target] of Object.entries(bins)) out.push(entry("command", name, name, file, 1, { target }));
+        for (const [name, script] of Object.entries(pkg.scripts ?? {})) out.push(entry("script", name, `npm run ${name}`, file, 1, { target: script }));
+      }
+    }
+    for (const file of sources) {
+      const source = repo.code(file);
+      if (marker(repo, file, CLI_NODE.manifests, CLI_NODE.dep, CLI_NODE.src)) {
+        const commands = [];
+        for (const { m, line } of codeMatches(repo, file, /\.command\(\s*['"`]([^'"`\s]+)/)) {
+          commands.push({ index: m.index, name: m[1] });
+          out.push(entry("command", m[1], m[1], file, line));
+        }
+        for (const { m, line } of codeMatches(repo, file, /\.(?:option|requiredOption)\(\s*['"`]([^'"`]+)['"`](?:\s*,\s*['"`]([^'"`]*)['"`])?/)) {
+          const flag = m[1].match(/--[\w-]+/)?.[0] ?? m[1].match(/-\w/)?.[0];
+          if (!flag) continue;
+          const found = [...commands].reverse().find((c) => c.index < m.index);
+          const chained = found && /\)\s*$/.test(source.slice(0, m.index)) && !source.slice(found.index, m.index).includes(";");
+          const owner = chained ? found : null;
+          out.push(entry("option", flag, owner ? `${owner.name} ${flag}` : flag, file, line, { target: m[2] ?? null }));
+        }
+      }
+      if (marker(repo, file, HTTP_NODE.manifests, HTTP_NODE.dep, HTTP_NODE.src)) {
+        const prefixes = mountPrefixes(mounts, file);
+        const route = /\b(\w+)\.(get|post|put|delete|patch|all)\(\s*(['"`])(\/[^'"`]*)\3\s*,\s*(?=[^\s{])/g;
+        for (const { m, line } of codeMatches(repo, file, route)) {
+          if (!ROUTE_RECEIVER.test(m[1])) continue;
+          out.push(...routeEntries(file, line, m[2].toUpperCase(), m[4], prefixes));
+        }
+        for (const { m, line } of codeMatches(repo, file, /\.route\(\s*['"`](\/[^'"`]*)['"`]\s*\)((?:\s*\.(?:get|post|put|delete|patch|all)\((?:[^()]|\([^()]*\))*\))+)/)) {
+          for (const verb of m[2].matchAll(/\.(get|post|put|delete|patch|all)\(/g)) out.push(...routeEntries(file, line, verb[1].toUpperCase(), m[1], prefixes));
+        }
+      }
+      if (/(?:from\s+|require\(\s*)['"]@nestjs\//.test(source)) {
+        const controllers = [...codeMatches(repo, file, /@Controller\(\s*(?:['"`]([^'"`]*)['"`]|\{[^}]*?path:\s*['"`]([^'"`]*)['"`][^}]*\})?/)].map(({ m }) => ({ index: m.index, base: m[1] ?? m[2] ?? "" }));
+        for (const { m, line } of codeMatches(repo, file, /@(Get|Post|Put|Delete|Patch|Options|Head|All)\(\s*(?:['"`]([^'"`]*)['"`])?/)) {
+          const owner = [...controllers].reverse().find((c) => c.index < m.index);
+          if (!owner) continue;
+          const full = joinRoute(globalPrefix, owner.base, m[2] ?? "");
+          out.push(entry("route", full, `${m[1] === "All" ? "ANY" : m[1].toUpperCase()} ${full}`, file, line));
+        }
+      }
+      const nextPkg = marker(repo, file, ["package.json"], NEXT_MARK, null);
+      if (nextPkg) {
+        const app = file.match(/(?:^|\/)app\/(.*?)(?:^|\/)?(page|route)\.[jt]sx?$/);
+        if (app) {
+          const route = `/${app[1].replace(/\/$/, "").replace(/\([^/]*\)\/?/g, "")}`.replace(/\/$/, "") || "/";
+          const methods = app[2] === "route"
+            ? [...new Set([...source.matchAll(/export\s+(?:async\s+)?(?:function|const)\s+(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/g)].map((x) => x[1]).concat([...source.matchAll(/export\s*\{[^}]*\bas\s+(GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\b/g)].map((x) => x[1])))]
+            : [];
+          out.push(entry("route", route, route, file, 1, methods.length ? { methods } : {}));
+          for (const method of methods) out.push(entry("route", route, `${method} ${route}`, file, lineOf(source, source.search(new RegExp(`\\b${method}\\b`)))));
+        }
+        const pages = file.match(/(?:^|\/)pages\/(.+?)\.[jt]sx?$/);
+        if (pages && !/^_/.test(basename(pages[1]))) {
+          const route = `/${pages[1].replace(/(^|\/)index$/, "")}`.replace(/\/$/, "") || "/";
+          out.push(entry("route", route, route, file, 1));
+        }
+      }
+      if (REACT_ROUTER.test(source) && /createBrowserRouter|createHashRouter|createMemoryRouter|useRoutes|<Route\b|RouteObject/.test(source)) {
+        for (const { m, line } of codeMatches(repo, file, /\bpath:\s*['"`]([^'"`]*)['"`]|<Route\b[^>]*?\bpath=\{?['"`]([^'"`]*)['"`]/)) {
+          const path = m[1] ?? m[2];
+          out.push(entry("route", path || "/", path || "/", file, line));
+        }
+      }
+    }
+    return out;
+  },
+};
+
+const PY_WEB = {
+  manifests: ["pyproject.toml", "requirements.txt", "Pipfile", "setup.py"],
+  dep: /(?:^|[\s"'=,\[])(?:fastapi|flask|quart|sanic|starlette)\b/im,
+  src: /^\s*(?:from|import)\s+(?:fastapi|flask|quart|sanic|starlette)\b/m,
+};
+const PY_CLI = {
+  manifests: ["pyproject.toml", "requirements.txt", "Pipfile", "setup.py"],
+  dep: /(?:^|[\s"'=,\[])(?:click|typer)\b/im,
+  src: /^\s*(?:from|import)\s+(?:click|typer)\b/m,
+};
+const PY_DJANGO = /^\s*(?:from|import)\s+django\b/m;
+
+function pyModuleIndex(repo) {
+  const index = new Map();
+  for (const file of repo.files) {
+    if (!file.endsWith(".py")) continue;
+    const parts = file.replace(/\.py$/, "").split("/");
+    if (parts[parts.length - 1] === "__init__") parts.pop();
+    for (let skip = 0; skip < parts.length; skip++) {
+      const name = parts.slice(skip).join(".");
+      if (!name) continue;
+      if (!index.has(name)) index.set(name, new Set());
+      index.get(name).add(file);
+    }
+  }
+  const unique = new Map();
+  for (const [name, set] of index) if (set.size === 1) unique.set(name, [...set][0]);
+  return unique;
+}
+
+function pyImports(repo, file, modules) {
+  const out = new Map();
+  const source = repo.code(file);
+  const base = (dots) => {
+    let dir = dirname(file) === "." ? "" : dirname(file);
+    for (let i = 1; i < dots.length; i++) dir = dirname(dir) === "." ? "" : dirname(dir);
+    return dir;
+  };
+  const fileOf = (dots, dotted) => {
+    if (dots) {
+      const path = join(base(dots), dotted.replace(/\./g, "/"));
+      for (const candidate of [`${path}.py`, `${path}/__init__.py`]) if (repo.fileSet.has(candidate)) return candidate;
+      return null;
+    }
+    return modules.get(dotted) ?? null;
+  };
+  for (const { m } of codeMatches(repo, file, /^\s*from\s+(\.*)([\w.]*)\s+import\s+(\([^)]*\)|[^\n]+)/m)) {
+    const names = m[3].replace(/[()]/g, "").split(",").map((s) => s.trim()).filter(Boolean);
+    for (const item of names) {
+      const [orig, alias] = item.split(/\s+as\s+/);
+      const asModule = fileOf(m[1], [m[2], orig].filter(Boolean).join("."));
+      if (asModule) out.set(alias ?? orig, { file: asModule, module: true });
+      else {
+        const holder = fileOf(m[1], m[2]);
+        if (holder) out.set(alias ?? orig, { file: holder, module: false, name: orig });
+      }
+    }
+  }
+  for (const { m } of codeMatches(repo, file, /^\s*import\s+([\w.]+)(?:\s+as\s+(\w+))?/m)) {
+    const target = fileOf("", m[1]);
+    if (target) out.set(m[2] ?? m[1], { file: target, module: true });
+  }
+  return out;
+}
+
+function pyArgs(code, open, inString) {
+  const close = balanced(code, open, inString);
+  const args = [];
+  let depth = 0;
+  let start = open + 1;
+  for (let i = open + 1; i < close; i++) {
+    if (inString[i]) continue;
+    const c = code[i];
+    if (c === "(" || c === "[" || c === "{") depth++;
+    else if (c === ")" || c === "]" || c === "}") depth--;
+    else if (c === "," && depth === 0) { args.push(code.slice(start, i)); start = i + 1; }
+  }
+  if (code.slice(start, close).trim()) args.push(code.slice(start, close));
+  return args;
+}
+
+function pyKeyword(text) {
+  const m = text.match(/^\s*(\w+)\s*=(?!=)\s*([\s\S]*)$/);
+  return m ? { name: m[1], value: m[2] } : null;
+}
+
+function pyString(text, consts) {
+  const literal = text.match(/^\s*['"]([^'"]*)['"]\s*$/);
+  if (literal) return literal[1];
+  const name = text.match(/^\s*([A-Z_][A-Z0-9_]*)\s*$/)?.[1];
+  return name && consts.has(name) ? consts.get(name) : null;
+}
+
+function pyRouterFile(repo, file, expr, imports, modules) {
+  const parts = expr.split(".");
+  const head = imports.get(parts[0]);
+  if (!head) return null;
+  let target = head.file;
+  let name = head.module ? parts[1] : head.name;
+  for (let depth = 0; name && depth < 4; depth++) {
+    if (new RegExp(`^\\s*${name}\\s*(?::[^=\\n]+)?=`, "m").test(repo.code(target))) break;
+    const there = pyImports(repo, target, modules).get(name);
+    if (!there) break;
+    target = there.file;
+    name = there.module ? null : there.name;
+  }
+  return target;
+}
+
+const pythonExtractor = {
+  name: "python",
+  enabled: (repo) => repo.has(/\.py$/) || repo.has(/(^|\/)pyproject\.toml$/),
+  extract(repo) {
+    const out = [];
+    const modules = pyModuleIndex(repo);
+    const mounts = new Map();
+    const routes = [];
+    const localPrefix = new Map();
+    const pyFiles = repo.files.filter((file) => file.endsWith(".py") && !isTest(file));
+    for (const file of repo.files) {
+      if (!/(^|\/)pyproject\.toml$/.test(file)) continue;
+      const toml = repo.text(file);
+      const section = toml.match(/\[project\.scripts\]\n([\s\S]*?)(?:\n\[|$)/);
+      if (!section) continue;
+      for (const { m } of matches(section[1], /^([\w.-]+)\s*=\s*"([^"]+)"/m)) {
+        out.push(entry("command", m[1], m[1], file, lineOf(toml, toml.indexOf(m[0])), { target: m[2] }));
+      }
+    }
+    for (const file of pyFiles) {
+      const source = repo.code(file);
+      const imports = pyImports(repo, file, modules);
+      const web = marker(repo, file, PY_WEB.manifests, PY_WEB.dep, PY_WEB.src);
+      if (web) {
+        const { code, inString } = repo.mask(file);
+        const consts = new Map();
+        for (const { m } of codeMatches(repo, file, /^([A-Z_][A-Z0-9_]*)\s*(?::\s*\w+\s*)?=\s*(['"])([^'"\n]*)\2\s*$/m)) consts.set(m[1], m[3]);
+        const vars = new Map();
+        for (const { m } of codeMatches(repo, file, /(\w+)\s*=\s*(?:\w+\.)?(?:APIRouter|Blueprint)\(/)) {
+          const open = m.index + m[0].length - 1;
+          const prefix = pyArgs(code, open, inString).map(pyKeyword).find((kv) => kv && /^(?:url_)?prefix$/.test(kv.name));
+          vars.set(m[1], prefix ? pyString(prefix.value, consts) ?? "" : "");
+        }
+        for (const { m } of codeMatches(repo, file, /\.(?:include_router|register_blueprint)\(/)) {
+          const open = m.index + m[0].length - 1;
+          const args = pyArgs(code, open, inString).map((text) => ({ text, kv: pyKeyword(text) }));
+          const exprText = args.find((a) => a.kv && /^(?:router|blueprint)$/.test(a.kv.name))?.kv.value ?? args.find((a) => !a.kv)?.text;
+          const prefixArg = args.find((a) => a.kv && /^(?:url_)?prefix$/.test(a.kv.name));
+          const expr = exprText?.match(/^\s*([\w.]+)/)?.[1];
+          if (!expr) continue;
+          let prefix = "";
+          if (prefixArg) {
+            const resolved = pyString(prefixArg.kv.value, consts);
+            if (resolved === null) repo.skipped["python-unresolved-prefix"] = (repo.skipped["python-unresolved-prefix"] ?? 0) + 1;
+            else prefix = resolved;
+          }
+          if (vars.has(expr)) { vars.set(expr, joinRoute(prefix, vars.get(expr))); continue; }
+          const target = pyRouterFile(repo, file, expr, imports, modules);
+          if (target) addMount(mounts, target, file, prefix);
+        }
+        localPrefix.set(file, vars);
+        for (const { m, line } of codeMatches(repo, file, /@(\w+)\.(get|post|put|delete|patch|options|head)\(\s*(?:path\s*=\s*)?['"]([^'"]*)['"]/)) {
+          if (m[3].startsWith("/") || (m[3] === "" && vars.has(m[1]))) routes.push({ file, line, method: m[2].toUpperCase(), path: m[3], receiver: m[1] });
+        }
+        for (const { m, line } of codeMatches(repo, file, /@(\w+)\.(?:api_)?route\(\s*(?:path\s*=\s*)?['"]([^'"]*)['"]([^)]*)\)/)) {
+          if (!m[2].startsWith("/") && !(m[2] === "" && vars.has(m[1]))) continue;
+          const listed = m[3].match(/methods\s*=\s*[\[(]([^\])]*)/)?.[1];
+          const methods = listed ? [...listed.matchAll(/['"](\w+)['"]/g)].map((x) => x[1].toUpperCase()) : ["GET"];
+          for (const method of methods) routes.push({ file, line, method, path: m[2], receiver: m[1] });
+        }
+      }
+      const isUrls = basename(file) === "urls.py" || (PY_DJANGO.test(source) && /django\.urls/.test(source));
+      if (isUrls) {
+        for (const { m, line } of codeMatches(repo, file, /\b(?:path|re_path|url)\(\s*r?['"]([^'"]*)['"]\s*,\s*(include\(\s*['"]([^'"]+)['"]|[\w.]+)/)) {
+          const pattern = m[1].replace(/^\^/, "").replace(/\$$/, "");
+          if (m[3]) addMount(mounts, modules.get(m[3]), file, pattern);
+          else routes.push({ file, line, method: null, path: pattern, receiver: null });
+        }
+      }
+      if (marker(repo, file, PY_CLI.manifests, PY_CLI.dep, PY_CLI.src)) {
+        for (const { m, line } of codeMatches(repo, file, /@(?:click|app|cli|\w+)\.(?:command|group)\(\s*(?:name\s*=\s*)?(?:['"]([^'"]+)['"])?\s*[^)]*\)\s*\n(?:@[^\n]*\n)*\s*(?:async\s+)?def\s+(\w+)/)) {
+          const name = m[1] ?? m[2];
+          out.push(entry("command", name, name, file, line));
+        }
+      }
+      for (const { m, line } of codeMatches(repo, file, /\.add_parser\(\s*['"]([^'"]+)/)) out.push(entry("command", m[1], m[1], file, line));
+    }
+    for (const route of routes) {
+      const own = localPrefix.get(route.file)?.get(route.receiver) ?? "";
+      for (const prefix of mountPrefixes(mounts, route.file)) {
+        const full = joinRoute(prefix, own, route.path);
+        out.push(entry("route", full, route.method ? `${route.method} ${full}` : full, route.file, route.line));
+      }
+    }
+    return out;
+  },
+};
+
+const GO_FRAMEWORK = /github\.com\/(?:gin-gonic\/gin|labstack\/echo|go-chi\/chi|gofiber\/fiber|gorilla\/mux)\b/;
+const GO_FRAMEWORK_IMPORT = /"github\.com\/(?:gin-gonic\/gin|labstack\/echo|go-chi\/chi|gofiber\/fiber|gorilla\/mux)\b/;
+
+const goExtractor = {
+  name: "go",
+  enabled: (repo) => repo.has(/\.go$/),
+  extract(repo) {
+    const out = [];
+    for (const file of repo.files) {
+      if (!file.endsWith(".go") || isTest(file)) continue;
+      const source = repo.code(file);
+      if (/^package main$/m.test(source) && /^func main\(\)/m.test(source)) {
+        const name = dirname(file) === "." ? basename(repo.root) : basename(dirname(file));
+        out.push(entry("command", name, name, file, lineOf(source, source.search(/^func main\(\)/m))));
+      }
+      for (const { m, line } of codeMatches(repo, file, /cobra\.Command\{[^}]*?Use:\s*"([^"\s]+)/s)) out.push(entry("command", m[1], m[1], file, line));
+      if (/cobra\.Command/.test(source)) {
+        for (const { m, line } of codeMatches(repo, file, /\.(?:Persistent)?Flags\(\)\.(?:String|Bool|Int|Int64|Uint|Float64|Duration|StringSlice|StringArray|StringToString|Count)(?:Var)?P?\(\s*(?:&[\w.]+\s*,\s*)?"([\w-]+)"/)) {
+          out.push(entry("option", `--${m[1]}`, `--${m[1]}`, file, line));
+        }
+      }
+      const framework = marker(repo, file, ["go.mod"], GO_FRAMEWORK, GO_FRAMEWORK_IMPORT);
+      const stdlib = /"net\/http"/.test(source);
+      if (framework || stdlib) {
+        const verbs = framework ? "HandleFunc|Handle|Get|Post|Put|Delete|Patch|GET|POST|PUT|DELETE|PATCH" : "HandleFunc|Handle";
+        for (const { m, line } of codeMatches(repo, file, new RegExp(`\\.(?:${verbs})\\(\\s*"(?:(?:GET|POST|PUT|DELETE|PATCH|HEAD|OPTIONS)\\s+)?(\\/[^"]*)"\\s*,`))) {
+          out.push(entry("route", m[1], m[1], file, line));
+        }
+      }
+    }
+    return out;
+  },
+};
+
+const FLUTTER_SRC = /package:flutter\/|\brunApp\(/;
+
+function dartConstants(repo) {
+  const found = new Map();
+  for (const file of repo.files) {
+    if (!file.endsWith(".dart")) continue;
+    const pkg = ancestors(file).find((dir) => repo.fileSet.has(dir === "." ? "pubspec.yaml" : `${dir}/pubspec.yaml`)) ?? ".";
+    const code = repo.code(file);
+    const classes = [...matches(code, /\bclass\s+(\w+)[^{]*\{/)].map(({ m }) => ({ index: m.index, name: m[1] }));
+    for (const { m } of codeMatches(repo, file, /\b(?:static\s+)?(?:const|final)\s+(?:String\s+)?(\w+)\s*=\s*(['"])([^'"$\n]*)\2\s*;/)) {
+      const owner = [...classes].reverse().find((c) => c.index < m.index)?.name;
+      for (const key of owner ? [`${owner}.${m[1]}`, m[1]] : [m[1]]) {
+        const id = `${pkg}\0${key}`;
+        if (!found.has(id)) found.set(id, new Set());
+        found.get(id).add(m[3]);
+      }
+    }
+  }
+  return { found, pkgOf: (file) => ancestors(file).find((dir) => repo.fileSet.has(dir === "." ? "pubspec.yaml" : `${dir}/pubspec.yaml`)) ?? "." };
+}
+
+function dartPath(repo, file, text, constants) {
+  const literal = text.match(/^\s*(['"])([^'"$]*)\1\s*$/);
+  if (literal) return literal[2];
+  const ref = text.match(/^\s*([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)?)\s*$/)?.[1];
+  const values = ref ? constants.found.get(`${constants.pkgOf(file)}\0${ref}`) : null;
+  if (values?.size === 1) return [...values][0];
+  repo.skipped["dart-unresolved-route-paths"] = (repo.skipped["dart-unresolved-route-paths"] ?? 0) + 1;
+  return null;
+}
+
+function dartGoRoutes(repo, file, constants) {
+  const { code, inString } = repo.mask(file);
+  const calls = [];
+  for (const { m, line } of codeMatches(repo, file, /\bGoRoute\(/)) {
+    const open = m.index + m[0].length - 1;
+    const close = balanced(code, open, inString);
+    const args = pyArgs(code, open, inString);
+    const rawArg = args.map((text) => text.match(/^\s*path\s*:\s*([\s\S]*)$/)).find(Boolean);
+    calls.push({ line, open, close, raw: rawArg?.[1] ?? null });
+  }
+  const resolved = new Map();
+  const fullOf = (call) => {
+    if (resolved.has(call)) return resolved.get(call);
+    const own = call.raw === null ? null : dartPath(repo, file, call.raw, constants);
+    const parent = calls.filter((c) => c !== call && c.open < call.open && call.close <= c.close).sort((x, y) => (x.close - x.open) - (y.close - y.open))[0];
+    let full = null;
+    if (own !== null) full = own.startsWith("/") || !parent ? own : (fullOf(parent) === null ? null : joinRoute(fullOf(parent), own));
+    resolved.set(call, full);
+    return full;
+  };
+  const out = [];
+  for (const call of calls) {
+    const full = fullOf(call);
+    if (full) out.push(entry("route", full, full, file, call.line));
+  }
+  return out;
+}
+
+const dartExtractor = {
+  name: "dart",
+  enabled: (repo) => repo.has(/(^|\/)pubspec\.yaml$/) || repo.has(/\.dart$/),
+  extract(repo) {
+    const out = [];
+    const constants = dartConstants(repo);
+    for (const file of repo.files) {
+      if (!file.endsWith(".dart") || isTest(file)) continue;
+      const source = repo.code(file);
+      const flutter = marker(repo, file, ["pubspec.yaml"], /^\s*flutter\s*:/m, FLUTTER_SRC);
+      for (const { line } of codeMatches(repo, file, /^(?:Future<void>|void)\s+main\(/m)) {
+        if (flutter) out.push(entry("command", "main", "flutter run", file, line));
+        else out.push(entry("command", "main", `dart run ${file}`, file, line));
+      }
+      out.push(...dartGoRoutes(repo, file, constants));
+      for (const { m, line } of codeMatches(repo, file, /^\s*['"](\/[^'"]*)['"]\s*:\s*\(/m)) out.push(entry("route", m[1], m[1], file, line));
+      const seen = new Set();
+      for (const hook of codeMatches(repo, file, /\bonGenerateRoute\b/)) {
+        const window = source.slice(hook.m.index, hook.m.index + 3000);
+        for (const { m } of matches(window, /\bcase\s+['"](\/[^'"]*)['"]|\.name\s*==\s*['"](\/[^'"]*)['"]/)) {
+          const name = m[1] ?? m[2];
+          if (seen.has(name)) continue;
+          seen.add(name);
+          out.push(entry("route", name, name, file, hook.line));
+        }
+      }
+      for (const { m, line } of codeMatches(repo, file, /^class\s+(\w+(?:Screen|Page))\s+extends/m)) out.push(entry("screen", m[1], m[1], file, line));
+    }
+    return out;
+  },
+};
+
+const ATTR = String.raw`#\[(?:[^\[\]]|\[[^\]]*\])*\]`;
+
+function rustVariants(body) {
+  const variants = [];
+  let depth = 0;
+  let start = 0;
+  const lead = new RegExp(`^(?:\\s*${ATTR})*\\s*`);
+  const flush = (end) => {
+    const chunk = body.slice(start, end);
+    const head = chunk.match(lead)[0];
+    const id = chunk.slice(head.length).match(/^([A-Z]\w*)/);
+    if (!id) return;
+    const subcommand = chunk.match(new RegExp(`#\\[(?:command|clap)\\(\\s*subcommand[^\\]]*\\]\\s*(?:pub\\s+)?\\w+\\s*:\\s*(?:Option<\\s*)?(\\w+)`));
+    variants.push({
+      name: id[1],
+      cli: head.match(/(?<![\w])name\s*=\s*"([^"]+)"/)?.[1] ?? kebab(id[1]),
+      offset: start + head.length,
+      child: subcommand?.[1] ?? null,
+    });
+  };
+  for (let i = 0; i < body.length; i++) {
+    const c = body[i];
+    if (c === "{" || c === "(" || c === "[") depth++;
+    else if (c === "}" || c === ")" || c === "]") depth--;
+    else if (c === "," && depth === 0) { flush(i); start = i + 1; }
+  }
+  flush(body.length);
+  return variants;
+}
+
+function kebab(name) {
+  return name.replace(/([a-z0-9])([A-Z])/g, "$1-$2").toLowerCase();
+}
+
+function tomlSections(toml) {
+  const out = [];
+  const re = /^\s*(\[\[?)([^\]\n]+)\]\]?[^\n]*$/gm;
+  const heads = [...toml.matchAll(re)];
+  heads.forEach((h, i) => {
+    const bodyStart = h.index + h[0].length;
+    const end = i + 1 < heads.length ? heads[i + 1].index : toml.length;
+    out.push({ header: h[2].trim(), array: h[1] === "[[", body: toml.slice(bodyStart, end), line: lineOf(toml, h.index) });
+  });
+  return out;
+}
+
+function cargoPackages(repo) {
+  const out = [];
+  for (const file of repo.files) {
+    if (!/(^|\/)Cargo\.toml$/.test(file)) continue;
+    const toml = repo.text(file);
+    const dir = dirname(file);
+    const at = (rel) => (dir === "." ? rel : `${dir}/${rel}`);
+    const sections = tomlSections(toml);
+    const pkg = sections.find((s) => s.header === "package");
+    const pkgName = pkg?.body.match(/^\s*name\s*=\s*"([^"]+)"/m)?.[1];
+    const bins = [];
+    for (const s of sections) {
+      if (s.header !== "bin" || !s.array) continue;
+      const name = s.body.match(/^\s*name\s*=\s*"([^"]+)"/m)?.[1];
+      if (name) bins.push({ name, file, line: s.line });
+    }
+    if (pkgName) {
+      if (repo.fileSet.has(at("src/main.rs")) && !bins.some((b) => b.name === pkgName)) bins.push({ name: pkgName, file, line: pkg.line });
+      const binDir = at("src/bin/");
+      for (const other of repo.files) {
+        if (!other.startsWith(binDir) || !other.endsWith(".rs")) continue;
+        const rest = other.slice(binDir.length);
+        const name = rest.includes("/") ? (rest.endsWith("/main.rs") ? rest.split("/")[0] : null) : rest.replace(/\.rs$/, "");
+        if (name && !bins.some((b) => b.name === name)) bins.push({ name, file: other, line: 1 });
+      }
+    }
+    out.push({ dir, file, bins });
+  }
+  return out;
+}
+
+const CLAP_DEP = /^\s*clap\s*[=.{]|\[(?:dev-|build-)?dependencies\.clap\]/m;
+
+function clapContext(repo, file, source) {
+  return /\buse\s+clap\b|\bclap::/.test(source) || manifestTexts(repo, file, ["Cargo.toml"]).some((text) => CLAP_DEP.test(text));
+}
+
+function rustClapEntries(repo, rustFiles) {
+  const enums = new Map();
+  for (const file of rustFiles) {
+    const source = repo.code(file);
+    if (!clapContext(repo, file, source)) continue;
+    for (const { m } of codeMatches(repo, file, /#\[derive\([^)]*\bSubcommand\b[^)]*\)\](?:\s*#\[[^\n]*\])*\s*(?:pub(?:\([^)]*\))?\s+)?enum\s+(\w+)[^{]*\{/)) {
+      const open = m.index + m[0].length - 1;
+      let depth = 0;
+      let close = open;
+      for (; close < source.length; close++) {
+        if (source[close] === "{") depth++;
+        else if (source[close] === "}" && --depth === 0) break;
+      }
+      const variants = rustVariants(source.slice(open + 1, close)).map((v) => ({ ...v, line: lineOf(source, open + 1 + v.offset) }));
+      enums.set(m[1], { file, variants });
+    }
+  }
+  const nested = new Set();
+  for (const info of enums.values()) for (const v of info.variants) if (v.child && enums.has(v.child)) nested.add(v.child);
+  const out = [];
+  const walk = (name, prefix, seen) => {
+    const info = enums.get(name);
+    if (!info || seen.has(name)) return;
+    for (const v of info.variants) {
+      const path = prefix ? `${prefix} ${v.cli}` : v.cli;
+      out.push(entry("command", path, path, info.file, v.line));
+      if (v.child) walk(v.child, path, new Set([...seen, name]));
+    }
+  };
+  for (const name of [...enums.keys()].sort(compare)) if (!nested.has(name)) walk(name, "", new Set());
+  for (const file of rustFiles) {
+    if (!clapContext(repo, file, repo.code(file))) continue;
+    for (const { m, line } of codeMatches(repo, file, new RegExp(`#\\[(?:arg|clap)\\(((?:[^\\]"]|"(?:[^"\\\\]|\\\\.)*"|\\[[^\\]]*\\])*)\\]((?:\\s*${ATTR})*)\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(\\w+)\\s*:`))) {
+      const args = m[1].replace(/\)\s*$/, "");
+      const explicit = args.match(/\blong\s*=\s*"([^"]+)"/)?.[1];
+      if (!explicit && !/\blong\b/.test(args.replace(/"(?:[^"\\]|\\.)*"/g, '""'))) continue;
+      const flag = `--${explicit ?? m[3].replace(/_/g, "-")}`;
+      out.push(entry("option", flag, flag, file, line));
+    }
+  }
+  for (const file of rustFiles) {
+    const source = repo.code(file);
+    if (!/\buse\s+clap::(?:\{[^}]*\bCommand\b[^}]*\}|Command\b)/.test(source)) continue;
+    for (const { m, line } of codeMatches(repo, file, /\bCommand::new\(\s*"([^"]+)"\s*\)/)) out.push(entry("command", m[1], m[1], file, line));
+  }
+  return out;
+}
+
+const AXUM = {
+  manifests: ["Cargo.toml"],
+  dep: /^\s*axum\s*[=.{]|\[dependencies\.axum\]/m,
+  src: /\buse\s+axum\b|\baxum::/,
+};
+
+function rustRouteEntries(repo, file, source) {
+  const out = [];
+  const owners = [...codeMatches(repo, file, /let\s+(?:mut\s+)?(\w+)\s*(?::[^=]+)?=\s*(?:axum::)?Router::(?:new|<[^>]*>::new)\(/)].map(({ m }) => ({ start: m.index, end: statementEnd(source, m.index), name: m[1] }));
+  const ownerAt = (index) => owners.find((o) => o.start < index && index < o.end)?.name ?? null;
+  const nests = new Map();
+  for (const { m } of codeMatches(repo, file, /\.nest\(\s*"([^"]*)"\s*,\s*(\w+)\b/)) nests.set(m[2], { prefix: m[1], owner: ownerAt(m.index) });
+  const prefixOf = (name, seen = new Set()) => {
+    const nest = nests.get(name);
+    if (!nest || seen.has(name)) return "";
+    const full = joinRoute(prefixOf(nest.owner, new Set([...seen, name])), nest.prefix);
+    return full === "/" ? "" : full;
+  };
+  for (const { m, line } of codeMatches(repo, file, /\.route\(\s*"(\/[^"]*)"\s*,/)) {
+    const open = m.index + m[0].indexOf("(");
+    const call = source.slice(m.index + m[0].length, balanced(source, open, repo.mask(file).inString));
+    const methods = [...new Set([...call.matchAll(/\b(get|post|put|delete|patch|head|options|any)\s*\(/g)].map((x) => x[1].toUpperCase()))];
+    const prefix = prefixOf(ownerAt(m.index));
+    const full = joinRoute(prefix, m[1]);
+    for (const method of methods.length ? methods : [null]) out.push(entry("route", full, method ? `${method === "ANY" ? "ANY" : method} ${full}` : full, file, line));
+  }
+  for (const { m, line } of codeMatches(repo, file, /#\[(get|post|put|delete|patch)\(\s*"(\/[^"]*)"/)) {
+    out.push(entry("route", m[2], `${m[1].toUpperCase()} ${m[2]}`, file, line));
+  }
+  return out;
+}
+
+const rustExtractor = {
+  name: "rust",
+  enabled: (repo) => repo.has(/(^|\/)Cargo\.toml$/),
+  extract(repo) {
+    const out = [];
+    for (const pkg of cargoPackages(repo)) for (const bin of pkg.bins) out.push(entry("command", bin.name, bin.name, bin.file, bin.line));
+    const rustFiles = repo.files.filter((file) => file.endsWith(".rs") && !isTest(file));
+    out.push(...rustClapEntries(repo, rustFiles));
+    for (const file of rustFiles) {
+      const source = repo.code(file);
+      if (marker(repo, file, AXUM.manifests, AXUM.dep, AXUM.src)) out.push(...rustRouteEntries(repo, file, source));
+    }
+    return out;
+  },
+};
+
+function readLisp(source) {
+  let i = 0;
+  let line = 1;
+  const n = source.length;
+  const stringMarker = Symbol("string");
+  const readForm = () => {
+    for (;;) {
+      const c = source[i];
+      if (c === "\n") { line++; i++; }
+      else if (c === " " || c === "\t" || c === "\r" || c === "\f") i++;
+      else if (c === ";") { while (i < n && source[i] !== "\n") i++; }
+      else break;
+    }
+    if (i >= n) return undefined;
+    const c = source[i];
+    if (c === "(" || c === "[") {
+      const close = c === "(" ? ")" : "]";
+      const list = [];
+      list.line = line;
+      list.vec = c === "[";
+      i++;
+      for (;;) {
+        for (;;) {
+          const d = source[i];
+          if (d === "\n") { line++; i++; }
+          else if (d === " " || d === "\t" || d === "\r" || d === "\f") i++;
+          else if (d === ";") { while (i < n && source[i] !== "\n") i++; }
+          else break;
+        }
+        if (i >= n) return list;
+        if (source[i] === close) { i++; return list; }
+        if (source[i] === ")" || source[i] === "]") { i++; continue; }
+        const form = readForm();
+        if (form === undefined) return list;
+        list.push(form);
+      }
+    }
+    if (c === ")" || c === "]") { i++; return readForm(); }
+    if (c === '"') {
+      let value = "";
+      const startLine = line;
+      i++;
+      while (i < n && source[i] !== '"') {
+        if (source[i] === "\\") {
+          i++;
+          if (source[i] === "\n") { line++; i++; continue; }
+          const esc = source[i++];
+          value += esc === "n" ? "\n" : esc === "t" ? "\t" : esc;
+        } else {
+          if (source[i] === "\n") line++;
+          value += source[i++];
+        }
+      }
+      i++;
+      return { [stringMarker]: true, value, line: startLine };
+    }
+    const prefixes = { "'": "quote", "`": "`", ",": ",", "#'": "function" };
+    if (c === "#" && source[i + 1] === "'") { i += 2; const form = readForm(); const l = ["function", form]; l.line = line; return l; }
+    if (c === "'" || c === "`") { i++; const form = readForm(); const l = [prefixes[c], form]; l.line = line; return l; }
+    if (c === ",") { i++; if (source[i] === "@") i++; const form = readForm(); const l = [",", form]; l.line = line; return l; }
+    if (c === "?") {
+      let j = i + 1;
+      if (source[j] === "\\") j += 2;
+      else j += 1;
+      while (j < n && !/[\s()\[\]"]/.test(source[j])) j++;
+      const atom = source.slice(i, j);
+      i = j;
+      return atom;
+    }
+    let j = i;
+    while (j < n && !/[\s()\[\]";]/.test(source[j])) {
+      if (source[j] === "\\") j++;
+      j++;
+    }
+    if (j === i) j = i + 1;
+    const atom = source.slice(i, j);
+    i = j;
+    return atom;
+  };
+  const forms = [];
+  for (;;) {
+    const form = readForm();
+    if (form === undefined) break;
+    forms.push(form);
+  }
+  return forms;
+}
+
+const isStr = (x) => x !== null && typeof x === "object" && !Array.isArray(x) && typeof x.value === "string";
+const isList = (x) => Array.isArray(x) && !x.vec;
+const strOf = (x) => (isStr(x) ? x.value : null);
+const symOf = (x) => (typeof x === "string" ? x : null);
+
+function unquote(x) {
+  return isList(x) && (x[0] === "quote" || x[0] === "function") && typeof x[1] === "string" ? x[1] : x;
+}
+
+function mapName(x) {
+  const u = unquote(x);
+  if (isList(u) && u[0] === "symbol-value") return mapName(u[1]);
+  return typeof u === "string" ? u : "<expr>";
+}
+
+function keyText(x) {
+  if (isStr(x)) return x.value;
+  if (isList(x) && x[0] === "kbd" && isStr(x[1])) return x[1].value;
+  if (Array.isArray(x) && x.vec) return `[${x.map((p) => (isStr(p) ? p.value : String(p))).join(" ")}]`;
+  return "<expr>";
+}
+
+function lispDef(x, label = null) {
+  if (isList(x) && x[0] === "cons" && isStr(x[1])) return lispDef(x[2], x[1].value);
+  if (isList(x) && (x[0] === "quote" || x[0] === "function") && typeof x[1] === "string") return { kind: "command", target: x[1], label };
+  if (isList(x) && (x[0] === "`" || x[0] === "menu-item")) {
+    const inner = x[0] === "`" ? x[1] : x;
+    return { kind: "other", target: isList(inner) ? String(inner[0]) : "<expr>", label: label ?? (isList(inner) && isStr(inner[1]) ? inner[1].value : null) };
+  }
+  if (typeof x === "string" && x !== "nil") return { kind: /-map$/.test(x) ? "map" : "command", target: x, label };
+  return { kind: "other", target: "<expr>", label };
+}
+
+const yggdrasilPlugin = {
+  name: "yggdrasil",
+  enabled: (repo) => repo.has(/(^|\/)yggdrasil-core\.el$/) || repo.files.some((file) => /\.el$/.test(file) && /\(yggdrasil-define-keys\s/.test(repo.text(file))),
+  handle(head, args, emit) {
+    if (head === "yggdrasil-define-keys" || head === "yggdrasil-key") {
+      pairs(mapName(args[0]), args.slice(1), emit);
+      return true;
+    }
+    if (head === "yggdrasil-leader-def") {
+      pairs("ygg-leader-map", [args[0], args[1], ":label", args[2]], emit);
+      return true;
+    }
+    if (head === "yggdrasil-localleader-def") {
+      const def = lispDef(args[2], isStr(args[3]) ? args[3].value : null);
+      emit.localleader({ mode: mapName(args[0]), key: keyText(args[1]), target: def.target, label: def.label });
+      return true;
+    }
+    return false;
+  },
+};
+
+function pairs(map, items, emit) {
+  const rest = [...items];
+  while (rest.length >= 2) {
+    const key = rest.shift();
+    const def = rest.shift();
+    let label = null;
+    if (rest[0] === ":label") {
+      rest.shift();
+      label = isStr(rest[0]) ? rest.shift().value : (rest.shift(), null);
+    }
+    emit.binding(map, keyText(key), lispDef(def, label), key.line ?? def?.line);
+  }
+}
+
+function elispFacts(repo, plugins) {
+  const bindings = [];
+  const parents = [];
+  const entries = [];
+  const localleader = [];
+  const files = repo.files.filter((file) => file.endsWith(".el"));
+  for (const file of files) {
+    const forms = readLisp(repo.text(file));
+    const emit = {
+      binding(map, key, def, line) {
+        bindings.push({ map, key, ...def, file, line: line ?? 1 });
+        if (def.kind === "map") parents.push({ child: def.target, parent: map, key });
+      },
+      localleader(item) {
+        localleader.push({ ...item, file });
+      },
+    };
+    const visit = (form) => {
+      if (!isList(form) || typeof form[0] !== "string") {
+        if (Array.isArray(form)) for (const sub of form) if (Array.isArray(sub)) visit(sub);
+        return;
+      }
+      const [head, ...args] = form;
+      const line = form.line;
+      const named = typeof args[0] === "string";
+      const handled = plugins.some((plugin) => plugin.handle(head, args, emit));
+      if (!handled) {
+        if (head === "define-key" || head === "keymap-set") emit.binding(mapName(args[0]), keyText(args[1]), lispDef(args[2]), line);
+        else if (head === "global-set-key") emit.binding("global-map", keyText(args[0]), lispDef(args[1]), line);
+        else if (head === "defvar-keymap") {
+          let rest = args.slice(1);
+          while (typeof rest[0] === "string" && rest[0].startsWith(":")) rest = rest.slice(2);
+          pairs(String(args[0]), rest, emit);
+        }
+      }
+      if (named && (head === "defun" || head === "cl-defun")) {
+        const body = args.slice(2, 6);
+        if (body.some((f) => isList(f) && f[0] === "interactive")) {
+          const doc = isStr(args[2]) ? args[2].value.split("\n")[0].trim() : null;
+          entries.push(entry("command", args[0], `M-x ${args[0]}`, file, line, { doc }));
+        }
+      } else if (named && (head === "define-minor-mode" || head === "define-globalized-minor-mode" || head === "define-derived-mode")) {
+        const doc = args.find(isStr);
+        entries.push(entry("command", args[0], `M-x ${args[0]}`, file, line, { doc: doc ? doc.value.split("\n")[0].trim() : null }));
+      } else if (named && head === "defcustom") {
+        entries.push(entry("option", args[0], `M-x customize-variable ${args[0]}`, file, line, { doc: isStr(args[2]) ? args[2].value.split("\n")[0].trim() : null }));
+      } else if (named && head === "transient-define-prefix") {
+        const suffixes = [];
+        const walk = (node, group) => {
+          if (Array.isArray(node) && node.vec) {
+            const items = [...node];
+            const title = isStr(items[0]) ? items.shift().value : group;
+            for (const item of items) walk(item, title);
+          } else if (isList(node) && isStr(node[0])) {
+            const rest = node.slice(1);
+            let desc = isStr(rest[0]) ? rest.shift().value : null;
+            let target = null;
+            if (typeof rest[0] === "string" && !rest[0].startsWith(":")) {
+              const first = rest.shift();
+              if (desc === null && typeof rest[0] === "string" && !rest[0].startsWith(":")) { desc = first; target = rest.shift(); } else target = first;
+            }
+            if (isStr(rest[0]) && rest[0].value.startsWith("--")) target = null;
+            suffixes.push({ key: node[0].value, description: desc, command: target, group });
+          } else if (isList(node)) for (const sub of node) if (Array.isArray(sub)) walk(sub, group);
+        };
+        for (const part of args.slice(2)) if (Array.isArray(part) && part.vec) walk(part, null);
+        entries.push(entry("transient", args[0], `M-x ${args[0]}`, file, line, { doc: isStr(args[1]) ? args[1].value.split("\n")[0].trim() : null, suffixes }));
+      }
+      for (const sub of form) if (Array.isArray(sub)) visit(sub);
+    };
+    for (const form of forms) visit(form);
+  }
+  return { bindings, parents, entries, localleader };
+}
+
+function pathsOf(map, parents, seen = []) {
+  const ups = parents.filter((p) => p.child === map);
+  if (!ups.length || seen.includes(map)) return [""];
+  const out = new Set();
+  for (const up of ups) for (const prefix of pathsOf(up.parent, parents, [...seen, map])) out.add(`${prefix} ${up.key}`.trim());
+  return [...out].sort(compare);
+}
+
+function rootsOf(map, parents, seen = []) {
+  const ups = parents.filter((p) => p.child === map);
+  if (!ups.length || seen.includes(map)) return [map];
+  const out = new Set();
+  for (const up of ups) for (const root of rootsOf(up.parent, parents, [...seen, map])) out.add(root);
+  return [...out].sort(compare);
+}
+
+function elispEntries(repo, plugins) {
+  const { bindings, parents, entries, localleader } = elispFacts(repo, plugins);
+  const keyEntries = [];
+  for (const b of bindings) {
+    if (b.kind === "other") continue;
+    const roots = rootsOf(b.map, parents);
+    for (const prefix of pathsOf(b.map, parents)) {
+      keyEntries.push(entry(b.kind === "map" ? "prefix" : "key", b.target, `${prefix} ${b.key}`.trim(), b.file, b.line, { map: b.map, label: b.label, roots }));
+    }
+  }
+  for (const l of localleader) keyEntries.push(entry("key", l.target, `\\ ${l.key}`, l.file, 1, { map: `localleader:${l.mode}`, label: l.label, roots: [`localleader:${l.mode}`] }));
+  const suffixEntries = [];
+  for (const transient of entries.filter((e) => e.kind === "transient")) {
+    for (const invoker of keyEntries.filter((k) => k.name === transient.name)) {
+      for (const suffix of transient.suffixes) {
+        if (!suffix.command) continue;
+        suffixEntries.push(entry("key", suffix.command, `${invoker.trigger} ${suffix.key}`, transient.file, transient.line, { map: `transient:${transient.name}`, label: suffix.description, roots: invoker.roots }));
+      }
+    }
+  }
+  return [...keyEntries, ...suffixEntries, ...entries];
+}
+
+const elispExtractor = {
+  name: "elisp",
+  enabled: (repo) => repo.has(/\.el$/),
+  extract(repo) {
+    const plugins = [yggdrasilPlugin].filter((plugin) => plugin.enabled(repo));
+    return elispEntries(repo, plugins);
+  },
+  plugins: (repo) => [yggdrasilPlugin].filter((plugin) => plugin.enabled(repo)).map((plugin) => plugin.name),
+  notation: (repo) => [...ELISP_KEY_NOTATION, ...(yggdrasilPlugin.enabled(repo) ? YGGDRASIL_KEY_NOTATION : [])],
+};
+
+const ROUTE_NOTATION = { kind: "route", pattern: "^(?:(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|ANY) )?/" };
+const OPTION_NOTATION = { kind: "option", pattern: "^--[A-Za-z][A-Za-z0-9_-]*$" };
+const ELISP_KEY_NOTATION = [
+  { kind: "key", pattern: "^(?:[CMsSH]-|[^ ]$|(?:RET|TAB|ESC|SPC|DEL)$)" },
+  { kind: "key-prose", pattern: "(?:^|[ (])((?:[CMsSH]-)+(?:RET|TAB|SPC|DEL|ESC|LFD|<[^ >]+>|[^ ,;:.()]))" },
+];
+const YGGDRASIL_KEY_NOTATION = [{ kind: "key", pattern: "^(?:SPC|M-SPC|=|\\]|\\[|\\\\) " }];
+
+const EXTRACTORS = [nodeExtractor, pythonExtractor, goExtractor, dartExtractor, rustExtractor, elispExtractor];
+
+function referenceEdges(repo, rank, sources) {
+  const definers = new Map();
+  for (const file of rank.keys()) {
+    for (const def of rank.get(file).defs) {
+      if (def.name.length < 4) continue;
+      if (!definers.has(def.name)) definers.set(def.name, new Set());
+      definers.get(def.name).add(file);
+    }
+  }
+  const refs = new Map();
+  const IDENT = /[A-Za-z_][\w\-/:*?!<>=+$]*/g;
+  for (const file of sources) {
+    if (!rank.has(file)) continue;
+    for (const name of new Set(repo.text(file).match(IDENT) ?? [])) {
+      const owners = definers.get(name);
+      if (!owners || owners.size > 2 || owners.has(file)) continue;
+      if (!refs.has(name)) refs.set(name, []);
+      refs.get(name).push(file);
+    }
+  }
+  const hubLimit = Math.max(8, sources.length * 0.08);
+  const edges = new Map();
+  for (const [name, referrers] of refs) {
+    if (referrers.length > hubLimit) continue;
+    const weight = 1 / Math.log2(2 + referrers.length);
+    for (const file of referrers) {
+      for (const owner of definers.get(name)) {
+        const key = compare(file, owner) < 0 ? `${file}\0${owner}` : `${owner}\0${file}`;
+        edges.set(key, (edges.get(key) ?? 0) + weight);
+      }
+    }
+  }
+  return edges;
+}
+
+function segments(path) {
+  return basename(path).replace(/\.[^.]+$/, "").split(/[-_.]/).filter(Boolean);
+}
+
+function affinity(a, b) {
+  let weight = 0;
+  const sa = segments(a);
+  const sb = segments(b);
+  let shared = 0;
+  while (shared < Math.min(sa.length, sb.length) && sa[shared] === sb[shared]) shared++;
+  if (shared >= 2) weight += 4 * (shared - 1);
+  if (dirname(a) === dirname(b) && dirname(a) !== "." && dirname(a).includes("/")) weight += 2;
+  else if (dirname(a).split("/")[0] === dirname(b).split("/")[0] && dirname(a).includes("/") && dirname(b).includes("/")) weight += 1;
+  return weight;
+}
+
+function propagate(sources, edges) {
+  const files = [...sources].sort(compare);
+  const inside = new Set(files);
+  const weight = new Map();
+  const add = (a, b, w) => {
+    if (!w) return;
+    for (const [x, y] of [[a, b], [b, a]]) {
+      if (!weight.has(x)) weight.set(x, new Map());
+      weight.get(x).set(y, (weight.get(x).get(y) ?? 0) + w);
+    }
+  };
+  for (const [key, count] of edges) {
+    const [a, b] = key.split("\0");
+    if (inside.has(a) && inside.has(b)) add(a, b, Math.min(6, count));
+  }
+  for (let i = 0; i < files.length; i++) for (let j = i + 1; j < files.length; j++) add(files[i], files[j], affinity(files[i], files[j]));
+  let label = new Map(files.map((file) => [file, file]));
+  for (let round = 0; round < 12; round++) {
+    const next = new Map(label);
+    let changed = false;
+    for (const file of files) {
+      const scores = new Map();
+      for (const [other, w] of weight.get(file) ?? []) scores.set(label.get(other), (scores.get(label.get(other)) ?? 0) + w);
+      if (!scores.size) continue;
+      let best = label.get(file);
+      let bestScore = scores.get(best) ?? 0;
+      for (const [candidate, score] of [...scores].sort((x, y) => compare(x[0], y[0]))) {
+        if (score > bestScore + 1e-9) { best = candidate; bestScore = score; }
+      }
+      if (best !== label.get(file)) { next.set(file, best); changed = true; }
+    }
+    label = next;
+    if (!changed) break;
+  }
+  const groups = new Map();
+  for (const file of files) {
+    const key = label.get(file);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(file);
+  }
+  return [...groups.values()];
+}
+
+const SRC_ROOTS = new Set(["src", "app", "lib", "internal", "cmd", "features", "pkg", "source"]);
+const MANIFEST = /(^|\/)(package\.json|pyproject\.toml|go\.mod|Cargo\.toml|pubspec\.yaml)$/;
+const CLUSTER_CAP = 40;
+const CLUSTER_MIN = 2;
+
+function packageDirs(repo) {
+  const dirs = new Set();
+  for (const file of repo.files) if (MANIFEST.test(file) && dirname(file) !== "." && !/(^|\/)node_modules\//.test(file)) dirs.add(dirname(file));
+  return [...dirs].sort((a, b) => b.length - a.length || compare(a, b));
+}
+
+function seedGroups(files, pkgs) {
+  const groups = new Map();
+  for (const file of files) {
+    const pkg = pkgs.find((dir) => file.startsWith(`${dir}/`)) ?? ".";
+    const rel = pkg === "." ? file : file.slice(pkg.length + 1);
+    const dirs = dirname(rel) === "." ? [] : dirname(rel).split("/");
+    let used = [];
+    if (dirs.length && SRC_ROOTS.has(dirs[0])) used = dirs.length >= 2 ? dirs.slice(0, 2) : [];
+    else if (dirs.length) used = dirs.slice(0, 1);
+    const key = `${pkg}\0${used.join("/")}`;
+    if (!groups.has(key)) groups.set(key, { pkg, dirPath: used, prefix: null, files: [] });
+    groups.get(key).files.push({ file, dirs, stem: segments(file) });
+  }
+  return [...groups.entries()].sort((a, b) => compare(a[0], b[0])).map(([, group]) => group);
+}
+
+function splitByName(group, edges, depth = 0) {
+  if (group.files.length <= CLUSTER_CAP) return [group];
+  for (let d = depth; d < 8; d++) {
+    const buckets = new Map();
+    const rest = [];
+    for (const f of group.files) {
+      const seg = f.stem[d];
+      if (seg === undefined) rest.push(f);
+      else {
+        if (!buckets.has(seg)) buckets.set(seg, []);
+        buckets.get(seg).push(f);
+      }
+    }
+    if (buckets.size + (rest.length ? 1 : 0) < 2) continue;
+    const out = [];
+    for (const [, files] of [...buckets].sort((x, y) => compare(x[0], y[0]))) {
+      out.push(...splitByName({ ...group, prefix: files[0].stem.slice(0, d + 1).join("-"), files }, edges, d + 1));
+    }
+    if (rest.length) out.push({ ...group, files: rest });
+    return out;
+  }
+  const byFile = new Map(group.files.map((f) => [f.file, f]));
+  const parts = propagate(group.files.map((f) => f.file), edges);
+  if (parts.length < 2) return [group];
+  return parts.map((names) => ({ ...group, prefix: segments(names[0]).join("-"), files: names.map((name) => byFile.get(name)) }));
+}
+
+function expandGroup(group, edges) {
+  if (group.files.length <= CLUSTER_CAP) return [group];
+  const depth = group.dirPath.length;
+  const buckets = new Map();
+  const rest = [];
+  for (const f of group.files) {
+    const dir = f.dirs[depth];
+    if (dir === undefined) rest.push(f);
+    else {
+      if (!buckets.has(dir)) buckets.set(dir, []);
+      buckets.get(dir).push(f);
+    }
+  }
+  if (!buckets.size) return splitByName(group, edges);
+  const out = [];
+  for (const [dir, files] of [...buckets].sort((x, y) => compare(x[0], y[0]))) {
+    out.push(...expandGroup({ ...group, dirPath: [...group.dirPath, dir], prefix: null, files }, edges));
+  }
+  if (rest.length) out.push(...splitByName({ ...group, files: rest }, edges));
+  return out;
+}
+
+function isEntryFile(file, perFile) {
+  return (perFile[file]?.entries ?? []).some((e) => e.kind === "route" || e.kind === "screen" || (e.kind === "command" && !e.trigger.startsWith("M-x ")));
+}
+
+function mergeTiny(groups, edges, perFile) {
+  const adjacent = new Map();
+  for (const [key, count] of edges) {
+    const [a, b] = key.split("\0");
+    for (const [x, y] of [[a, b], [b, a]]) {
+      if (!adjacent.has(x)) adjacent.set(x, new Map());
+      adjacent.get(x).set(y, count);
+    }
+  }
+  const owner = new Map();
+  groups.forEach((group, i) => group.files.forEach((f) => owner.set(f.file, i)));
+  const isTiny = (group) => group.files.length < CLUSTER_MIN && !group.files.some((f) => isEntryFile(f.file, perFile));
+  const gone = new Set();
+  groups.forEach((group, i) => {
+    if (!isTiny(group)) return;
+    const scores = new Map();
+    for (const f of group.files) {
+      for (const [other, w] of adjacent.get(f.file) ?? []) {
+        const j = owner.get(other);
+        if (j === undefined || j === i || gone.has(j) || groups[j].pkg !== group.pkg || groups[j].files.length + group.files.length > CLUSTER_CAP) continue;
+        scores.set(j, (scores.get(j) ?? 0) + w);
+      }
+    }
+    const best = [...scores].sort((x, y) => y[1] - x[1] || x[0] - y[0])[0];
+    if (!best) return;
+    groups[best[0]].files.push(...group.files);
+    group.files.forEach((f) => owner.set(f.file, best[0]));
+    group.files = [];
+    gone.add(i);
+  });
+  const live = groups.filter((group) => group.files.length);
+  const pools = new Map();
+  const kept = [];
+  for (const group of live) {
+    if (!isTiny(group)) { kept.push(group); continue; }
+    const key = `${group.pkg}\0${group.dirPath.join("/")}`;
+    if (!pools.has(key)) pools.set(key, []);
+    pools.get(key).push(group);
+  }
+  for (const [, members] of [...pools].sort((x, y) => compare(x[0], y[0]))) {
+    if (members.length < 2) { kept.push(...members); continue; }
+    for (let i = 0; i < members.length; i += CLUSTER_CAP) {
+      const chunk = members.slice(i, i + CLUSTER_CAP);
+      kept.push({ ...chunk[0], prefix: null, files: chunk.flatMap((g) => g.files) });
+    }
+  }
+  return kept;
+}
+
+function nameGroups(groups, repoName) {
+  const chains = groups.map((group) => {
+    const chain = [];
+    if (group.pkg !== ".") chain.push(basename(group.pkg));
+    group.dirPath.forEach((dir, i) => { if (!(i === 0 && SRC_ROOTS.has(dir))) chain.push(dir); });
+    if (group.prefix) chain.push(group.prefix);
+    if (!chain.length) chain.push(repoName);
+    return chain;
+  });
+  const names = chains.map((chain, i) => (groups[i].pkg !== "." && chain.length > 1 ? chain.slice(-2).join("-") : chain[chain.length - 1]));
+  for (let k = 2; k <= 6; k++) {
+    const counts = new Map();
+    for (const name of names) counts.set(name, (counts.get(name) ?? 0) + 1);
+    if (![...counts.values()].some((n) => n > 1)) break;
+    chains.forEach((chain, i) => { if (counts.get(names[i]) > 1) names[i] = chain.slice(-k).join("-"); });
+  }
+  const seen = new Map();
+  return names.map((name) => {
+    const n = (seen.get(name) ?? 0) + 1;
+    seen.set(name, n);
+    return n > 1 ? `${name}-${n}` : name;
+  });
+}
+
+function clusterRepo(repo, sources, edges, perFile) {
+  const files = [...sources].sort(compare);
+  let groups = seedGroups(files, packageDirs(repo)).flatMap((group) => expandGroup(group, edges));
+  groups = mergeTiny(groups, edges, perFile).sort((a, b) => compare(a.files[0].file, b.files[0].file));
+  const names = nameGroups(groups, basename(repo.root));
+  return groups.map((group, i) => ({ name: names[i], files: group.files.map((f) => f.file) }));
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  const root = resolveRoot(opts.root);
+  const repo = makeRepo(root);
+  const mapFiles = repoMap(root);
+  const rank = new Map(mapFiles.map((f) => [f.path, f]));
+  const tests = repo.files.filter(isTest);
+  const sources = repo.files.filter((file) => !isTest(file) && (SOURCE_EXT.has(extname(file)) || rank.has(file) || isScript(root, file)));
+  const { named: testMap, required: requiredMap } = mapTests(repo, sources);
+
+  const ecosystems = [];
+  const entries = [];
+  const notation = [ROUTE_NOTATION];
+  for (const extractor of EXTRACTORS) {
+    if (!extractor.enabled(repo)) continue;
+    ecosystems.push(extractor.name);
+    for (const e of extractor.extract(repo)) entries.push(e);
+    if (extractor.plugins) for (const plugin of extractor.plugins(repo)) ecosystems.push(`${extractor.name}:${plugin}`);
+    if (extractor.notation) notation.push(...extractor.notation(repo));
+  }
+  if (entries.some((e) => e.kind === "option" && e.name.startsWith("--"))) notation.push(OPTION_NOTATION);
+  entries.sort((a, b) => compare(a.file, b.file) || a.line - b.line || compare(a.trigger, b.trigger) || compare(a.name, b.name));
+
+  const perFile = {};
+  for (const file of sources) {
+    perFile[file] = { rank: rank.has(file) ? Number(rank.get(file).rank.toFixed(6)) : 0, defs: rank.get(file)?.defs.length ?? 0, tests: testMap.get(file) ?? [], required_by_tests: (requiredMap.get(file) ?? []).filter((t) => !(testMap.get(file) ?? []).includes(t)), entries: [] };
+  }
+  for (const e of entries) if (perFile[e.file]) perFile[e.file].entries.push(e);
+
+  const clusterable = sources.filter((file) => SOURCE_EXT.has(extname(file)) && !/(^|\/)(node_modules|vendor|dist|build)\//.test(file));
+  const edges = referenceEdges(repo, rank, clusterable);
+  const clusters = clusterRepo(repo, clusterable, edges, perFile)
+    .map(({ name, files }) => {
+      const members = files.sort((a, b) => (rank.get(b)?.rank ?? 0) - (rank.get(a)?.rank ?? 0) || compare(a, b));
+      const clusterEntries = members.flatMap((file) => perFile[file].entries);
+      const topKeys = clusterEntries.filter((e) => e.kind === "key" || e.kind === "route" || e.kind === "command").slice(0, 5).map((e) => e.trigger);
+      return {
+        name,
+        files: members,
+        tests: [...new Set(members.flatMap((file) => perFile[file].tests))].sort(compare),
+        rank: Number(members.reduce((sum, file) => sum + (rank.get(file)?.rank ?? 0), 0).toFixed(6)),
+        entry_count: clusterEntries.length,
+        sample_triggers: topKeys,
+      };
+    })
+    .sort((a, b) => b.rank - a.rank || compare(a.name, b.name));
+
+  const triggers = {};
+  for (const e of entries) {
+    if (e.kind === "prefix") continue;
+    (triggers[e.trigger] ??= []).push({ name: e.name, kind: e.kind, file: e.file, line: e.line, label: e.label ?? null, map: e.map ?? null });
+  }
+
+  if (opts.keys !== null || opts.triggers !== null) {
+    const prefix = opts.keys ?? opts.triggers;
+    const wanted = opts.keys !== null ? new Set(["key"]) : null;
+    const rows = [];
+    for (const [trigger, list] of Object.entries(triggers)) {
+      if (!trigger.startsWith(prefix)) continue;
+      for (const item of list) if (!wanted || wanted.has(item.kind)) rows.push(`${trigger}\t${item.name}\t${item.label ?? ""}`);
+    }
+    process.stdout.write(`${rows.sort(compare).join("\n")}\n`);
+    return;
+  }
+  if (opts.clusters) {
+    process.stdout.write(`${JSON.stringify(clusters, null, 2)}\n`);
+    return;
+  }
+  const files = opts.file ? Object.fromEntries(Object.entries(perFile).filter(([file]) => file === opts.file)) : perFile;
+  process.stdout.write(`${JSON.stringify({ root, ecosystems, notation, skipped: repo.skipped, test_files: tests.length, tests: tests.filter((file) => SOURCE_EXT.has(extname(file)) || isScript(root, file)).sort(compare), files, clusters, triggers }, null, 2)}\n`);
+}
+
+main();

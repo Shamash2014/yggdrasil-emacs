@@ -1,8 +1,8 @@
 # Features
 
-One section per user-visible feature: sub-features, how to get there, driving it and gotchas, each as a subsection.
+One section per user-visible feature with five h3 subsections: Sub-features, How to get to it, Driving it, Gotchas and Code.
 
-Every recipe starts from the baseline in skills/verify-notes/SKILL.md: Notes at http://127.0.0.1:4173 on a disposable data directory, seeded with Quarterly plan and Grocery list, and control-notes doctor passing. Each feature is an h2 named the way a user names it; intents link to it as "Feature: <name>". Its h3s are Sub-features, How to get to it, Driving it and Gotchas, in that order, each opening with a paragraph of at most 250 characters. The archive step adds a Changes h3; leave it to that step.
+Every recipe starts from the baseline in skills/verify-notes/SKILL.md: Notes at http://127.0.0.1:4173 on a disposable data directory, seeded with Quarterly plan and Grocery list, and control-notes doctor passing. Each feature is an h2 named the way a user names it; intents link to it as "Feature: <name>". Its h3s are Sub-features, How to get to it, Driving it, Gotchas and Code, in that order, each opening with a paragraph of at most 250 characters. The archive step adds a Changes h3; leave it to that step.
 
 ## Create a note
 
@@ -53,6 +53,18 @@ Traps that waste a run or make its proof worthless.
 - Titles are trimmed on save. Assert the rendered title, not the draft input value.
 - A save status alone is not proof. Reopen the note from the list.
 - Remove Release checklist and CLI note in cleanup, but keep their proof artifacts.
+
+### Code
+
+The main files, then the test files that map to them by name.
+
+- `src/ui/note-editor.tsx`
+- `src/cli/notes-create.ts`
+
+Tests:
+
+- `src/ui/note-editor.test.tsx`
+- `src/cli/notes-create.test.ts`
 
 ## Search notes
 
@@ -109,3 +121,15 @@ Traps that waste a run or make its proof worthless.
 - Archived notes are left out unless the user turns on Include archived.
 - The CLI prints for humans by default. Use --format json for stable assertions.
 - Opening a result changes browser state. Reopen search before proving another query.
+
+### Code
+
+The main files, then the test files that map to them by name.
+
+- `src/ui/search-dialog.tsx`
+- `src/cli/notes-search.ts`
+
+Tests:
+
+- `src/ui/search-dialog.test.tsx`
+- `src/cli/notes-search.test.ts`

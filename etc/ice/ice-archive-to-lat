@@ -13,8 +13,7 @@ ice = importlib.util.module_from_spec(importlib.util.spec_from_loader("ice_scena
 _loader.exec_module(ice)
 
 MAX_LEAD = 240
-FEATURES_LEAD = ("One section per user-visible feature: sub-features, how to get there, "
-                 "driving it and gotchas, each as a subsection: what and why, invariants and code anchors, never the code restated.")
+FEATURES_LEAD = ("One section per user-visible feature with five h3 subsections: Sub-features, How to get to it, Driving it, Gotchas and Code. Say what and why, invariants and code anchors, never the code restated.")
 CHANGES_LEAD = "Archived OpenSpec changes, newest last: what changed, why and where, linked to the feature."
 INDEX_ENTRIES = {
     "features": "feature map, one section per user-visible feature",
@@ -129,8 +128,8 @@ def link_feature(path, feature, change):
             b[1] = [text]
             break
     else:
-        blocks.append([feature, ["## %s\n\nStub filed by ice-archive-to-lat; fill in sub-features, how to get there, "
-                                  "driving it and gotchas.\n\n### Changes\n\nArchived changes that touched this "
+        blocks.append([feature, ["## %s\n\nStub filed by ice-archive-to-lat; add the Sub-features, How to get to it, Driving it, Gotchas "
+                                  "and Code h3s.\n\n### Changes\n\nArchived changes that touched this "
                                   "feature.\n\n%s\n" % (feature, link)]])
     write_if_changed(path, join_h2(head, blocks))
 
