@@ -85,7 +85,6 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                                     ygg-git-compare-submit-tests--comments))))
                ((symbol-function 'ygg-git-compare--list) #'current-buffer)
                ((symbol-function 'ygg-git-compare--range-label) (lambda () "R"))
-               ((symbol-function 'ygg-git-compare--this-pr) (lambda () ,pr))
                ((symbol-function 'y-or-n-p)
                 (lambda (prompt)
                   (push prompt ygg-git-compare-submit-tests--prompts)
@@ -95,8 +94,8 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                   (when format
                     (push (apply #'format-message format args)
                           ygg-git-compare-submit-tests--messages))))
-               ((symbol-function 'ygg-git-compare--forge-run)
-                (lambda (program &rest args)
+               ((symbol-function 'ygg-git-compare--forge-async)
+                (lambda (program args callback &optional _timeout)
                   (let* ((input (cadr (member "--input" args)))
                          (body (and input (json-parse-string
                                            (with-temp-buffer
@@ -104,7 +103,13 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                                              (buffer-string))
                                            :object-type 'plist :array-type 'list))))
                     (push (list program args body) ygg-git-compare-submit-tests--calls)
-                    (funcall ,answer program args body)))))
+                    (apply callback
+                           (condition-case failure
+                               (list 0 (funcall ,answer program args body) "")
+                             (error (list 1 "" (error-message-string failure))))))))
+               ((symbol-function 'ygg-git-compare--this-pr)
+                (lambda (&optional continue)
+                  (if continue (funcall continue ,pr) ,pr))))
        (with-temp-buffer ,@body))))
 
 (defvar ygg-git-compare-submit-tests--yes t)
@@ -287,9 +292,11 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
   (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
       ygg-git-compare-submit-tests--github-pr
       (lambda (&rest _) (user-error "gh api: one pending review per pull request"))
-    (should-error (ygg-git-compare-submit-forge 'draft) :type 'user-error)
+    (ygg-git-compare-submit-forge 'draft)
     (should (= (length ygg-git-compare-submit-tests--comments) 5))
-    (should-not ygg-git-compare-submit-tests--dropped)))
+    (should-not ygg-git-compare-submit-tests--dropped)
+    (should (string-search "Posted 0 of 4; 4 kept: gh api: one pending review per pull request"
+                           (car ygg-git-compare-submit-tests--messages)))))
 
 (ert-deftest ygg-git-compare-submit-confirm-no-sends-nothing ()
   (let ((ygg-git-compare-submit-tests--yes nil))
@@ -576,5 +583,56 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
       (should (string-search "a.txt" text))
       (should (string-search "b.txt" text)))
     (should (equal (ygg-git-compare-submit-tests--ids) '("todo" "nit")))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-reports-each-comment-then-the-approval ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
+      ygg-git-compare-submit-tests--gitlab-pr (lambda (&rest _) "{\"id\":1}")
+    (ygg-git-compare-submit-forge 'approve)
+    (should (equal (reverse ygg-git-compare-submit-tests--messages)
+                   (list "Posting 1/4…" "Posting 3/4…" "Posting 4/4…" "Approving…"
+                         (format "Posted 4 comments to gitlab MR !7 and approved it (%s)"
+                                 (plist-get ygg-git-compare-submit-tests--gitlab-pr :url)))))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-names-the-first-failure-and-keeps-the-rest ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
+      ygg-git-compare-submit-tests--gitlab-pr
+      (lambda (_program _args body)
+        (if (equal (plist-get body :body) "**nit:** line")
+            (user-error "400 position is invalid")
+          "{\"id\":1}"))
+    (ygg-git-compare-submit-forge 'comment)
+    (should (equal (car ygg-git-compare-submit-tests--messages)
+                   "Posted 3 of 4; 1 kept: 400 position is invalid"))
+    (should (equal (ygg-git-compare-submit-tests--ids) '("line" "proposed")))))
+
+(ert-deftest ygg-git-compare-submit-refuses-a-second-review-while-one-is-in-flight ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--typed
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (let (pending)
+      (cl-letf (((symbol-function 'ygg-git-compare--forge-async)
+                 (lambda (_program _args callback &optional _timeout)
+                   (push callback pending))))
+        (ygg-git-compare-submit-forge 'comment)
+        (should (= (length pending) 1))
+        (should (string-search "already being posted"
+                               (cadr (should-error (ygg-git-compare-submit-forge 'comment)
+                                                   :type 'user-error))))
+        (should (= (length ygg-git-compare-submit-tests--prompts) 1))
+        (funcall (pop pending) 0 "{}" "")
+        (should (equal ygg-git-compare-submit-tests--dropped '("nit")))
+        (should (string-prefix-p "Posted 1 comment to"
+                                 (car ygg-git-compare-submit-tests--messages)))
+        (should (string-search "No comments held"
+                               (cadr (should-error (ygg-git-compare-submit-forge 'comment)
+                                                   :type 'user-error))))))))
+
+(ert-deftest ygg-git-compare-submit-says-what-was-also-decided ()
+  (dolist (case '((approve . " and approved it") (request-changes . " and requested changes")))
+    (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
+        ygg-git-compare-submit-tests--gitlab-pr (lambda (&rest _) "{\"id\":1}")
+      (ygg-git-compare-submit-forge (car case))
+      (should (equal (car ygg-git-compare-submit-tests--messages)
+                     (format "Posted 4 comments to gitlab MR !7%s (%s)" (cdr case)
+                             (plist-get ygg-git-compare-submit-tests--gitlab-pr :url)))))))
 
 ;;; ygg-git-compare-submit-tests.el ends here

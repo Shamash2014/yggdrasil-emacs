@@ -587,6 +587,50 @@ ends it."
                           (and confidence (format " · %s" confidence)))
                   'face (if wrong 'error 'success)))))
 
+(defun ygg-git-compare--remote-id-p (id)
+  (and (stringp id) (string-prefix-p "remote:" id)))
+
+(defvar ygg-git-compare--mark-drafts nil
+  "Whether the comments of the compare show as drafts, as they do beside
+those of the forge.")
+
+(declare-function ygg-git-compare--remote-comments "ygg-git-compare-threads" (list))
+(declare-function ygg-git-compare--remote-block "ygg-git-compare-threads" (comment))
+(autoload 'ygg-git-compare--remote-comments "ygg-git-compare-threads")
+(autoload 'ygg-git-compare--remote-block "ygg-git-compare-threads")
+(autoload 'ygg-git-compare-threads-toggle-resolved "ygg-git-compare-threads" nil t)
+(autoload 'ygg-git-compare-threads-open "ygg-git-compare-threads" nil t)
+(autoload 'ygg-git-compare-threads-copy "ygg-git-compare-threads" nil t)
+(autoload 'ygg-git-compare-threads-reply "ygg-git-compare-threads" nil t)
+(autoload 'ygg-git-compare-threads-toggle-fold "ygg-git-compare-threads" nil t)
+
+(defun ygg-git-compare--remote-here-p ()
+  "Whether a comment from the forge is shown on this line, wherever on it
+point is."
+  (ignore-errors
+    (seq-some (lambda (ov)
+                (seq-some #'ygg-git-compare--remote-id-p
+                          (overlay-get ov 'ygg-git-compare-comments)))
+              (overlays-in (line-beginning-position) (line-end-position)))))
+
+(defun ygg-git-compare--bind-on-remote (key command)
+  "Bind KEY in the compare's map to COMMAND on a line a comment from the forge
+is on, anywhere on the line, and to what it was otherwise."
+  (let* ((bound (keymap-lookup ygg-git-compare-mode-map key))
+         (original (if (eq (car-safe bound) 'menu-item) (nth 2 bound) bound)))
+    (keymap-set ygg-git-compare-mode-map key
+                `(menu-item "" ,original
+                            :filter ,(lambda (original)
+                                       (if (ygg-git-compare--remote-here-p) command original))))))
+
+(dolist (binding '(("o" . ygg-git-compare-threads-open)
+                   ("y" . ygg-git-compare-threads-copy)
+                   ("r" . ygg-git-compare-threads-reply)
+                   ("TAB" . ygg-git-compare-threads-toggle-fold)
+                   ("<tab>" . ygg-git-compare-threads-toggle-fold)))
+  (ygg-git-compare--bind-on-remote (car binding) (cdr binding)))
+(keymap-set ygg-git-compare-mode-map "H" #'ygg-git-compare-threads-toggle-resolved)
+
 (defun ygg-git-compare--comment-block (comment &optional where)
   "COMMENT as lines to show, naming WHERE it is on when given."
   (let* ((type (plist-get comment :type))
@@ -608,6 +652,8 @@ ends it."
                            (and where (propertize where 'face 'shadow))
                            (when-let* ((author (plist-get comment :author)))
                              (propertize author 'face 'shadow))
+                           (and ygg-git-compare--mark-drafts (not pending)
+                                (propertize "draft" 'face '(warning italic)))
                            (and pending (propertize "pending" 'face 'shadow))
                            (and (ygg-git-compare--stale-p comment)
                                 (propertize (format "stale · made on %s"
@@ -621,12 +667,14 @@ ends it."
          (head (string-join (append meta (and title (list (propertize title 'face 'bold))))
                             " "))
          (body (split-string (or (plist-get comment :text) "") "\n")))
-    (mapconcat (lambda (line) (concat bar line))
-               (append (unless (string-empty-p head) (list head))
-                       (mapcar (lambda (line)
-                                 (if pending (propertize line 'face '(shadow italic)) line))
-                               body))
-               "\n")))
+    (if (plist-get comment :remote)
+        (ygg-git-compare--remote-block comment)
+      (mapconcat (lambda (line) (concat bar line))
+                 (append (unless (string-empty-p head) (list head))
+                         (mapcar (lambda (line)
+                                   (if pending (propertize line 'face '(shadow italic)) line))
+                                 body))
+                 "\n"))))
 
 (defun ygg-git-compare--line-pos (file comment)
   "Where in FILE's section the line COMMENT is on ends, or nil."
@@ -644,6 +692,12 @@ ends it."
                   (save-excursion (goto-char (car hit)) (line-end-position))))
               (oref file children))))
 
+(defun ygg-git-compare--shown-text (shown)
+  "The blocks of SHOWN, newest first as (ID BLOCK), oldest first, those a
+folded thread leaves empty left out."
+  (mapconcat #'cadr (seq-remove (lambda (entry) (string-empty-p (cadr entry))) (reverse shown))
+             "\n"))
+
 (defun ygg-git-compare--draw-comments ()
   "Show the compare's comments under what each is on in this diff; those
 it has no place for at the top of the diff of every file."
@@ -651,9 +705,13 @@ it has no place for at the top of the diff of every file."
     (when (overlay-get ov 'ygg-git-compare-comments) (delete-overlay ov)))
   (when-let* (((derived-mode-p 'magit-diff-mode))
               (list (ignore-errors (ygg-git-compare--list)))
-              (comments (reverse (buffer-local-value 'ygg-git-compare--comments list)))
+              (comments (append (ygg-git-compare--remote-comments list)
+                                (reverse (buffer-local-value 'ygg-git-compare--comments list))))
               ((bound-and-true-p magit-root-section)))
-    (let ((files (seq-filter (lambda (s) (magit-section-match 'file s))
+    (let ((ygg-git-compare--mark-drafts
+           (seq-find (lambda (c) (and (plist-get c :remote) (not (plist-get c :notice))))
+                     comments))
+          (files (seq-filter (lambda (s) (magit-section-match 'file s))
                              (oref magit-root-section children)))
           (places nil)
           (stale nil)
@@ -683,16 +741,20 @@ it has no place for at the top of the diff of every file."
         (let ((ov (make-overlay (save-excursion (goto-char pos) (line-beginning-position)) pos)))
           (overlay-put ov 'ygg-git-compare-comments (mapcar #'car shown))
           (overlay-put ov 'after-string
-                       (concat "\n" (mapconcat #'cadr (reverse shown) "\n")))))
+                       (concat "\n" (ygg-git-compare--shown-text shown)))))
       (when (or stale top)
-        (let ((ov (make-overlay (point-min) (point-min))))
+        (let ((ov (make-overlay (point-min)
+                                (if (seq-some #'ygg-git-compare--remote-id-p
+                                              (mapcar #'car top))
+                                    (save-excursion (goto-char (point-min)) (line-end-position))
+                                  (point-min)))))
           (overlay-put ov 'ygg-git-compare-comments (mapcar #'car (append stale top)))
           (overlay-put ov 'before-string
                        (concat (when stale
                                  (concat (propertize "Made on another range" 'face 'warning)
                                          "\n" (mapconcat #'cadr (reverse stale) "\n") "\n"))
                                (when top
-                                 (concat (mapconcat #'cadr (reverse top) "\n") "\n")))))))))
+                                 (concat (ygg-git-compare--shown-text top) "\n")))))))))
 
 (defun ygg-git-compare--redraw-comments (list)
   "Show LIST's comments again wherever they are shown."
@@ -1046,6 +1108,7 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
     ("&" "submit to PR" ygg-git-compare-submit)
     ("@" ygg-git-compare-comments--review-description ygg-git-compare-review)]
    ["View"
+    ("H" "hide or show resolved threads" ygg-git-compare-threads-toggle-resolved)
     ("I" "interdiff since last review" ygg-git-compare-interdiff)
     ("x" "explain the change" ygg-git-compare-explain)
     ("b" "switch base" ygg-git-compare-switch-base)

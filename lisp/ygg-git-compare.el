@@ -244,10 +244,46 @@ which ended with STATUS and said ERR, did not answer."
                  (funcall done (car value))
                (funcall done nil (format "%s answered nothing readable" program)))))))
 
+(defvar ygg-git-compare--gitdirs (make-hash-table :test #'equal)
+  "Each directory's git directory, asked of git once, as (GITDIR TOP CLAIM):
+the nearest directory holding a .git, and where that .git points.")
+
+(defun ygg-git-compare--dotgit-claim (top)
+  "Where the .git in TOP points: itself as a directory, else its gitdir: line."
+  (when top
+    (let ((dotgit (expand-file-name ".git" top)))
+      (if (file-directory-p dotgit)
+          dotgit
+        (ignore-errors
+          (with-temp-buffer
+            (insert-file-contents dotgit nil 0 1024)
+            (when (re-search-forward "^gitdir: *\\(.+\\)$" nil t)
+              (expand-file-name (match-string 1) top))))))))
+
+(defun ygg-git-compare--gitdir-current-p (here memo)
+  "Whether MEMO, a git directory found from HERE, is still what HERE has,
+judged from the file system alone."
+  (pcase-let ((`(,gitdir ,top ,claim) memo))
+    (or (file-remote-p gitdir)
+        (and (file-exists-p (expand-file-name "HEAD" gitdir))
+             (equal top (locate-dominating-file here ".git"))
+             (equal claim (ygg-git-compare--dotgit-claim top))))))
+
 (defun ygg-git-compare--gitdir ()
-  "This repository's git directory, however the path to it is spelled."
-  (when-let* ((gitdir (magit-gitdir)))
-    (file-truename gitdir)))
+  "This repository's git directory, however the path to it is spelled.  Every
+cache, in-flight lookup and fetch lane is keyed by it, so a right one is
+enough to keep their repositories apart."
+  (let* ((here (expand-file-name default-directory))
+         (memo (gethash here ygg-git-compare--gitdirs)))
+    (if (and memo (ygg-git-compare--gitdir-current-p here memo))
+        (car memo)
+      (remhash here ygg-git-compare--gitdirs)
+      (when-let* ((gitdir (magit-gitdir)))
+        (let ((top (and (not (file-remote-p here)) (locate-dominating-file here ".git"))))
+          (car (puthash here
+                        (list (if (file-remote-p gitdir) gitdir (file-truename gitdir))
+                              top (ygg-git-compare--dotgit-claim top))
+                        ygg-git-compare--gitdirs)))))))
 
 (defvar ygg-git-compare--fetch-lanes (make-hash-table :test #'equal)
   "Each busy git directory's fetches, as (BUSY . QUEUE) by git directory.")
@@ -278,7 +314,8 @@ one at a time, however they end."
                         (remhash lane ygg-git-compare--fetch-lanes))))))
     (unwind-protect
         (prog1 (condition-case failure
-                   (funcall job release)
+                   (let ((ygg-git-compare--landing land))
+                     (funcall job release))
                  (error (when land
                           (funcall land nil (error-message-string failure)))
                         (if deferred
@@ -292,21 +329,27 @@ one at a time, however they end."
   "Fetch REFSPEC from REMOTE into FETCH_HEAD, then call DONE with the commit
 there, or with nil and what went wrong.  Fetches share FETCH_HEAD, so those
 into one repository run one at a time."
-  (let ((dir default-directory))
-    (ygg-git-compare--serially
-     (or (ygg-git-compare--gitdir) dir)
-     (lambda (release)
-       (let ((default-directory dir))
-         (ygg-git-compare--forge-async
-          "git" (list "fetch" "--quiet" "--no-tags" remote refspec)
-          (lambda (status text err)
-            (let ((default-directory dir))
-              (unwind-protect
-                  (ygg-git-compare--answer
-                   done "git" status text err
-                   (lambda (_text) (ygg-git-compare--commit "FETCH_HEAD")))
-                (funcall release))))
-          ygg-git-compare-fetch-timeout))))))
+  (let* ((dir default-directory)
+         (answered nil)
+         (once (lambda (&rest answer)
+                 (unless answered
+                   (setq answered t)
+                   (apply done answer)))))
+    (let ((ygg-git-compare--landing once))
+      (ygg-git-compare--serially
+       (or (ygg-git-compare--gitdir) dir)
+       (lambda (release)
+         (let ((default-directory dir))
+           (ygg-git-compare--forge-async
+            "git" (list "fetch" "--quiet" "--no-tags" remote refspec)
+            (lambda (status text err)
+              (let ((default-directory dir))
+                (unwind-protect
+                    (ygg-git-compare--answer
+                     once "git" status text err
+                     (lambda (_text) (ygg-git-compare--commit "FETCH_HEAD")))
+                  (funcall release))))
+            ygg-git-compare-fetch-timeout)))))))
 
 (defvar ygg-git-compare--caches (make-hash-table :test #'equal)
   "Each git directory's answers, by key, as (:value V :time T) or, after a
@@ -406,6 +449,19 @@ later than now, or nil when it is not one."
       (unwind-protect (funcall body)
         (ignore-errors (delete-directory lock))))))
 
+(defconst ygg-git-compare--cache-kind-max-rows '((threads . 50))
+  "Rows kept per kind of answer, where a kind is too big to keep as many as
+the rest.")
+
+(defun ygg-git-compare--cache-cap-kinds (rows)
+  "ROWS, newest first, without those past the cap of their kind."
+  (let (seen)
+    (seq-filter (lambda (row)
+                  (let* ((kind (car-safe (car row)))
+                         (cap (cdr (assq kind ygg-git-compare--cache-kind-max-rows))))
+                    (or (null cap) (<= (cl-incf (alist-get kind seen 0)) cap))))
+                rows)))
+
 (defun ygg-git-compare--cache-save (gitdir table)
   "Write TABLE's answers into GITDIR's file, merged with what other Emacs
 sessions wrote there since, the newest of each kept; the old and the
@@ -428,8 +484,9 @@ excess dropped."
                           (push (list key :value (plist-get entry :value) :time time)
                                 rows))))
                     table)
-           (setq rows (seq-take (sort rows (lambda (a b) (> (plist-get (cdr a) :time)
-                                                            (plist-get (cdr b) :time))))
+           (setq rows (seq-take (ygg-git-compare--cache-cap-kinds
+                                 (sort rows (lambda (a b) (> (plist-get (cdr a) :time)
+                                                             (plist-get (cdr b) :time)))))
                                 ygg-git-compare--cache-max-rows))
            (let ((temp (make-temp-file file))
                  (print-length nil) (print-level nil) (coding-system-for-write 'utf-8))
@@ -762,11 +819,12 @@ the background."
          (dolist (pr pulls)
            (add (format "#%s %s" (plist-get pr :number) (plist-get pr :title))
 		"Pull requests"
-		(cons 'pr (list :number (plist-get pr :number)
-				:title (plist-get pr :title)
-				:head (plist-get pr :headRefName)
-				:base (plist-get pr :baseRefName)
-				:remote remote))
+		(cons 'pr (append (list :number (plist-get pr :number)
+					:title (plist-get pr :title)
+					:head (plist-get pr :headRefName)
+					:base (plist-get pr :baseRefName)
+					:remote remote)
+				  (ygg-git-compare--repo-props repo)))
 		(format "%s → %s" (plist-get pr :headRefName)
 			(plist-get pr :baseRefName)))))
        (dolist (line (magit-git-lines "log" "--format=%h %s" "-n" "30"))
@@ -1396,45 +1454,6 @@ started in ROOT when new; answer its session."
 
 ;;; Posting to the pull request
 
-(defun ygg-git-compare--forge-run (program &rest args)
-  "What PROGRAM ARGS prints, run on this machine; a user error naming its
-complaint on failure."
-  (with-temp-buffer
-    (let* ((default-directory (if (file-remote-p default-directory)
-                                  temporary-file-directory
-                                default-directory))
-           (err (make-temp-file "ygg-git-compare-forge-")))
-      (unwind-protect
-          (let ((status (condition-case failure
-                            (apply #'call-process program nil (list t err) nil args)
-                          (file-error (user-error "%s did not start: %s" program
-                                                  (error-message-string failure))))))
-            (unless (eql status 0)
-              (user-error "%s %s: %s" program (car args)
-                          (string-trim (concat (with-temp-buffer
-                                                 (insert-file-contents err)
-                                                 (buffer-string))
-                                               "\n" (buffer-string))))))
-        (delete-file err)))
-    (buffer-string)))
-
-(defun ygg-git-compare--forge-json (program body &rest args)
-  "What PROGRAM ARGS prints, read as JSON; BODY, when non-nil, is posted
-as JSON through api's --input."
-  (let ((input (and body (let ((coding-system-for-write 'utf-8))
-                           (make-temp-file "ygg-git-compare-body-" nil ".json"
-                                           (json-serialize body))))))
-    (unwind-protect
-        (let ((out (string-trim
-                    (apply #'ygg-git-compare--forge-run program
-                           (append args
-                                   (and input (list "--method" "POST"
-                                                    "--header" "Content-Type: application/json"
-                                                    "--input" input)))))))
-          (unless (string-empty-p out)
-            (ygg-git-compare--json out)))
-      (when input (delete-file input)))))
-
 (defun ygg-git-compare--lab-host ()
   (car (split-string (ygg-git-compare--url-key (or (getenv "LAB_HOST")
                                                     (bound-and-true-p ygg-lab-host)
@@ -1540,6 +1559,19 @@ what glab or gh calls it; nil if none knows it."
 (defvar ygg-git-compare--forge-repos (make-hash-table :test #'equal)
   "Each remote's repository, by checkout and URL.")
 
+(defun ygg-git-compare--rewrite-url (url)
+  "URL as git reaches it, its longest url.BASE.insteadOf prefix replaced."
+  (let (best)
+    (dolist (line (ignore-errors
+                    (magit-git-lines "config" "--get-regexp" "^url\\..*\\.insteadof$")))
+      (when (string-match "\\`url\\.\\(.*\\)\\.insteadof \\(.+\\)\\'" line)
+        (let ((base (match-string 1 line))
+              (prefix (match-string 2 line)))
+          (when (and (string-prefix-p prefix url)
+                     (or (null best) (> (length prefix) (length (car best)))))
+            (setq best (cons prefix base))))))
+    (if best (concat (cdr best) (substring url (length (car best)))) url)))
+
 (defun ygg-git-compare--forge-repo (&optional remote)
   "REMOTE's repository as (FORGE HOST PATH), FORGE github or gitlab;
 REMOTE defaults to the one pull requests are taken from."
@@ -1549,14 +1581,25 @@ REMOTE defaults to the one pull requests are taken from."
                   (user-error "Remote %s has no URL" remote)))
          (memo (cons (magit-toplevel) url)))
     (or (gethash memo ygg-git-compare--forge-repos)
-        (let* ((key (ygg-git-compare--url-key url))
-               (host (car (split-string key "/")))
-               (path (substring key (min (length key) (1+ (length host)))))
-               (hosts (delq nil (list host (ygg-git-compare--ssh-hostname host))))
-               (forge (or (seq-some #'ygg-git-compare--configured-forge hosts)
-                          (seq-some #'ygg-git-compare--named-forge hosts)
-                          (user-error "%s is neither GitHub nor GitLab" host))))
-          (puthash memo (list (car forge) (cdr forge) path) ygg-git-compare--forge-repos)))))
+        (let ((rewritten (ygg-git-compare--rewrite-url url)))
+          (puthash memo
+                   (or (and (not (equal rewritten url))
+                            (not (string-match-p "\\`\\(?:/\\|file:\\|\\.\\)" rewritten))
+                            (ignore-errors (ygg-git-compare--classify-url rewritten)))
+                       (ygg-git-compare--classify-url url))
+                   ygg-git-compare--forge-repos)))))
+
+(defun ygg-git-compare--classify-url (url)
+  "URL's repository as (FORGE HOST PATH); a user error when its host is
+neither GitHub nor GitLab."
+  (let* ((key (ygg-git-compare--url-key url))
+         (host (car (split-string key "/")))
+         (path (substring key (min (length key) (1+ (length host)))))
+         (hosts (delq nil (list host (ygg-git-compare--ssh-hostname host))))
+         (forge (or (seq-some #'ygg-git-compare--configured-forge hosts)
+                    (seq-some #'ygg-git-compare--named-forge hosts)
+                    (user-error "%s is neither GitHub nor GitLab" host))))
+    (list (car forge) (cdr forge) path)))
 
 (defun ygg-git-compare--forge-pr-fetch (repo selector done)
   "Ask REPO's forge for the open pull or merge request SELECTOR names, a
@@ -1618,6 +1661,10 @@ and what went wrong."
                "glab" status text err
                (lambda (text) (plist-get (car (ygg-git-compare--json text)) :iid)))))))))))
 
+(defun ygg-git-compare--repo-props (repo)
+  "REPO, as `--forge-repo' gives it, as the plist keys a pull request side carries."
+  (and repo (list :forge (nth 0 repo) :host (nth 1 repo) :path (nth 2 repo))))
+
 (defun ygg-git-compare--pr-key (repo selector)
   (list 'pr repo selector))
 
@@ -1675,33 +1722,77 @@ there is none, WHAT being how it is called."
                          ((magit-remote-branch-p rev)
                           (cdr (magit-split-branch-name rev)))))))
 
-(defun ygg-git-compare--this-pr ()
+(defun ygg-git-compare--pr-absence (repo selector what)
+  "Why SELECTOR, called WHAT, has no pull request in the cache of REPO."
+  (let ((entry (ygg-git-compare--cache-entry (ygg-git-compare--pr-key repo selector))))
+    (cond ((plist-get entry :error)
+           (format "Could not read %s: %s" what (plist-get entry :error)))
+          (entry (format "No open pull request for %s" what))
+          (t (format "Looking up %s…" what)))))
+
+(defun ygg-git-compare--when-pr (repo selector what continue)
+  "Call CONTINUE with the open request SELECTOR names in REPO, now when it is
+known, else when the forge has said, with WHAT in the echo area meanwhile.
+A lookup that fails or finds nothing says so, once, and calls nothing."
+  (let* ((buffer (current-buffer))
+         (dir default-directory)
+         (called nil)
+         (settle (lambda (pr err)
+                   (unless called
+                     (setq called t)
+                     (run-at-time
+                      0 nil
+                      (lambda ()
+                        (when (buffer-live-p buffer)
+                          (with-current-buffer buffer
+                            (let ((default-directory dir))
+                              (condition-case failure
+                                  (cond (err (user-error "Could not read %s: %s" what err))
+                                        ((null pr) (user-error "No open pull request for %s" what))
+                                        (t (funcall continue pr)))
+                                (error (message "%s" (error-message-string failure))))))))))))
+         (pr (ygg-git-compare--forge-pr repo selector settle)))
+    (cond (pr (setq called t) (funcall continue pr))
+          (called)
+          ((gethash (cons (ygg-git-compare--gitdir) (ygg-git-compare--pr-key repo selector))
+                    ygg-git-compare--inflight)
+           (message "Looking up %s…" what))
+          (t (user-error "%s" (ygg-git-compare--pr-absence repo selector what))))))
+
+(defun ygg-git-compare--this-pr (&optional continue)
   "The pull or merge request this compare is the range of; a user error
-saying why when it is not."
+saying why when it is not.  With CONTINUE, a function of it, nothing is
+returned: it is called with the request once the forge has said, at once
+when that is known, and a compare that is not its range says why instead."
   (let* ((spec (cdr-safe ygg-git-compare--b-spec))
          (pr-spec (eq (car ygg-git-compare--b-spec) 'pr))
          (repo (ygg-git-compare--forge-repo (and pr-spec (plist-get spec :remote))))
-         (pr (if pr-spec
-                 (ygg-git-compare--known-pr repo (plist-get spec :number)
-                                            (format "#%s" (plist-get spec :number)))
-               (let ((branch (or (ygg-git-compare--b-branch)
-                                 (user-error "B is not a branch, so it has no pull request"))))
-                 (ygg-git-compare--known-pr repo branch branch))))
-         (name (ygg-git-compare--pr-name pr)))
-    (cond ((not (equal ygg-git-compare--dots "..."))
-           (user-error "%s is diffed A...B; this compare is A..B" name))
-          ((plist-get ygg-git-compare--plan :work)
-           (user-error "This compare shows uncommitted changes %s does not have" name))
-          ((not (equal (plist-get ygg-git-compare--b :diff) (plist-get pr :head)))
-           (user-error "B is at %s, %s's head at %s"
-                       (plist-get ygg-git-compare--b :diff) name (plist-get pr :head)))
-          ((not (plist-get pr :base))
-           (user-error "%s's base %s is not here; fetch it" name (plist-get pr :start)))
-          ((not (equal (magit-git-string "merge-base" (plist-get ygg-git-compare--a :diff)
-                                         (plist-get ygg-git-compare--b :diff))
-                       (plist-get pr :base)))
-           (user-error "A does not part from B where %s's base does" name)))
-    pr))
+         (selector (if pr-spec
+                       (plist-get spec :number)
+                     (or (ygg-git-compare--b-branch)
+                         (user-error "B is not a branch, so it has no pull request"))))
+         (what (if pr-spec (format "PR #%s" selector) selector))
+         (check (lambda (pr)
+                  (let ((name (ygg-git-compare--pr-name pr)))
+                    (cond ((not (equal ygg-git-compare--dots "..."))
+                           (user-error "%s is diffed A...B; this compare is A..B" name))
+                          ((plist-get ygg-git-compare--plan :work)
+                           (user-error "This compare shows uncommitted changes %s does not have" name))
+                          ((not (equal (plist-get ygg-git-compare--b :diff) (plist-get pr :head)))
+                           (user-error "B is at %s, %s's head at %s"
+                                       (plist-get ygg-git-compare--b :diff) name (plist-get pr :head)))
+                          ((not (plist-get pr :base))
+                           (user-error "%s's base %s is not here; fetch it" name (plist-get pr :start)))
+                          ((not (equal (magit-git-string "merge-base" (plist-get ygg-git-compare--a :diff)
+                                                         (plist-get ygg-git-compare--b :diff))
+                                       (plist-get pr :base)))
+                           (user-error "A does not part from B where %s's base does" name)))
+                    pr))))
+    (if continue
+        (ygg-git-compare--when-pr repo selector what
+                                  (lambda (pr) (funcall continue (funcall check pr))))
+      (funcall check (or (ygg-git-compare--forge-pr repo selector)
+                         (user-error "%s" (ygg-git-compare--pr-absence repo selector what)))))))
 
 (defun ygg-git-compare--gitlab-position (comment pr)
   (append (list :position_type "text"
@@ -1952,6 +2043,9 @@ refused: a compare is read-only.
     (add-hook 'magit-refresh-buffer-hook #'ygg-git-compare--draw-comments nil t)
     (ygg-git-compare--draw-comments)))
 
+(declare-function ygg-git-compare--remote-shown "ygg-git-compare-threads" (list &optional notice))
+(declare-function ygg-git-compare--remote-label "ygg-git-compare-threads" (comment))
+
 (defun ygg-git-compare--imenu-comments (beg end texts)
   "The comments shown from BEG to END as (LABEL . POS), TEXTS their texts by id."
   (let (items)
@@ -1969,7 +2063,10 @@ refused: a compare is read-only.
     (let ((texts (make-hash-table :test #'equal)))
       (when-let* ((list (ignore-errors (ygg-git-compare--list))))
         (dolist (c (buffer-local-value 'ygg-git-compare--comments list))
-          (puthash (plist-get c :id) (plist-get c :text) texts)))
+          (puthash (plist-get c :id) (plist-get c :text) texts))
+        (when (featurep 'ygg-git-compare-threads)
+          (dolist (c (ignore-errors (ygg-git-compare--remote-shown list)))
+            (puthash (plist-get c :id) (ygg-git-compare--remote-label c) texts))))
       (seq-keep
        (lambda (file)
          (when (magit-section-match 'file file)
@@ -2125,9 +2222,10 @@ are old."
                              "Merge requests"
                              (format "%s → %s" (plist-get mr :headRefName)
                                      (plist-get mr :baseRefName)))
-                            (cons 'pr (list :number (plist-get mr :number)
-                                            :head (plist-get mr :headRefName)
-                                            :base (plist-get mr :baseRefName)))))
+                            (cons 'pr (append (list :number (plist-get mr :number)
+                                                    :head (plist-get mr :headRefName)
+                                                    :base (plist-get mr :baseRefName))
+                                              (ygg-git-compare--repo-props repo)))))
                     (and gitlab (ygg-git-compare--merge-requests repo))))))
 
 (defun ygg-git-compare--review-specs (pr name remote)
@@ -2137,8 +2235,10 @@ are old."
     (when (and (magit-commit-p head) (magit-commit-p start))
       (cons (cons 'rev (or (plist-get (ygg-git-compare--with-base pr) :base)
                            (ygg-git-compare--pr-base (plist-get pr :base-ref) remote)))
-            (cons 'pr (list :number (plist-get pr :number) :sha head :head name
-                            :base (plist-get pr :base-ref) :remote remote))))))
+            (cons 'pr (append (list :number (plist-get pr :number) :sha head :head name
+                                    :base (plist-get pr :base-ref) :remote remote)
+                              (ygg-git-compare--repo-props
+                               (ignore-errors (ygg-git-compare--forge-repo remote)))))))))
 
 (defun ygg-git-compare--review-fetch (pr remote dir done)
   "Fetch what PR's compare lacks here, then call DONE with what went wrong,

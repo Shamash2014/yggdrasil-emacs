@@ -27,6 +27,12 @@
 echo \"$*\" >> \"$FAKE_DIR/gh.log\"
 env | grep -E '^(GH_PROMPT_DISABLED|GIT_TERMINAL_PROMPT)=' >> \"$FAKE_DIR/gh.env\"
 [ -f \"$FAKE_DIR/gh.delay\" ] && sleep \"$(cat \"$FAKE_DIR/gh.delay\")\"
+if [ \"$1\" = api ]; then
+  for a in \"$@\"; do [ \"$prev\" = --input ] && body=$(cat \"$a\"); prev=$a; done
+  echo \"$body\" >> \"$FAKE_DIR/api.log\"
+  case \"$body\" in *FAILME*) echo \"boom: refused\" >&2; exit 1;; esac
+  echo '{\"id\":1}'; exit 0
+fi
 case \"$1 $2\" in
   \"pr list\") cat \"$FAKE_DIR/pulls.json\";;
   \"pr view\") cat \"$FAKE_DIR/pr-view.json\";;
@@ -37,6 +43,16 @@ esac
     ("glab" . "#!/bin/sh
 echo \"$*\" >> \"$FAKE_DIR/glab.log\"
 [ -f \"$FAKE_DIR/gh.delay\" ] && sleep \"$(cat \"$FAKE_DIR/gh.delay\")\"
+for a in \"$@\"; do
+  [ \"$prev\" = --input ] && body=$(cat \"$a\")
+  [ \"$a\" = --method ] && post=1
+  prev=$a
+done
+if [ -n \"$post\" ]; then
+  echo \"$body\" >> \"$FAKE_DIR/api.log\"
+  case \"$body\" in *FAILME*) echo \"boom: refused\" >&2; exit 1;; esac
+  echo '{\"id\":1}'; exit 0
+fi
 cat \"$FAKE_DIR/mrs.json\"
 ")
     ("git" . "#!/bin/sh
@@ -400,13 +416,50 @@ those git runs took is taken off."
       (should (seq-some (lambda (p) (string-search "(refreshing PRs…)" p)) prompts))
       (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p))))
 
-(ert-deftest ygg-git-compare-async-a-worktree-for-an-unfetched-pull-request-says-so ()
+(defvar ygg-git-compare-async-tests--said nil)
+
+(defmacro ygg-git-compare-async-tests--saying (&rest body)
+  "BODY with every message collected, newest first, in `--said'."
+  `(let ((ygg-git-compare-async-tests--said nil))
+     (cl-letf (((symbol-function 'message)
+                (lambda (format &rest args)
+                  (when format
+                    (push (apply #'format-message format args)
+                          ygg-git-compare-async-tests--said)))))
+       ,@body)))
+
+(ert-deftest ygg-git-compare-async-a-worktree-for-an-unfetched-pull-request-continues-when-it-lands ()
   (skip-unless (require 'ygg-git-worktree nil t))
-  (ygg-git-compare-async-tests--with-world (_root fake _base _head)
+  (ygg-git-compare-async-tests--with-world (_root fake _base head)
     (ygg-git-compare-async-tests--put (expand-file-name "git.delay" fake) "0.3")
-    (let ((spec (cons 'pr (list :number 7 :head "feature" :remote "origin"))))
-      (should (string-search "fetching PR #7"
-                             (cadr (should-error (ygg-git-worktree-run spec) :type 'user-error))))
+    (let ((spec (cons 'pr (list :number 7 :head "feature" :remote "origin")))
+          (added nil))
+      (ygg-git-compare-async-tests--saying
+        (cl-letf (((symbol-function 'ygg-git-worktree--git)
+                   (lambda (args _on-success) (setq added args))))
+          (ygg-git-compare-async-tests--unblocked (ygg-git-worktree-run spec))
+          (should-not added)
+          (should (member "Fetching PR #7…" ygg-git-compare-async-tests--said))
+          (ygg-git-compare-async-tests--wait (lambda () added))))
+      (should (equal (list (nth 0 added) (nth 1 added) (nth 2 added) (nth 4 added))
+                     (list "worktree" "add" "--detach" head)))
+      (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p))))
+
+(ert-deftest ygg-git-compare-async-a-worktree-for-a-pull-request-that-will-not-fetch-says-why ()
+  (skip-unless (require 'ygg-git-worktree nil t))
+  (ygg-git-compare-async-tests--with-world (_root _fake _base _head)
+    (let ((spec (cons 'pr (list :number 99 :head "feature" :remote "origin")))
+          (added nil))
+      (ygg-git-compare-async-tests--saying
+        (cl-letf (((symbol-function 'ygg-git-worktree--git)
+                   (lambda (args _on-success) (setq added args))))
+          (ygg-git-compare-async-tests--unblocked (ygg-git-worktree-run spec))
+          (ygg-git-compare-async-tests--wait
+           (lambda () (seq-some (lambda (m) (string-search "PR #99 not fetched" m))
+                                ygg-git-compare-async-tests--said)))
+          (should-not added)
+          (should-not (seq-some (lambda (m) (string-search "try again" m))
+                                ygg-git-compare-async-tests--said))))
       (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p))))
 
 (ert-deftest ygg-git-compare-async-pull-requests-reach-an-open-picker ()
@@ -509,7 +562,7 @@ those git runs took is taken off."
       (let ((error nil))
         (ygg-git-compare-async-tests--unblocked
           (setq error (cadr (should-error (ygg-git-compare--this-pr) :type 'user-error))))
-        (should (string-search "Looking up #7" error)))
+        (should (string-search "Looking up PR #7" error)))
       (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p)
       (ygg-git-compare-async-tests--seed (ygg-git-compare--pr-key '(github "github.com" "o/r") 7)
                                          (ygg-git-compare--cache-value
@@ -1038,3 +1091,257 @@ esac
       (should (string-search "PR #7 is closed or gone" (ygg-git-compare-async-tests--header buffer)))
       (should-not (string-search "not found" (ygg-git-compare-async-tests--header buffer)))
       (should-not messages))))
+
+(ert-deftest ygg-git-compare-async-this-pr-continues-when-a-cold-lookup-lands ()
+  (ygg-git-compare-async-tests--with-world (root fake _base head)
+    (ygg-git-compare-async-tests--git root "fetch" "-q" "origin" "refs/pull/7/head")
+    (ygg-git-compare-async-tests--put (expand-file-name "gh.delay" fake) "0.3")
+    (with-current-buffer (ygg-git-compare-buffer
+                          root (cons 'rev _base)
+                          (cons 'pr (list :number 7 :sha head :head "feature" :base "main"
+                                          :remote "origin")))
+      (let (got)
+        (ygg-git-compare-async-tests--saying
+          (ygg-git-compare-async-tests--unblocked
+            (ygg-git-compare--this-pr (lambda (pr) (setq got pr))))
+          (should-not got)
+          (should (member "Looking up PR #7…" ygg-git-compare-async-tests--said))
+          (ygg-git-compare-async-tests--wait (lambda () got)))
+        (should (equal (plist-get got :number) 7))
+        (should (equal (plist-get got :head) head)))
+      (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p))))
+
+(ert-deftest ygg-git-compare-async-this-pr-says-why-a-lookup-failed-without-asking-to-retry ()
+  (ygg-git-compare-async-tests--with-world (root fake base head)
+    (ygg-git-compare-async-tests--git root "fetch" "-q" "origin" "refs/pull/7/head")
+    (delete-file (expand-file-name "pr-view.json" fake))
+    (ygg-git-compare-async-tests--put (expand-file-name "gh.delay" fake) "0.2")
+    (with-current-buffer (ygg-git-compare-buffer
+                          root (cons 'rev base)
+                          (cons 'pr (list :number 7 :sha head :head "feature" :base "main"
+                                          :remote "origin")))
+      (let (got)
+        (ygg-git-compare-async-tests--saying
+          (ygg-git-compare--this-pr (lambda (pr) (setq got pr)))
+          (ygg-git-compare-async-tests--wait
+           (lambda () (seq-some (lambda (m) (string-search "Could not read PR #7" m))
+                                ygg-git-compare-async-tests--said)))
+          (should-not got)
+          (should-not (seq-some (lambda (m) (string-search "try again" m))
+                                ygg-git-compare-async-tests--said))))
+      (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p))))
+
+(ert-deftest ygg-git-compare-async-a-queued-fetch-whose-start-fails-lands-its-error ()
+  (ygg-git-compare-async-tests--with-world (_root fake _base _head)
+    (ygg-git-compare-async-tests--put (expand-file-name "git.delay" fake) "0.3")
+    (let ((landed nil))
+      (ygg-git-compare--fetch-ref "origin" "pull/7/head" #'ignore)
+      (advice-add 'make-process :around
+                  (lambda (original &rest args)
+                    (if (member "fetch" (plist-get args :command))
+                        (signal 'wrong-type-argument '(boom))
+                      (apply original args)))
+                  '((name . boom)))
+      (unwind-protect
+          (progn
+            (ygg-git-compare--fetch-ref "origin" "pull/7/head"
+                                        (lambda (&rest answer) (setq landed (or answer '(none)))))
+            (should-not landed)
+            (ygg-git-compare-async-tests--wait (lambda () landed))
+            (should-not (car landed))
+            (should (string-search "boom" (cadr landed))))
+        (advice-remove 'make-process 'boom))
+      (ygg-git-compare-async-tests--wait
+       (lambda () (zerop (hash-table-count ygg-git-compare--fetch-lanes)))))))
+
+(ert-deftest ygg-git-compare-async-a-remote-git-dir-is-not-resolved-on-the-way ()
+  (let ((resolved nil))
+    (cl-letf (((symbol-function 'magit-gitdir) (lambda (&rest _) "/ssh:host:/repo/.git"))
+              ((symbol-function 'file-truename)
+               (lambda (file &rest _) (setq resolved t) file)))
+      (should (equal (ygg-git-compare--gitdir) "/ssh:host:/repo/.git"))
+      (should-not resolved))))
+
+(ert-deftest ygg-git-compare-async-a-running-job-lands-on-its-own-key ()
+  (clrhash ygg-git-compare--fetch-lanes)
+  (let ((release-first nil)
+        (own (lambda (&rest _)))
+        (other (lambda (&rest _)))
+        (seen 'unset))
+    (let ((ygg-git-compare--landing nil))
+      (ygg-git-compare--serially "lane" (lambda (release) (setq release-first release))))
+    (let ((ygg-git-compare--landing own))
+      (ygg-git-compare--serially "lane" (lambda (_release) (setq seen ygg-git-compare--landing))))
+    (let ((ygg-git-compare--landing other))
+      (funcall release-first))
+    (should (eq seen own))
+    (clrhash ygg-git-compare--fetch-lanes)))
+
+(defvar ygg-git-compare-async-tests--held nil)
+(defvar ygg-git-compare-async-tests--dropped nil)
+
+(defun ygg-git-compare-async-tests--comment (id &rest props)
+  (append props (list :id id :range "R" :text id)))
+
+(defmacro ygg-git-compare-async-tests--submitting (comments pr &rest body)
+  "BODY in a compare holding COMMENTS for PR, the forge being the fake gh and
+glab, every message collected in `--said'."
+  (declare (indent 2))
+  `(let ((ygg-git-compare-async-tests--held (copy-tree ,comments))
+         (ygg-git-compare-async-tests--dropped nil))
+     (ygg-git-compare-async-tests--saying
+       (with-temp-buffer
+         (cl-letf (((symbol-function 'ygg-git-compare-comments-list)
+                    (lambda (&rest _) ygg-git-compare-async-tests--held))
+                   ((symbol-function 'ygg-git-compare-comments-drop)
+                    (lambda (ids)
+                      (setq ygg-git-compare-async-tests--dropped
+                            (append ygg-git-compare-async-tests--dropped ids)
+                            ygg-git-compare-async-tests--held
+                            (seq-remove (lambda (c) (member (plist-get c :id) ids))
+                                        ygg-git-compare-async-tests--held))))
+                   ((symbol-function 'ygg-git-compare--list) #'current-buffer)
+                   ((symbol-function 'ygg-git-compare--range-label) (lambda () "R"))
+                   ((symbol-function 'ygg-git-compare--this-pr)
+                    (lambda (&optional continue) (funcall continue ,pr)))
+                   ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+           ,@body)))))
+
+(defun ygg-git-compare-async-tests--posted-p ()
+  (seq-some (lambda (m) (string-prefix-p "Posted" m)) ygg-git-compare-async-tests--said))
+
+(ert-deftest ygg-git-compare-async-submit-to-github-leaves-emacs-free-and-refuses-a-second ()
+  (skip-unless (and (require 'ygg-git-compare-submit nil t)
+                    (require 'ygg-git-compare-comments nil t)))
+  (ygg-git-compare-async-tests--with-world (_root fake _base _head)
+    (ygg-git-compare-async-tests--put (expand-file-name "gh.delay" fake) "0.4")
+    (ygg-git-compare-async-tests--submitting
+        (list (ygg-git-compare-async-tests--comment "a" :level 'line :file "a.txt"
+                                                    :new-path "a.txt" :side 'new :line 2)
+              (ygg-git-compare-async-tests--comment "b" :level 'review))
+        '(:forge github :host "github.com" :path "o/r" :number 7 :head "h" :base "b"
+          :start "s" :url "https://github.com/o/r/pull/7")
+      (ygg-git-compare-async-tests--unblocked (ygg-git-compare-submit-forge 'comment))
+      (should (equal (reverse ygg-git-compare-async-tests--said)
+                     '("Posting 2 comments to github PR #7…")))
+      (should-not ygg-git-compare-async-tests--dropped)
+      (should (string-search "already being posted"
+                             (cadr (should-error (ygg-git-compare-submit-forge 'comment)
+                                                 :type 'user-error))))
+      (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--posted-p)
+      (should (equal (sort (copy-sequence ygg-git-compare-async-tests--dropped) #'string<)
+                     '("a" "b")))
+      (should (string-prefix-p "Posted 2 comments to github PR #7"
+                               (car ygg-git-compare-async-tests--said)))
+      (should (= (length (split-string
+                          (ygg-git-compare-async-tests--read (expand-file-name "api.log" fake))
+                          "\n" t))
+                 1))
+      (should (string-search "No comments held"
+                             (cadr (should-error (ygg-git-compare-submit-forge 'comment)
+                                                 :type 'user-error)))))))
+
+(ert-deftest ygg-git-compare-async-submit-to-gitlab-reports-progress-and-keeps-what-failed ()
+  (skip-unless (and (require 'ygg-git-compare-submit nil t)
+                    (require 'ygg-git-compare-comments nil t)))
+  (ygg-git-compare-async-tests--with-world (_root fake _base _head)
+    (ygg-git-compare-async-tests--put (expand-file-name "gh.delay" fake) "0.2")
+    (ygg-git-compare-async-tests--submitting
+        (cl-loop for id in '("one" "two" "three")
+                 collect (ygg-git-compare-async-tests--comment
+                          id :level 'line :file "a.txt" :new-path "a.txt" :old-path "a.txt"
+                          :side 'old :line 4 :text (if (equal id "two") "FAILME" id)))
+        '(:forge gitlab :host "gitlab.com" :path "g/p" :number 7 :head "h" :base "b"
+          :start "s" :url "https://gitlab.com/g/p/-/merge_requests/7")
+      (ygg-git-compare-async-tests--unblocked (ygg-git-compare-submit-forge 'comment))
+      (should (equal (reverse ygg-git-compare-async-tests--said) '("Posting 1/3…")))
+      (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--posted-p 15)
+      (should (equal (reverse ygg-git-compare-async-tests--said)
+                     '("Posting 1/3…" "Posting 2/3…" "Posting 3/3…"
+                       "Posted 2 of 3; 1 kept: boom: refused")))
+      (should (equal (sort (copy-sequence ygg-git-compare-async-tests--dropped) #'string<)
+                     '("one" "three")))
+      (should (equal (mapcar (lambda (c) (plist-get c :id)) ygg-git-compare-async-tests--held)
+                     '("two"))))))
+
+(defun ygg-git-compare-async-tests--repo ()
+  (let ((dir (file-name-as-directory (file-truename (make-temp-file "ygg-gitdir-" t)))))
+    (ygg-git-compare-async-tests--git dir "init" "-q" "-b" "main")
+    (ygg-git-compare-async-tests--git dir "config" "user.name" "x")
+    (ygg-git-compare-async-tests--git dir "config" "user.email" "x@x.i")
+    (ygg-git-compare-async-tests--put (expand-file-name "f" dir) "x")
+    (ygg-git-compare-async-tests--git dir "add" ".")
+    (ygg-git-compare-async-tests--git dir "commit" "-q" "-m" "c")
+    dir))
+
+(defun ygg-git-compare-async-tests--gitdir (dir)
+  (let ((default-directory dir)) (ygg-git-compare--gitdir)))
+
+(ert-deftest ygg-git-compare-async-gitdir-follows-a-git-init-in-a-subdirectory ()
+  (let* ((root (ygg-git-compare-async-tests--repo))
+         (sub (file-name-as-directory (expand-file-name "sub" root))))
+    (make-directory sub)
+    (should (equal (ygg-git-compare-async-tests--gitdir sub)
+                   (file-name-as-directory (file-truename (expand-file-name ".git" root)))))
+    (ygg-git-compare-async-tests--git sub "init" "-q" "-b" "main")
+    (should (equal (ygg-git-compare-async-tests--gitdir sub)
+                   (file-name-as-directory (file-truename (expand-file-name ".git" sub)))))))
+
+(ert-deftest ygg-git-compare-async-gitdir-follows-a-removed-nested-repository ()
+  (let* ((root (ygg-git-compare-async-tests--repo))
+         (sub (file-name-as-directory (expand-file-name "sub" root))))
+    (make-directory sub)
+    (ygg-git-compare-async-tests--git sub "init" "-q")
+    (should (equal (ygg-git-compare-async-tests--gitdir sub)
+                   (file-name-as-directory (file-truename (expand-file-name ".git" sub)))))
+    (delete-directory (expand-file-name ".git" sub) t)
+    (should (equal (ygg-git-compare-async-tests--gitdir sub)
+                   (file-name-as-directory (file-truename (expand-file-name ".git" root)))))))
+
+(ert-deftest ygg-git-compare-async-gitdir-follows-a-worktree-path-another-repository-reuses ()
+  (let* ((a (ygg-git-compare-async-tests--repo))
+         (b (ygg-git-compare-async-tests--repo))
+         (wt (concat (file-name-as-directory (make-temp-file "ygg-wt-" t)) "w/")))
+    (ygg-git-compare-async-tests--git a "worktree" "add" "-q" "-b" "w" (directory-file-name wt))
+    (let ((first (ygg-git-compare-async-tests--gitdir wt)))
+      (should (string-prefix-p (file-truename (expand-file-name ".git/worktrees" a)) first))
+      (ygg-git-compare-async-tests--git a "worktree" "remove" "--force" (directory-file-name wt))
+      (ygg-git-compare-async-tests--git b "worktree" "add" "-q" "-b" "w" (directory-file-name wt))
+      (let ((second (ygg-git-compare-async-tests--gitdir wt)))
+        (should (string-prefix-p (file-truename (expand-file-name ".git/worktrees" b)) second))
+        (should-not (equal first second))))))
+
+(ert-deftest ygg-git-compare-async-a-warm-gitdir-runs-no-process ()
+  (let ((root (ygg-git-compare-async-tests--repo)))
+    (ygg-git-compare-async-tests--gitdir root)
+    (cl-letf (((symbol-function 'call-process) (lambda (&rest _) (error "process")))
+              ((symbol-function 'process-file) (lambda (&rest _) (error "process")))
+              ((symbol-function 'make-process) (lambda (&rest _) (error "process"))))
+      (should (ygg-git-compare-async-tests--gitdir root)))))
+
+(ert-deftest ygg-git-compare-async-a-submit-makes-the-next-redraw-fetch-the-threads-once ()
+  (skip-unless (and (require 'ygg-git-compare-submit nil t)
+                    (require 'ygg-git-compare-comments nil t)
+                    (require 'ygg-git-compare-threads nil t)))
+  (ygg-git-compare-async-tests--with-world (_root fake _base _head)
+    (let* ((pr '(:forge github :host "github.com" :path "o/r" :number 7 :head "h" :base "b"
+                 :start "s" :url "https://github.com/o/r/pull/7"))
+           (key (ygg-git-compare--remote-key pr))
+           (fetches (lambda ()
+                      (length (seq-filter
+                               (lambda (l) (string-search "graphql" l))
+                               (split-string
+                                (or (ygg-git-compare-async-tests--read (expand-file-name "gh.log" fake)) "")
+                                "\n" t))))))
+      (ygg-git-compare-async-tests--seed key (list :comments nil) 1)
+      (ygg-git-compare-async-tests--submitting
+          (list (ygg-git-compare-async-tests--comment "a" :level 'review))
+          pr
+        (ygg-git-compare--remote-start (current-buffer) pr key)
+        (should (= (funcall fetches) 0))
+        (ygg-git-compare-submit-forge 'comment)
+        (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--posted-p)
+        (ygg-git-compare--remote-start (current-buffer) pr key)
+        (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p)
+        (ygg-git-compare--remote-start (current-buffer) pr key)
+        (should (= (funcall fetches) 1))))))

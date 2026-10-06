@@ -16,6 +16,15 @@
 
 (defvar ygg-git-compare--a-spec)
 (defvar ygg-git-compare--b-spec)
+(defvar ygg-git-compare--inflight)
+(defvar ygg-git-compare-pr-ttl)
+(declare-function ygg-git-compare--cached "ygg-git-compare"
+                  (key ttl fetch-fn on-fresh &optional retry))
+(declare-function ygg-git-compare--fetch-ref "ygg-git-compare" (remote refspec done))
+(declare-function ygg-git-compare--gitdir "ygg-git-compare" ())
+(declare-function ygg-git-compare--head-key "ygg-git-compare" (remote number))
+(declare-function ygg-git-compare--pending-note "ygg-git-compare" (number remote))
+(declare-function ygg-git-compare--remote "ygg-git-compare" ())
 (declare-function ygg-git-compare-resolve "ygg-git-compare" (spec))
 (declare-function ygg-git-compare--list "ygg-git-compare" ())
 (declare-function ygg-git-compare--read "ygg-git-compare" (prompt cands default))
@@ -132,13 +141,52 @@ reused; a branch gets a worktree on that branch, anything else one
 detached at its commit."
   (interactive (list (ygg-git-worktree--spec-at-point)))
   (require 'ygg-git-compare)
-  (let* ((default-directory (or (magit-toplevel) (user-error "Not in a git repository")))
-         (branch (pcase spec
+  (let ((default-directory (or (magit-toplevel) (user-error "Not in a git repository"))))
+    (if (eq (car spec) 'worktree)
+        (ygg-git-worktree--place spec nil)
+      (if-let* ((sha (plist-get (ygg-git-compare-resolve spec) :diff)))
+          (ygg-git-worktree--place spec sha)
+        (ygg-git-worktree--when-fetched spec)))))
+
+(defun ygg-git-worktree--when-fetched (spec)
+  "Place SPEC, a pull request whose commit is being fetched, once it is here;
+say why when it is not."
+  (let* ((pr (cdr spec))
+         (number (plist-get pr :number))
+         (remote (or (plist-get pr :remote) (ygg-git-compare--remote)))
+         (key (ygg-git-compare--head-key remote number))
+         (dir default-directory)
+         (called nil)
+         (settle (lambda (sha err)
+                   (unless called
+                     (setq called t)
+                     (run-at-time
+                      0 nil
+                      (lambda ()
+                        (let ((default-directory dir))
+                          (condition-case failure
+                              (if (and sha (magit-commit-p sha))
+                                  (ygg-git-worktree--place spec sha)
+                                (user-error "PR #%s not fetched: %s" number
+                                            (or err "its commit is not here")))
+                            (error (message "%s" (error-message-string failure))))))))))
+         (sha (ygg-git-compare--cached
+               key ygg-git-compare-pr-ttl
+               (lambda (done)
+                 (ygg-git-compare--fetch-ref remote (format "pull/%s/head" number) done))
+               settle)))
+    (cond ((and sha (magit-commit-p sha))
+           (setq called t)
+           (ygg-git-worktree--place spec sha))
+          (called)
+          ((gethash (cons (ygg-git-compare--gitdir) key) ygg-git-compare--inflight)
+           (message "Fetching PR #%s…" number))
+          (t (user-error "%s" (ygg-git-compare--pending-note number remote))))))
+
+(defun ygg-git-worktree--place (spec sha)
+  "Open SPEC in a worktree, SHA being its commit unless it is a worktree."
+  (let* ((branch (pcase spec
                    (`(rev . ,rev) (and (magit-local-branch-p rev) rev))))
-         (sha (unless (eq (car spec) 'worktree)
-                (let ((side (ygg-git-compare-resolve spec)))
-                  (or (plist-get side :diff)
-                      (user-error "%s; try again" (plist-get side :pending))))))
          (found (if (eq (car spec) 'worktree) (cdr spec)
                   (ygg-git-worktree--existing branch sha))))
     (cond

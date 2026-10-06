@@ -32,6 +32,13 @@
   "Whether a markdown export quotes the lines under each comment."
   :type 'boolean :group 'ygg-git-compare)
 
+(defcustom ygg-git-compare-submit-timeout 60
+  "Seconds each call to the forge may take before it is given up."
+  :type 'number :group 'ygg-git-compare)
+
+(defvar-local ygg-git-compare-submit--busy nil
+  "Whether a review is being posted from this compare.")
+
 (defcustom ygg-git-compare-submit-type-format "**%s:** "
   "How a comment's type leads its text on a pull request."
   :type 'string :group 'ygg-git-compare)
@@ -258,13 +265,46 @@ RANGE-KEY, such as \"branch NAME\", for batch use and agents."
                                              (seq-filter #'ygg-git-compare-submit--inline-p
                                                          comments)))))))
 
-(defun ygg-git-compare-submit--github (pr event comments)
-  "Post COMMENTS to PR as one review with EVENT; all of them, or a user error."
-  (ygg-git-compare--forge-json
-   "gh" (ygg-git-compare-submit--github-review pr event comments)
-   "api" "--hostname" (plist-get pr :host)
-   (format "repos/%s/pulls/%s/reviews" (plist-get pr :path) (plist-get pr :number)))
-  (list comments nil))
+(defun ygg-git-compare-submit--api (program body args done)
+  "Run PROGRAM with ARGS without waiting, BODY, when non-nil, posted as JSON
+through api's --input; call DONE with (VALUE ERR REFUSED): what it printed
+read as JSON, or nil and what went wrong, REFUSED when the forge said no."
+  (let ((input (and body (let ((coding-system-for-write 'utf-8))
+                           (make-temp-file "ygg-git-compare-body-" nil ".json"
+                                           (json-serialize body))))))
+    (condition-case failure
+        (ygg-git-compare--forge-async
+         program
+         (append args (and input (list "--method" "POST"
+                                       "--header" "Content-Type: application/json"
+                                       "--input" input)))
+         (lambda (status text err)
+           (when input (ignore-errors (delete-file input)))
+           (cond ((null status) (funcall done nil (format "%s not found" program)))
+                 ((eq status 'timeout) (funcall done nil (format "%s timed out" program)))
+                 ((/= status 0)
+                  (funcall done nil (if (string-empty-p err) (format "%s failed" program) err) t))
+                 (t (let ((value (condition-case nil
+                                     (let ((out (string-trim text)))
+                                       (list (unless (string-empty-p out)
+                                               (ygg-git-compare--json out))))
+                                   (error nil))))
+                      (if value
+                          (funcall done (car value) nil)
+                        (funcall done nil (format "%s answered nothing readable" program)))))))
+         ygg-git-compare-submit-timeout)
+      (error (when input (ignore-errors (delete-file input)))
+             (signal (car failure) (cdr failure))))))
+
+(defun ygg-git-compare-submit--github-steps (pr event comments)
+  (list (list comments nil
+              (lambda (next)
+                (ygg-git-compare-submit--api
+                 "gh" (ygg-git-compare-submit--github-review pr event comments)
+                 (list "api" "--hostname" (plist-get pr :host)
+                       (format "repos/%s/pulls/%s/reviews"
+                               (plist-get pr :path) (plist-get pr :number)))
+                 (lambda (_value err &rest _) (funcall next err)))))))
 
 (defun ygg-git-compare-submit--line-code (path side line old-line)
   "GitLab's code for the diff LINE of PATH on SIDE, OLD-LINE a context line's
@@ -336,80 +376,168 @@ new LINE; nil when LINE is not a context line there."
 (defun ygg-git-compare-submit--range-prefix (comment)
   (format "L%d–%d: " (plist-get comment :start-line) (plist-get comment :line)))
 
-(defun ygg-git-compare-submit--gitlab-api (pr body &rest path-and-args)
-  (apply #'ygg-git-compare--forge-json "glab" body "api" "--hostname" (plist-get pr :host)
-         path-and-args))
+(defun ygg-git-compare-submit--gitlab-api (pr body path-and-args done)
+  (ygg-git-compare-submit--api
+   "glab" body (append (list "api" "--hostname" (plist-get pr :host)) path-and-args) done))
 
 (defun ygg-git-compare-submit--gitlab-mr (pr what)
   (format "projects/%s/merge_requests/%s/%s"
           (url-hexify-string (plist-get pr :path)) (plist-get pr :number) what))
 
-(defun ygg-git-compare-submit--gitlab-note (pr draft text &optional position)
+(defun ygg-git-compare-submit--gitlab-note (pr draft text position done)
   (ygg-git-compare-submit--gitlab-api
    pr (append (list (if draft :note :body) text) (and position (list :position position)))
-   (ygg-git-compare-submit--gitlab-mr pr (cond (draft "draft_notes")
-                                               (position "discussions")
-                                               (t "notes")))))
+   (list (ygg-git-compare-submit--gitlab-mr pr (cond (draft "draft_notes")
+                                                     (position "discussions")
+                                                     (t "notes"))))
+   done))
 
-(defun ygg-git-compare-submit--gitlab-inline (pr draft comment)
-  "Post COMMENT on its lines; a range GitLab refuses goes on its last line."
+(defun ygg-git-compare-submit--gitlab-inline (pr draft comment next)
+  "Post COMMENT on its lines, then call NEXT with what went wrong, if
+anything; a range GitLab refuses goes on its last line."
   (let ((text (ygg-git-compare-submit--text comment)))
-    (condition-case err
-        (ygg-git-compare-submit--gitlab-note
-         pr draft text (ygg-git-compare-submit--gitlab-position comment pr))
-      (user-error
-       (if (eq (ygg-git-compare-submit--level comment) 'range)
+    (ygg-git-compare-submit--gitlab-note
+     pr draft text (ygg-git-compare-submit--gitlab-position comment pr)
+     (lambda (_value err &optional refused)
+       (if (and err refused (eq (ygg-git-compare-submit--level comment) 'range))
            (ygg-git-compare-submit--gitlab-note
             pr draft (concat (ygg-git-compare-submit--range-prefix comment) text)
-            (ygg-git-compare-submit--gitlab-position comment pr t))
-         (signal (car err) (cdr err)))))))
+            (ygg-git-compare-submit--gitlab-position comment pr t)
+            (lambda (_value err &rest _) (funcall next err)))
+         (funcall next err))))))
 
 (defconst ygg-git-compare-submit--request-changes-query
   "mutation($projectPath: ID!, $iid: String!) { mergeRequestRequestChanges(input: { projectPath: $projectPath, iid: $iid }) { errors } }")
 
-(defun ygg-git-compare-submit--gitlab-request-changes (pr)
-  (let* ((out (ygg-git-compare-submit--gitlab-api
-               pr nil "graphql"
-               "-f" (concat "query=" ygg-git-compare-submit--request-changes-query)
-               "-f" (concat "projectPath=" (plist-get pr :path))
-               "-f" (format "iid=%s" (plist-get pr :number))))
-         (errors (append (plist-get out :errors)
-                         (plist-get (plist-get (plist-get out :data)
-                                               :mergeRequestRequestChanges)
-                                    :errors))))
-    (when errors
-      (user-error "glab graphql: %s"
-                  (mapconcat (lambda (e) (if (stringp e) e (or (plist-get e :message)
-                                                               (format "%S" e))))
-                             errors "; ")))))
+(defun ygg-git-compare-submit--gitlab-request-changes (pr next)
+  (ygg-git-compare-submit--gitlab-api
+   pr nil
+   (list "graphql"
+         "-f" (concat "query=" ygg-git-compare-submit--request-changes-query)
+         "-f" (concat "projectPath=" (plist-get pr :path))
+         "-f" (format "iid=%s" (plist-get pr :number)))
+   (lambda (out err &rest _)
+     (let ((errors (append (plist-get out :errors)
+                           (plist-get (plist-get (plist-get out :data)
+                                                 :mergeRequestRequestChanges)
+                                      :errors))))
+       (funcall next
+                (or err
+                    (when errors
+                      (format "glab graphql: %s"
+                              (mapconcat (lambda (e) (if (stringp e) e (or (plist-get e :message)
+                                                                           (format "%S" e))))
+                                         errors "; ")))))))))
 
-(defun ygg-git-compare-submit--gitlab (pr event comments)
-  "Post COMMENTS to PR as notes, drafts when EVENT is draft, then approve or
-request changes when every one went; the ones posted, and the first failure."
-  (let ((draft (eq event 'draft))
-        (summary-comments (seq-remove #'ygg-git-compare-submit--inline-p comments))
-        posted failure)
-    (cl-flet ((try (done thunk)
-                (condition-case err
-                    (progn (funcall thunk) (setq posted (append posted done)))
-                  (error (unless failure (setq failure (error-message-string err)))))))
-      (when summary-comments
-        (try summary-comments
-             (lambda () (ygg-git-compare-submit--gitlab-note
-                         pr draft (ygg-git-compare-submit--summary summary-comments)))))
-      (dolist (c (seq-filter #'ygg-git-compare-submit--inline-p comments))
-        (try (list c) (lambda () (ygg-git-compare-submit--gitlab-inline pr draft c))))
-      (unless failure
-        (pcase event
-          ('approve
-           (try nil (lambda () (ygg-git-compare-submit--gitlab-api
-                                pr nil "--method" "POST"
-                                (ygg-git-compare-submit--gitlab-mr pr "approve")))))
-          ('request-changes
-           (try nil (lambda () (ygg-git-compare-submit--gitlab-request-changes pr)))))))
-    (list (seq-filter (lambda (c) (memq c posted)) comments) failure)))
+(defun ygg-git-compare-submit--gitlab-steps (pr event comments)
+  "The notes that post COMMENTS to PR, drafts when EVENT is draft, and a
+function of the first failure for the approval or request for changes."
+  (let* ((draft (eq event 'draft))
+         (summary-comments (seq-remove #'ygg-git-compare-submit--inline-p comments))
+         (steps (append
+                 (when summary-comments
+                   (list (list summary-comments nil
+                               (lambda (next)
+                                 (ygg-git-compare-submit--gitlab-note
+                                  pr draft (ygg-git-compare-submit--summary summary-comments)
+                                  nil (lambda (_value err &rest _) (funcall next err)))))))
+                 (mapcar (lambda (c)
+                           (list (list c) nil
+                                 (lambda (next)
+                                   (ygg-git-compare-submit--gitlab-inline pr draft c next))))
+                         (seq-filter #'ygg-git-compare-submit--inline-p comments)))))
+    (cons steps
+          (lambda (failure)
+            (unless failure
+              (pcase event
+                ('approve
+                 (list (list nil "Approving"
+                             (lambda (next)
+                               (ygg-git-compare-submit--gitlab-api
+                                pr nil (list "--method" "POST"
+                                             (ygg-git-compare-submit--gitlab-mr pr "approve"))
+                                (lambda (_value err &rest _) (funcall next err)))))))
+                ('request-changes
+                 (list (list nil "Requesting changes"
+                             (lambda (next)
+                               (ygg-git-compare-submit--gitlab-request-changes pr next)))))))))))
 
 ;;; Submitting
+
+(defun ygg-git-compare-submit--sequence (steps final progress done)
+  "Run STEPS, each (COMMENTS LABEL RUN), one after another, RUN being called
+with a function taking what went wrong, if anything; a failure does not
+stop the rest.  Then the steps FINAL, a function of the first failure,
+gives.  PROGRESS is called with the comments handled and a step's LABEL
+before each; DONE with the comments posted and the first failure."
+  (let ((posted nil) (failure nil) (handled 0))
+    (letrec ((advance
+              (lambda (queue)
+                (if (null queue)
+                    (let ((more (and final (prog1 (funcall final failure) (setq final nil)))))
+                      (if more
+                          (funcall advance more)
+                        (funcall done posted failure)))
+                  (pcase-let ((`(,comments ,label ,run) (car queue))
+                              (over nil))
+                    (let ((next (lambda (&optional err)
+                                  (unless over
+                                    (setq over t)
+                                    (if err
+                                        (unless failure (setq failure err))
+                                      (setq posted (append posted comments)))
+                                    (cl-incf handled (length comments))
+                                    (funcall advance (cdr queue))))))
+                      (funcall progress handled label)
+                      (condition-case err
+                          (funcall run next)
+                        (error (if over
+                                   (signal (car err) (cdr err))
+                                 (funcall next (error-message-string err))))))))))) 
+      (funcall advance steps))))
+
+(defconst ygg-git-compare-submit--event-past
+  '((comment . "Posted") (approve . "Posted") (request-changes . "Posted") (draft . "Drafted")))
+
+(defconst ygg-git-compare-submit--event-also
+  '((approve . " and approved it") (request-changes . " and requested changes")))
+
+(declare-function ygg-git-compare--remote-key "ygg-git-compare-threads" (pr))
+
+(defun ygg-git-compare-submit--say (buffer text)
+  (message "%s" text)
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (ignore-errors (ygg-git-compare--review-note buffer text)))))
+
+(defun ygg-git-compare-submit--settle (buffer name pr event comments posted failure prior)
+  "Drop what was POSTED of COMMENTS and say how it went."
+  (let* ((n (length comments))
+         (posted (seq-filter (lambda (c) (memq c posted)) comments))
+         (kept (- n (length posted)))
+         (text (cond ((and failure (> kept 0))
+                      (format "Posted %d of %d; %d kept: %s" (length posted) n kept failure))
+                     (failure
+                      (format "Posted %d comment%s to %s, then failed: %s" n (if (= n 1) "" "s")
+                              name failure))
+                     ((zerop n) (format "Approved %s" name))
+                     (t (format "%s %d comment%s to %s%s (%s)"
+                                (alist-get event ygg-git-compare-submit--event-past)
+                                n (if (= n 1) "" "s") name
+                                (alist-get event ygg-git-compare-submit--event-also "")
+                                (plist-get pr :url))))))
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (setq ygg-git-compare-submit--busy nil)
+        (ygg-git-compare-submit--drop posted)
+        (when (and posted (fboundp 'ygg-git-compare--remote-key))
+          (ignore-errors (ygg-git-compare--cache-drop (ygg-git-compare--remote-key pr))))))
+    (ygg-git-compare-submit--say buffer text)
+    (run-at-time 8 nil
+                 (lambda ()
+                   (when (and (buffer-live-p buffer)
+                              (eq (buffer-local-value 'ygg-git-compare--note buffer) text))
+                     (ygg-git-compare--review-note buffer prior))))))
 
 (defconst ygg-git-compare-submit--event-names
   '((comment . "Comment with") (approve . "Approve with")
@@ -419,40 +547,69 @@ request changes when every one went; the ones posted, and the first failure."
   (when comments
     (ygg-git-compare-comments-drop (mapcar (lambda (c) (plist-get c :id)) comments))))
 
+(defun ygg-git-compare-submit--held (event max-priority)
+  "The comments for the pull request, a user error when there is nothing to
+send or one was made on another range."
+  (let* ((comments (ygg-git-compare-submit--select 'forge max-priority))
+         (here (ygg-git-compare--range-label))
+         (stale (seq-find (lambda (c) (and (plist-get c :range)
+                                           (not (equal (plist-get c :range) here))))
+                          comments)))
+    (unless (or comments (eq event 'approve))
+      (user-error "No comments held for the pull request"))
+    (when stale
+      (user-error "A comment was made on %s; drop it or send it to an agent"
+                  (plist-get stale :range)))
+    comments))
+
+(defun ygg-git-compare-submit--post (event max-priority pr)
+  "Ask, then post the comments to PR in the background."
+  (when ygg-git-compare-submit--busy
+    (user-error "A review is already being posted; wait for it to land"))
+  (let* ((comments (ygg-git-compare-submit--held event max-priority))
+         (name (ygg-git-compare--pr-name pr))
+         (n (length comments))
+         (pending (ygg-git-compare-submit--pending-note))
+         (buffer (current-buffer))
+         (prior ygg-git-compare--note))
+    (unless (y-or-n-p (format "%s %d comment%s on %s%s? "
+                              (alist-get event ygg-git-compare-submit--event-names)
+                              n (if (= n 1) "" "s") name
+                              (if (string-empty-p pending) "" (concat " (" pending ")"))))
+      (user-error "Nothing sent"))
+    (setq ygg-git-compare-submit--busy t)
+    (condition-case failure
+        (pcase-let* ((gitlab (eq (plist-get pr :forge) 'gitlab))
+                     (`(,steps . ,final)
+                      (if gitlab
+                          (ygg-git-compare-submit--gitlab-steps pr event comments)
+                        (cons (ygg-git-compare-submit--github-steps pr event comments) nil))))
+          (ygg-git-compare-submit--sequence
+           steps final
+           (lambda (handled label)
+             (ygg-git-compare-submit--say
+              buffer (cond (label (format "%s…" label))
+                           (gitlab (format "Posting %d/%d…" (min n (1+ handled)) n))
+                           (t (format "Posting %d comment%s to %s…" n (if (= n 1) "" "s")
+                                      name)))))
+           (lambda (posted failure)
+             (ygg-git-compare-submit--settle buffer name pr event comments posted failure
+                                             prior))))
+      (error (when (buffer-live-p buffer)
+               (with-current-buffer buffer (setq ygg-git-compare-submit--busy nil)))
+             (signal (car failure) (cdr failure))))))
+
 (defun ygg-git-compare-submit-forge (event &optional max-priority)
   "Send the comments for the pull or merge request as a review with EVENT:
-comment, approve, request-changes or draft.
+comment, approve, request-changes or draft.  The forge is asked in the
+background, the pull request first when it is not known yet.
 MAX-PRIORITY leaves out findings less urgent than it."
   (with-current-buffer (ygg-git-compare--list)
-    (let* ((comments (ygg-git-compare-submit--select 'forge max-priority))
-           (_ (unless (or comments (eq event 'approve))
-                (user-error "No comments held for the pull request")))
-           (here (ygg-git-compare--range-label))
-           (stale (seq-find (lambda (c) (and (plist-get c :range)
-                                             (not (equal (plist-get c :range) here))))
-                            comments))
-           (_ (when stale
-                (user-error "A comment was made on %s; drop it or send it to an agent"
-                            (plist-get stale :range))))
-           (pr (ygg-git-compare--this-pr))
-           (name (ygg-git-compare--pr-name pr))
-           (n (length comments))
-           (pending (ygg-git-compare-submit--pending-note)))
-      (unless (y-or-n-p (format "%s %d comment%s on %s%s? "
-                                (alist-get event ygg-git-compare-submit--event-names)
-                                n (if (= n 1) "" "s") name
-                                (if (string-empty-p pending) "" (concat " (" pending ")"))))
-        (user-error "Nothing sent"))
-      (pcase-let ((`(,posted ,failure)
-                   (if (eq (plist-get pr :forge) 'github)
-                       (ygg-git-compare-submit--github pr event comments)
-                     (ygg-git-compare-submit--gitlab pr event comments))))
-        (ygg-git-compare-submit--drop posted)
-        (if failure
-            (message "%d of %d sent to %s; %d kept: %s"
-                     (length posted) n name (- n (length posted)) failure)
-          (message "%s: %d comment%s sent, %s" name n (if (= n 1) "" "s")
-                   (plist-get pr :url)))))))
+    (when ygg-git-compare-submit--busy
+      (user-error "A review is already being posted; wait for it to land"))
+    (ygg-git-compare-submit--held event max-priority)
+    (ygg-git-compare--this-pr
+     (lambda (pr) (ygg-git-compare-submit--post event max-priority pr)))))
 
 (defun ygg-git-compare-submit--agent-prompt (comments)
   (concat ygg-git-compare-review-instructions

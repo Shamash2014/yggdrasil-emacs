@@ -104,19 +104,6 @@ a function of (PROGRAM ARGS BODY), says what it prints."
                   (apply make-process-before args)))
                ((symbol-function 'ygg-git-compare--forge-async)
                 (lambda (program args callback &optional _timeout)
-                  (push (list program args nil) ygg-git-compare-post-tests--calls)
-                  (apply callback
-                         (condition-case failure
-                             (list 0 (funcall ,answer program args nil) "")
-                           (user-error (list 1 "" (error-message-string failure)))))))
-               ((symbol-function 'y-or-n-p) (lambda (&rest _) t))
-               ((symbol-function 'message)
-                (lambda (format &rest args)
-                  (when format
-                    (push (apply #'format-message format args)
-                          ygg-git-compare-post-tests--messages))))
-               ((symbol-function 'ygg-git-compare--forge-run)
-                (lambda (program &rest args)
                   (let* ((input (cadr (member "--input" args)))
                          (body (and input (json-parse-string
                                            (with-temp-buffer
@@ -124,7 +111,16 @@ a function of (PROGRAM ARGS BODY), says what it prints."
                                              (buffer-string))
                                            :object-type 'plist :array-type 'list))))
                     (push (list program args body) ygg-git-compare-post-tests--calls)
-                    (funcall ,answer program args body)))))
+                    (apply callback
+                           (condition-case failure
+                               (list 0 (funcall ,answer program args body) "")
+                             (user-error (list 1 "" (error-message-string failure))))))))
+               ((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+               ((symbol-function 'message)
+                (lambda (format &rest args)
+                  (when format
+                    (push (apply #'format-message format args)
+                          ygg-git-compare-post-tests--messages)))))
        ,@body)))
 
 (defun ygg-git-compare-post-tests--goto (text)
@@ -321,7 +317,9 @@ a function of (PROGRAM ARGS BODY), says what it prints."
         (let* ((targets (ygg-git-compare--review-targets))
                (mr (seq-find (lambda (c) (string-prefix-p "!7 " (car c))) targets)))
           (should mr)
-          (should (equal (cdr mr) (cons 'pr (list :number 7 :head "feature" :base "main"))))
+          (should (equal (cdr mr) (cons 'pr (list :number 7 :head "feature" :base "main"
+                                                  :forge 'gitlab :host "gitlab.example.com"
+                                                  :path "g/r"))))
           (should (assoc "feature" targets))
           (should-not (seq-find (lambda (c) (eq (cadr c) 'worktree)) targets)))))))
 
@@ -341,16 +339,5 @@ a function of (PROGRAM ARGS BODY), says what it prints."
     (ygg-git-compare-post-tests--with-repo (_root _base _head) url
       (should (equal (ygg-git-compare--forge-repo "origin")
                      '(gitlab "gitlab.example.com" "g/p"))))))
-
-(ert-deftest ygg-git-compare-forge-run-names-a-program-that-will-not-start ()
-  (let* ((temporary-file-directory (file-name-as-directory (make-temp-file "forge-run-" t)))
-         (program (expand-file-name "ygg-no-such-program" temporary-file-directory)))
-    (unwind-protect
-        (progn
-          (should (string-search program
-                                 (cadr (should-error (ygg-git-compare--forge-run program "pr")
-                                                     :type 'user-error))))
-          (should-not (directory-files temporary-file-directory nil "forge")))
-      (delete-directory temporary-file-directory t))))
 
 ;;; ygg-git-compare-post-tests.el ends here
