@@ -2,17 +2,21 @@
 
 ;;; Commentary:
 ;; The modal layer's way into the diagram renderer and the image paster:
-;; markdown and gfm buffers get the whole-buffer toggle and the paste on
-;; their localleader, org buffers the paste.  ygg-diagram and ygg-md-image
-;; know nothing of the layer.
+;; markdown and gfm buffers get the whole-buffer toggle, the raw-fences
+;; toggle and the paste on their localleader, org buffers the paste.
+;; ygg-diagram and ygg-md-image know nothing of the layer.
 
 ;;; Code:
 
 (require 'yggdrasil-localleader)
 (require 'ygg-diagram)
+(require 'ygg-markdown-fences)
 
 (dolist (mode '(markdown-mode gfm-mode))
   (yggdrasil-localleader-def mode "m" #'ygg-diagram-toggle "diagrams & math"))
+
+(dolist (mode '(markdown-mode gfm-mode))
+  (yggdrasil-localleader-def mode "f" #'ygg-markdown-fences-toggle "raw code fences"))
 
 (autoload 'ygg-md-paste-image "ygg-md-image" nil t)
 (dolist (mode '(markdown-mode gfm-mode org-mode))

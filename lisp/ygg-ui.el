@@ -178,6 +178,7 @@ turns it back on."
 (defvar markdown-hide-markup)
 (defvar markdown-fontify-code-blocks-natively)
 (declare-function markdown-mode "markdown-mode" ())
+(declare-function ygg-markdown-fences-propertize "ygg-markdown-fences" (text hide))
 
 (defcustom ygg-ui-markdown-hide-markup t
   "Render markdown formatted: the asterisks and backticks go invisible."
@@ -191,7 +192,7 @@ turns it back on."
 Its font-lock is quadratic in the size of the buffer — measured on
 Emacs 31: 3ms at 1k, 10ms at 2k, 49ms at 4k, 161ms at 8k, 1.3s at 24k —
 so a long answer is left as plain text rather than stopping the editor
-to decorate it."
+to decorate it.  Past it only the fenced code is fontified."
   :type 'natnum :group 'yggdrasil)
 
 (defvar ygg-ui--markdown-buffer nil
@@ -218,11 +219,18 @@ invisible, so bold reads bold rather than showing its asterisks.  TEXT
 is answered as it stands when it is not a string, when it is empty,
 when markdown-mode is missing, and whenever the fontification itself
 goes wrong."
-  (if (or (not (stringp text)) (string-empty-p text)
-          (> (length text) ygg-ui-markdown-max)
-          (not (or (fboundp 'markdown-mode)
-                   (require 'markdown-mode nil t))))
-      text
+  (cond
+   ((or (not (stringp text)) (string-empty-p text)
+        (not (or (fboundp 'markdown-mode)
+                 (require 'markdown-mode nil t))))
+    text)
+   ((> (length text) ygg-ui-markdown-max)
+    (or (ignore-errors
+          (require 'ygg-markdown-fences)
+          (ygg-markdown-fences-propertize text ygg-ui-markdown-hide-markup))
+        text))
+   (t
+    (require 'ygg-markdown-fences)
     (or (ignore-errors
           (let ((out (copy-sequence text)))
             (with-current-buffer (ygg-ui--markdown-buffer)
@@ -254,7 +262,7 @@ goes wrong."
                           (put-text-property (1- pos) (1- next) prop val out)))
                       (setq pos next))))))
             out))
-        text)))
+        text))))
 
 (defun ygg-ui-tokens (text &optional chars-per-token)
   "Tokens TEXT is counted as: its characters over CHARS-PER-TOKEN.
