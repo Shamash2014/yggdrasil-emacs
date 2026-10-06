@@ -89,11 +89,12 @@ Nil keeps every line."
     (+ (* era 146097) doe -719468)))
 
 (defun ygg-review-file--iso-parse (token)
-  (when (string-match (concat "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)"
-                              "T\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)"
-                              "\\(?:\\.\\([0-9]+\\)\\)?"
-                              "\\(Z\\|\\([-+]\\)\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)\\)?\\'")
-                      token)
+  (when (let ((case-fold-search nil))
+          (string-match (concat "\\`\\([0-9]\\{4\\}\\)-\\([0-9]\\{2\\}\\)-\\([0-9]\\{2\\}\\)"
+                                "[T ]\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\):\\([0-9]\\{2\\}\\)"
+                                "\\(?:\\.\\([0-9]+\\)\\)?"
+                                "\\(Z\\|\\([-+]\\)\\([0-9]\\{2\\}\\):?\\([0-9]\\{2\\}\\)\\)?\\'")
+                        token))
     (let* ((n (mapcar (lambda (k) (string-to-number (match-string k token))) '(1 2 3 4 5 6)))
            (frac (match-string 7 token))
            (sign (match-string 9 token))
@@ -104,7 +105,8 @@ Nil keeps every line."
                      (* 3600 (nth 3 n)) (* 60 (nth 4 n)) (nth 5 n)))
            (secs (- local offset)))
       (when (and (<= hours 23) (<= minutes 59)
-                 (string= (format-time-string "%Y-%m-%dT%H:%M:%S" local t) (substring token 0 19)))
+                 (string= (format-time-string "%Y-%m-%dT%H:%M:%S" local t)
+                          (concat (substring token 0 10) "T" (substring token 11 19))))
         (cond ((null frac) secs)
               ((>= secs 0) (string-to-number (format "%d.%s" secs frac)))
               (t (+ secs (string-to-number (concat "0." frac)))))))))
@@ -249,7 +251,12 @@ Nil keeps every line."
         (cond
          ((and (memq c '(?. ?#)) (ygg-review-file--token-start-p s (1+ i)))
           (string-match "[^ \t}\"=]+" s (1+ i))
-          (if (eq c ?.) (push (match-string 0 s) classes) (setq id (match-string 0 s)))
+          (let ((token (match-string 0 s)))
+            (cond ((and (eq c ?.) classes)
+                   (ygg-review-file--note line (format "extra class %s, the first is used" token)))
+                  ((eq c ?.) (push token classes))
+                  (id (ygg-review-file--note line (format "duplicate id #%s, the first is kept" token)))
+                  (t (setq id token))))
           (setq i (match-end 0)))
          ((and (or (<= ?a c ?z) (<= ?A c ?Z))
                (let ((e (ygg-review-file--name-end s i))) (and (< e n) (eq (aref s e) ?=) e)))
@@ -259,7 +266,8 @@ Nil keeps every line."
                  (key (intern (concat ":" name))))
             (condition-case err
                 (let ((v (ygg-review-file--read-value s start key)))
-                  (if-let* ((pair (gethash key seen))) (setcdr pair (car v))
+                  (if (gethash key seen)
+                      (ygg-review-file--note line (format "duplicate attribute %s, the first is kept" name))
                     (let ((pair (cons key (car v))))
                       (puthash key pair seen)
                       (push pair pairs)))
@@ -533,7 +541,7 @@ Nil keeps every line."
 (defun ygg-review-file--join (recs from to)
   (mapconcat (lambda (k) (plist-get (aref recs k) :text)) (number-sequence from to) "\n"))
 
-(defun ygg-review-file--window (recs i)
+(defun ygg-review-file--window-bounds (recs i)
   (let ((hunk (plist-get (aref recs i) :hunk)) (n (length recs)) (lo i) (hi i) (k (1- i)) (c 0))
     (while (and (>= k 0) (< c 2) (eql (plist-get (aref recs k) :hunk) hunk)
                 (not (eq (plist-get (aref recs k) :kind) 'snip)))
@@ -544,7 +552,16 @@ Nil keeps every line."
                 (not (eq (plist-get (aref recs k) :kind) 'snip)))
       (when (ygg-review-file--content-p (aref recs k)) (setq hi k) (cl-incf c))
       (cl-incf k))
-    (ygg-review-file--join recs lo hi)))
+    (cons lo hi)))
+
+(defun ygg-review-file--window (recs i)
+  (let ((bounds (ygg-review-file--window-bounds recs i)))
+    (ygg-review-file--join recs (car bounds) (cdr bounds))))
+
+(defun ygg-review-file--quote-bounds (recs i span attrs)
+  (let ((start (nth 1 (ygg-review-file--anchor-at recs i span attrs))))
+    (cond (start (cons start i))
+          ((ygg-review-file--content-p (aref recs i)) (ygg-review-file--window-bounds recs i)))))
 
 (defun ygg-review-file--hunk-text (recs i)
   (when-let* ((h (plist-get (aref recs i) :hunk))) (ygg-review-file--join recs h i)))
@@ -712,9 +729,23 @@ Nil keeps every line."
     (:type (and (symbolp value) (not (eq value t)) (list value)))
     (_ (list value))))
 
+(defconst ygg-review-file--known-statuses '(pending))
+
+(defun ygg-review-file--known-types ()
+  (append (if (boundp 'ygg-git-compare-comment-types) ygg-git-compare-comment-types
+            '(issue suggestion nit question praise))
+          (if (boundp 'ygg-git-compare-agent-types) ygg-git-compare-agent-types '(todo fix))))
+
+(defun ygg-review-file--vocabulary-note (k v line)
+  (when (and (memq k '(:type :status)) v (symbolp v) (not (eq v t))
+             (not (memq v (if (eq k :type) (ygg-review-file--known-types)
+                            ygg-review-file--known-statuses))))
+    (ygg-review-file--note line (format "unknown %s %s, kept" (substring (symbol-name k) 1) v))))
+
 (defun ygg-review-file--sanitize (plist line)
   (cl-loop for (k v) on plist by #'cddr
            for ok = (and v (ygg-review-file--field k v))
+           when ok do (ygg-review-file--vocabulary-note k (car ok) line)
            if (or (null v) ok) append (list k (if ok (car ok) v))
            else do (ygg-review-file--note
                     line (format "bad value for %s, %s" (substring (symbol-name k) 1)
@@ -729,6 +760,8 @@ Nil keeps every line."
          (end (ygg-review-file--div-end lines i to (car f) quote-ends))
          (body (append (cl-subseq lines (1+ i) (nth 0 end)) nil))
          (plist (ygg-review-file--sanitize (nth 2 attrs) (1+ i))))
+    (when (and (nth 1 attrs) (plist-get plist :id))
+      (ygg-review-file--note (1+ i) "id given twice, the one after # is kept"))
     (unless (nth 2 end)
       (setq body (reverse (seq-drop-while #'string-blank-p (reverse body))))
       (ygg-review-file--note (1+ i) "unclosed div, closed at the next div or quoted line"))
@@ -738,9 +771,12 @@ Nil keeps every line."
           :body body :next (nth 1 end) :line (1+ i) :from (1+ i) :to (nth 0 end))))
 
 (defun ygg-review-file--body-text (div)
-  (let ((attrs (plist-get div :attrs)))
-    (if (plist-member attrs :text) (plist-get attrs :text)
-      (string-join (plist-get div :body) "\n"))))
+  (let* ((attrs (plist-get div :attrs))
+         (body (string-join (plist-get div :body) "\n")))
+    (cond ((not (plist-member attrs :text)) body)
+          ((string-blank-p body) (plist-get attrs :text))
+          (t (ygg-review-file--note (plist-get div :line) "text attribute together with a body, the body wins")
+             body))))
 
 (defun ygg-review-file--replies (lines div)
   (let ((j (plist-get div :from)) (to (plist-get div :to)) out)
@@ -805,51 +841,219 @@ Nil keeps every line."
 
 ;;; Live diff
 
+(defconst ygg-review-file--lcs-cells 4000000)
+
+(defun ygg-review-file--same (quoted live)
+  (or (eq quoted :wild) (equal quoted live)))
+
+(defun ygg-review-file--align-greedy (a b i0 i1 j0 j1 eq)
+  (let ((i i0) (j j0) out)
+    (while (and (< i i1) (< j j1))
+      (if (funcall eq (aref a i) (aref b j))
+          (progn (push (list i j) out) (cl-incf i) (cl-incf j))
+        (let ((ahead (cl-loop for x from (1+ j) below (min j1 (+ j 21))
+                              when (funcall eq (aref a i) (aref b x)) return x))
+              (behind (cl-loop for y from (1+ i) below (min i1 (+ i 21))
+                               when (funcall eq (aref a y) (aref b j)) return y)))
+          (cond ((and ahead (or (null behind) (<= (- ahead j) (- behind i)))) (setq j ahead))
+                (behind (setq i behind))
+                (t (cl-incf i) (cl-incf j))))))
+    (nreverse out)))
+
+(defun ygg-review-file--align-dp (a b i0 i1 j0 j1 eq)
+  (let* ((n (- i1 i0)) (m (- j1 j0)) (w (1+ m)) (tbl (make-vector (* (1+ n) w) 0)) out)
+    (cl-loop for ii from (1- n) downto 0
+             do (cl-loop for jj from (1- m) downto 0
+                         do (aset tbl (+ (* ii w) jj)
+                                  (if (funcall eq (aref a (+ i0 ii)) (aref b (+ j0 jj)))
+                                      (1+ (aref tbl (+ (* (1+ ii) w) jj 1)))
+                                    (max (aref tbl (+ (* (1+ ii) w) jj))
+                                         (aref tbl (+ (* ii w) jj 1)))))))
+    (let ((ii 0) (jj 0))
+      (while (and (< ii n) (< jj m))
+        (cond ((funcall eq (aref a (+ i0 ii)) (aref b (+ j0 jj)))
+               (push (list (+ i0 ii) (+ j0 jj)) out)
+               (cl-incf ii) (cl-incf jj))
+              ((>= (aref tbl (+ (* (1+ ii) w) jj)) (aref tbl (+ (* ii w) jj 1))) (cl-incf ii))
+              (t (cl-incf jj)))))
+    (nreverse out)))
+
+(defun ygg-review-file--align (a b i0 i1 j0 j1 eq)
+  (let (head tail)
+    (while (and (< i0 i1) (< j0 j1) (funcall eq (aref a i0) (aref b j0)))
+      (push (list i0 j0) head) (cl-incf i0) (cl-incf j0))
+    (while (and (< i0 i1) (< j0 j1) (funcall eq (aref a (1- i1)) (aref b (1- j1))))
+      (cl-decf i1) (cl-decf j1) (push (list i1 j1) tail))
+    (append (nreverse head)
+            (and (< i0 i1) (< j0 j1)
+                 (funcall (if (<= (* (- i1 i0) (- j1 j0)) ygg-review-file--lcs-cells)
+                              #'ygg-review-file--align-dp
+                            #'ygg-review-file--align-greedy)
+                          a b i0 i1 j0 j1 eq))
+            tail)))
+
+(defun ygg-review-file--tiers (a b eqs positional)
+  (let (out)
+    (named-let rec ((i0 0) (i1 (length a)) (j0 0) (j1 (length b)) (tier 0))
+      (when (and (< i0 i1) (< j0 j1))
+        (cond
+         ((< tier (length eqs))
+          (let ((qi i0) (lj j0))
+            (dolist (p (ygg-review-file--align a b i0 i1 j0 j1 (nth tier eqs)))
+              (rec qi (nth 0 p) lj (nth 1 p) (1+ tier))
+              (push (list (nth 0 p) (nth 1 p) tier) out)
+              (setq qi (1+ (nth 0 p)) lj (1+ (nth 1 p))))
+            (rec qi i1 lj j1 (1+ tier))))
+         (positional
+          (dotimes (k (min (- i1 i0) (- j1 j0)))
+            (push (list (+ i0 k) (+ j0 k) tier) out))))))
+    (nreverse out)))
+
+(defun ygg-review-file--gaps (pairs nq nl fn)
+  (let ((qi 0) (lj 0))
+    (dolist (p pairs)
+      (when (or (< qi (nth 0 p)) (< lj (nth 1 p))) (funcall fn qi (nth 0 p) lj (nth 1 p)))
+      (setq qi (1+ (nth 0 p)) lj (1+ (nth 1 p))))
+    (when (or (< qi nq) (< lj nl)) (funcall fn qi nq lj nl))))
+
+(defun ygg-review-file--live-hunk (v s e expand limit)
+  (let ((body nil) (idx nil))
+    (cl-loop for k from (1+ s) below e
+             for line = (aref v k)
+             do (if (and expand (string-match "\\`\\[\\.\\.\\. \\([0-9]+\\) lines\\]\\'" line))
+                    (dotimes (_ (min limit (string-to-number (match-string 1 line))))
+                      (push :wild body) (push k idx))
+                  (push line body) (push k idx)))
+    (vector s e (vconcat (nreverse body)) (vconcat (nreverse idx))
+            (and (string-match "\\`@@ -\\([0-9]+\\)" (aref v s)) (match-string 1 (aref v s)))
+            (aref v s))))
+
+(defun ygg-review-file--live-files (v expand)
+  (let ((n (length v)) (limit (length v)) files key (fstart 0) fhead hunks hstart)
+    (cl-flet ((close-hunk (e)
+                (when hstart
+                  (push (ygg-review-file--live-hunk v hstart e expand limit) hunks)
+                  (setq hstart nil)))
+              (close-file (e)
+                (when hstart
+                  (push (ygg-review-file--live-hunk v hstart e expand limit) hunks)
+                  (setq hstart nil))
+                (when (> e fstart)
+                  (push (vector key fstart (or fhead e) e (vconcat (nreverse hunks))) files))
+                (setq hunks nil fhead nil)))
+      (dotimes (i n)
+        (let ((line (aref v i)))
+          (cond ((string-prefix-p "diff --git " line)
+                 (close-file i) (setq key line fstart i))
+                ((string-prefix-p "@@ " line)
+                 (close-hunk i)
+                 (unless fhead (setq fhead i))
+                 (setq hstart i)))))
+      (close-file n))
+    (vconcat (nreverse files))))
+
+(defun ygg-review-file--body-match (q l)
+  (let ((a (aref q 2)) (b (aref l 2)))
+    (and (= (length a) (length b))
+         (cl-loop for x across a for y across b always (ygg-review-file--same x y)))))
+
+(defun ygg-review-file--live-runs (qv qa qx la tail note)
+  (let ((prev-i -1) (prev-j -1) (nqa (length qa)) (nla (length la)))
+    (dolist (p (append (ygg-review-file--align qa la 0 nqa 0 nla #'ygg-review-file--same)
+                       (list (list nqa nla))))
+      (let ((d (- (nth 0 p) prev-i 1)) (ins (- (nth 1 p) prev-j 1)))
+        (cond
+         ((and (= d 0) (= ins 0)))
+         ((= d 0)
+          (funcall note (if (< (nth 0 p) nqa) (aref qx (nth 0 p)) tail)
+                   (format "live diff has %d more line%s here" ins (if (= ins 1) "" "s"))
+                   'gap))
+         (t
+          (let ((k (aref qx (1+ prev-i))))
+            (funcall note k
+                     (cond ((and (= ins 0) (= d 1))
+                            (format "quoted line is not in the live diff: %s" (aref qv k)))
+                           ((= ins 0) (format "%d quoted lines are not in the live diff" d))
+                           ((= d 1) (format "quoted line differs from the live diff: %s" (aref qv k)))
+                           (t (format "%d quoted lines differ from the live diff" d)))))))
+      (setq prev-i (nth 0 p) prev-j (nth 1 p))))))
+
+(defun ygg-review-file--live-file (qv lv q l tail lastp note shift)
+  (let* ((qh (aref q 4)) (lh (aref l 4)) (nqh (length qh))
+         (qhe (aref q 2)) (qs (aref q 1)))
+    (ygg-review-file--live-runs
+     qv (vconcat (seq-subseq qv qs qhe)) (vconcat (number-sequence qs (1- qhe)))
+     (vconcat (seq-subseq lv (aref l 1) (aref l 2))) (min qhe tail) note)
+    (let ((pairs (ygg-review-file--tiers
+                  qh lh
+                  (list (lambda (x y) (and (equal (aref x 5) (aref y 5)) (ygg-review-file--body-match x y)))
+                        #'ygg-review-file--body-match
+                        (lambda (x y) (and (aref x 4) (equal (aref x 4) (aref y 4)))))
+                  t)))
+      (dolist (p pairs)
+        (let ((x (aref qh (nth 0 p))) (y (aref lh (nth 1 p))) (tier (nth 2 p)))
+          (cond ((= tier 0))
+                ((= tier 1) (funcall shift (aref x 0)))
+                (t (ygg-review-file--live-runs
+                    qv (aref x 2) (aref x 3) (aref y 2)
+                    (if (< (1+ (nth 0 p)) nqh) (aref (aref qh (1+ (nth 0 p))) 0) tail)
+                    note)))))
+      (ygg-review-file--gaps
+       pairs nqh (length lh)
+       (lambda (qi0 qi1 lj0 lj1)
+         (cl-loop for x from qi0 below qi1
+                  for h = (aref qh x)
+                  do (funcall note (aref h 0) (format "quoted hunk is not in the live diff: %s" (aref h 5))))
+         (when (< lj0 lj1)
+           (funcall note (if (< qi1 nqh) (aref (aref qh qi1) 0) tail)
+                    (if (and lastp (>= qi1 nqh) (= lj1 (length lh)))
+                        "live diff has extra files or hunks beyond the quoted diff"
+                      "live diff has extra hunks here")
+                    'gap)))))))
+
 (defun ygg-review-file--check-live (quotes qlines live)
   (let* ((strip (lambda (l) (if (string-suffix-p "\r" l) (substring l 0 -1) l)))
-         (live-lines (vconcat (mapcar strip (ygg-review-file--lines live))))
+         (lv (vconcat (mapcar strip (ygg-review-file--lines live))))
          (qv (vconcat (mapcar strip quotes)))
-         (m (length live-lines)) (nq (length qv)) (p 0) (k 0) (shown 0) (hidden 0))
-    (cl-flet ((report (message)
-                (if (< shown 30)
-                    (progn (cl-incf shown) (ygg-review-file--note (aref qlines k) message))
-                  (cl-incf hidden))))
-      (while (< k nq)
-        (let ((q (aref qv k)))
-          (cond
-           ((string-match "\\`\\[\\.\\.\\. \\([0-9]+\\) lines\\]\\'" q)
-            (cl-incf p (string-to-number (match-string 1 q)))
-            (cl-incf k))
-           ((and (< p m) (equal q (aref live-lines p)))
-            (cl-incf p)
-            (cl-incf k))
-           (t
-            (let ((extra-live (cl-loop for x from (1+ p) below (min m (+ p 21))
-                                       when (equal q (aref live-lines x)) return (- x p)))
-                  (extra-quoted (and (< p m)
-                                     (cl-loop for y from (1+ k) below (min nq (+ k 21))
-                                              when (equal (aref qv y) (aref live-lines p)) return (- y k))))
-                  (swapped (and (< (1+ p) m) (< (1+ k) nq)
-                                (equal (aref qv (1+ k)) (aref live-lines (1+ p))))))
-              (cond
-               ((and extra-live (not swapped) (or (null extra-quoted) (<= extra-live extra-quoted)))
-                (report (format "live diff has %d more lines here" extra-live))
-                (cl-incf p extra-live))
-               ((and extra-quoted (not swapped))
-                (report (if (= extra-quoted 1) (format "quoted line is not in the live diff: %s" q)
-                          (format "%d quoted lines are not in the live diff" extra-quoted)))
-                (cl-incf k extra-quoted))
-               (t
-                (report (format "quoted line differs from the live diff: %s" q))
-                (cl-incf p)
-                (cl-incf k)))))))))
-    (when (> hidden 0)
-      (ygg-review-file--note (aref qlines (1- (length qlines)))
-                             (format "%d more quoted lines differ from the live diff" hidden)))
-    (when (and (> nq 0) (< p m))
-      (ygg-review-file--note (aref qlines (1- nq))
-                             "live diff has extra files or hunks beyond the quoted diff"))
-    (concat "\n" (string-join live-lines "\n") "\n")))
+         (nq (length qv)) (shown 0) (hidden 0) (shifted 0) first-shifted
+         (gaps (make-vector (1+ nq) nil)))
+    (when (> nq 0)
+      (let* ((note (lambda (k message &optional gap)
+                     (when gap (aset gaps (min k nq) t))
+                     (if (< shown 30)
+                         (progn (cl-incf shown)
+                                (ygg-review-file--note (aref qlines (max 0 (min k (1- nq)))) message))
+                       (cl-incf hidden))))
+             (shift (lambda (k) (cl-incf shifted) (unless first-shifted (setq first-shifted k))))
+             (qf (ygg-review-file--live-files qv t)) (lf (ygg-review-file--live-files lv nil))
+             (pairs (ygg-review-file--tiers
+                     qf lf (list (lambda (x y) (equal (aref x 0) (aref y 0)))) nil)))
+        (dolist (p pairs)
+          (let ((q (aref qf (nth 0 p))))
+            (ygg-review-file--live-file
+             qv lv q (aref lf (nth 1 p)) (min (aref q 3) (1- nq))
+             (= (1+ (nth 0 p)) (length qf)) note shift)))
+        (ygg-review-file--gaps
+         pairs (length qf) (length lf)
+         (lambda (qi0 qi1 lj0 lj1)
+           (cl-loop for x from qi0 below qi1
+                    for q = (aref qf x)
+                    do (funcall note (aref q 1)
+                                (if (aref q 0) (format "quoted file is not in the live diff: %s" (aref q 0))
+                                  (format "%d quoted lines are not in the live diff" (- (aref q 3) (aref q 1))))))
+           (when (< lj0 lj1)
+             (funcall note (if (< qi1 (length qf)) (aref (aref qf qi1) 1) nq)
+                      (if (>= qi1 (length qf))
+                          "live diff has extra files or hunks beyond the quoted diff"
+                        "live diff has extra files or hunks here")
+                      'gap))))
+        (when (> shifted 0)
+          (funcall note first-shifted
+                   (format "hunk headers shifted (%d hunk%s)" shifted (if (= shifted 1) "" "s"))))
+        (when (> hidden 0)
+          (ygg-review-file--note (aref qlines (1- nq))
+                                 (format "%d more quoted lines differ from the live diff" hidden)))))
+    (list (concat "\n" (string-join lv "\n") "\n") gaps)))
 
 ;;; Parsing
 
@@ -888,7 +1092,13 @@ Nil keeps every line."
     (cl-loop for (k v) on attrs by #'cddr unless (memq k skip) do (setq fields (plist-put fields k v)))
     fields))
 
-(defun ygg-review-file--build-comment (ev precs front-range seen live-text author)
+(defun ygg-review-file--strip-cr (text)
+  (replace-regexp-in-string "\r\\(\n\\|\\'\\)" "\\1" text))
+
+(defun ygg-review-file--explained (bounds gaps)
+  (and bounds (cl-loop for x from (1+ (car bounds)) to (cdr bounds) thereis (aref gaps x))))
+
+(defun ygg-review-file--build-comment (ev precs front-range seen live author)
   (let* ((d (plist-get ev :div)) (line (plist-get d :line))
          (attrs (plist-get d :attrs)) (a (plist-get ev :anchor))
          (span (ygg-review-file--span-attr attrs line a))
@@ -914,8 +1124,11 @@ Nil keeps every line."
       (unless (plist-member attrs :created) (setq fields (plist-put fields :created (float-time)))))
     (puthash id t seen)
     (let ((c (append (list :id id) fields (list :text text))))
-      (when (and live-text (stringp (plist-get c :quote)) (not (string-empty-p (plist-get c :quote)))
-                 (not (string-search (concat "\n" (plist-get c :quote) "\n") live-text)))
+      (when (and live (stringp (plist-get c :quote)) (not (string-empty-p (plist-get c :quote)))
+                 (not (string-search (concat "\n" (ygg-review-file--strip-cr (plist-get c :quote)) "\n")
+                                     (nth 0 live)))
+                 (not (ygg-review-file--explained (ygg-review-file--quote-bounds precs a span attrs)
+                                                  (nth 1 live))))
         (ygg-review-file--note line (format "quote of %s no longer matches the live diff" id)))
       c)))
 
@@ -952,14 +1165,14 @@ Nil keeps every line."
          (precs (ygg-review-file--records-of
                  quotes (lambda (pos message)
                           (ygg-review-file--note (aref (plist-get scan :qlines) pos) message))))
-         (live-text (and live (ygg-review-file--check-live quotes (plist-get scan :qlines) live)))
+         (live-info (and live (ygg-review-file--check-live quotes (plist-get scan :qlines) live)))
          (front-range (plist-get front :range))
          (author (plist-get front :author))
          (seen (make-hash-table :test 'equal)) (tseen (make-hash-table :test 'equal))
          comments threads)
     (dolist (ev (plist-get scan :events))
       (if (eq (plist-get ev :kind) 'comment)
-          (push (ygg-review-file--build-comment ev precs front-range seen live-text author) comments)
+          (push (ygg-review-file--build-comment ev precs front-range seen live-info author) comments)
         (push (ygg-review-file--build-thread ev precs tseen) threads)))
     (let ((pieces (plist-get scan :pieces)) review)
       (cl-loop for (k v) on front by #'cddr

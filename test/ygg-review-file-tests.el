@@ -7,6 +7,8 @@
 (require 'seq)
 (require 'ygg-review-file)
 
+(defvar ygg-git-compare-comment-types)
+
 (defun ygg-review-file-tests--git (dir &rest args)
   (let ((default-directory dir))
     (with-temp-buffer
@@ -1178,7 +1180,7 @@ deleted and d.txt renamed to e.txt with an edit."
      (list :repo "github.com/o/r" :pr 12 :base "9f8e7d6" :head "1a2b3c4" :round 2
            :verdict 'request-changes :range range :text "Overall: close."
            :comments
-           (list (funcall line 4 "c1" :type 'nit :author "you" :created 1790000000.5 :status 'draft
+           (list (funcall line 4 "c1" :type 'nit :author "you" :created 1790000000.5 :status 'pending
                           :range range :text "Name this constant.")
                  (funcall line 6 "c2" :type 'issue :priority 1 :author "you" :created 1790000010.5
                           :range range :text "Empty input case?")
@@ -1375,7 +1377,9 @@ deleted and d.txt renamed to e.txt with an edit."
                         (list "2026-02-03T04:05:06+00:00" base)
                         (list "2026-02-02T22:35:06-05:30" base)
                         (list "2026-02-03T04:05:06.250" (+ base 0.25))
-                        (list "2026-02-03T07:05:06.250+03:00" (+ base 0.25))))
+                        (list "2026-02-03T07:05:06.250+03:00" (+ base 0.25))
+                        (list "2026-02-02T22:35:06.250-0530" (+ base 0.25))
+                        (list "2026-02-03T07:05:06+0300" base)))
       (let ((got (ygg-review-file-tests--created (car case))))
         (should-not (cdr got))
         (should (equal (plist-get (car got) :created) (nth 1 case)))))))
@@ -1383,7 +1387,7 @@ deleted and d.txt renamed to e.txt with an edit."
 (ert-deftest ygg-review-file-created-that-is-not-a-valid-time-is-a-problem-and-dropped ()
   (dolist (token '("2026-12-31T23:59:60Z" "2026-02-30T00:00:00Z" "2026-02-03T24:00:00Z" "2026-02-03"
                    "10000-01-01T00:00:00Z" "2026-02-03T04:05:06+24:00" "2026-02-03T04:05:06+03:60"
-                   "2026-02-03T04:05:06+0300" "2026-02-03T04:05:06+03" "2026-02-03t04:05:06z"
+                   "2026-02-03T04:05:06+03" "2026-02-03t04:05:06z"
                    "yesterday" "\"yesterday\"" ":soon" "true"))
     (let ((got (ygg-review-file-tests--created token)))
       (should (equal (mapcar #'cdr (cdr got)) '("bad value for created, ignored")))
@@ -1563,8 +1567,8 @@ deleted and d.txt renamed to e.txt with an edit."
     (dolist (id '("t1" "t2"))
       (should-not (plist-member (funcall c id) :type)))
     (should (eq (plist-get (funcall c "t3") :type) 'odd))
-    (should (= 10 (length (plist-get back :problems))))
-    (should (seq-every-p (lambda (p) (string-match-p "\\`bad value for \\(priority\\|confidence\\|type\\), ignored\\'" (cdr p)))
+    (should (= 11 (length (plist-get back :problems))))
+    (should (seq-every-p (lambda (p) (string-match-p "\\`\\(bad value for \\(priority\\|confidence\\|type\\), ignored\\|unknown type odd, kept\\)\\'" (cdr p)))
                          (plist-get back :problems)))))
 
 (defun ygg-review-file-tests--live-problems (text live)
@@ -1577,7 +1581,7 @@ deleted and d.txt renamed to e.txt with an edit."
          (target "> +l3 changed\n"))
     (should-not (ygg-review-file-tests--live-problems text diff))
     (dolist (case (list (list (ygg-review-file-tests--sub text target (concat "> junk\n" target)) "not in the live diff")
-                        (list (ygg-review-file-tests--sub text target "") "more lines here")
+                        (list (ygg-review-file-tests--sub text target "") "1 more line here")
                         (list (ygg-review-file-tests--sub text target "> +l3 other\n") "differs")
                         (list (ygg-review-file-tests--sub text target (concat "> >\n" target)) "not in the live diff")))
       (let ((found (ygg-review-file-tests--live-problems (car case) diff)))
@@ -1769,3 +1773,109 @@ deleted and d.txt renamed to e.txt with an edit."
                         "n1" "n1" "https://github.com/o/r/pull/1#discussion_r1")))
          (text (ygg-review-file-tests--round-trip (list :threads thread) diff)))
     (should (string-search "diff-hunk=null" text))))
+
+(defun ygg-review-file-tests--live-text (diff)
+  (let ((recs (ygg-review-file--records diff)))
+    (ygg-review-file-print
+     (list :comments
+           (list (ygg-review-file-tests--derived
+                  recs (ygg-review-file-tests--rec-at-index recs 'new 3) "c1" nil
+                  :type 'nit :created 1.0 :text "first")
+                 (ygg-review-file-tests--derived
+                  recs (ygg-review-file-tests--rec-at-index recs 'new 20) "c2" nil
+                  :type 'nit :created 2.0 :text "second")))
+     diff)))
+
+(defun ygg-review-file-tests--live-messages (text live)
+  (mapcar #'cdr (plist-get (ygg-review-file-parse text live) :problems)))
+
+(ert-deftest ygg-review-file-live-diff-check-ignores-a-carriage-return-ending-the-content-lines ()
+  (let* ((diff (concat "diff --git a/f b/f\n--- a/f\n+++ b/f\n@@ -1,3 +1,3 @@\n a\r\n-b\r\n+B\r\n c\r\n"))
+         (recs (ygg-review-file--records diff))
+         (text (ygg-review-file-print
+                (list :comments (list (ygg-review-file-tests--derived
+                                       recs (cl-position "+B\r" recs :test #'equal
+                                                         :key (lambda (r) (plist-get r :text)))
+                                       "a" nil
+                                       :type 'nit :created 1.0 :text "x")))
+                diff)))
+    (should (string-search "\r" (plist-get (car (plist-get (ygg-review-file-parse text) :comments)) :quote)))
+    (should-not (plist-get (ygg-review-file-parse text diff) :problems))
+    (should-not (plist-get (ygg-review-file-parse text (replace-regexp-in-string "\r" "" diff)) :problems))))
+
+(ert-deftest ygg-review-file-live-diff-check-resyncs-after-an-insert-of-any-size ()
+  (let* ((diff (ygg-review-file-tests--diff 3))
+         (text (ygg-review-file-tests--live-text diff)))
+    (should-not (ygg-review-file-tests--live-messages text diff))
+    (dolist (n '(1 2 20 21 25 150))
+      (let* ((extra (mapconcat (lambda (k) (format "+extra%d\n" k)) (number-sequence 1 n) ""))
+             (live (ygg-review-file-tests--sub diff " l2\n-l3\n" (concat " l2\n" extra "-l3\n")))
+             (found (ygg-review-file-tests--live-messages text live)))
+        (should (equal found (list (format "live diff has %d more line%s here" n (if (= n 1) "" "s")))))))
+    (let ((found (ygg-review-file-tests--live-messages
+                  text (ygg-review-file-tests--sub diff "+b1\n" (concat (make-string 30 ?+) "\n+b1\n")))))
+      (should (= 1 (length found))))))
+
+(ert-deftest ygg-review-file-live-diff-check-resyncs-on-a-moved-hunk-and-a-shift-of-every-hunk-header ()
+  (let* ((diff (ygg-review-file-tests--diff 3))
+         (text (ygg-review-file-tests--live-text diff))
+         (h2 (string-search "@@ -18,6" diff)) (h3 (string-search "@@ -35,6" diff))
+         (rest (string-search "diff --git a/b.txt" diff))
+         (moved (concat (substring diff 0 h2) (substring diff h3 rest) (substring diff h2 h3)
+                        (substring diff rest)))
+         (shifted (replace-regexp-in-string
+                   "^@@ -\\([0-9]+\\)\\(,[0-9]+\\)? \\+\\([0-9]+\\)"
+                   (lambda (m)
+                     (string-match "^@@ -\\([0-9]+\\)\\(,[0-9]+\\)? \\+\\([0-9]+\\)" m)
+                     (format "@@ -%d%s +%d" (+ 7 (string-to-number (match-string 1 m)))
+                             (or (match-string 2 m) "") (+ 7 (string-to-number (match-string 3 m)))))
+                   diff t t)))
+    (should (<= (length (ygg-review-file-tests--live-messages text moved)) 2))
+    (should (ygg-review-file-tests--live-messages text moved))
+    (let ((found (ygg-review-file-tests--live-messages text shifted)))
+      (should (= 1 (length found)))
+      (should (string-prefix-p "hunk headers shifted" (car found))))))
+
+(ert-deftest ygg-review-file-duplicate-or-conflicting-attributes-are-reported-and-the-first-is-kept ()
+  (dolist (case '(("{.c #a type=nit type=issue}" "duplicate attribute type" :type nit)
+                  ("{.c #a #b}" "duplicate id #b" :id "a")
+                  ("{.c #a line=2 line=1}" "duplicate attribute line" :line 2)
+                  ("{.c #a #b id=c}" "duplicate id #b" :id "a")
+                  ("{.c .c #a}" "extra class c" :id "a")))
+    (let* ((back (ygg-review-file-tests--tiny (concat "::: " (car case) "\nhi\n:::\n")))
+           (c (car (plist-get back :comments))))
+      (should (equal (plist-get c (nth 2 case)) (nth 3 case)))
+      (should (ygg-review-file-tests--problem back (nth 1 case)))))
+  (let ((back (ygg-review-file-tests--tiny "::: {.c #a text=zz}\nhi\n:::\n")))
+    (should (equal (plist-get (car (plist-get back :comments)) :text) "hi"))
+    (should (ygg-review-file-tests--problem back "text attribute together with a body")))
+  (let ((back (ygg-review-file-tests--tiny "::: {.c #a text=zz}\n:::\n")))
+    (should (equal (plist-get (car (plist-get back :comments)) :text) "zz"))
+    (should-not (ygg-review-file-tests--problem back "text attribute"))))
+
+(ert-deftest ygg-review-file-created-accepts-a-basic-offset-with-a-fraction-and-a-space-for-the-t ()
+  (let ((base (ygg-review-file-tests--utc 2026 2 3 4 5 6)))
+    (dolist (case (list (list "\"2026-02-03 04:05:06Z\"" base)
+                        (list "\"2026-02-03 07:05:06+03:00\"" base)
+                        (list "\"2026-02-02T22:35:06.5-0530\"" (+ base 0.5))
+                        (list "\"2026-02-02 22:35:06.5-0530\"" (+ base 0.5))))
+      (let ((got (ygg-review-file-tests--created (car case))))
+        (should-not (cdr got))
+        (should (equal (plist-get (car got) :created) (nth 1 case)))))
+    (let ((back (ygg-review-file-parse "---\ncreated: 2026-02-03 04:05:06Z\n---\n")))
+      (should-not (plist-get back :problems))
+      (should (equal (plist-get back :created) base)))))
+
+(ert-deftest ygg-review-file-unknown-type-and-status-are-reported-and-kept ()
+  (let* ((back (ygg-review-file-tests--tiny
+                (concat "::: {.c #a type=issue status=pending}\n1\n:::\n"
+                        "::: {.c #b type=todo}\n2\n:::\n"
+                        "::: {.c #c type=bogus status=weird}\n3\n:::\n")))
+         (c (ygg-review-file-tests--c back "c")))
+    (should (eq (plist-get c :type) 'bogus))
+    (should (eq (plist-get c :status) 'weird))
+    (should (equal (mapcar #'cdr (plist-get back :problems))
+                   '("unknown type bogus, kept" "unknown status weird, kept"))))
+  (let ((ygg-git-compare-comment-types '(zap)))
+    (let ((back (ygg-review-file-tests--tiny "::: {.c #a type=zap}\n1\n:::\n::: {.c #b type=nit}\n2\n:::\n")))
+      (should (equal (mapcar #'cdr (plist-get back :problems)) '("unknown type nit, kept"))))))
