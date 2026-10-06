@@ -140,7 +140,7 @@ are, so the many lookups of one call chain ask git once."
 
 (defun ygg-git-compare--configured-ssh-command ()
   (when-let* (((not (file-remote-p default-directory)))
-              (gitdir (magit-gitdir)))
+              (gitdir (ygg-git-compare--gitdir)))
     (let ((known (gethash gitdir ygg-git-compare--ssh-commands 'unread)))
       (when (eq known 'unread)
         (setq known (or (let ((value (magit-get "core.sshCommand")))
@@ -182,6 +182,7 @@ it said.  Nothing it runs may ask a question."
          (timer nil)
          (main nil)
          (errproc nil)
+         (started nil)
          (finish (lambda (status)
                    (when timer (cancel-timer timer))
                    (let ((text (with-current-buffer out (buffer-string)))
@@ -190,34 +191,45 @@ it said.  Nothing it runs may ask a question."
                      (kill-buffer err)
                      (funcall callback status text said))))
          (join (lambda () (when (zerop (cl-decf open)) (funcall finish status)))))
-    (condition-case nil
-        (progn
-          (setq errproc (make-pipe-process
-                         :name "ygg-git-compare-forge-err" :buffer err :noquery t
-                         :sentinel (lambda (process _event)
-                                     (unless (process-live-p process) (funcall join))))
-                main (make-process
-                      :name "ygg-git-compare-forge" :buffer out :stderr errproc
-                      :noquery t :connection-type 'pipe :coding 'utf-8
-                      :file-handler git
-                      :command (cons program args)
-                      :sentinel (lambda (process _event)
-                                  (unless (process-live-p process)
-                                    (setq status (process-exit-status process))
-                                    (funcall join))))
-                timer (run-at-time (or timeout ygg-git-compare-forge-timeout) nil
-                                   (lambda ()
-                                     (when (process-live-p main)
-                                       (set-process-sentinel main #'ignore)
-                                       (set-process-sentinel errproc #'ignore)
-                                       (delete-process main)
-                                       (delete-process errproc)
-                                       (funcall finish 'timeout))))))
-      (file-error
-       (when errproc
-         (set-process-sentinel errproc #'ignore)
-         (delete-process errproc))
-       (funcall finish nil)))))
+    (unwind-protect
+        (condition-case nil
+            (progn
+              (setq errproc (make-pipe-process
+                             :name "ygg-git-compare-forge-err" :buffer err :noquery t
+                             :sentinel (lambda (process _event)
+                                         (unless (process-live-p process) (funcall join))))
+                    main (make-process
+                          :name "ygg-git-compare-forge" :buffer out :stderr errproc
+                          :noquery t :connection-type 'pipe :coding 'utf-8
+                          :file-handler git
+                          :command (cons program args)
+                          :sentinel (lambda (process _event)
+                                      (unless (process-live-p process)
+                                        (setq status (process-exit-status process))
+                                        (funcall join))))
+                    timer (run-at-time (or timeout ygg-git-compare-forge-timeout) nil
+                                       (lambda ()
+                                         (when (process-live-p main)
+                                           (set-process-sentinel main #'ignore)
+                                           (set-process-sentinel errproc #'ignore)
+                                           (delete-process main)
+                                           (delete-process errproc)
+                                           (funcall finish 'timeout)))))
+              (setq started t))
+          (file-error
+           (when errproc
+             (set-process-sentinel errproc #'ignore)
+             (delete-process errproc))
+           (setq started t)
+           (funcall finish nil)))
+      (unless started
+        (when timer (cancel-timer timer))
+        (dolist (process (list main errproc))
+          (when process
+            (set-process-sentinel process #'ignore)
+            (delete-process process)))
+        (kill-buffer out)
+        (kill-buffer err)))))
 
 (defun ygg-git-compare--answer (done program status text err parse)
   "Call DONE with PARSE of TEXT, or with nil and what went wrong when PROGRAM,
@@ -232,25 +244,57 @@ which ended with STATUS and said ERR, did not answer."
                  (funcall done (car value))
                (funcall done nil (format "%s answered nothing readable" program)))))))
 
-(defvar ygg-git-compare--fetching nil)
-(defvar ygg-git-compare--fetch-queue nil)
+(defun ygg-git-compare--gitdir ()
+  "This repository's git directory, however the path to it is spelled."
+  (when-let* ((gitdir (magit-gitdir)))
+    (file-truename gitdir)))
 
-(defun ygg-git-compare--serially (job)
-  "Call JOB with the function that says it is done; jobs run one at a time."
-  (if ygg-git-compare--fetching
-      (setq ygg-git-compare--fetch-queue (append ygg-git-compare--fetch-queue (list job)))
-    (setq ygg-git-compare--fetching t)
-    (funcall job (lambda ()
-                   (setq ygg-git-compare--fetching nil)
-                   (when-let* ((next (pop ygg-git-compare--fetch-queue)))
-                     (ygg-git-compare--serially next))))))
+(defvar ygg-git-compare--fetch-lanes (make-hash-table :test #'equal)
+  "Each busy git directory's fetches, as (BUSY . QUEUE) by git directory.")
+
+(defvar ygg-git-compare--landing nil
+  "The function the lookup being started lands its answer with, if any.")
+
+(defun ygg-git-compare--serially (lane job)
+  "Call JOB with the function that says it is done; the jobs of one LANE run
+one at a time, however they end."
+  (let ((state (or (gethash lane ygg-git-compare--fetch-lanes)
+                   (puthash lane (cons nil nil) ygg-git-compare--fetch-lanes)))
+        (land ygg-git-compare--landing))
+    (if (car state)
+        (setcdr state (append (cdr state) (list (cons land job))))
+      (setcar state t)
+      (ygg-git-compare--run-job lane state land job nil))))
+
+(defun ygg-git-compare--run-job (lane state land job deferred)
+  (let* ((released nil)
+         (returned nil)
+         (release (lambda ()
+                    (unless released
+                      (setq released t)
+                      (if-let* ((next (pop (cdr state))))
+                          (ygg-git-compare--run-job lane state (car next) (cdr next) t)
+                        (setcar state nil)
+                        (remhash lane ygg-git-compare--fetch-lanes))))))
+    (unwind-protect
+        (prog1 (condition-case failure
+                   (funcall job release)
+                 (error (when land
+                          (funcall land nil (error-message-string failure)))
+                        (if deferred
+                            (funcall release)
+                          (signal (car failure) (cdr failure)))))
+          (setq returned t))
+      (unless returned
+        (funcall release)))))
 
 (defun ygg-git-compare--fetch-ref (remote refspec done)
   "Fetch REFSPEC from REMOTE into FETCH_HEAD, then call DONE with the commit
-there, or with nil and what went wrong.  Fetches share FETCH_HEAD, so they
-run one at a time."
+there, or with nil and what went wrong.  Fetches share FETCH_HEAD, so those
+into one repository run one at a time."
   (let ((dir default-directory))
     (ygg-git-compare--serially
+     (or (ygg-git-compare--gitdir) dir)
      (lambda (release)
        (let ((default-directory dir))
          (ygg-git-compare--forge-async
@@ -286,12 +330,21 @@ functions to call when it lands.")
        (seq-every-p (lambda (item) (and (proper-list-p item) (cl-evenp (length item))))
                     value)))
 
+(defun ygg-git-compare--pr-value-p (value)
+  (and (ygg-git-compare--plists-p (list value))
+       (seq-every-p (lambda (field)
+                      (let ((v (plist-get value field)))
+                        (or (null v) (stringp v))))
+                    '(:head :base :start :base-ref :url))
+       (let ((number (plist-get value :number)))
+         (or (null number) (integerp number)))))
+
 (defun ygg-git-compare--value-valid-p (key value)
   "Whether VALUE is the kind of answer KEY asks for."
   (pcase (car-safe key)
     ((or 'pulls 'mrs) (ygg-git-compare--plists-p value))
     ((or 'head 'gh-url) (stringp value))
-    ('pr (or (null value) (ygg-git-compare--plists-p (list value))))
+    ('pr (or (null value) (ygg-git-compare--pr-value-p value)))
     (_ t)))
 
 (defun ygg-git-compare--cache-row (row)
@@ -387,19 +440,19 @@ excess dropped."
 
 (defun ygg-git-compare--cache-entry (key)
   "What is kept under KEY here, as (:value V :time T), or nil."
-  (when-let* ((gitdir (magit-gitdir)))
+  (when-let* ((gitdir (ygg-git-compare--gitdir)))
     (gethash key (ygg-git-compare--cache-table gitdir))))
 
 (defun ygg-git-compare--cache-value (key)
   (plist-get (ygg-git-compare--cache-entry key) :value))
 
 (defun ygg-git-compare--cache-drop (key)
-  (when-let* ((gitdir (magit-gitdir)))
+  (when-let* ((gitdir (ygg-git-compare--gitdir)))
     (remhash key (ygg-git-compare--cache-table gitdir))))
 
 (defun ygg-git-compare--refreshing-p (&rest kinds)
   "Whether a lookup here is under way whose key starts with one of KINDS."
-  (when-let* ((gitdir (magit-gitdir)))
+  (when-let* ((gitdir (ygg-git-compare--gitdir)))
     (let (found)
       (maphash (lambda (id _cell)
                  (when (and (equal (car id) gitdir) (memq (car-safe (cdr id)) kinds))
@@ -436,7 +489,7 @@ than TTL seconds, or failed more than RETRY, by default
 `ygg-git-compare-forge-retry', seconds ago, FETCH-FN is called with a
 function taking (VALUE ERR) to say what it found, once however many ask;
 ON-FRESH is then called with the same."
-  (let* ((gitdir (or (magit-gitdir) (user-error "Not in a git repository")))
+  (let* ((gitdir (or (ygg-git-compare--gitdir) (user-error "Not in a git repository")))
          (table (ygg-git-compare--cache-table gitdir))
          (id (cons gitdir key)))
     (when (ygg-git-compare--cache-stale-p (gethash key table) ttl retry)
@@ -444,11 +497,21 @@ ON-FRESH is then called with the same."
           (when on-fresh (push on-fresh (car cell)))
         (let ((cell (list (and on-fresh (list on-fresh)))))
           (puthash id cell ygg-git-compare--inflight)
-          (let ((land (lambda (value &optional err)
-                        (ygg-git-compare--landed gitdir table key cell value err))))
-            (condition-case failure
-                (funcall fetch-fn land)
-              (error (funcall land nil (error-message-string failure))))))))
+          (let* ((landed nil)
+                 (land (lambda (value &optional err)
+                         (unless landed
+                           (setq landed t)
+                           (ygg-git-compare--landed gitdir table key cell value err))))
+                 (started nil))
+            (unwind-protect
+                (progn
+                  (condition-case failure
+                      (let ((ygg-git-compare--landing land))
+                        (funcall fetch-fn land))
+                    (error (funcall land nil (error-message-string failure))))
+                  (setq started t))
+              (unless started
+                (remhash id ygg-git-compare--inflight)))))))
     (plist-get (gethash key table) :value)))
 
 (defun ygg-git-compare--json (text)
@@ -646,6 +709,25 @@ it is not known."
               (ygg-git-compare--answer done "gh" status text err #'ygg-git-compare--json)))))
        #'ygg-git-compare--announce))))
 
+(defun ygg-git-compare--worktrees ()
+  "The worktrees of this repository as (PATH COMMIT BRANCH BARE PRUNABLE),
+from one `git worktree list'."
+  (let ((remote (file-remote-p default-directory))
+        worktrees)
+    (dolist (line (magit-git-items "worktree" "list" "--porcelain" "-z"))
+      (cond ((string-prefix-p "worktree " line)
+             (push (list (concat remote (substring line 9)) nil nil nil nil) worktrees))
+            ((null worktrees))
+            ((string-prefix-p "HEAD " line)
+             (setf (nth 1 (car worktrees)) (substring line 5)))
+            ((string-prefix-p "branch refs/heads/" line)
+             (setf (nth 2 (car worktrees)) (substring line 18)))
+            ((string-equal line "bare")
+             (setf (nth 3 (car worktrees)) t))
+            ((string-prefix-p "prunable" line)
+             (setf (nth 4 (car worktrees)) t))))
+    (nreverse worktrees)))
+
 (defun ygg-git-compare--group (label group &optional note)
   (propertize label 'ygg-git-compare-group group 'ygg-git-compare-note note))
 
@@ -659,13 +741,13 @@ the background."
      (cl-flet ((add (label group spec &optional note)
                  (while (assoc label cands) (setq label (concat label "'")))
                  (push (cons (ygg-git-compare--group label group note) spec) cands)))
-       (pcase-dolist (`(,path ,commit ,branch ,bare ,_detached ,_locked ,prunable)
-                      (magit-list-worktrees))
+       (pcase-dolist (`(,path ,commit ,branch ,bare ,prunable)
+                      (ygg-git-compare--worktrees))
          (unless (or bare prunable)
            (add (format "%s [%s]" (file-name-nondirectory (directory-file-name path))
 			(or branch (magit-rev-abbrev commit)))
 		"Worktrees" (cons 'worktree (file-name-as-directory path))
-		(concat (abbreviate-file-name path)
+		(concat (abbreviate-file-name (file-name-as-directory path))
 			(when (and here (file-equal-p path here)) "  (here)")))))
        (dolist (b (magit-list-local-branch-names))
          (add b "Branches" (cons 'rev b)))
@@ -1385,7 +1467,7 @@ as JSON through api's --input."
 (defun ygg-git-compare--glab-hosts ()
   "Each host glab is configured for, as (KEY API-HOST SSH-HOST ...)."
   (let (hosts)
-    (dolist (file (list (when-let* ((gitdir (magit-gitdir)))
+    (dolist (file (list (when-let* ((gitdir (ygg-git-compare--gitdir)))
                           (expand-file-name "glab-cli/config.yml" gitdir))
                         (ygg-git-compare--glab-global-config)))
       (when (and file (file-readable-p file))
@@ -1542,7 +1624,9 @@ and what went wrong."
 (defun ygg-git-compare--with-base (pr)
   "PR with :base, the commit it parted from its target, as far as it can be
 told here."
-  (if (or (null pr) (plist-get pr :base))
+  (if (or (null pr) (plist-get pr :base)
+          (not (stringp (plist-get pr :start)))
+          (not (stringp (plist-get pr :head))))
       pr
     (append (list :base (magit-git-string "merge-base" (plist-get pr :start)
                                           (plist-get pr :head)))
@@ -2115,10 +2199,21 @@ Nothing is done when BUFFER was opened for another review since TOKEN."
                (or ygg-git-compare--note
                    (and pr (eq (car-safe ygg-git-compare--b-spec) 'pr)
                         (equal (plist-get (cdr ygg-git-compare--b-spec) :number)
-                               (plist-get pr :number))))))
+                               (plist-get pr :number)))
+                   (and (null pr) (null err) (eq (car-safe ygg-git-compare--b-spec) 'pr)))))
     (let ((default-directory dir)
           (number (plist-get pr :number)))
       (cond
+       ((and (null pr)
+             (eq (car-safe (buffer-local-value 'ygg-git-compare--b-spec buffer)) 'pr)
+             (let ((gone (format "PR #%s is closed or gone"
+                                 (plist-get (cdr (buffer-local-value 'ygg-git-compare--b-spec buffer))
+                                            :number)))
+                   (note (buffer-local-value 'ygg-git-compare--note buffer)))
+               (cond ((null note)
+                      (ygg-git-compare--review-note buffer gone)
+                      t)
+                     ((equal note gone))))))
        ((null pr)
         (ygg-git-compare--review-none buffer name selector err
                                       (cdr (buffer-local-value 'ygg-git-compare--a-spec buffer))))
