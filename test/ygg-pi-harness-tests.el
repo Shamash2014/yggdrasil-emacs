@@ -204,8 +204,9 @@
       (let ((lat (seq-find (lambda (e) (equal (plist-get e :name) "lat"))
                            (ygg-pi-tests--env-json (ygg-pi-session-env s)))))
         (should lat)
-        (should (equal (plist-get lat :args) '("mcp")))
-        (should (string-suffix-p "lat" (plist-get lat :command)))))))
+        (should (equal (plist-get lat :command) "/bin/sh"))
+        (should (equal (nth 3 (plist-get lat :args)) (directory-file-name (ygg-pi-tests--proj))))
+        (should (string-suffix-p "lat" (car (last (plist-get lat :args)))))))))
 
 (ert-deftest ygg-pi-session-env-leaves-out-what-pi-loads-itself ()
   (ygg-pi-tests--with

@@ -11,6 +11,7 @@
 (declare-function aob-session-dir "aob")
 (declare-function aob-acp--mcp-entry "aob-acp")
 (declare-function aob-acp--mcp-absolute "aob-acp")
+(declare-function aob-acp-lat-entry "aob-acp")
 (declare-function aob-acp-project-mcp-servers "aob-acp")
 (defvar aob-acp-agents)
 (defvar aob-acp-project-mcp-file)
@@ -101,12 +102,6 @@ settings, extensions, skills, prompts and mcp.json instead of hanging."
         (setq entry (plist-put entry key (ygg-pi--stringify-pairs (plist-get entry key))))))
     entry))
 
-(defun ygg-pi--lat-entry (dir)
-  "The lat MCP server for DIR when it has a lat.md, else nil."
-  (when (and dir (file-directory-p (expand-file-name "lat.md" dir)))
-    (list :name "lat" :command "lat" :args (vector "mcp") :env (vector)
-          :cwd (directory-file-name (expand-file-name dir)))))
-
 (defun ygg-pi--warn-skipped (s skipped)
   "Warn once per distinct SKIPPED list for session S."
   (when (and skipped (not (equal skipped (aob-session-ref s :pi-mcp-skipped))))
@@ -146,10 +141,8 @@ to the same pi server name are suffixed by the extension, not here."
          (names (append own (mapcar (lambda (e) (plist-get e :name)) mine)))
          (theirs (seq-remove (lambda (e) (member (plist-get e :name) names))
                              (aob-acp-project-mcp-servers project)))
-         (lat (and (not (member "lat" (append names
-                                              (mapcar (lambda (e) (plist-get e :name))
-                                                      theirs))))
-                   (ygg-pi--lat-entry dir)))
+         (lat (and (not (member "lat" own))
+                   (aob-acp-lat-entry dir mine theirs)))
          (aob-acp--mcp-dropped nil)
          valid)
     (dolist (tagged (append (mapcar (lambda (e) (cons e aob-acp-project-mcp-file)) theirs)

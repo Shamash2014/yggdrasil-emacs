@@ -3792,6 +3792,32 @@ checkout whose agents get it, whoever opened them."
               (push entry out))))
         (nreverse out)))))
 
+(defconst aob-acp--lat-launcher "cd \"$1\" && PATH=\"$2:$PATH\" exec \"$3\" mcp"
+  "Shell script run as sh -c with root, node directory and lat as $1 to $3.")
+
+(defun aob-acp-lat-entry (dir &rest taken)
+  "The lat MCP server for DIR as an entry, or nil.
+Nil when DIR is remote or has no lat.md, lat or node is not installed, or
+one of the entry lists TAKEN already has a server named lat.  lat finds
+lat.md from its working directory and ACP stdio servers have none, so sh
+enters the root first; node's directory is put on PATH because lat's
+shebang needs it.  Without node lat cannot run, so there is no entry."
+  (when-let* ((dir)
+              ((not (file-remote-p dir)))
+              ((file-directory-p (expand-file-name "lat.md" dir)))
+              ((not (seq-find (lambda (entries)
+                                (seq-find (lambda (e) (equal (plist-get e :name) "lat"))
+                                          entries))
+                              taken)))
+              (lat (executable-find "lat"))
+              (node (executable-find "node")))
+    (list :name "lat" :command "/bin/sh"
+          :args (vector "-c" aob-acp--lat-launcher "sh"
+                        (directory-file-name (expand-file-name dir))
+                        (directory-file-name (file-name-directory (expand-file-name node)))
+                        (expand-file-name lat))
+          :env (vector))))
+
 (defun aob-acp--mcp-servers (&optional init project)
   "What to send as mcpServers: what PROJECT declares and what the caller bound.
 INIT is the adapter\='s initialize result, when the caller has it; a
@@ -3812,6 +3838,8 @@ repository that declares a name of its own keeps it."
                                          (plist-get entry :name)))
                                 mine))
                     (aob-acp-project-mcp-servers project)))
+           (lat (aob-acp-lat-entry project mine
+                                   (aob-acp-project-mcp-servers project)))
            (all (seq-filter
                  (lambda (entry)
                    (aob-acp--mcp-takes-p
@@ -3819,7 +3847,7 @@ repository that declares a name of its own keeps it."
                         (intern (plist-get entry :type))
                       'stdio)
                     init))
-                 (append theirs mine))))
+                 (append theirs mine (and lat (list lat))))))
       (vconcat (if (file-remote-p (or project default-directory))
                    all
                  (delq nil (mapcar #'aob-acp--mcp-absolute all)))))))
