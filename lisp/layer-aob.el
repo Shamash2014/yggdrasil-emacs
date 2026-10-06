@@ -6,6 +6,7 @@
 (require 'cl-lib)
 (require 'ygg-agent-conf)
 (require 'ygg-pi)
+(require 'ygg-agent-maps)
 (require 'ygg-projects)
 (require 'aob-context)
 (require 'aob-deliver)

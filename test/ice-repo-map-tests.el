@@ -151,7 +151,7 @@
   (ice-repo-map-tests--with-repo root t
     (let ((counts (mapcar (lambda (budget)
                             (let ((out (ice-repo-map-tests--run root "--budget" (number-to-string budget))))
-                              (should (<= (length out) (* budget 4)))
+                              (should (<= (length out) (* budget 2.5)))
                               (ice-repo-map-tests--def-count out)))
                           '(256 1024 2000))))
       (should (< (nth 0 counts) (nth 1 counts)))
@@ -227,10 +227,16 @@
     (let ((default (ice-repo-map-tests--run root))
           (explicit (ice-repo-map-tests--run root "--budget" "2000"))
           (clamped (ice-repo-map-tests--run root "--budget" "9000")))
-      (should (<= (string-bytes default) (* 2000 4)))
-      (should (<= (string-bytes clamped) (* 2000 4)))
+      (should (<= (length default) (* 2000 2.5)))
+      (should (<= (length clamped) (* 2000 2.5)))
       (should (equal default explicit))
       (should (equal default clamped)))))
+
+(ert-deftest ice-repo-map-fit-leaves-a-safety-margin ()
+  (ice-repo-map-tests--with-repo root t
+    (dolist (budget '(800 2000))
+      (let ((out (ice-repo-map-tests--run root "--budget" (number-to-string budget))))
+        (should (<= (ceiling (/ (length out) 2.5)) (floor (* budget 0.97))))))))
 
 (ert-deftest ice-repo-map-write-is-full ()
   (ice-repo-map-tests--with-repo root t
