@@ -69,11 +69,14 @@
 
 (declare-function magit-add-section-hook "magit-section")
 (autoload 'ygg-git-worktree-insert-section "ygg-git-worktree")
+(autoload 'ygg-git-review-requests-insert-section "ygg-git-review-requests")
 
 ;; it inserts nothing when the repository has one worktree
 (with-eval-after-load 'magit-status
   (magit-add-section-hook 'magit-status-sections-hook #'ygg-git-worktree-insert-section
-                          #'magit-insert-status-headers t))
+                          #'magit-insert-status-headers t)
+  (magit-add-section-hook 'magit-status-sections-hook #'ygg-git-review-requests-insert-section
+                          #'ygg-git-worktree-insert-section t))
 
 (declare-function magit-blame-next-chunk "magit-blame")
 (declare-function magit-blame-previous-chunk "magit-blame")
