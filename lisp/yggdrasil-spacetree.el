@@ -1188,6 +1188,31 @@ by re-parenting them to the phantom root, so they group as siblings."
   ;; same count under the same ids the bar was last drawn for
   (ygg-space--format-invalidate))
 
+(defun ygg-space--set-tab-bar-visible (symbol value)
+  (set-default symbol value)
+  (when (and (boundp 'tab-bar-mode) tab-bar-mode)
+    (ygg-space--apply-tab-bar-visibility)))
+
+(defcustom ygg-space-tab-bar-visible nil
+  "Whether the space-tree tab bar is drawn.
+Spaces work either way; the current name stays in the mode line."
+  :type 'boolean
+  :set #'ygg-space--set-tab-bar-visible
+  :initialize #'custom-initialize-default
+  :group 'tab-bar)
+
+(defun ygg-space--apply-tab-bar-visibility ()
+  "Show or hide the tab bar on every frame and on new ones."
+  (setq tab-bar-show (and ygg-space-tab-bar-visible t))
+  (tab-bar--update-tab-bar-lines t))
+
+;;;###autoload
+(defun ygg-space-toggle-tab-bar ()
+  "Show or hide the space-tree tab bar for this session."
+  (interactive)
+  (setq ygg-space-tab-bar-visible (not ygg-space-tab-bar-visible))
+  (ygg-space--apply-tab-bar-visibility))
+
 (defun ygg-space-modeline ()
   "Mode-line segment: the current space's name, dimmed."
   (when-let* ((name (and tab-bar-mode (ygg-space--name (ygg-space--current)))))
@@ -1196,10 +1221,10 @@ by re-parenting them to the phantom root, so they group as siblings."
 ;;;###autoload
 (defun ygg-spacetree-setup ()
   "Enable the space-tree tab-bar: crumbs + numbered same-level siblings."
-  (setq tab-bar-show t
-        tab-bar-format '(ygg-space--format)
+  (setq tab-bar-format '(ygg-space--format)
         tab-bar-auto-width nil)
   (tab-bar-mode 1)
+  (ygg-space--apply-tab-bar-visibility)
   (ygg-space--ensure-root)
   (add-hook 'tab-bar-tab-post-open-functions #'ygg-space--on-open)
   (add-hook 'tab-bar-tab-pre-close-functions #'ygg-space--on-close)

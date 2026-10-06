@@ -199,8 +199,25 @@ buffer costs, a tenth of a second each, and a session is many buffers."
       (add-hook 'window-buffer-change-functions #'ygg-session--vc-on-display)
       (ygg-session--vc-on-display (selected-frame)))))
 
-(with-eval-after-load 'easysession
+(declare-function ygg-space--apply-tab-bar-visibility "yggdrasil-spacetree")
+(defvar easysession--overwrite-frameset-filter-alist)
+(defvar easysession--overwrite-frameset-filter-include-geometry-alist)
+
+(defun ygg-session--keep-tab-bar-setting ()
+  (when (fboundp 'ygg-space--apply-tab-bar-visibility)
+    (ygg-space--apply-tab-bar-visibility)))
+
+(defun ygg-session--install-easysession ()
+  (dolist (var '(easysession--overwrite-frameset-filter-alist
+                 easysession--overwrite-frameset-filter-include-geometry-alist))
+    (when (boundp var)
+      (unless (assq 'tab-bar-lines (symbol-value var))
+        (set var (cons '(tab-bar-lines . :never) (symbol-value var))))))
+  (add-hook 'easysession-after-load-hook #'ygg-session--keep-tab-bar-setting)
   (advice-add 'easysession-switch-to :around #'ygg-session--load-fast))
+
+(with-eval-after-load 'easysession
+  (ygg-session--install-easysession))
 
 (defun ygg-session--saved-name (root)
   "The saved session of the project at ROOT, on its branch or without one."

@@ -18,6 +18,7 @@
 (declare-function posframe-poshandler-frame-top-right-corner "posframe")
 (declare-function posframe-poshandler-frame-center "posframe")
 (declare-function vertico-posframe-mode "vertico-posframe")
+(declare-function ygg-space-toggle-tab-bar "yggdrasil-spacetree")
 
 (defvar vertico-posframe-poshandler)
 (defvar vertico-posframe-border-width)
@@ -381,7 +382,8 @@ An over-long candidate is cut with an ellipsis, keeping prefix and suffix."
   "z" #'ygg-zen-toggle :label "zen"
   "l" #'display-line-numbers-mode :label "line numbers"
   "w" #'ygg-cursorword-mode :label "cursorword"
-  "p" #'ygg-vertico-posframe-toggle :label "picker float")
+  "p" #'ygg-vertico-posframe-toggle :label "picker float"
+  "T" #'ygg-space-toggle-tab-bar :label "space bar")
 
 (yggdrasil-leader-def "u" ygg-leader-ui-map "ui")
 
