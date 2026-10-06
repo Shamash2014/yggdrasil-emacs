@@ -190,14 +190,31 @@ for the same entries share a process.")
                  (plist-get (cdr (assoc agent aob-acp-agents)) :command))
        t))
 
+(defcustom aob-acp-session-env-function nil
+  "Function (SESSION) returning extra \"VAR=VAL\" strings for SESSION's connection.
+For an adapter that reads from its environment what session/new would
+have told it.  The strings join the connection's key, so sessions that
+differ in them never share a process."
+  :type '(choice (const nil) function) :group 'aob)
+
 (defun aob-acp--agent-env (s)
   "The environment S's agent reads its subagent limits and roles from.
 Codex's adapter merges the JSON in CODEX_CONFIG into every thread it
 starts or resumes, and reads nothing of the kind from session/new."
-  (if (aob-acp--codex-agent-p (aob-session-ref s :agent))
-      (when-let* ((config (aob-acp--codex-config s)))
-        (list (concat "CODEX_CONFIG=" (json-serialize config))))
-    (aob-acp--cap-env s)))
+  (append
+   (if (aob-acp--codex-agent-p (aob-session-ref s :agent))
+       (when-let* ((config (aob-acp--codex-config s)))
+         (list (concat "CODEX_CONFIG=" (json-serialize config))))
+     (aob-acp--cap-env s))
+   (and aob-acp-session-env-function
+        (condition-case err
+            (funcall aob-acp-session-env-function s)
+          (error
+           (display-warning
+            'aob (format "%s: extra session environment failed, continuing without it: %s"
+                         (aob-session-ref s :agent) (error-message-string err))
+            :warning)
+           nil)))))
 
 (defun aob-acp--conn-env (agent project)
   "The environment a connection for AGENT on PROJECT would be started with."
@@ -4111,6 +4128,7 @@ the adapters store their sessions under."
     ;; meant to be handed.  The handshake is asynchronous, so by the time
     ;; the adapter asks what to open with, a caller's `let' is long
     ;; unwound and the session would go out with none of them
+    (aob-session-put s :mcp-declared aob-acp-mcp-servers)
     (let ((servers aob-acp-mcp-servers)
           (told (if (functionp aob-acp-system-append)
                     (funcall aob-acp-system-append s)

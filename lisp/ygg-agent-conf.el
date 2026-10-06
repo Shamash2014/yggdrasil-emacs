@@ -217,6 +217,8 @@ env table.  Anything else in the file is somebody else\='s business."
                                 ((plist-get spec :command) spec))))
                       (nreverse order)))))))
 
+(defvar ygg-agent--config-homes)
+
 ;;;###autoload
 (defun ygg-agent-user-mcp-servers (agent &optional project)
   "The MCP servers AGENT\='s own configuration declares, in wire shape.
@@ -229,6 +231,14 @@ is started by hand."
     ("claude" (ygg-agent--json-mcp "~/.claude.json" project))
     ("gemini" (ygg-agent--json-mcp "~/.gemini/settings.json" project))
     ("codex" (ygg-agent--toml-mcp "~/.codex/config.toml"))
+    ("pi" (ygg-agent--json-mcp
+           (expand-file-name "mcp.json"
+                             (or (ignore-errors
+                                   (ygg-agent--known-config-dir
+                                    "pi" (cdr (assoc "pi" ygg-agent--config-homes))
+                                    (or project default-directory)))
+                                 "~/.pi/agent"))
+           project))
     ((pred stringp)
      ;; anything else: the two places the others keep it
      (or (ygg-agent--json-mcp (format "~/.%s/settings.json" agent) project)
@@ -315,7 +325,12 @@ second run replaces ours rather than adding another."
      :seed ("enabledPlugins" "extraKnownMarketplaces" "skillOverrides")
      :adopt-plugin-mcp t)
     ("codex" :var "CODEX_HOME" :marker ".codex-home" :home "~/.codex"
-     :share ("agents" "prompts")))
+     :share ("agents" "prompts"))
+    ("pi" :var "PI_CODING_AGENT_DIR" :marker ".pi-agent-dir" :home "~/.pi/agent"
+     :share ("skills" "prompts" "npm" "extensions" "themes")
+     :settings "settings.json"
+     :seed ("packages" "defaultProvider" "defaultModel")
+     :seed-files (("models.json" "providers"))))
   "Per-kind config-home spec: env var, marker file, real home, shared subdirs.")
 
 (defcustom ygg-agent-conf-root "~/.agents-conf"
@@ -332,7 +347,8 @@ command naming the kind's adapter, still reads that kind's home."
      ((assoc exe ygg-agent--config-homes) exe)
      ((seq-find (lambda (kind)
                   (or (string-prefix-p (concat kind "-") preset)
-                      (string-match-p (regexp-quote kind) cmd)))
+                      (and (not (equal kind "pi"))
+                           (string-match-p (regexp-quote kind) cmd))))
                 (mapcar #'car ygg-agent--config-homes))))))
 
 (defun ygg-agent--repo-home (project)
@@ -354,16 +370,27 @@ command naming the kind's adapter, still reads that kind's home."
           (expand-file-name line (file-name-directory path)))))))
 
 (defun ygg-agent--read-json (path)
-  "PATH as a hash table, or nil when it is missing or not JSON."
+  "PATH as a hash table, or nil when it is missing, not JSON or not an object."
   (when (file-readable-p path)
-    (ignore-errors
-      (with-temp-buffer
-        (insert-file-contents path)
-        (json-parse-buffer :object-type 'hash-table
-                           :null-object nil :false-object :false)))))
+    (let ((json (ignore-errors
+                  (with-temp-buffer
+                    (insert-file-contents path)
+                    (json-parse-buffer :object-type 'hash-table
+                                       :null-object nil :false-object :false)))))
+      (and (hash-table-p json) json))))
 
-(defun ygg-agent--seed-settings (spec dir)
-  "Give DIR's settings file what SPEC's real home has to say.
+(defun ygg-agent--read-json-or-warn (path)
+  "PATH as a hash table, or nil.\nWarns, naming PATH, when it exists but holds no JSON object."
+  (when (file-exists-p path)
+    (or (ygg-agent--read-json path)
+        (progn (display-warning
+                'ygg-agent
+                (format "%s is not a JSON object; its config is left unseeded" path)
+                :warning)
+               nil))))
+
+(defun ygg-agent--seed-file (spec dir name keys)
+  "Give DIR's file NAME what SPEC's real home has to say under KEYS.
 Entry by entry, not key by key: a config home that once turned one
 plugin on has said something about that plugin and nothing about the
 others, so seeding the whole object only where it is absent leaves every
@@ -371,16 +398,15 @@ home the CLI ever wrote to stuck with whatever it decided that day.  An
 explicit answer here always wins — a project keeps the plugins it turned
 on and the skills it switched off — and this only fills silence.
 Returns what changed, nil when nothing did and nothing was written."
-  (when-let* ((name (plist-get spec :settings))
-              (src (expand-file-name name (expand-file-name (plist-get spec :home))))
-              (global (ygg-agent--read-json src)))
+  (when-let* ((src (expand-file-name name (expand-file-name (plist-get spec :home))))
+              (global (ygg-agent--read-json-or-warn src)))
     (let* ((dest (expand-file-name name dir))
            (local (if (file-exists-p dest)
-                      (ygg-agent--read-json dest)
+                      (ygg-agent--read-json-or-warn dest)
                     (make-hash-table :test #'equal)))
            (changed nil))
       (when local
-        (dolist (key (plist-get spec :seed))
+        (dolist (key keys)
           (let ((have (gethash key local 'missing))
                 (want (gethash key global 'missing)))
             (cond
@@ -397,6 +423,16 @@ Returns what changed, nil when nothing did and nothing was written."
                   (push (format "%s+%d" key n) changed)))))))
         (when (and changed (ygg-agent--replace-json dest local))
           (nreverse changed))))))
+
+(defun ygg-agent--seed-settings (spec dir)
+  "Seed DIR from SPEC's real home: its settings keys and its extra files.
+Returns what changed, nil when nothing did."
+  (let (changed)
+    (when-let* ((name (plist-get spec :settings)))
+      (setq changed (ygg-agent--seed-file spec dir name (plist-get spec :seed))))
+    (pcase-dolist (`(,name . ,keys) (plist-get spec :seed-files))
+      (setq changed (append changed (ygg-agent--seed-file spec dir name keys))))
+    changed))
 
 (defun ygg-agent--replace-json (path table)
   "Swap TABLE in for PATH, pretty-printed, by rename.
@@ -847,7 +883,7 @@ names the one that was."
 
 (defun ygg-agent--home-env (preset cmd home-of)
   "\"VAR=DIR\" for PRESET/CMD, DIR what HOME-OF gives its kind and spec."
-  (condition-case nil
+  (condition-case err
       (when-let* ((kind (ygg-agent--kind preset cmd))
                   (spec (cdr (assoc kind ygg-agent--config-homes)))
                   (dir (funcall home-of kind spec))
@@ -855,7 +891,12 @@ names the one that was."
                                (directory-file-name
                                 (expand-file-name (plist-get spec :home)))))))
         (format "%s=%s" (plist-get spec :var) (directory-file-name dir)))
-    (error nil)))
+    (error (display-warning
+            'ygg-agent
+            (format "config home for %s/%s not set up: %s" preset cmd
+                    (error-message-string err))
+            :warning)
+           nil)))
 
 (declare-function project-root "project" (project))
 (declare-function make-term "term" (name program &optional startfile &rest switches))

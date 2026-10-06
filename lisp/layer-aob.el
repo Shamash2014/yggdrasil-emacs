@@ -5,6 +5,7 @@
 (require 'yggdrasil-leader)
 (require 'cl-lib)
 (require 'ygg-agent-conf)
+(require 'ygg-pi)
 (require 'ygg-projects)
 (require 'aob-context)
 (require 'aob-deliver)
@@ -359,6 +360,8 @@ actions keep their tool title.  The short path stays the clickable target."
         ;; start
         (when-let* ((env (ygg-agent--known-config-env agent agent project)))
           (list env))))
+
+(setq aob-acp-session-env-function #'ygg-pi-session-env)
 
 (setq aob-acp-prepare-function
       (lambda (agent project &optional _isolate)

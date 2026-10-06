@@ -1,0 +1,3 @@
+#!/bin/sh
+DIR=$(cd "$(dirname "$0")" && pwd)
+exec pi -e "$DIR/aob-pi-mcp.js" ${AOB_PI_APPROVE:+--approve} "$@"
