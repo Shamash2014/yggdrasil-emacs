@@ -44,8 +44,24 @@
   "Idle seconds after a move before the right pane follows the file at point."
   :type 'number)
 
-(defcustom ygg-git-compare-gh-timeout 4
-  "Seconds to wait for gh to list pull requests before going on without them."
+(defcustom ygg-git-compare-forge-timeout 30
+  "Seconds before a forge lookup that has not answered is given up on."
+  :type 'number)
+
+(defcustom ygg-git-compare-fetch-timeout 300
+  "Seconds before a git fetch that has not finished is given up on."
+  :type 'number)
+
+(defcustom ygg-git-compare-forge-retry 20
+  "Seconds before a lookup that failed is tried again."
+  :type 'number)
+
+(defcustom ygg-git-compare-pr-ttl 60
+  "Seconds before a pull request's state and fetched head are asked for again."
+  :type 'number)
+
+(defcustom ygg-git-compare-list-ttl 120
+  "Seconds before the open pull or merge requests are asked for again."
   :type 'number)
 
 (defcustom ygg-git-compare-untracked-max-size 1000000
@@ -70,6 +86,21 @@ left out of a review."
   "This compare's review comments as kept, newest first.")
 (defvar-local ygg-git-compare--list-buffer nil
   "In the right pane, the diff of every file it belongs to.")
+(defvar-local ygg-git-compare--note nil
+  "What the header says is still under way, or nil.")
+(defvar-local ygg-git-compare--review-token nil
+  "Identifies the review request the compare was last opened for; answers to
+an earlier one are dropped.")
+(defvar vertico--input)
+(defvar magit--refresh-cache)
+(declare-function vertico--exhibit "vertico")
+
+(defmacro ygg-git-compare--with-git-cache (&rest body)
+  "Run BODY with magit remembering where the repository and its git directory
+are, so the many lookups of one call chain ask git once."
+  (declare (indent 0))
+  `(let ((magit--refresh-cache (or magit--refresh-cache (list (cons 0 0)))))
+     ,@body))
 
 ;;; Git
 
@@ -102,6 +133,328 @@ left out of a review."
       (magit-get-current-branch)
       "HEAD"))
 
+;;; Forges, asked in the background
+
+(defvar ygg-git-compare--ssh-commands (make-hash-table :test #'equal)
+  "Each local repository's core.sshCommand, or `none', by git directory.")
+
+(defun ygg-git-compare--configured-ssh-command ()
+  (when-let* (((not (file-remote-p default-directory)))
+              (gitdir (magit-gitdir)))
+    (let ((known (gethash gitdir ygg-git-compare--ssh-commands 'unread)))
+      (when (eq known 'unread)
+        (setq known (or (let ((value (magit-get "core.sshCommand")))
+                          (and (not (string-empty-p (or value ""))) value))
+                        'none))
+        (puthash gitdir known ygg-git-compare--ssh-commands))
+      (and (stringp known) known))))
+
+(defun ygg-git-compare--ssh-environment ()
+  "The variable that keeps git's ssh from asking, and leaves the user's own
+choice of ssh in place: GIT_SSH_COMMAND, else core.sshCommand, else GIT_SSH."
+  (let ((env (getenv "GIT_SSH_COMMAND"))
+        (git-ssh (getenv "GIT_SSH")))
+    (if-let* ((command (if (and env (not (string-empty-p env)))
+                           env
+                         (ygg-git-compare--configured-ssh-command))))
+        (list (concat "GIT_SSH_COMMAND=" command " -o BatchMode=yes"))
+      (unless (or (and git-ssh (not (string-empty-p git-ssh)))
+                  (file-remote-p default-directory))
+        (list "GIT_SSH_COMMAND=ssh -o BatchMode=yes")))))
+
+(defun ygg-git-compare--forge-async (program args callback &optional timeout)
+  "Run PROGRAM with ARGS on this machine without waiting, then call CALLBACK
+with (STATUS TEXT ERR): its exit code, nil when it did not start, or
+`timeout' when it was killed after TIMEOUT seconds; what it printed; what
+it said.  Nothing it runs may ask a question."
+  (let* ((git (equal program "git"))
+         (default-directory (if (and (file-remote-p default-directory) (not git))
+                                temporary-file-directory
+                              default-directory))
+         (process-environment
+          (append (list "GIT_TERMINAL_PROMPT=0" "GH_PROMPT_DISABLED=1")
+                  (and git (ygg-git-compare--ssh-environment))
+                  process-environment))
+         (out (generate-new-buffer " *ygg-git-compare-forge*"))
+         (err (generate-new-buffer " *ygg-git-compare-forge-err*"))
+         (open 2)
+         (status nil)
+         (timer nil)
+         (main nil)
+         (errproc nil)
+         (finish (lambda (status)
+                   (when timer (cancel-timer timer))
+                   (let ((text (with-current-buffer out (buffer-string)))
+                         (said (with-current-buffer err (string-trim (buffer-string)))))
+                     (kill-buffer out)
+                     (kill-buffer err)
+                     (funcall callback status text said))))
+         (join (lambda () (when (zerop (cl-decf open)) (funcall finish status)))))
+    (condition-case nil
+        (progn
+          (setq errproc (make-pipe-process
+                         :name "ygg-git-compare-forge-err" :buffer err :noquery t
+                         :sentinel (lambda (process _event)
+                                     (unless (process-live-p process) (funcall join))))
+                main (make-process
+                      :name "ygg-git-compare-forge" :buffer out :stderr errproc
+                      :noquery t :connection-type 'pipe :coding 'utf-8
+                      :file-handler git
+                      :command (cons program args)
+                      :sentinel (lambda (process _event)
+                                  (unless (process-live-p process)
+                                    (setq status (process-exit-status process))
+                                    (funcall join))))
+                timer (run-at-time (or timeout ygg-git-compare-forge-timeout) nil
+                                   (lambda ()
+                                     (when (process-live-p main)
+                                       (set-process-sentinel main #'ignore)
+                                       (set-process-sentinel errproc #'ignore)
+                                       (delete-process main)
+                                       (delete-process errproc)
+                                       (funcall finish 'timeout))))))
+      (file-error
+       (when errproc
+         (set-process-sentinel errproc #'ignore)
+         (delete-process errproc))
+       (funcall finish nil)))))
+
+(defun ygg-git-compare--answer (done program status text err parse)
+  "Call DONE with PARSE of TEXT, or with nil and what went wrong when PROGRAM,
+which ended with STATUS and said ERR, did not answer."
+  (cond ((null status) (funcall done nil (format "%s not found" program)))
+        ((eq status 'timeout) (funcall done nil (format "%s timed out" program)))
+        ((/= status 0) (funcall done nil (if (string-empty-p err)
+                                             (format "%s failed" program)
+                                           err)))
+        (t (let ((value (condition-case nil (list (funcall parse text)) (error nil))))
+             (if value
+                 (funcall done (car value))
+               (funcall done nil (format "%s answered nothing readable" program)))))))
+
+(defvar ygg-git-compare--fetching nil)
+(defvar ygg-git-compare--fetch-queue nil)
+
+(defun ygg-git-compare--serially (job)
+  "Call JOB with the function that says it is done; jobs run one at a time."
+  (if ygg-git-compare--fetching
+      (setq ygg-git-compare--fetch-queue (append ygg-git-compare--fetch-queue (list job)))
+    (setq ygg-git-compare--fetching t)
+    (funcall job (lambda ()
+                   (setq ygg-git-compare--fetching nil)
+                   (when-let* ((next (pop ygg-git-compare--fetch-queue)))
+                     (ygg-git-compare--serially next))))))
+
+(defun ygg-git-compare--fetch-ref (remote refspec done)
+  "Fetch REFSPEC from REMOTE into FETCH_HEAD, then call DONE with the commit
+there, or with nil and what went wrong.  Fetches share FETCH_HEAD, so they
+run one at a time."
+  (let ((dir default-directory))
+    (ygg-git-compare--serially
+     (lambda (release)
+       (let ((default-directory dir))
+         (ygg-git-compare--forge-async
+          "git" (list "fetch" "--quiet" "--no-tags" remote refspec)
+          (lambda (status text err)
+            (let ((default-directory dir))
+              (unwind-protect
+                  (ygg-git-compare--answer
+                   done "git" status text err
+                   (lambda (_text) (ygg-git-compare--commit "FETCH_HEAD")))
+                (funcall release))))
+          ygg-git-compare-fetch-timeout))))))
+
+(defvar ygg-git-compare--caches (make-hash-table :test #'equal)
+  "Each git directory's answers, by key, as (:value V :time T) or, after a
+failure, also :failed and :error.")
+
+(defvar ygg-git-compare--inflight (make-hash-table :test #'equal)
+  "The lookups under way, by git directory and key, each a cell holding the
+functions to call when it lands.")
+
+(defvar ygg-git-compare-candidates-refreshed-hook nil
+  "Functions called when a background lookup of pull or merge requests lands.")
+
+(defun ygg-git-compare--cache-file (gitdir)
+  (expand-file-name "ygg-forge-cache.eld" gitdir))
+
+(defconst ygg-git-compare--cache-max-age (* 7 86400))
+(defconst ygg-git-compare--cache-max-rows 500)
+
+(defun ygg-git-compare--plists-p (value)
+  (and (proper-list-p value)
+       (seq-every-p (lambda (item) (and (proper-list-p item) (cl-evenp (length item))))
+                    value)))
+
+(defun ygg-git-compare--value-valid-p (key value)
+  "Whether VALUE is the kind of answer KEY asks for."
+  (pcase (car-safe key)
+    ((or 'pulls 'mrs) (ygg-git-compare--plists-p value))
+    ((or 'head 'gh-url) (stringp value))
+    ('pr (or (null value) (ygg-git-compare--plists-p (list value))))
+    (_ t)))
+
+(defun ygg-git-compare--cache-row (row)
+  "ROW as read from a cache file, as (KEY :value V :time T) with a time no
+later than now, or nil when it is not one."
+  (when (and (consp row)
+             (proper-list-p row)
+             (proper-list-p (car row))
+             (symbolp (car-safe (car row)))
+             (car-safe (car row))
+             (proper-list-p (cdr row))
+             (cl-evenp (length (cdr row))))
+    (let ((value (plist-get (cdr row) :value))
+          (time (plist-get (cdr row) :time))
+          (now (float-time)))
+      (when (and (numberp time)
+                 (= time time)
+                 (> time (- now ygg-git-compare--cache-max-age))
+                 (ygg-git-compare--value-valid-p (car row) value))
+        (list (car row) :value value :time (min time now))))))
+
+(defun ygg-git-compare--cache-rows (gitdir)
+  "The rows of GITDIR's cache file that are sound; none when it is unreadable."
+  (let ((file (ygg-git-compare--cache-file gitdir)))
+    (unless (file-remote-p gitdir)
+      (let ((data (condition-case nil
+                      (and (file-readable-p file)
+                           (with-temp-buffer
+                             (insert-file-contents file)
+                             (read (current-buffer))))
+                    (error nil))))
+        (and (proper-list-p data)
+             (delq nil (mapcar #'ygg-git-compare--cache-row data)))))))
+
+(defun ygg-git-compare--cache-table (gitdir)
+  "GITDIR's answers, read from its file the first time."
+  (or (gethash gitdir ygg-git-compare--caches)
+      (let ((table (make-hash-table :test #'equal)))
+        (dolist (row (ygg-git-compare--cache-rows gitdir))
+          (puthash (car row) (cdr row) table))
+        (puthash gitdir table ygg-git-compare--caches))))
+
+(defun ygg-git-compare--locked (file body)
+  "Call BODY holding FILE's lock; skip it if the lock stays taken for a second."
+  (let ((lock (concat file ".lock"))
+        (deadline (+ (float-time) 1))
+        held)
+    (while (not (or held (> (float-time) deadline)))
+      (condition-case nil
+          (progn (make-directory lock) (setq held t))
+        (file-already-exists
+         (let ((attributes (file-attributes lock)))
+           (when (and attributes
+                      (> (- (float-time) (float-time (file-attribute-modification-time attributes)))
+                         10))
+             (ignore-errors (delete-directory lock))))
+         (sleep-for 0.02))))
+    (when held
+      (unwind-protect (funcall body)
+        (ignore-errors (delete-directory lock))))))
+
+(defun ygg-git-compare--cache-save (gitdir table)
+  "Write TABLE's answers into GITDIR's file, merged with what other Emacs
+sessions wrote there since, the newest of each kept; the old and the
+excess dropped."
+  (unless (file-remote-p gitdir)
+    (ignore-errors
+      (let ((file (ygg-git-compare--cache-file gitdir))
+            (floor (- (float-time) ygg-git-compare--cache-max-age))
+            rows)
+        (ygg-git-compare--locked
+         file
+         (lambda ()
+           (pcase-dolist (`(,key . ,entry) (ygg-git-compare--cache-rows gitdir))
+             (let ((mine (plist-get (gethash key table) :time)))
+               (unless (and (numberp mine) (>= mine (plist-get entry :time)))
+                 (puthash key entry table))))
+           (maphash (lambda (key entry)
+                      (let ((time (plist-get entry :time)))
+                        (when (and (numberp time) (> time floor))
+                          (push (list key :value (plist-get entry :value) :time time)
+                                rows))))
+                    table)
+           (setq rows (seq-take (sort rows (lambda (a b) (> (plist-get (cdr a) :time)
+                                                            (plist-get (cdr b) :time))))
+                                ygg-git-compare--cache-max-rows))
+           (let ((temp (make-temp-file file))
+                 (print-length nil) (print-level nil) (coding-system-for-write 'utf-8))
+             (with-temp-file temp
+               (prin1 rows (current-buffer))
+               (insert "\n"))
+             (rename-file temp file t))))))))
+
+(defun ygg-git-compare--cache-entry (key)
+  "What is kept under KEY here, as (:value V :time T), or nil."
+  (when-let* ((gitdir (magit-gitdir)))
+    (gethash key (ygg-git-compare--cache-table gitdir))))
+
+(defun ygg-git-compare--cache-value (key)
+  (plist-get (ygg-git-compare--cache-entry key) :value))
+
+(defun ygg-git-compare--cache-drop (key)
+  (when-let* ((gitdir (magit-gitdir)))
+    (remhash key (ygg-git-compare--cache-table gitdir))))
+
+(defun ygg-git-compare--refreshing-p (&rest kinds)
+  "Whether a lookup here is under way whose key starts with one of KINDS."
+  (when-let* ((gitdir (magit-gitdir)))
+    (let (found)
+      (maphash (lambda (id _cell)
+                 (when (and (equal (car id) gitdir) (memq (car-safe (cdr id)) kinds))
+                   (setq found t)))
+               ygg-git-compare--inflight)
+      found)))
+
+(defun ygg-git-compare--cache-stale-p (entry ttl &optional retry)
+  (let ((now (float-time)))
+    (cond ((null entry) t)
+          ((numberp (plist-get entry :failed))
+           (> (- now (plist-get entry :failed)) (or retry ygg-git-compare-forge-retry)))
+          ((numberp (plist-get entry :time))
+           (> (- now (plist-get entry :time)) ttl))
+          (t t))))
+
+(defun ygg-git-compare--landed (gitdir table key cell value err)
+  (remhash (cons gitdir key) ygg-git-compare--inflight)
+  (let ((old (gethash key table))
+        (now (float-time)))
+    (if err
+        (puthash key (list :value (plist-get old :value) :time (plist-get old :time)
+                           :failed now :error err)
+                 table)
+      (puthash key (list :value value :time now) table)
+      (ygg-git-compare--cache-save gitdir table)))
+  (dolist (waiter (reverse (car cell)))
+    (with-demoted-errors "Forge answer: %S"
+      (funcall waiter value err))))
+
+(defun ygg-git-compare--cached (key ttl fetch-fn on-fresh &optional retry)
+  "What was last found under KEY here, or nil, at once.  When that is older
+than TTL seconds, or failed more than RETRY, by default
+`ygg-git-compare-forge-retry', seconds ago, FETCH-FN is called with a
+function taking (VALUE ERR) to say what it found, once however many ask;
+ON-FRESH is then called with the same."
+  (let* ((gitdir (or (magit-gitdir) (user-error "Not in a git repository")))
+         (table (ygg-git-compare--cache-table gitdir))
+         (id (cons gitdir key)))
+    (when (ygg-git-compare--cache-stale-p (gethash key table) ttl retry)
+      (if-let* ((cell (gethash id ygg-git-compare--inflight)))
+          (when on-fresh (push on-fresh (car cell)))
+        (let ((cell (list (and on-fresh (list on-fresh)))))
+          (puthash id cell ygg-git-compare--inflight)
+          (let ((land (lambda (value &optional err)
+                        (ygg-git-compare--landed gitdir table key cell value err))))
+            (condition-case failure
+                (funcall fetch-fn land)
+              (error (funcall land nil (error-message-string failure))))))))
+    (plist-get (gethash key table) :value)))
+
+(defun ygg-git-compare--json (text)
+  (json-parse-string text :object-type 'plist :array-type 'list
+                     :null-object nil :false-object nil))
+
 (defun ygg-git-compare--url-key (url)
   "URL as host/owner/name, however git or gh spells it."
   (thread-last url
@@ -112,8 +465,30 @@ left out of a review."
                (replace-regexp-in-string "\\(\\.git\\)?/*\\'" "")
                downcase))
 
+(defun ygg-git-compare--gh-repo-url ()
+  "The URL of the repository gh last said it takes pull requests from, or nil."
+  (ygg-git-compare--cache-value '(gh-url)))
+
+(defun ygg-git-compare--refine-pr-remote ()
+  "Ask gh in the background which repository it takes pull requests from,
+when this is a GitHub repository; a failure is kept as long as an answer."
+  (when (and (executable-find "gh")
+             (eq (car (ignore-errors
+                        (ygg-git-compare--forge-repo (ygg-git-compare--remote))))
+                 'github))
+    (ygg-git-compare--cached
+     '(gh-url) 86400
+     (lambda (done)
+       (ygg-git-compare--forge-async
+        "gh" '("repo" "view" "--json" "url" "--jq" ".url")
+        (lambda (status text err)
+          (ygg-git-compare--answer done "gh" status text err #'string-trim))))
+     nil
+     (and (file-remote-p default-directory) 86400))))
+
 (defun ygg-git-compare--pr-remote ()
-  "The remote of the repository gh lists pull requests for, else the primary one."
+  "The remote of the repository gh last said it lists pull requests for,
+else the primary one."
   (or (when-let* ((url (ygg-git-compare--gh-repo-url))
                   (key (ygg-git-compare--url-key url)))
         (seq-find (lambda (remote)
@@ -130,25 +505,80 @@ left out of a review."
 
 ;;; Sides
 
-(defun ygg-git-compare-fetch-pr (number &optional remote)
-  "Fetch pull request NUMBER's head from REMOTE without a branch for it;
-return its commit."
-  (let ((remote (or remote (ygg-git-compare--remote)
-                    (user-error "No remote to fetch from"))))
-    (message "Fetching pull request #%s from %s…" number remote)
-    (ygg-git-compare--git "fetch" "--quiet" "--no-tags" remote
-                          (format "pull/%s/head" number))
-    (prog1 (ygg-git-compare--commit "FETCH_HEAD")
-      (message nil))))
+(defun ygg-git-compare--head-key (remote number)
+  (list 'head remote number))
 
-(defun ygg-git-compare--prepare (spec)
-  "SPEC with its network work done: a pull request carries its fetched commit."
-  (if (and (eq (car spec) 'pr) (not (plist-get (cdr spec) :sha)))
-      (cons 'pr (append (list :sha (ygg-git-compare-fetch-pr
-                                    (plist-get (cdr spec) :number)
-                                    (plist-get (cdr spec) :remote)))
-                        (cdr spec)))
-    spec))
+(defun ygg-git-compare--side-outdated-p (spec side)
+  "Whether SIDE, the resolved SPEC, is waiting for a pull request's commit,
+says its head is old, or stands at another commit than the one last fetched."
+  (and (eq (car-safe spec) 'pr)
+       (not (plist-get (cdr spec) :sha))
+       (or (plist-get side :pending)
+           (plist-get side :note)
+           (let ((sha (ygg-git-compare--cache-value
+                       (ygg-git-compare--head-key
+                        (or (plist-get (cdr spec) :remote) (ygg-git-compare--remote))
+                        (plist-get (cdr spec) :number)))))
+             (and sha (magit-commit-p sha)
+                  (not (equal sha (plist-get side :diff))))))))
+
+(defun ygg-git-compare--pr-landed (&rest _)
+  "Draw again every compare whose pull request's commit has come or changed."
+  (dolist (buffer (buffer-list))
+    (when (and (buffer-live-p buffer)
+               (buffer-local-value 'ygg-git-compare--a-spec buffer))
+      (with-current-buffer buffer
+        (condition-case failure
+            (let ((default-directory (or ygg-git-compare--root default-directory)))
+              (when (or (ygg-git-compare--side-outdated-p ygg-git-compare--a-spec
+                                                          ygg-git-compare--a)
+                        (ygg-git-compare--side-outdated-p ygg-git-compare--b-spec
+                                                          ygg-git-compare--b))
+                (ygg-git-compare--redraw)))
+          (user-error (message "%s" (error-message-string failure))))))))
+
+(defun ygg-git-compare-fetch-pr (number &optional remote)
+  "Pull request NUMBER's head commit, once REMOTE's has been fetched without
+a branch for it; nil until then, the fetch running in the background."
+  (let* ((remote (or remote (ygg-git-compare--remote)
+                     (user-error "No remote to fetch from")))
+         (key (ygg-git-compare--head-key remote number))
+         (dir default-directory))
+    (when-let* ((sha (ygg-git-compare--cache-value key))
+                ((not (magit-commit-p sha))))
+      (ygg-git-compare--cache-drop key))
+    (let ((sha (ygg-git-compare--cached
+                key ygg-git-compare-pr-ttl
+                (lambda (done)
+                  (let ((default-directory dir))
+                    (ygg-git-compare--fetch-ref remote (format "pull/%s/head" number) done)))
+                #'ygg-git-compare--pr-landed)))
+      (and sha (magit-commit-p sha) sha))))
+
+(defun ygg-git-compare--pending-note (number remote)
+  (let ((entry (ygg-git-compare--cache-entry
+                (ygg-git-compare--head-key (or remote (ygg-git-compare--remote)) number))))
+    (if-let* ((err (plist-get entry :error)))
+        (format "PR #%s not fetched: %s" number err)
+      (format "fetching PR #%s…" number))))
+
+(defun ygg-git-compare--age (seconds)
+  (cond ((< seconds 120) (format "%ds" seconds))
+        ((< seconds 7200) (format "%dm" (/ seconds 60)))
+        ((< seconds 172800) (format "%dh" (/ seconds 3600)))
+        (t (format "%dd" (/ seconds 86400)))))
+
+(defun ygg-git-compare--head-note (number remote)
+  "What the header says of a pull request's head when it is older than
+`ygg-git-compare-pr-ttl', else nil."
+  (let* ((entry (ygg-git-compare--cache-entry
+                 (ygg-git-compare--head-key (or remote (ygg-git-compare--remote)) number)))
+         (time (plist-get entry :time)))
+    (when (and (numberp time) (> (- (float-time) time) ygg-git-compare-pr-ttl))
+      (format "head as of %s; %s" (ygg-git-compare--age (truncate (- (float-time) time)))
+              (if (plist-get entry :failed)
+                  (format "not refreshed: %s" (plist-get entry :error))
+                "refreshing…")))))
 
 (defun ygg-git-compare--dirty-p (dir)
   (let ((default-directory dir))
@@ -159,7 +589,9 @@ return its commit."
   "SPEC as the commits it stands for, without touching any checkout or ref.
 A plist: :label, :diff the commit diffs are taken from, :log the commit
 history is read from, and for a worktree :dir, its checkout, with
-:uncommitted when it has changes over its HEAD, untracked files included."
+:uncommitted when it has changes over its HEAD, untracked files included.
+A pull request not fetched yet has no :diff, only :pending, what the
+header says of it; it is fetched in the background and drawn when here."
   (pcase spec
     (`(worktree . ,dir)
      (let* ((default-directory (file-name-as-directory dir))
@@ -178,7 +610,13 @@ history is read from, and for a worktree :dir, its checkout, with
                                               (plist-get pr :remote)))))
        (list :label (format "#%s %s" (plist-get pr :number)
                             (or (plist-get pr :head) ""))
-             :diff sha :log sha)))
+             :diff sha :log sha
+             :note (when (and sha (not (plist-get pr :sha)))
+                     (ygg-git-compare--head-note (plist-get pr :number)
+                                                 (plist-get pr :remote)))
+             :pending (unless sha
+                        (ygg-git-compare--pending-note (plist-get pr :number)
+                                                       (plist-get pr :remote))))))
     (`(rev . ,rev)
      (let ((sha (or (ignore-errors (ygg-git-compare--commit rev))
                     (user-error "No commit called %s" rev))))
@@ -187,87 +625,71 @@ history is read from, and for a worktree :dir, its checkout, with
 
 ;;; Picking sides
 
-(defun ygg-git-compare--gh (what &rest args)
-  "What gh ARGS prints, or nil without gh, on failure or past its timeout,
-saying WHAT is left out."
-  (when (executable-find "gh")
-    (with-temp-buffer
-      (let* ((out (current-buffer))
-             (err (generate-new-buffer " *ygg-git-compare-gh*"))
-             (proc (make-process
-                    :name "ygg-git-compare-gh" :buffer out :stderr err
-                    :noquery t :connection-type 'pipe
-                    :command (cons "gh" args)))
-             (deadline (+ (float-time) ygg-git-compare-gh-timeout)))
-        (unwind-protect
-            (progn
-              (while (and (process-live-p proc) (< (float-time) deadline))
-                (accept-process-output proc 0.1))
-              (unless (process-live-p proc)
-                (while (accept-process-output proc 0)))
-              (cond ((process-live-p proc)
-                     (delete-process proc)
-                     (message "gh took too long; %s left out" what)
-                     nil)
-                    ((zerop (process-exit-status proc))
-                     (buffer-string))
-                    (t (message "gh %s failed; %s left out" (car args) what)
-                       nil)))
-          (kill-buffer err))))))
+(defun ygg-git-compare--announce (&rest _)
+  (run-hooks 'ygg-git-compare-candidates-refreshed-hook))
 
-(defun ygg-git-compare--gh-pulls ()
-  "Open pull requests as gh lists them, or nil without gh or within its timeout."
-  (message "Listing open pull requests (gh)…")
-  (when-let* ((json (ygg-git-compare--gh "pull requests" "pr" "list" "--json"
-                                         "number,title,headRefName,baseRefName")))
-    (message nil)
-    (ignore-errors (json-parse-string json :object-type 'plist :array-type 'list))))
-
-(defun ygg-git-compare--gh-repo-url ()
-  "The URL of the repository gh takes pull requests from, or nil."
-  (when-let* ((url (ygg-git-compare--gh "its remote" "repo" "view" "--json" "url"
-                                        "--jq" ".url")))
-    (string-trim url)))
+(defun ygg-git-compare--pulls (repo)
+  "The open pull requests gh last listed, or nil; gh is asked again in the
+background when they are old.  REPO is a (FORGE HOST PATH), or nil when
+it is not known."
+  (let ((dir default-directory))
+    (when (executable-find "gh")
+      (ygg-git-compare--cached
+       (list 'pulls repo) ygg-git-compare-list-ttl
+       (lambda (done)
+         (let ((default-directory dir))
+           (ygg-git-compare--forge-async
+            "gh" (append '("pr" "list" "--json" "number,title,headRefName,baseRefName")
+                         (when (eq (car repo) 'github)
+                           (list "--repo" (concat (nth 1 repo) "/" (nth 2 repo)))))
+            (lambda (status text err)
+              (ygg-git-compare--answer done "gh" status text err #'ygg-git-compare--json)))))
+       #'ygg-git-compare--announce))))
 
 (defun ygg-git-compare--group (label group &optional note)
   (propertize label 'ygg-git-compare-group group 'ygg-git-compare-note note))
 
 (defun ygg-git-compare-candidates (&optional with-prs)
   "Every side this repository offers, as (LABEL . SPEC), grouped by kind.
-WITH-PRS asks gh for open pull requests too."
-  (let ((here (magit-toplevel))
-        (cands nil))
-    (cl-flet ((add (label group spec &optional note)
-                (while (assoc label cands) (setq label (concat label "'")))
-                (push (cons (ygg-git-compare--group label group note) spec) cands)))
-      (pcase-dolist (`(,path ,commit ,branch ,bare ,_detached ,_locked ,prunable)
-                     (magit-list-worktrees))
-        (unless (or bare prunable)
-          (add (format "%s [%s]" (file-name-nondirectory (directory-file-name path))
-                       (or branch (magit-rev-abbrev commit)))
-               "Worktrees" (cons 'worktree (file-name-as-directory path))
-               (concat (abbreviate-file-name path)
-                       (when (and here (file-equal-p path here)) "  (here)")))))
-      (dolist (b (magit-list-local-branch-names))
-        (add b "Branches" (cons 'rev b)))
-      (dolist (b (magit-list-remote-branch-names))
-        (unless (string-suffix-p "/HEAD" b)
-          (add b "Remote branches" (cons 'rev b))))
-      (let* ((pulls (and with-prs (ygg-git-compare--gh-pulls)))
-             (remote (and pulls (ygg-git-compare--pr-remote))))
-        (dolist (pr pulls)
-          (add (format "#%s %s" (plist-get pr :number) (plist-get pr :title))
-               "Pull requests"
-               (cons 'pr (list :number (plist-get pr :number)
-                               :title (plist-get pr :title)
-                               :head (plist-get pr :headRefName)
-                               :base (plist-get pr :baseRefName)
-                               :remote remote))
-               (format "%s → %s" (plist-get pr :headRefName)
-                       (plist-get pr :baseRefName)))))
-      (dolist (line (magit-git-lines "log" "--format=%h %s" "-n" "30"))
-        (add line "Recent commits" (cons 'rev (car (split-string line " "))))))
-    (nreverse cands)))
+WITH-PRS adds the open pull requests gh last listed and asks it again in
+the background."
+  (ygg-git-compare--with-git-cache
+   (let ((here (magit-toplevel))
+         (cands nil))
+     (cl-flet ((add (label group spec &optional note)
+                 (while (assoc label cands) (setq label (concat label "'")))
+                 (push (cons (ygg-git-compare--group label group note) spec) cands)))
+       (pcase-dolist (`(,path ,commit ,branch ,bare ,_detached ,_locked ,prunable)
+                      (magit-list-worktrees))
+         (unless (or bare prunable)
+           (add (format "%s [%s]" (file-name-nondirectory (directory-file-name path))
+			(or branch (magit-rev-abbrev commit)))
+		"Worktrees" (cons 'worktree (file-name-as-directory path))
+		(concat (abbreviate-file-name path)
+			(when (and here (file-equal-p path here)) "  (here)")))))
+       (dolist (b (magit-list-local-branch-names))
+         (add b "Branches" (cons 'rev b)))
+       (dolist (b (magit-list-remote-branch-names))
+         (unless (string-suffix-p "/HEAD" b)
+           (add b "Remote branches" (cons 'rev b))))
+       (let* ((repo (and with-prs (ignore-errors (ygg-git-compare--forge-repo))))
+              (pulls (and with-prs (not (eq (car repo) 'gitlab))
+                          (progn (ygg-git-compare--refine-pr-remote)
+                                 (ygg-git-compare--pulls repo))))
+              (remote (and pulls (ygg-git-compare--pr-remote))))
+         (dolist (pr pulls)
+           (add (format "#%s %s" (plist-get pr :number) (plist-get pr :title))
+		"Pull requests"
+		(cons 'pr (list :number (plist-get pr :number)
+				:title (plist-get pr :title)
+				:head (plist-get pr :headRefName)
+				:base (plist-get pr :baseRefName)
+				:remote remote))
+		(format "%s → %s" (plist-get pr :headRefName)
+			(plist-get pr :baseRefName)))))
+       (dolist (line (magit-git-lines "log" "--format=%h %s" "-n" "30"))
+         (add line "Recent commits" (cons 'rev (car (split-string line " "))))))
+     (nreverse cands))))
 
 (defun ygg-git-compare--label (spec cands)
   "The label of SPEC among CANDS, or a string that names it when it is not one."
@@ -284,18 +706,20 @@ WITH-PRS asks gh for open pull requests too."
   "The side A defaults to when B is picked: a pull request's base, HEAD for
 this worktree when it has uncommitted changes, else the repository's
 default branch."
-  (cond ((eq (car b) 'pr)
-         (cons 'rev (ygg-git-compare--pr-base (plist-get (cdr b) :base)
-                                              (plist-get (cdr b) :remote))))
-        ((and (eq (car b) 'worktree)
-              (file-equal-p (cdr b) (cdr (ygg-git-compare--here-spec)))
-              (ygg-git-compare--dirty-p (cdr b)))
-         '(rev . "HEAD"))
-        (t (cons 'rev (ygg-git-compare--default-branch)))))
+  (ygg-git-compare--with-git-cache
+   (cond ((eq (car b) 'pr)
+          (cons 'rev (ygg-git-compare--pr-base (plist-get (cdr b) :base)
+                                               (plist-get (cdr b) :remote))))
+         ((and (eq (car b) 'worktree)
+               (file-equal-p (cdr b) (cdr (ygg-git-compare--here-spec)))
+               (ygg-git-compare--dirty-p (cdr b)))
+          '(rev . "HEAD"))
+         (t (cons 'rev (ygg-git-compare--default-branch))))))
 
 (defun ygg-git-compare-table (cands category)
-  "A completion table of CANDS, (LABEL . VALUE) in the order given, of
-CATEGORY; each LABEL's group and note are read from its text properties."
+  "A completion table of CANDS, (LABEL . VALUE) in the order given, or a
+function answering them, of CATEGORY; each LABEL's group and note are read
+from its text properties."
   (lambda (str pred action)
     (if (eq action 'metadata)
         `(metadata
@@ -310,25 +734,80 @@ CATEGORY; each LABEL's group and note are read from its text properties."
                   (concat "  " (propertize note 'face 'completions-annotations)))))
           (display-sort-function . identity)
           (cycle-sort-function . identity))
-      (complete-with-action action cands str pred))))
+      (complete-with-action action (if (functionp cands) (funcall cands) cands)
+                            str pred))))
 
-(defun ygg-git-compare--read (prompt cands default)
-  "Read a side with PROMPT among CANDS, DEFAULT the spec RET takes."
-  (let* ((default-label (ygg-git-compare--label default cands))
-         (choice (completing-read (format-prompt prompt default-label)
-                                  (ygg-git-compare-table cands 'ygg-review-side)
-                                  nil nil nil nil default-label)))
-    (or (cdr (assoc choice cands))
+(defun ygg-git-compare--nudge (table)
+  "Have vertico read TABLE again when it is what the open minibuffer completes."
+  (when-let* ((window (active-minibuffer-window))
+              ((fboundp 'vertico--exhibit)))
+    (with-current-buffer (window-buffer window)
+      (when (and (bound-and-true-p vertico--input)
+                 (eq minibuffer-completion-table table))
+        (setq vertico--input nil)
+        (vertico--exhibit)))))
+
+(defconst ygg-git-compare--refreshing-suffix
+  (propertize " (refreshing PRs…)" 'ygg-git-compare-refreshing t))
+
+(defun ygg-git-compare--clear-refreshing (table)
+  "Take the \"refreshing\" words off the open minibuffer's prompt when it is
+what completes TABLE."
+  (when-let* ((window (active-minibuffer-window)))
+    (with-current-buffer (window-buffer window)
+      (when (eq minibuffer-completion-table table)
+        (let ((inhibit-read-only t)
+              (start (text-property-any (point-min) (point-max)
+                                        'ygg-git-compare-refreshing t)))
+          (when start
+            (delete-region start (or (next-single-property-change
+                                      start 'ygg-git-compare-refreshing)
+                                     (point-max)))))))))
+
+(defvar ygg-git-compare--last-candidates nil
+  "What the side last read was chosen among.")
+
+(defun ygg-git-compare--read (prompt cands default &optional known)
+  "Read a side with PROMPT among CANDS, a list or a function answering one,
+DEFAULT the spec RET takes.  KNOWN is what CANDS answers now when that
+has just been worked out.  A function is called again when pull requests
+land while the prompt is open."
+  (let* ((dir default-directory)
+         (current (or known (if (functionp cands) (funcall cands) cands)))
+         (default-label (ygg-git-compare--label default current))
+         (table (ygg-git-compare-table (lambda () current) 'ygg-review-side))
+         (refresh (lambda ()
+                    (when (functionp cands)
+                      (setq current (let ((default-directory dir)) (funcall cands)))
+                      (ygg-git-compare--nudge table)
+                      (unless (let ((default-directory dir))
+                                (ygg-git-compare--refreshing-p 'pulls 'mrs))
+                        (ygg-git-compare--clear-refreshing table)))))
+         (choice nil))
+    (add-hook 'ygg-git-compare-candidates-refreshed-hook refresh)
+    (unwind-protect
+        (setq choice
+              (completing-read
+               (format-prompt (concat prompt
+                                      (and (ygg-git-compare--with-git-cache
+                                             (ygg-git-compare--refreshing-p 'pulls 'mrs))
+                                           ygg-git-compare--refreshing-suffix))
+                              default-label)
+               table nil nil nil nil default-label))
+      (remove-hook 'ygg-git-compare-candidates-refreshed-hook refresh)
+      (setq ygg-git-compare--last-candidates current))
+    (or (cdr (assoc choice current))
         (and (equal choice default-label) default)
         (cons 'rev choice))))
 
 (defun ygg-git-compare--read-sides ()
   "Read side B, then side A defaulting to what B is compared against."
-  (let* ((cands (ygg-git-compare-candidates t))
+  (let* ((cands (apply-partially #'ygg-git-compare-candidates t))
          (b (ygg-git-compare--read "Compare (B)" cands (ygg-git-compare--here-spec)))
+         (known ygg-git-compare--last-candidates)
          (a (ygg-git-compare--read (format "Against (A) for %s"
-                                           (ygg-git-compare--label b cands))
-                                   cands (ygg-git-compare-default-a b))))
+                                           (ygg-git-compare--label b known))
+                                   cands (ygg-git-compare-default-a b) known)))
     (list a b)))
 
 ;;; The two panes
@@ -456,7 +935,13 @@ Nothing is selected and no window layout is remembered for magit's q."
   (magit-set-header-line-format
    (concat "A: " (ygg-git-compare--side-label ygg-git-compare--a)
            " ↔ B: " (ygg-git-compare--side-label ygg-git-compare--b)
-           (if (equal ygg-git-compare--dots "...") "  A...B" "  A..B"))))
+           (if (equal ygg-git-compare--dots "...") "  A...B" "  A..B")
+           (when-let* ((note (or ygg-git-compare--note
+                                 (plist-get ygg-git-compare--a :pending)
+                                 (plist-get ygg-git-compare--b :pending)
+                                 (plist-get ygg-git-compare--a :note)
+                                 (plist-get ygg-git-compare--b :note))))
+             (concat "  " note)))))
 
 (defun ygg-git-compare--fold ()
   "Fold every file to its heading, the diffstat and untracked files left open,
@@ -471,16 +956,24 @@ point on the first file."
                    (oref file start)
                  (point-min)))))
 
+(defun ygg-git-compare--settled (a b)
+  "Sides A and B, one still being fetched standing where the other does."
+  (let ((stand (or (plist-get a :diff) (plist-get b :diff) (ygg-git-compare--commit "HEAD"))))
+    (mapcar (lambda (side)
+              (if (plist-get side :diff) side (append (list :diff stand :log stand) side)))
+            (list a b))))
+
 (defun ygg-git-compare--redraw (&optional a-spec b-spec dots)
   "Resolve sides A-SPEC and B-SPEC afresh, worktrees as they stand, and diff
 them here with DOTS; each nil keeps the compare's own.  When they cannot
 be diffed, the compare stays as it was."
+  (when (or a-spec b-spec) (setq ygg-git-compare--note nil))
   (pcase-let* ((a-spec (or a-spec ygg-git-compare--a-spec))
                (b-spec (or b-spec ygg-git-compare--b-spec))
                (dots (or dots ygg-git-compare--dots))
                (`(,a ,b) (let ((default-directory ygg-git-compare--root))
-                           (list (ygg-git-compare-resolve a-spec)
-                                 (ygg-git-compare-resolve b-spec))))
+                           (ygg-git-compare--settled (ygg-git-compare-resolve a-spec)
+                                                     (ygg-git-compare-resolve b-spec))))
                (plan (ygg-git-compare--planned a b dots ygg-git-compare--root))
                (args (ygg-git-compare--args plan)))
     (setq ygg-git-compare--a-spec a-spec
@@ -604,10 +1097,11 @@ an untracked one against nothing."
   "Pick another side A, the base B is compared against."
   (interactive)
   (with-current-buffer (ygg-git-compare--list)
-    (let ((cands (ygg-git-compare-candidates t)))
+    (let ((cands (apply-partially #'ygg-git-compare-candidates t)))
       (ygg-git-compare--redraw
        (ygg-git-compare--read (format "Compare %s against (A)"
-                                      (ygg-git-compare--label ygg-git-compare--b-spec cands))
+                                      (ygg-git-compare--label ygg-git-compare--b-spec
+                                                              (funcall cands)))
                               cands (ygg-git-compare-default-a ygg-git-compare--b-spec))))))
 
 (defun ygg-git-compare-toggle-dots ()
@@ -856,8 +1350,7 @@ as JSON through api's --input."
                                                     "--header" "Content-Type: application/json"
                                                     "--input" input)))))))
           (unless (string-empty-p out)
-            (json-parse-string out :object-type 'plist :array-type 'list
-                               :null-object nil :false-object nil)))
+            (ygg-git-compare--json out)))
       (when input (delete-file input)))))
 
 (defun ygg-git-compare--lab-host ()
@@ -962,6 +1455,9 @@ what glab or gh calls it; nil if none knows it."
   (cond ((string-search "gitlab" host) (cons 'gitlab host))
         ((string-search "github" host) (cons 'github host))))
 
+(defvar ygg-git-compare--forge-repos (make-hash-table :test #'equal)
+  "Each remote's repository, by checkout and URL.")
+
 (defun ygg-git-compare--forge-repo (&optional remote)
   "REMOTE's repository as (FORGE HOST PATH), FORGE github or gitlab;
 REMOTE defaults to the one pull requests are taken from."
@@ -969,63 +1465,118 @@ REMOTE defaults to the one pull requests are taken from."
                      (user-error "No remote to post to")))
          (url (or (magit-get "remote" remote "url")
                   (user-error "Remote %s has no URL" remote)))
-         (key (ygg-git-compare--url-key url))
-         (host (car (split-string key "/")))
-         (path (substring key (min (length key) (1+ (length host)))))
-         (hosts (delq nil (list host (ygg-git-compare--ssh-hostname host))))
-         (forge (or (seq-some #'ygg-git-compare--configured-forge hosts)
-                    (seq-some #'ygg-git-compare--named-forge hosts)
-                    (user-error "%s is neither GitHub nor GitLab" host))))
-    (list (car forge) (cdr forge) path)))
+         (memo (cons (magit-toplevel) url)))
+    (or (gethash memo ygg-git-compare--forge-repos)
+        (let* ((key (ygg-git-compare--url-key url))
+               (host (car (split-string key "/")))
+               (path (substring key (min (length key) (1+ (length host)))))
+               (hosts (delq nil (list host (ygg-git-compare--ssh-hostname host))))
+               (forge (or (seq-some #'ygg-git-compare--configured-forge hosts)
+                          (seq-some #'ygg-git-compare--named-forge hosts)
+                          (user-error "%s is neither GitHub nor GitLab" host))))
+          (puthash memo (list (car forge) (cdr forge) path) ygg-git-compare--forge-repos)))))
 
-(defun ygg-git-compare--forge-pr (repo selector)
-  "The open pull or merge request of REPO, as `--forge-repo' gives it, that
-SELECTOR names, a number or a source branch; nil when a branch has none.
-A plist: :forge :host :path :number :head :base, the commit where it
-parted from its target, :start, the target's tip, :base-ref and :url."
+(defun ygg-git-compare--forge-pr-fetch (repo selector done)
+  "Ask REPO's forge for the open pull or merge request SELECTOR names, a
+number or a source branch, then call DONE with it as `--forge-pr' gives it
+but for :base on GitHub, or with nil when a branch has none, or with nil
+and what went wrong."
   (pcase-let ((`(,forge ,host ,path) repo)
               (by-branch (stringp selector)))
     (pcase forge
       ('github
-       (when-let* ((pr (condition-case err
-                           (ygg-git-compare--forge-json
-                            "gh" nil "pr" "view" (format "%s" selector)
-                            "--repo" (concat host "/" path) "--json"
-                            "number,state,baseRefOid,headRefOid,baseRefName,url")
-                         (user-error
-                          (unless (and by-branch
-                                       (string-search "no pull requests found"
-                                                      (error-message-string err)))
-                            (signal (car err) (cdr err))))))
-                   ((or (not by-branch) (equal (plist-get pr :state) "OPEN"))))
-         (list :forge 'github :host host :path path
-               :number (plist-get pr :number)
-               :head (plist-get pr :headRefOid)
-               :base (magit-git-string "merge-base" (plist-get pr :baseRefOid)
-                                       (plist-get pr :headRefOid))
-               :start (plist-get pr :baseRefOid)
-               :base-ref (plist-get pr :baseRefName)
-               :url (plist-get pr :url))))
+       (ygg-git-compare--forge-async
+        "gh" (list "pr" "view" (format "%s" selector) "--repo" (concat host "/" path)
+                   "--json" "number,state,baseRefOid,headRefOid,baseRefName,url")
+        (lambda (status text err)
+          (if (and by-branch (eql status 1)
+                   (string-search "no pull requests found" err))
+              (funcall done nil)
+            (ygg-git-compare--answer
+             done "gh" status text err
+             (lambda (text)
+               (let ((pr (ygg-git-compare--json text)))
+                 (when (or (not by-branch) (equal (plist-get pr :state) "OPEN"))
+                   (list :forge 'github :host host :path path
+                         :number (plist-get pr :number)
+                         :head (plist-get pr :headRefOid)
+                         :start (plist-get pr :baseRefOid)
+                         :base-ref (plist-get pr :baseRefName)
+                         :url (plist-get pr :url))))))))))
       ('gitlab
        (let* ((project (concat "projects/" (url-hexify-string path)))
-              (iid (if by-branch
-                       (plist-get (car (ygg-git-compare--forge-json
-                                        "glab" nil "api" "--hostname" host
-                                        (format "%s/merge_requests?state=opened&source_branch=%s"
-                                                project (url-hexify-string selector))))
-                                  :iid)
-                     selector))
-              (mr (and iid (ygg-git-compare--forge-json
-                            "glab" nil "api" "--hostname" host
-                            (format "%s/merge_requests/%s" project iid))))
-              (refs (plist-get mr :diff_refs)))
-         (when mr
-           (list :forge 'gitlab :host host :path path :number iid
-                 :head (plist-get refs :head_sha)
-                 :base (plist-get refs :base_sha)
-                 :start (plist-get refs :start_sha)
-                 :base-ref (plist-get mr :target_branch)
-                 :url (plist-get mr :web_url))))))))
+              (view (lambda (iid)
+                      (ygg-git-compare--forge-async
+                       "glab" (list "api" "--hostname" host
+                                    (format "%s/merge_requests/%s" project iid))
+                       (lambda (status text err)
+                         (ygg-git-compare--answer
+                          done "glab" status text err
+                          (lambda (text)
+                            (let* ((mr (ygg-git-compare--json text))
+                                   (refs (plist-get mr :diff_refs)))
+                              (list :forge 'gitlab :host host :path path :number iid
+                                    :head (plist-get refs :head_sha)
+                                    :base (plist-get refs :base_sha)
+                                    :start (plist-get refs :start_sha)
+                                    :base-ref (plist-get mr :target_branch)
+                                    :url (plist-get mr :web_url))))))))))
+         (if (not by-branch)
+             (funcall view selector)
+           (ygg-git-compare--forge-async
+            "glab" (list "api" "--hostname" host
+                         (format "%s/merge_requests?state=opened&source_branch=%s"
+                                 project (url-hexify-string selector)))
+            (lambda (status text err)
+              (ygg-git-compare--answer
+               (lambda (iid &optional failure)
+                 (cond (failure (funcall done nil failure))
+                       (iid (funcall view iid))
+                       (t (funcall done nil))))
+               "glab" status text err
+               (lambda (text) (plist-get (car (ygg-git-compare--json text)) :iid)))))))))))
+
+(defun ygg-git-compare--pr-key (repo selector)
+  (list 'pr repo selector))
+
+(defun ygg-git-compare--with-base (pr)
+  "PR with :base, the commit it parted from its target, as far as it can be
+told here."
+  (if (or (null pr) (plist-get pr :base))
+      pr
+    (append (list :base (magit-git-string "merge-base" (plist-get pr :start)
+                                          (plist-get pr :head)))
+            pr)))
+
+(defun ygg-git-compare--forge-pr (repo selector &optional on-fresh)
+  "The open pull or merge request of REPO, as `--forge-repo' gives it, that
+SELECTOR names, a number or a source branch, as last found; nil when a
+branch has none or nothing is known yet.  A plist: :forge :host :path
+:number :head :base, the commit where it parted from its target, :start,
+the target's tip, :base-ref and :url.  The forge is asked again in the
+background when the answer is older than `ygg-git-compare-pr-ttl', and
+ON-FRESH then called with (PR ERR)."
+  (let ((dir default-directory))
+    (ygg-git-compare--with-base
+     (ygg-git-compare--cached
+      (ygg-git-compare--pr-key repo selector) ygg-git-compare-pr-ttl
+      (lambda (done)
+        (let ((default-directory dir))
+          (ygg-git-compare--forge-pr-fetch repo selector done)))
+      (and on-fresh
+           (lambda (pr err)
+             (let ((default-directory dir))
+               (funcall on-fresh (ygg-git-compare--with-base pr) err))))))))
+
+(defun ygg-git-compare--known-pr (repo selector what)
+  "The request SELECTOR names as last found; a user error saying why when
+there is none, WHAT being how it is called."
+  (or (ygg-git-compare--forge-pr repo selector)
+      (let ((entry (ygg-git-compare--cache-entry (ygg-git-compare--pr-key repo selector))))
+        (user-error "%s" (cond ((plist-get entry :error)
+                                (format "Could not read %s: %s" what (plist-get entry :error)))
+                               (entry (format "No open pull request for %s" what))
+                               (t (format "Looking up %s; try again in a moment" what)))))))
 
 (defun ygg-git-compare--pr-name (pr)
   (format (if (eq (plist-get pr :forge) 'gitlab) "%s MR !%s" "%s PR #%s")
@@ -1047,11 +1598,11 @@ saying why when it is not."
          (pr-spec (eq (car ygg-git-compare--b-spec) 'pr))
          (repo (ygg-git-compare--forge-repo (and pr-spec (plist-get spec :remote))))
          (pr (if pr-spec
-                 (ygg-git-compare--forge-pr repo (plist-get spec :number))
+                 (ygg-git-compare--known-pr repo (plist-get spec :number)
+                                            (format "#%s" (plist-get spec :number)))
                (let ((branch (or (ygg-git-compare--b-branch)
                                  (user-error "B is not a branch, so it has no pull request"))))
-                 (or (ygg-git-compare--forge-pr repo branch)
-                     (user-error "No open pull request for %s" branch)))))
+                 (ygg-git-compare--known-pr repo branch branch))))
          (name (ygg-git-compare--pr-name pr)))
     (cond ((not (equal ygg-git-compare--dots "..."))
            (user-error "%s is diffed A...B; this compare is A..B" name))
@@ -1363,10 +1914,10 @@ refused: a compare is read-only.
 (defun ygg-git-compare-buffer (root a b)
   "Magit's diff of sides A and B in ROOT, folded to its files, not yet shown."
   (let* ((default-directory root)
-         (a (ygg-git-compare--prepare a))
-         (b (ygg-git-compare--prepare b))
-         (a-side (ygg-git-compare-resolve a))
-         (b-side (ygg-git-compare-resolve b))
+         (sides (ygg-git-compare--settled (ygg-git-compare-resolve a)
+                                          (ygg-git-compare-resolve b)))
+         (a-side (car sides))
+         (b-side (cadr sides))
          (dots (if (magit-git-string "merge-base" (plist-get a-side :diff)
                                     (plist-get b-side :diff))
                    "..." ".."))
@@ -1452,17 +2003,28 @@ uncommitted changes, else the repository's default branch."
 
 (defun ygg-git-compare--merge-requests (repo)
   "REPO's open merge requests as `ygg-git-compare-candidates' lists pull
-requests, or nil when glab cannot list them."
-  (pcase-let ((`(,_forge ,host ,path) repo))
-    (mapcar (lambda (mr)
-              (list :number (plist-get mr :iid) :title (plist-get mr :title)
-                    :headRefName (plist-get mr :source_branch)
-                    :baseRefName (plist-get mr :target_branch)))
-            (ignore-errors
-              (ygg-git-compare--forge-json
-               "glab" nil "api" "--hostname" host
-               (format "projects/%s/merge_requests?state=opened&per_page=100"
-                       (url-hexify-string path)))))))
+requests, as last found; glab is asked again in the background when they
+are old."
+  (pcase-let ((`(,_forge ,host ,path) repo)
+              (dir default-directory))
+    (ygg-git-compare--cached
+     (list 'mrs repo) ygg-git-compare-list-ttl
+     (lambda (done)
+       (let ((default-directory dir))
+         (ygg-git-compare--forge-async
+          "glab" (list "api" "--hostname" host
+                       (format "projects/%s/merge_requests?state=opened&per_page=100"
+                               (url-hexify-string path)))
+          (lambda (status text err)
+            (ygg-git-compare--answer
+             done "glab" status text err
+             (lambda (text)
+               (mapcar (lambda (mr)
+                         (list :number (plist-get mr :iid) :title (plist-get mr :title)
+                               :headRefName (plist-get mr :source_branch)
+                               :baseRefName (plist-get mr :target_branch)))
+                       (ygg-git-compare--json text))))))))
+     #'ygg-git-compare--announce)))
 
 (defun ygg-git-compare--review-targets ()
   "Branches and open pull or merge requests to review, as (LABEL . SPEC)."
@@ -1484,18 +2046,113 @@ requests, or nil when glab cannot list them."
                                             :base (plist-get mr :baseRefName)))))
                     (and gitlab (ygg-git-compare--merge-requests repo))))))
 
+(defun ygg-git-compare--review-specs (pr name remote)
+  "The sides of PR's compare as (A . B) when its commits are here, else nil."
+  (let ((head (plist-get pr :head))
+        (start (plist-get pr :start)))
+    (when (and (magit-commit-p head) (magit-commit-p start))
+      (cons (cons 'rev (or (plist-get (ygg-git-compare--with-base pr) :base)
+                           (ygg-git-compare--pr-base (plist-get pr :base-ref) remote)))
+            (cons 'pr (list :number (plist-get pr :number) :sha head :head name
+                            :base (plist-get pr :base-ref) :remote remote))))))
+
+(defun ygg-git-compare--review-fetch (pr remote dir done)
+  "Fetch what PR's compare lacks here, then call DONE with what went wrong,
+or nil."
+  (let ((refs (delq nil
+                    (list (unless (magit-commit-p (plist-get pr :head))
+                            (format (if (eq (plist-get pr :forge) 'gitlab)
+                                        "merge-requests/%s/head"
+                                      "pull/%s/head")
+                                    (plist-get pr :number)))
+                          (unless (magit-commit-p (plist-get pr :start))
+                            (plist-get pr :base-ref))))))
+    (cl-labels ((next (refs)
+                  (if (null refs)
+                      (funcall done nil)
+                    (let ((default-directory dir))
+                      (ygg-git-compare--fetch-ref
+                       remote (car refs)
+                       (lambda (_sha &optional err)
+                         (if err (funcall done err) (next (cdr refs)))))))))
+      (next refs))))
+
+(defun ygg-git-compare--review-note (buffer note)
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (setq ygg-git-compare--note note)
+      (ygg-git-compare--header))))
+
+(defun ygg-git-compare--review-show (buffer specs)
+  (with-current-buffer buffer
+    (setq ygg-git-compare--note nil)
+    (if (and (equal (car specs) ygg-git-compare--a-spec)
+             (equal (cdr specs) ygg-git-compare--b-spec))
+        (ygg-git-compare--header)
+      (ygg-git-compare--redraw (car specs) (cdr specs)))))
+
+(defun ygg-git-compare--review-none (buffer name selector err base)
+  "Say in BUFFER's header and in the echo area why the review it was opened
+for has no pull request: ERR being what the forge said, BASE what it is
+compared with instead."
+  (let ((text (cond ((and (integerp selector) err
+                          (not (string-match-p "Could not resolve\\|not found\\|404" err)))
+                     (format "Could not read PR #%s (%s)" selector err))
+                    ((integerp selector) (format "PR #%s not found" selector))
+                    (t (format "No open pull request for %s%s; comparing it with %s"
+                               name (if err (format " (%s)" err) "") base)))))
+    (ygg-git-compare--review-note buffer text)
+    (message "%s" text)))
+
+(defun ygg-git-compare--review-settle (buffer token dir name remote selector pr err)
+  "Bring BUFFER, a compare opened for a review before its pull request was
+known here, to PR: its sides once their commits are here, fetched first.
+Without PR, say why it stays as it is, ERR being what the forge said.
+Nothing is done when BUFFER was opened for another review since TOKEN."
+  (when (and (buffer-live-p buffer)
+             (eq token (buffer-local-value 'ygg-git-compare--review-token buffer))
+             (with-current-buffer buffer
+               (or ygg-git-compare--note
+                   (and pr (eq (car-safe ygg-git-compare--b-spec) 'pr)
+                        (equal (plist-get (cdr ygg-git-compare--b-spec) :number)
+                               (plist-get pr :number))))))
+    (let ((default-directory dir)
+          (number (plist-get pr :number)))
+      (cond
+       ((null pr)
+        (ygg-git-compare--review-none buffer name selector err
+                                      (cdr (buffer-local-value 'ygg-git-compare--a-spec buffer))))
+       ((ygg-git-compare--review-specs pr name remote)
+        (ygg-git-compare--review-show buffer (ygg-git-compare--review-specs pr name remote)))
+       (t
+        (ygg-git-compare--review-note buffer (format "fetching PR #%s…" number))
+        (ygg-git-compare--review-fetch
+         pr remote dir
+         (lambda (failure)
+           (when (and (buffer-live-p buffer)
+                      (eq token (buffer-local-value 'ygg-git-compare--review-token buffer)))
+             (let ((default-directory dir))
+               (if-let* (((not failure))
+                         (specs (ygg-git-compare--review-specs pr name remote)))
+                   (ygg-git-compare--review-show buffer specs)
+                 (ygg-git-compare--review-note
+                  buffer (format "PR #%s not fetched: %s" number
+                                 (or failure "its commits are not here")))))))))))))
+
 ;;;###autoload
 (defun ygg-git-compare-review-branch (&optional target)
   "Compare TARGET as its open pull or merge request has it, so held
 comments go there; a branch without one, against the default branch.
 TARGET is a branch or a (pr . PLIST) side; nil takes the branch at
 point, else the current one.  Interactively, pick among branches and
-open pull and merge requests, the branch at point first."
+open pull and merge requests, the branch at point first.  The compare
+opens at once from what is known; the request and its commits are
+fetched in the background and the compare drawn again when they are here."
   (interactive
    (progn
      (require 'magit)
      (let ((here (or (magit-branch-at-point) (magit-get-current-branch))))
-       (list (pcase (ygg-git-compare--read "Review" (ygg-git-compare--review-targets)
+       (list (pcase (ygg-git-compare--read "Review" #'ygg-git-compare--review-targets
                                            (and here (cons 'rev here)))
                (`(rev . ,(pred string-empty-p)) (user-error "No branch here"))
                (`(rev . ,branch) branch)
@@ -1509,38 +2166,46 @@ open pull and merge requests, the branch at point first."
          (name (if (and branch (magit-remote-branch-p branch))
                    (cdr (magit-split-branch-name branch))
                  branch))
+         (selector (if by-number (plist-get (cdr target) :number) name))
          (remote (ygg-git-compare--pr-remote))
+         (dir default-directory)
          (why nil)
-         (pr (condition-case err
-                 (ygg-git-compare--forge-pr (ygg-git-compare--forge-repo remote)
-                                            (if by-number (plist-get (cdr target) :number) name))
-               (user-error (setq why (error-message-string err)) nil))))
-    (if (not pr)
-        (let ((base (ygg-git-compare--default-branch)))
-          (when by-number
-            (user-error "Could not read request %s%s" (plist-get (cdr target) :number)
-                        (if why (format " (%s)" why) "")))
-          (message "No open pull request for %s%s; comparing it with %s"
-                   name (if why (format " (%s)" why) "") base)
-          (ygg-git-compare-open (cons 'rev base) (cons 'rev branch)))
-      (let* ((head (plist-get pr :head))
-             (start (plist-get pr :start))
-             (number (plist-get pr :number))
-             (gitlab (eq (plist-get pr :forge) 'gitlab)))
-        (unless (magit-commit-p head)
-          (ygg-git-compare--git "fetch" "--quiet" "--no-tags" remote
-                                (format (if gitlab "merge-requests/%s/head" "pull/%s/head")
-                                        number)))
-        (unless (magit-commit-p start)
-          (ygg-git-compare--git "fetch" "--quiet" "--no-tags" remote
-                                (plist-get pr :base-ref)))
-        (ygg-git-compare-open
-         (cons 'rev (or (if gitlab
-                            (plist-get pr :base)
-                          (magit-git-string "merge-base" start head))
-                        (ygg-git-compare--pr-base (plist-get pr :base-ref) remote)))
-         (cons 'pr (list :number number :sha head :head name
-                         :base (plist-get pr :base-ref) :remote remote)))))))
+         (repo (condition-case err (ygg-git-compare--forge-repo remote)
+                 (user-error (setq why (error-message-string err)) nil)))
+         (cell (list nil))
+         (token (list nil))
+         (pr (and repo
+                  (progn
+                    (ygg-git-compare--refine-pr-remote)
+                    (ygg-git-compare--forge-pr
+                     repo selector
+                     (lambda (pr err)
+                       (ygg-git-compare--review-settle (car cell) token dir name remote
+                                                       selector pr err))))))
+         (entry (and repo (ygg-git-compare--cache-entry
+                           (ygg-git-compare--pr-key repo selector))))
+         (specs (and pr (ygg-git-compare--review-specs pr name remote)))
+         (base (if pr
+                   (ygg-git-compare--pr-base (plist-get pr :base-ref) remote)
+                 (ygg-git-compare--default-branch)))
+         (opened (or specs
+                     (cons (cons 'rev base)
+                           (cons 'rev (if (and by-number (not (magit-rev-verify name)))
+                                          base
+                                        branch))))))
+    (setcar cell (ygg-git-compare-open (car opened) (cdr opened)))
+    (when (buffer-live-p (car cell))
+      (with-current-buffer (car cell)
+        (setq ygg-git-compare--review-token token)))
+    (unless specs
+      (ygg-git-compare--review-note (car cell) "looking up the pull request…")
+      (cond (pr (ygg-git-compare--review-settle (car cell) token dir name remote
+                                                selector pr nil))
+            ((or entry (not repo))
+             (ygg-git-compare--review-none (car cell) name selector
+                                           (or (plist-get entry :error) why)
+                                           (cdr (car opened))))))
+    (car cell)))
 
 (provide 'ygg-git-compare)
 ;;; ygg-git-compare.el ends here

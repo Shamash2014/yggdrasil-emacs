@@ -136,7 +136,9 @@ detached at its commit."
          (branch (pcase spec
                    (`(rev . ,rev) (and (magit-local-branch-p rev) rev))))
          (sha (unless (eq (car spec) 'worktree)
-                (plist-get (ygg-git-compare-resolve spec) :diff)))
+                (let ((side (ygg-git-compare-resolve spec)))
+                  (or (plist-get side :diff)
+                      (user-error "%s; try again" (plist-get side :pending))))))
          (found (if (eq (car spec) 'worktree) (cdr spec)
                   (ygg-git-worktree--existing branch sha))))
     (cond
@@ -167,7 +169,8 @@ detached at its commit."
         (cons 'worktree dir))
       (when-let* ((rev (magit-branch-or-commit-at-point)))
         (cons 'rev rev))
-      (ygg-git-compare--read "Run in a worktree" (ygg-git-compare-candidates t) nil)))
+      (ygg-git-compare--read "Run in a worktree"
+                             (apply-partially #'ygg-git-compare-candidates t) nil)))
 
 ;;; Taking one away
 
