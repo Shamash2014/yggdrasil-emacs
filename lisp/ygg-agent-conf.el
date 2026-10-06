@@ -110,6 +110,26 @@ the CLI will hand to a session."
 
 ;;;###autoload
 
+(defun ygg-agent-mcp-value (value)
+  "VALUE as a header or env string, or nil when it says nothing."
+  (cond ((memq value '(nil :null :false :json-false)) nil)
+        ((eq value t) "true")
+        ((stringp value) value)
+        ((or (hash-table-p value) (vectorp value) (consp value))
+         (condition-case nil
+             (json-serialize value :null-object nil :false-object :false)
+           (error (format "%s" value))))
+        (t (format "%s" value))))
+
+(defun ygg-agent--mcp-pairs (table)
+  (let (out)
+    (when (hash-table-p table)
+      (maphash (lambda (key value)
+                 (when-let* ((text (ygg-agent-mcp-value value)))
+                   (push (list :name key :value text) out)))
+               table))
+    (nreverse out)))
+
 (defun ygg-agent--mcp-spec (name spec)
   "One server SPEC from a CLI config, in the shape a session is handed."
   (when (hash-table-p spec)
@@ -117,24 +137,18 @@ the CLI will hand to a session."
           (type (or (gethash "type" spec) "stdio"))
           (command (gethash "command" spec)))
       (cond
-       (url (list :name name :type (if (equal type "sse") "sse" "http") :url url))
+       (url (list :name name :type (if (equal type "sse") "sse" "http") :url url
+                  :headers (ygg-agent--mcp-pairs (gethash "headers" spec))))
        (command
         (list :name name :command command
               :args (vconcat (gethash "args" spec))
-              :env (let (env)
-                     (when-let* ((table (gethash "env" spec)))
-                       (maphash (lambda (key value)
-                                  (push (list :name key :value (format "%s" value))
-                                        env))
-                                table))
-                     ;; a list of (:name :value), which is the shape the
-                     ;; wire builder recognises; a vector is not
-                     (nreverse env))))))))
+              :env (ygg-agent--mcp-pairs (gethash "env" spec))))))))
 
-(defun ygg-agent--json-mcp (file &optional project)
-  "The servers FILE declares, and the ones it declares for PROJECT."
-  (when-let* (((file-readable-p (expand-file-name file)))
-              (json (ygg-agent--read-json (expand-file-name file))))
+(defun ygg-agent--json-mcp (file &optional project jsonc)
+  "The servers FILE declares, and the ones it declares for PROJECT.
+JSONC lets FILE carry comments."
+  (when-let* ((json (ygg-agent--read-json-or-warn
+                     (expand-file-name file) 'user-mcp jsonc)))
     (let (out)
       (dolist (table (delq nil
                            (list (gethash "mcpServers" json)
@@ -229,7 +243,7 @@ agent started from Emacs should reach what that agent reaches when it
 is started by hand."
   (pcase agent
     ("claude" (ygg-agent--json-mcp "~/.claude.json" project))
-    ("gemini" (ygg-agent--json-mcp "~/.gemini/settings.json" project))
+    ("gemini" (ygg-agent--json-mcp "~/.gemini/settings.json" project t))
     ("codex" (ygg-agent--toml-mcp "~/.codex/config.toml"))
     ("pi" (ygg-agent--json-mcp
            (expand-file-name "mcp.json"
@@ -330,7 +344,7 @@ second run replaces ours rather than adding another."
      :share ("skills" "prompts" "npm" "extensions" "themes")
      :settings "settings.json"
      :seed ("packages" "defaultProvider" "defaultModel")
-     :seed-files (("models.json" "providers"))))
+     :seed-files (("models.json" "providers") ("mcp.json" "mcpServers"))))
   "Per-kind config-home spec: env var, marker file, real home, shared subdirs.")
 
 (defcustom ygg-agent-conf-root "~/.agents-conf"
@@ -369,25 +383,56 @@ command naming the kind's adapter, still reads that kind's home."
         (unless (string-empty-p line)
           (expand-file-name line (file-name-directory path)))))))
 
-(defun ygg-agent--read-json (path)
-  "PATH as a hash table, or nil when it is missing, not JSON or not an object."
+(defun ygg-agent--strip-jsonc ()
+  "Delete the // and /* */ comments from the buffer, leaving strings alone."
+  (goto-char (point-min))
+  (while (re-search-forward "\"\\(?:[^\"\\]\\|\\\\.\\)*\"\\|//.*\\|/\\*\\(?:.\\|\n\\)*?\\*/" nil t)
+    (unless (eq (char-after (match-beginning 0)) ?\")
+      (replace-match ""))))
+
+(defun ygg-agent--read-json (path &optional jsonc)
+  "PATH as a hash table, or nil when it is missing, not JSON or not an object.
+JSONC lets the file carry comments."
   (when (file-readable-p path)
     (let ((json (ignore-errors
                   (with-temp-buffer
                     (insert-file-contents path)
+                    (when jsonc (ygg-agent--strip-jsonc) (goto-char (point-min)))
                     (json-parse-buffer :object-type 'hash-table
                                        :null-object nil :false-object :false)))))
       (and (hash-table-p json) json))))
 
-(defun ygg-agent--read-json-or-warn (path)
-  "PATH as a hash table, or nil.\nWarns, naming PATH, when it exists but holds no JSON object."
+(defvar ygg-agent--warned-json (make-hash-table :test #'equal))
+
+(defun ygg-agent--json-problem (path)
+  (cond ((file-directory-p path) "a directory")
+        ((not (file-readable-p path)) "unreadable")
+        ((string-blank-p (or (ignore-errors
+                               (with-temp-buffer
+                                 (insert-file-contents path)
+                                 (buffer-string)))
+                             "x"))
+         "empty")
+        (t "not a JSON object")))
+
+(defun ygg-agent--read-json-or-warn (path &optional context jsonc)
+  "PATH as a hash table, or nil; never signals.
+Warns once per PATH and modification time when it exists but cannot be
+used.  CONTEXT is `user-mcp' for a file read only for its MCP servers.
+JSONC lets the file carry comments."
   (when (file-exists-p path)
-    (or (ygg-agent--read-json path)
-        (progn (display-warning
-                'ygg-agent
-                (format "%s is not a JSON object; its config is left unseeded" path)
-                :warning)
-               nil))))
+    (or (ygg-agent--read-json path jsonc)
+        (let ((mtime (file-attribute-modification-time (file-attributes path))))
+          (unless (equal (gethash path ygg-agent--warned-json) mtime)
+            (puthash path mtime ygg-agent--warned-json)
+            (display-warning
+             'ygg-agent
+             (format "%s is %s; %s" path (ygg-agent--json-problem path)
+                     (if (eq context 'user-mcp)
+                         "its MCP servers are skipped"
+                       "skipped; the project home is still used"))
+             :warning))
+          nil))))
 
 (defun ygg-agent--seed-file (spec dir name keys)
   "Give DIR's file NAME what SPEC's real home has to say under KEYS.
@@ -396,7 +441,9 @@ plugin on has said something about that plugin and nothing about the
 others, so seeding the whole object only where it is absent leaves every
 home the CLI ever wrote to stuck with whatever it decided that day.  An
 explicit answer here always wins — a project keeps the plugins it turned
-on and the skills it switched off — and this only fills silence.
+on and the skills it switched off — and this only fills silence, so a
+later change to an entry the real home already gave does not reach a
+seeded copy.
 Returns what changed, nil when nothing did and nothing was written."
   (when-let* ((src (expand-file-name name (expand-file-name (plist-get spec :home))))
               (global (ygg-agent--read-json-or-warn src)))

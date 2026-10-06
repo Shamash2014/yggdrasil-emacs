@@ -18,6 +18,7 @@
 (require 'aob)
 (require 'aob-subagent)
 (require 'json)
+(require 'ygg-agent-conf)
 (require 'ygg-git)
 (require 'ygg-ui)
 
@@ -3557,6 +3558,34 @@ was sent with."
       ('http (and (plist-get caps :http) t))
       ('sse (and (plist-get caps :sse) t)))))
 
+(defun aob-acp--mcp-key (key)
+  (if (keywordp key) (substring (symbol-name key) 1) (format "%s" key)))
+
+(defun aob-acp--mcp-pairs (value)
+  "VALUE, headers or env in any of their shapes, as ACP name/value entries."
+  (let ((items (cond ((hash-table-p value)
+                      (let (out)
+                        (maphash (lambda (k v) (push (cons k v) out)) value)
+                        (nreverse out)))
+                     ((vectorp value) (append value nil))
+                     (t value))))
+    (cl-flet ((entry (key val)
+             (when-let* ((text (ygg-agent-mcp-value val)))
+               (list :name (aob-acp--mcp-key key) :value text))))
+      (cond
+       ((not (consp items)) nil)
+       ((consp (car items))
+        (delq nil (mapcar (lambda (item)
+                            (if (and (proper-list-p item) (plist-member item :name))
+                                (entry (plist-get item :name) (plist-get item :value))
+                              (entry (car item) (cdr item))))
+                          items)))
+       (t
+        (let (out)
+          (while items
+            (push (entry (pop items) (pop items)) out))
+          (nreverse (delq nil out))))))))
+
 (defun aob-acp--mcp-entry (name spec)
   "SPEC under NAME as the entry a session/new carries, or nil."
   (pcase (aob-acp--mcp-kind spec)
@@ -3564,27 +3593,11 @@ was sent with."
      (when-let* ((command (plist-get spec :command)))
        (list :name name :command command
              :args (vconcat (plist-get spec :args))
-             ;; already in the shape a session takes, or a json object
-             :env (vconcat
-                   (if (and (plist-get spec :env)
-                            (plist-get (car (append (plist-get spec :env) nil))
-                                       :name))
-                       (plist-get spec :env)
-                     (let ((env (plist-get spec :env)) out)
-                       (while env
-                         (let ((key (pop env)) (value (pop env)))
-                           (push (list :name (if (keywordp key)
-                                                 (substring (symbol-name key) 1)
-                                               (format "%s" key))
-                                       :value (format "%s" value))
-                                 out)))
-                       (nreverse out)))))))
+             :env (vconcat (aob-acp--mcp-pairs (plist-get spec :env))))))
     (kind
      (when-let* ((url (plist-get spec :url)))
-       ;; headers is not optional in the wire schema: an adapter that
-       ;; validates the entry drops a server that leaves it out
        (list :name name :type (symbol-name kind) :url url
-             :headers (vconcat (plist-get spec :headers)))))))
+             :headers (vconcat (aob-acp--mcp-pairs (plist-get spec :headers))))))))
 
 (defun aob-acp--mcp-probe (url)
   "Ask URL for its tools, and say how that went."

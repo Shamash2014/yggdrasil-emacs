@@ -378,8 +378,8 @@
           (should (seq-some (lambda (e) (string-prefix-p (concat var "=") e)) env)))))))
 
 (ert-deftest ygg-pi-terminal-env-exports-the-pi-home-with-the-others ()
-  (skip-unless (require 'layer-aob nil t))
-  (skip-unless (fboundp 'ygg-agent-terminal-env))
+  (require 'layer-sessions)
+  (require 'layer-aob)
   (ygg-pi-tests--with
     (ygg-pi-tests--without-keychain
       (let ((env (ygg-agent-terminal-env (ygg-pi-tests--proj))))
@@ -424,7 +424,6 @@
   (ygg-pi-tests--with
     (let* ((extra (list (list :name "badurl" :url 5)
                         (list :name "badargs" :command "x" :args '("a" 1))
-                        (list :name "badheaders" :type "http" :url "http://h" :headers '(("K" . "v")))
                         (list :name "empty")
                         (list :name "legacy" :type "sse" :url "http://h/sse")
                         (list :name "good" :command "x" :args '("ok"))))
@@ -435,12 +434,12 @@
                         (ygg-pi-session-env s))))
         (should (equal (mapcar (lambda (e) (plist-get e :name)) servers) '("aob" "good")))
         (should (= (length warnings) 1))
-        (dolist (name '("badurl" "badargs" "badheaders" "empty" "legacy"))
+        (dolist (name '("badurl" "badargs" "empty" "legacy"))
           (should (string-match-p (concat name " (") (car warnings))))
         (should (string-match-p "url is not a string" (car warnings)))
         (should (string-match-p "args are not a list of strings" (car warnings)))
-        (should (string-match-p "headers are not an alist or plist" (car warnings)))
         (should (string-match-p "neither url nor command" (car warnings)))
+        (should (string-match-p "from user config or sidecar" (car warnings)))
         (should (string-match-p "not sse" (car warnings)))))))
 
 (ert-deftest ygg-pi-session-env-stays-quiet-when-every-entry-loads ()
@@ -462,6 +461,211 @@
                   ((:name "a" :url "http://h" :headers "s") "headers are not an alist or plist")
                   ((:name "a" :type "sse" :url "http://h") "pi supports stdio and streamable HTTP, not sse")))
     (should (equal (ygg-pi--entry-problem (car case)) (cadr case)))))
+
+(ert-deftest ygg-pi-global-mcp-json-seeds-by-name-without-overwriting ()
+  (ygg-pi-tests--with
+    (ygg-pi-tests--file ".pi/agent/mcp.json"
+                        "{\"mcpServers\":{\"gsrv\":{\"url\":\"http://g/mcp\"},\"both\":{\"url\":\"http://global/mcp\"}}}")
+    (ygg-pi-tests--file "conf/proj/pi/mcp.json"
+                        "{\"mcpServers\":{\"both\":{\"url\":\"http://mine/mcp\"}}}")
+    (ygg-agent--config-env "pi" "pi" (ygg-pi-tests--proj))
+    (let* ((servers (gethash "mcpServers"
+                             (ygg-pi-tests--json
+                              (expand-file-name "conf/proj/pi/mcp.json" ygg-pi-tests--root)))))
+      (should (equal (gethash "url" (gethash "gsrv" servers)) "http://g/mcp"))
+      (should (equal (gethash "url" (gethash "both" servers)) "http://mine/mcp")))
+    (should (equal (sort (mapcar (lambda (e) (plist-get e :name))
+                                 (ygg-agent-user-mcp-servers "pi" (ygg-pi-tests--proj)))
+                         #'string<)
+                   '("both" "gsrv")))
+    (should (member "gsrv" (ygg-pi--own-server-names "pi" (ygg-pi-tests--proj))))))
+
+(ert-deftest ygg-pi-cli-lists-the-seeded-global-mcp-server ()
+  (skip-unless (executable-find "pi"))
+  (ygg-pi-tests--with
+    (ygg-pi-tests--file ".pi/agent/mcp.json"
+                        "{\"mcpServers\":{\"gsrv\":{\"url\":\"http://127.0.0.1:9/mcp\"}}}")
+    (let* ((env (ygg-agent--config-env "pi" "pi" (ygg-pi-tests--proj)))
+           (process-environment (append (list env "PI_OFFLINE=1") process-environment))
+           (default-directory (ygg-pi-tests--proj)))
+      (should (string-match-p "gsrv" (shell-command-to-string "pi mcp list 2>&1"))))))
+
+(defun ygg-pi-tests--entry-headers (headers)
+  (plist-get (aob-acp--mcp-entry "h" (list :url "http://h/mcp" :headers headers)) :headers))
+
+(ert-deftest ygg-pi-mcp-entry-accepts-every-shape-of-headers-and-env ()
+  (let ((want [(:name "Authorization" :value "Bearer t")]))
+    (should (equal (ygg-pi-tests--entry-headers '(:Authorization "Bearer t")) want))
+    (should (equal (ygg-pi-tests--entry-headers '(("Authorization" . "Bearer t"))) want))
+    (should (equal (ygg-pi-tests--entry-headers
+                    (let ((h (make-hash-table :test #'equal)))
+                      (puthash "Authorization" "Bearer t" h)
+                      h))
+                   want))
+    (should (equal (ygg-pi-tests--entry-headers '((:name "Authorization" :value "Bearer t"))) want))
+    (should (equal (ygg-pi-tests--entry-headers [(:name "Authorization" :value "Bearer t")]) want))
+    (should (equal (ygg-pi-tests--entry-headers nil) []))
+    (should (equal (plist-get (aob-acp--mcp-entry "e" '(:command "c" :env (:K "v" "L" 2))) :env)
+                   [(:name "K" :value "v") (:name "L" :value "2")]))))
+
+(ert-deftest ygg-pi-project-mcp-json-object-headers-reach-pi ()
+  (ygg-pi-tests--with
+    (ygg-pi-tests--file "proj/.mcp.json"
+                        "{\"mcpServers\":{\"web\":{\"type\":\"http\",\"url\":\"http://h/mcp\",\"headers\":{\"Authorization\":\"Bearer t\",\"X-N\":3}}}}")
+    (let* ((s (ygg-pi-tests--session "p1" "pi" "tok1"))
+           servers
+           (warnings (ygg-pi-tests--collect-warnings w
+                       (setq servers (ygg-pi-tests--env-json (ygg-pi-session-env s))))))
+      (should-not warnings)
+      (should (equal (plist-get (seq-find (lambda (e) (equal (plist-get e :name) "web")) servers)
+                                :headers)
+                     '((:name "Authorization" :value "Bearer t") (:name "X-N" :value "3")))))))
+
+(ert-deftest ygg-pi-skip-warning-names-the-source-file ()
+  (ygg-pi-tests--with
+    (ygg-pi-tests--file "proj/.mcp.json"
+                        "{\"mcpServers\":{\"web\":{\"type\":\"sse\",\"url\":\"http://h/sse\"}}}")
+    (let* ((s (ygg-pi-tests--session "p1" "pi" "tok1"))
+           (warnings (ygg-pi-tests--collect-warnings w (ygg-pi-session-env s))))
+      (should (string-match-p "web (.*from \\.mcp\\.json)" (car warnings))))))
+
+(ert-deftest ygg-pi-entry-problem-accepts-numeric-pair-values ()
+  (should-not (ygg-pi--entry-problem
+               (list :name "a" :url "http://h" :headers [(:name "N" :value 3)])))
+  (should (equal (plist-get (ygg-pi--stringify-entry
+                             (list :name "a" :url "http://h" :headers [(:name "N" :value 3)]))
+                            :headers)
+                 [(:name "N" :value "3")])))
+
+(ert-deftest ygg-pi-malformed-json-warns-once-per-file-version ()
+  (ygg-pi-tests--with
+    (let ((file (ygg-pi-tests--file ".pi/agent/settings.json" "{not json")))
+      (let ((warnings (ygg-pi-tests--collect-warnings w
+                        (dotimes (_ 5) (ygg-agent--read-json-or-warn file)))))
+        (should (= (length warnings) 1))
+        (should (string-match-p "not a JSON object; skipped; the project home is still used"
+                                (car warnings))))
+      (set-file-times file (time-add (current-time) 100))
+      (should (= 1 (length (ygg-pi-tests--collect-warnings w (ygg-agent--read-json-or-warn file)))))
+      (with-temp-file file)
+      (set-file-times file (time-add (current-time) 200))
+      (should (string-match-p "is empty"
+                              (car (ygg-pi-tests--collect-warnings w
+                                     (ygg-agent--read-json-or-warn file))))))))
+
+(ert-deftest ygg-pi-malformed-mcp-json-warns ()
+  (ygg-pi-tests--with
+    (ygg-pi-tests--file "conf/proj/pi/mcp.json" "{oops")
+    (let ((warnings (ygg-pi-tests--collect-warnings w
+                      (dotimes (_ 3) (ygg-agent-user-mcp-servers "pi" (ygg-pi-tests--proj))))))
+      (should (= (length warnings) 1))
+      (should (string-match-p "conf/proj/pi/mcp\\.json" (car warnings))))))
+
+(ert-deftest ygg-pi-mcp-value-reads-json-scalars-and-objects ()
+  (should-not (ygg-agent-mcp-value nil))
+  (should-not (ygg-agent-mcp-value :null))
+  (should-not (ygg-agent-mcp-value :false))
+  (should (equal (ygg-agent-mcp-value t) "true"))
+  (should (equal (ygg-agent-mcp-value 3) "3"))
+  (should (equal (ygg-agent-mcp-value "s") "s"))
+  (should (equal (ygg-agent-mcp-value '(:x 1)) "{\"x\":1}"))
+  (should (equal (ygg-agent-mcp-value [1 2]) "[1,2]")))
+
+(ert-deftest ygg-pi-mcp-pairs-omit-empty-and-serialize-values ()
+  (let ((want [(:name "A" :value "b") (:name "T" :value "true")
+               (:name "N" :value "2") (:name "O" :value "{\"x\":1}")]))
+    (should (equal (plist-get (aob-acp--mcp-entry
+                               "h" (list :url "http://h"
+                                         :headers '(:A "b" :F :false :Z nil :T t :N 2 :O (:x 1))))
+                              :headers)
+                   want))
+    (should (equal (plist-get (aob-acp--mcp-entry
+                               "h" (list :url "http://h"
+                                         :headers '(("A" . "b") ("F" . :false) ("Z") ("T" . t)
+                                                    ("N" . 2) ("O" :x 1))))
+                              :headers)
+                   want))
+    (should (equal (plist-get (aob-acp--mcp-entry
+                               "e" '(:command "c" :env (:A "b" :F :false :T t)))
+                              :env)
+                   [(:name "A" :value "b") (:name "T" :value "true")]))))
+
+(ert-deftest ygg-pi-user-config-url-server-carries-its-headers ()
+  (ygg-pi-tests--with
+    (ygg-pi-tests--file ".claude.json"
+                        "{\"mcpServers\":{\"web\":{\"type\":\"http\",\"url\":\"http://h/mcp\",\"headers\":{\"Authorization\":\"Bearer t\",\"X-Off\":false,\"X-N\":3}},\"st\":{\"command\":\"c\",\"env\":{\"K\":\"v\",\"B\":true,\"Z\":null}}}}")
+    (let* ((specs (ygg-agent-user-mcp-servers "claude" (ygg-pi-tests--proj)))
+           (web (seq-find (lambda (e) (equal (plist-get e :name) "web")) specs))
+           (st (seq-find (lambda (e) (equal (plist-get e :name) "st")) specs)))
+      (should (equal (plist-get (aob-acp--mcp-entry "web" web) :headers)
+                     [(:name "Authorization" :value "Bearer t") (:name "X-N" :value "3")]))
+      (should (equal (plist-get (aob-acp--mcp-entry "st" st) :env)
+                     [(:name "K" :value "v") (:name "B" :value "true")])))))
+
+(ert-deftest ygg-pi-gemini-settings-may-carry-comments ()
+  (ygg-pi-tests--with
+    (ygg-pi-tests--file ".gemini/settings.json"
+                        "// top\n{\n  /* block\n x */\n  \"mcpServers\": {\"g\": {\"url\": \"http://h//x\"}} // tail\n}")
+    (let ((warnings (ygg-pi-tests--collect-warnings w
+                      (should (equal (mapcar (lambda (e) (plist-get e :url))
+                                             (ygg-agent-user-mcp-servers "gemini" (ygg-pi-tests--proj)))
+                                     '("http://h//x"))))))
+      (should-not warnings))))
+
+(ert-deftest ygg-pi-user-mcp-warning-says-the-servers-are-skipped ()
+  (ygg-pi-tests--with
+    (ygg-pi-tests--file ".claude.json" "{oops")
+    (let ((warnings (ygg-pi-tests--collect-warnings w
+                      (ygg-agent-user-mcp-servers "claude" (ygg-pi-tests--proj)))))
+      (should (string-match-p "its MCP servers are skipped" (car warnings)))
+      (should-not (string-match-p "project home" (car warnings))))))
+
+(defun ygg-pi-tests--break (path how)
+  (pcase how
+    ('dir (make-directory path t))
+    ('chmod (with-temp-file path (insert "{}")) (set-file-modes path 0))))
+
+(defun ygg-pi-tests--unbreak (path how)
+  (when (eq how 'chmod) (set-file-modes path #o644)))
+
+(ert-deftest ygg-pi-unusable-global-config-files-never-abort-the-project-home ()
+  (skip-unless (not (zerop (user-uid))))
+  (dolist (case '(("pi" ".pi/agent/settings.json") ("pi" ".pi/agent/models.json")
+                  ("pi" ".pi/agent/mcp.json") ("claude" ".claude/settings.json")))
+    (dolist (how '(dir chmod))
+      (ygg-pi-tests--with
+        (let ((path (expand-file-name (cadr case) ygg-pi-tests--root))
+              result warnings)
+          (make-directory (file-name-directory path) t)
+          (ygg-pi-tests--break path how)
+          (unwind-protect
+              (setq warnings (ygg-pi-tests--collect-warnings w
+                               (setq result (ygg-agent--config-env
+                                             (car case) (car case) (ygg-pi-tests--proj)))))
+            (ygg-pi-tests--unbreak path how))
+          (should (stringp result))
+          (should (file-directory-p (expand-file-name (format "conf/proj/%s" (car case))
+                                                       ygg-pi-tests--root)))
+          (should (cl-some (lambda (m) (string-match-p (if (eq how 'dir) "is a directory" "is unreadable") m))
+                           warnings)))))))
+
+(ert-deftest ygg-pi-unusable-user-mcp-files-warn-and-skip ()
+  (skip-unless (not (zerop (user-uid))))
+  (dolist (case '(("claude" ".claude.json") ("gemini" ".gemini/settings.json")
+                  ("pi" "conf/proj/pi/mcp.json")))
+    (dolist (how '(dir chmod))
+      (ygg-pi-tests--with
+        (let ((path (expand-file-name (cadr case) ygg-pi-tests--root)) warnings)
+          (make-directory (file-name-directory path) t)
+          (ygg-pi-tests--break path how)
+          (unwind-protect
+              (setq warnings (ygg-pi-tests--collect-warnings w
+                               (should-not (ygg-agent-user-mcp-servers
+                                            (car case) (ygg-pi-tests--proj)))))
+            (ygg-pi-tests--unbreak path how))
+          (should (= 1 (length warnings)))
+          (should (string-match-p (if (eq how 'dir) "is a directory; its MCP" "is unreadable; its MCP")
+                                  (car warnings))))))))
 
 (provide 'ygg-pi-harness-tests)
 ;;; ygg-pi-harness-tests.el ends here
