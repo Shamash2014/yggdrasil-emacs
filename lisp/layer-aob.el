@@ -788,23 +788,36 @@ stand, and a list that made spaces would make one per agent per redraw."
 ;; reader the main window, which is right for something you go and read
 ;; and wrong for something that streams while you keep working: the
 ;; buffer you were in would be the thing that disappeared.
+(defconst ygg-agent-session-env-vars
+  '("PI_ACP_PI_COMMAND" "AOB_PI_MCP_SERVERS" "AOB_PI_APPROVE")
+  "Variables only an aob session's own process may carry.
+What `ygg-pi-session-env' hands a connection; a shell or task started
+from an agent buffer inherits them and has to drop them.")
+
 (defun ygg-agent-terminal-env (&optional project)
-  "The config-home variables a shell in PROJECT should carry.
-One entry per kind of CLI that keeps a home — CLAUDE_CONFIG_DIR,
-CODEX_HOME — pointing at the same home the agents spawned from here
-are given, so a CLI run by hand and one run by aob are the same
-install, logged in once."
+  "The environment entries a shell or task in PROJECT should start with.
+One config-home entry per kind of CLI that keeps a home, pointing at the
+same home the agents spawned from here are given, so a CLI run by hand
+and one run by aob are the same install, logged in once.  A project on
+the shared home gets none, as an agent there does: the CLI keeps what it
+inherits.  A remote project gets those variables unset, since a local
+home means nothing there.  The per-session variables are unset in every
+case.  An unset is a bare name, which Emacs passes on as removal."
   (let ((project (or project default-directory)))
-    (delq nil (mapcar (lambda (kind) (ygg-agent--config-env kind kind project))
-                      (mapcar #'car ygg-agent--config-homes)))))
+    (append
+     (if (file-remote-p project)
+         (delete-dups (mapcar (lambda (home) (plist-get (cdr home) :var))
+                              ygg-agent--config-homes))
+       (delq nil (mapcar (lambda (kind) (ygg-agent--config-env kind kind project))
+                         (mapcar #'car ygg-agent--config-homes))))
+     ygg-agent-session-env-vars)))
 
 (defun ygg-agent--terminal-env ()
   "Point a terminal's CLI agents at its own project's config home.
 Every terminal, however it was opened: a claude run by hand and one
 spawned by aob are then the same install, logged in once."
-  (dolist (entry (ygg-agent-terminal-env default-directory))
-    (when (string-match "\\`\\([^=]+\\)=\\(.*\\)\\'" entry)
-      (setenv (match-string 1 entry) (match-string 2 entry)))))
+  (setq process-environment
+        (append (ygg-agent-terminal-env default-directory) process-environment)))
 
 (add-hook 'ghostel-pre-spawn-hook #'ygg-agent--terminal-env)
 

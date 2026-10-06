@@ -30,6 +30,8 @@
 (defvar ghostel--term)
 (defvar ghostel-shell)
 (defvar ghostel-macos-login-shell)
+(defvar ghostel-pre-spawn-hook)
+(declare-function ygg-agent--terminal-env "layer-aob" ())
 (defvar ygg-leader-map)
 
 (when (fboundp 'elpaca)
@@ -161,6 +163,14 @@ lookups."
    (lambda ()
      (let* ((sh (or (getenv "SHELL") "/bin/zsh"))
             (over-there (ygg-term--remote-command dir))
+            (ghostel-pre-spawn-hook (if over-there
+                                        (remq #'ygg-agent--terminal-env
+                                              ghostel-pre-spawn-hook)
+                                      ghostel-pre-spawn-hook))
+            (default-directory (if (and dir (not (file-remote-p dir))
+                                        (file-directory-p dir))
+                                   (file-name-as-directory dir)
+                                 default-directory))
             (mise (if over-there "" (ygg-mise-prefix)))
             ;; when injecting mise, drive the shell ourselves: a login shell
             ;; (past path_helper) execs `mise exec' then the interactive shell
@@ -183,7 +193,9 @@ lookups."
          (add-hook 'kill-buffer-hook #'ygg--term-delete-window nil t)
          (unless (equal (buffer-name) name)
            (rename-buffer name t)))
-       buf))))
+       buf))
+   (and dir (file-remote-p dir) (fboundp 'ygg-agent-terminal-env)
+        (ygg-agent-terminal-env dir))))
 
 (defun ygg--term-delete-window ()
   "Delete the windows showing this terminal when its buffer is killed."

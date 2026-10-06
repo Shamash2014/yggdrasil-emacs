@@ -223,7 +223,8 @@ Skipped when ROOT is remote — a stat per file would hammer TRAMP."
            (compilation-always-kill t)
            (compilation-buffer-name-function
             (lambda (_mode) (ygg-task--buffer-name (or name command)))))
-       (compile command ygg-task-comint)))))
+       (compile command ygg-task-comint)))
+   (and (fboundp 'ygg-agent-terminal-env) (ygg-agent-terminal-env directory))))
 
 (defun ygg-task-run ()
   "Locate just/npm tasks upward from `default-directory' and run the chosen one."
