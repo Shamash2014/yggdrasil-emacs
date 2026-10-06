@@ -1100,7 +1100,6 @@ saying why when it is not."
 (autoload 'ygg-git-compare-comment-append "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-delete "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-copy "ygg-git-compare-comments" nil t)
-(autoload 'ygg-git-compare-comment-toggle-destination "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-accept "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comments-summary "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-dispatch "ygg-git-compare-comments" nil t)
@@ -1260,7 +1259,6 @@ around past the end."
   "K" #'ygg-git-compare-comment-delete
   "y" #'ygg-git-compare-export-markdown
   "Y" #'ygg-git-compare-comment-copy
-  "t" #'ygg-git-compare-comment-toggle-destination
   "a" #'ygg-git-compare-comment-accept
   "s" #'ygg-git-compare-read-only
   "S" #'ygg-git-compare-read-only
@@ -1294,9 +1292,10 @@ unreviewed hunk, and
 \\[ygg-git-compare-comment] comments on the line at point, the lines selected or the file.
 v, x or V select lines for a range comment; x, j and k extend it, Esc ends it.
 \\[ygg-git-compare-comment-file] comments on the file at point.
-On a comment, i and A edit it, d d and K delete it, Y copies it, t sends
-it to the pull request or an agent instead, and a accepts one an agent
-proposed; off one they say so.  Staging, discarding and applying are
+On a comment, i and A edit it, d d and K delete it, Y copies it, and a
+accepts one an agent proposed; off one they say so.  A comment's type
+decides where it goes: those in `ygg-git-compare-agent-types' to an
+agent, the rest to the pull request.  Staging, discarding and applying are
 refused: a compare is read-only.
 \\[ygg-git-compare-export-markdown] copies the review as markdown.
 \\[ygg-git-compare-mark-file-reviewed] and \\[ygg-git-compare-mark-hunk-reviewed] mark the file or hunk reviewed.

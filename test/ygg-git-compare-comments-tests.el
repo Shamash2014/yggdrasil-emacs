@@ -71,10 +71,11 @@ and adds b.txt; main stays checked out."
   (search-forward text)
   (beginning-of-line))
 
-(defun ygg-git-compare-comments-tests--write (buffer text)
-  "Write TEXT in the comment BUFFER and save it."
+(defun ygg-git-compare-comments-tests--write (buffer text &optional type)
+  "Write TEXT in the comment BUFFER, typed TYPE, and save it."
   (with-current-buffer buffer
     (insert text)
+    (setq ygg-git-compare--draft (plist-put ygg-git-compare--draft :type type))
     (ygg-git-compare-draft-save)))
 
 (defun ygg-git-compare-comments-tests--shown ()
@@ -127,7 +128,7 @@ and adds b.txt; main stays checked out."
         (should-not (plist-get review :file))
         (dolist (c (list line range file review))
           (should (stringp (plist-get c :id)))
-          (should (eq (plist-get c :to) 'agent))
+          (should-not (plist-member c :to))
           (should (equal (plist-get c :range) (ygg-git-compare--range-label)))
           (should-not (plist-get c :type)))
         (should (equal (ygg-git-compare--where range) "a.txt:1-2"))))))
@@ -151,12 +152,11 @@ and adds b.txt; main stays checked out."
         (should (eq (plist-get ygg-git-compare--draft :type) 'issue))
         (ygg-git-compare-draft-cycle-type-back)
         (ygg-git-compare-draft-cycle-type-back)
-        (should (eq (plist-get ygg-git-compare--draft :type) 'praise))
-        (should (string-search "[praise]" (ygg-git-compare--draft-header)))
+        (should (eq (plist-get ygg-git-compare--draft :type) 'fix))
+        (should (string-search "[fix]" (ygg-git-compare--draft-header)))
         (insert "nice")
         (ygg-git-compare-draft-save))
-      (should (eq (plist-get (car (ygg-git-compare-comments-list)) :type) 'praise))
-      (should (equal (ygg-git-compare-comment-types) ygg-git-compare-comment-types))
+      (should (eq (plist-get (car (ygg-git-compare-comments-list)) :type) 'fix))
       (ygg-git-compare-comments-tests--goto "+three")
       (with-current-buffer (ygg-git-compare-comment)
         (ygg-git-compare-draft-cancel))
@@ -212,9 +212,6 @@ and adds b.txt; main stays checked out."
                               (all-completions "" table)))))
         (ygg-git-compare-comment-copy)
         (should (equal (car kill-ring) "first"))
-        (ygg-git-compare-comment-toggle-destination)
-        (should (eq (plist-get (car (ygg-git-compare-comments-list)) :to) 'forge))
-        (should (string-search "→ PR" (ygg-git-compare-comments-tests--shown)))
         (with-current-buffer (ygg-git-compare-comment-append)
           (should (eobp))
           (insert ", again")
@@ -276,7 +273,6 @@ and adds b.txt; main stays checked out."
           (should (equal (plist-get line :author) "claude"))
           (should (eq (plist-get line :status) 'pending))
           (should (eq (plist-get line :type) 'issue))
-          (should (eq (plist-get line :to) 'forge))
           (should (eq (plist-get range :level) 'range))
           (should (equal (list (plist-get range :start-side) (plist-get range :side))
                          '(new new)))
@@ -348,14 +344,14 @@ and adds b.txt; main stays checked out."
       (push-mark (point) t t)
       (ygg-git-compare-comments-tests--goto "+two")
       (with-current-buffer (ygg-git-compare-comment)
-        (dotimes (_ 3) (ygg-git-compare-draft-cycle-type))
+        (dotimes (_ 6) (ygg-git-compare-draft-cycle-type))
         (insert "tidy")
         (ygg-git-compare-draft-save))
       (ygg-git-compare-comments-tests--goto "+b1")
-      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-file) "whole file")
-      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-review) "overall")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-file) "whole file" 'fix)
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-review) "overall" 'todo)
       (let ((prompt (ygg-git-compare-review-prompt)))
-        (should (string-search "[nit] a.txt:1-2\n>  1\n> -2\n> -3\n> +two\ntidy" prompt))
+        (should (string-search "[todo] a.txt:1-2\n>  1\n> -2\n> -3\n> +two\ntidy" prompt))
         (should (string-search "b.txt\nwhole file" prompt))
         (should (string-search "review\noverall" prompt))
         (should (string-search "\nbranch feature\n" prompt))
@@ -399,7 +395,6 @@ and adds b.txt; main stays checked out."
                        ("K" ygg-git-compare-comment-delete)
                        ("y" ygg-git-compare-export-markdown)
                        ("Y" ygg-git-compare-comment-copy)
-                       ("t" ygg-git-compare-comment-toggle-destination)
                        ("a" ygg-git-compare-comment-accept)
                        ("r" ygg-git-compare-mark-file-reviewed)
                        ("R" ygg-git-compare-mark-hunk-reviewed)
@@ -417,7 +412,7 @@ and adds b.txt; main stays checked out."
                        ("q" ygg-git-compare-quit)))
         (should (equal (list key (key-binding (kbd key) nil nil (point))) (list key command))))
       (ygg-git-compare-comments-tests--goto "+three")
-      (dolist (key '("i" "A" "Y" "t" "a" "K"))
+      (dolist (key '("i" "A" "Y" "a" "K"))
         (should (string-search "No comment here"
                                (cadr (should-error (call-interactively (key-binding key))
                                                    :type 'user-error)))))
@@ -525,7 +520,7 @@ and adds b.txt; main stays checked out."
         (should (equal (funcall (alist-get 'group-function meta) theirs nil) "Pending · claude"))
         (should (equal (substring-no-properties
                         (funcall (alist-get 'annotation-function meta) theirs))
-                       "  [nit] P1 claude a.txt:2 → PR")))
+                       "  [nit] P1 claude a.txt:2")))
       (let* ((rows (ygg-git-compare--priority-candidates))
              (meta (ygg-git-compare-comments-tests--meta
                     (ygg-git-compare-table rows 'ygg-review-priority))))
@@ -636,7 +631,7 @@ and adds b.txt; main stays checked out."
   (ygg-git-compare-comments-tests--with-repo root
     (ygg-git-compare-comments-tests--with-compare root
       (ygg-git-compare-comments-tests--goto "+two")
-      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on two")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on two" 'todo)
       (should-not (string-search "Made on another range"
                                  (ygg-git-compare-comments-tests--shown)))
       (ygg-git-compare-swap)
@@ -705,5 +700,48 @@ and adds b.txt; main stays checked out."
           (should-not (string-search "second" old)))
         (should (string-search "second" (with-temp-buffer (insert-file-contents file)
                                                           (buffer-string))))))))
+
+(ert-deftest ygg-git-compare-comments-agent-types-are-not-forge ()
+  (should-not (ygg-git-compare--forge-p '(:type todo)))
+  (should-not (ygg-git-compare--forge-p '(:type fix))))
+
+(ert-deftest ygg-git-compare-comments-other-types-and-untyped-are-forge ()
+  (should (ygg-git-compare--forge-p '(:type nit)))
+  (should (ygg-git-compare--forge-p '(:type nil)))
+  (should (ygg-git-compare--forge-p '(:text "plain"))))
+
+(ert-deftest ygg-git-compare-comments-stored-destination-is-ignored ()
+  (should (ygg-git-compare--forge-p '(:to agent :type nit)))
+  (should-not (ygg-git-compare--forge-p '(:to forge :type todo))))
+
+(ert-deftest ygg-git-compare-comments-agent-types-are-selectable ()
+  (let ((types (ygg-git-compare-comment-types)))
+    (dolist (type (append ygg-git-compare-comment-types ygg-git-compare-agent-types))
+      (should (memq type types)))
+    (should (equal types (delete-dups (copy-sequence types))))
+    (should (equal (ygg-git-compare--next-type 'praise 1) 'todo))))
+
+(ert-deftest ygg-git-compare-comments-received-type-is-downcased ()
+  (let ((received (ygg-git-compare--received '(:type "Fix" :text "x") "claude")))
+    (should (eq (plist-get received :type) 'fix))
+    (should-not (ygg-git-compare--forge-p received))))
+
+(ert-deftest ygg-git-compare-comments-received-symbol-types-are-downcased ()
+  (let ((types (mapcar (lambda (type)
+                         (ygg-git-compare--received (list :type type :text "x") "claude"))
+                       '(Fix FIX Todo Nit))))
+    (should (equal (mapcar (lambda (c) (plist-get c :type)) types) '(fix fix todo nit)))
+    (should-not (ygg-git-compare--forge-p (nth 0 types)))
+    (should-not (ygg-git-compare--forge-p (nth 1 types)))
+    (should-not (ygg-git-compare--forge-p (nth 2 types)))
+    (should (ygg-git-compare--forge-p (nth 3 types)))))
+
+(ert-deftest ygg-git-compare-comments-dispatch-description-follows-agent-types ()
+  (should (equal (ygg-git-compare-comments--review-description) "agent review (+ todo, fix)"))
+  (let ((ygg-git-compare-agent-types '(todo)))
+    (should (equal (ygg-git-compare-comments--review-description) "agent review (+ todo)"))))
+
+(ert-deftest ygg-git-compare-comments-toggle-destination-is-gone ()
+  (should-not (fboundp 'ygg-git-compare-comment-toggle-destination)))
 
 ;;; ygg-git-compare-comments-tests.el ends here

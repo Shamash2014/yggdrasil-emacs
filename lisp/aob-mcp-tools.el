@@ -649,7 +649,7 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
          (:name "branch" :type string
           :description "Branch reviewed.")
          (:name "comments" :type array :items (:type "object") :optional t
-          :description "[{file, line (end), side: new|old, start_line, level: line|range|file|review, type: issue|nit|question, title, priority: 0-3, confidence: 0-1, text}]; only text required for a review-level comment.")
+          :description "[{file, line (end), side: new|old, start_line, level: line|range|file|review, type: issue|nit|question|todo|fix (todo and fix go back to the agent, not the PR), title, priority: 0-3, confidence: 0-1, text}]; only text required for a review-level comment.")
          (:name "verdict" :type object :optional t
           :description "{correctness: \"patch is correct\"|\"patch is incorrect\", explanation, confidence}.")
          (:name "codex_review" :type object :optional t

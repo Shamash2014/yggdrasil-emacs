@@ -20,6 +20,7 @@
 (declare-function ygg-git-compare-comments-list "ygg-git-compare-comments"
                   (&optional include-pending))
 (declare-function ygg-git-compare-comments-drop "ygg-git-compare-comments" (ids))
+(declare-function ygg-git-compare--forge-p "ygg-git-compare-comments" (comment))
 (declare-function aob-trace "aob-trace")
 
 (defcustom ygg-git-compare-export-intro
@@ -56,20 +57,21 @@ without one.  Every comment is when MAX-PRIORITY is nil."
     (or (null max-priority)
         (if priority (<= priority max-priority) (null (plist-get comment :author))))))
 
-(defun ygg-git-compare-submit--select (to &optional max-priority)
-  "The checked comments going TO forge, agent, or all, oldest first,
-those past MAX-PRIORITY left out."
+(defun ygg-git-compare-submit--select (&optional to max-priority)
+  "The checked comments going TO `forge' or `agent', all when nil, oldest
+first, those past MAX-PRIORITY left out."
   (seq-filter (lambda (c) (and (not (ygg-git-compare-submit--pending-p c))
-                               (memq to (list nil 'all (plist-get c :to)))
+                               (pcase to
+                                 ('forge (ygg-git-compare--forge-p c))
+                                 ('agent (not (ygg-git-compare--forge-p c)))
+                                 (_ t))
                                (ygg-git-compare-submit--within-p c max-priority)))
               (ygg-git-compare-comments-list)))
 
 (defun ygg-git-compare-submit--args ()
-  "The submit menu's filter as (TO MAX-PRIORITY), each nil when unset."
-  (let ((args (transient-args 'ygg-git-compare-submit)))
-    (list (when-let* ((to (transient-arg-value "--to=" args))) (intern to))
-          (when-let* ((max (transient-arg-value "--max-priority=" args)))
-            (string-to-number max)))))
+  "The submit menu's filter as (MAX-PRIORITY), nil when unset."
+  (let ((max (transient-arg-value "--max-priority=" (transient-args 'ygg-git-compare-submit))))
+    (list (and max (string-to-number max)))))
 
 (defun ygg-git-compare-submit--level (comment)
   (or (plist-get comment :level) (if (plist-get comment :file) 'line 'review)))
@@ -167,9 +169,9 @@ RANGE-KEY, such as \"branch NAME\", for batch use and agents."
                        (ignore-errors (read (current-buffer)))))))
     (ygg-git-compare-markdown (cdr (assoc range-key alist)))))
 
-(defun ygg-git-compare-submit--export-text (to max-priority)
+(defun ygg-git-compare-submit--export-text (max-priority)
   (with-current-buffer (ygg-git-compare--list)
-    (let ((comments (or (ygg-git-compare-submit--select to max-priority)
+    (let ((comments (or (ygg-git-compare-submit--select nil max-priority)
                         (user-error "No review comments to export"))))
       (cons (length comments) (ygg-git-compare-markdown comments)))))
 
@@ -417,12 +419,12 @@ request changes when every one went; the ones posted, and the first failure."
   (when comments
     (ygg-git-compare-comments-drop (mapcar (lambda (c) (plist-get c :id)) comments))))
 
-(defun ygg-git-compare-submit-forge (event &optional to max-priority)
-  "Send the comments going TO the pull or merge request, forge ones by
-default, as a review with EVENT: comment, approve, request-changes or draft.
+(defun ygg-git-compare-submit-forge (event &optional max-priority)
+  "Send the comments for the pull or merge request as a review with EVENT:
+comment, approve, request-changes or draft.
 MAX-PRIORITY leaves out findings less urgent than it."
   (with-current-buffer (ygg-git-compare--list)
-    (let* ((comments (ygg-git-compare-submit--select (or to 'forge) max-priority))
+    (let* ((comments (ygg-git-compare-submit--select 'forge max-priority))
            (_ (unless (or comments (eq event 'approve))
                 (user-error "No comments held for the pull request")))
            (here (ygg-git-compare--range-label))
@@ -457,14 +459,14 @@ MAX-PRIORITY leaves out findings less urgent than it."
           "\n\n<review-comments>\n" (ygg-git-compare-markdown comments) "</review-comments>\n\n"
           (ygg-git-compare-compare-block)))
 
-(defun ygg-git-compare-submit-agent (&optional to max-priority)
-  "Send the comments going TO an agent, agent ones by default, with the
-compare, written as the markdown export writes them.  MAX-PRIORITY leaves
+(defun ygg-git-compare-submit-agent (&optional max-priority)
+  "Send the agent-typed comments with the compare, written as the markdown
+export writes them.  MAX-PRIORITY leaves
 out findings less urgent than it."
   (require 'aob)
   (require 'aob-acp)
   (with-current-buffer (ygg-git-compare--list)
-    (let* ((comments (ygg-git-compare-submit--select (or to 'agent) max-priority))
+    (let* ((comments (ygg-git-compare-submit--select 'agent max-priority))
            (_ (unless comments (user-error "No comments held for an agent")))
            (text (ygg-git-compare-submit--agent-prompt comments))
            (session (ygg-git-compare-send-to-reviewer default-directory text)))
@@ -514,7 +516,7 @@ out findings less urgent than it."
     (or (ignore-errors
           (with-current-buffer (ygg-git-compare--list)
             (let* ((comments (ygg-git-compare-submit--select nil))
-                   (forge (seq-count (lambda (c) (eq (plist-get c :to) 'forge)) comments))
+                   (forge (seq-count (lambda (c) (ygg-git-compare--forge-p c)) comments))
                    (pending (ygg-git-compare-submit--pending-note)))
               (concat (format "Review comments: %d for the pull request, %d for an agent"
                               forge (- (length comments) forge))
@@ -526,7 +528,6 @@ out findings less urgent than it."
 (transient-define-prefix ygg-git-compare-submit ()
   "Send or export the compare's review comments."
   [:description ygg-git-compare-submit--description
-   ("-t" "Only comments for" "--to=" :choices ("all" "forge" "agent"))
    ("-p" "Only findings up to priority" "--max-priority=" :choices ("0" "1" "2" "3"))]
   [["Pull request"
     ("c" "Comment" ygg-git-compare-submit-comment)

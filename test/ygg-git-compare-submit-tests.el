@@ -35,7 +35,7 @@
     :start "s" :url "https://gitlab.com/grp/proj/-/merge_requests/7"))
 
 (defun ygg-git-compare-submit-tests--c (id &rest props)
-  (append props (list :id id :range "R" :to 'forge :text id)))
+  (append props (list :id id :range "R" :text id)))
 
 (defconst ygg-git-compare-submit-tests--mixed
   (list (ygg-git-compare-submit-tests--c "summary" :level 'review :type 'issue :text "Looks off")
@@ -186,7 +186,6 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
     (should (equal (mapcar (lambda (c) (plist-get c :id)) (ygg-git-compare-submit--select nil 1))
                    '("p0" "mine")))
     (should (equal (length (ygg-git-compare-submit--select nil)) 4))
-    (should (equal (length (ygg-git-compare-submit--select 'all)) 4))
     (should-not (ygg-git-compare-submit--select 'agent))))
 
 (ert-deftest ygg-git-compare-submit-markdown-for-range-reads-the-drafts-file ()
@@ -207,7 +206,7 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
   (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed nil #'ignore
     (let ((kill-ring nil)
           (interprogram-cut-function nil))
-      (cl-letf (((symbol-function 'ygg-git-compare-submit--args) (lambda () '(nil nil))))
+      (cl-letf (((symbol-function 'ygg-git-compare-submit--args) (lambda () '(nil))))
         (ygg-git-compare-export-markdown))
       (should (string-search "`a.txt:12-18`" (car kill-ring)))
       (should-not (string-search "proposed" (car kill-ring)))
@@ -497,10 +496,10 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
 
 (ert-deftest ygg-git-compare-submit-agent-sends-markdown-and-drops-agent-comments ()
   (let ((comments (list (ygg-git-compare-submit-tests--c "for pr")
-                        (ygg-git-compare-submit-tests--c "for agent" :to 'agent :level 'file
-                                                         :file "a.txt" :type 'issue)
-                        (ygg-git-compare-submit-tests--c "unchecked" :to 'agent :level 'file
-                                                         :file "a.txt" :status 'pending)))
+                        (ygg-git-compare-submit-tests--c "for agent" :level 'file
+                                                         :file "a.txt" :type 'todo)
+                        (ygg-git-compare-submit-tests--c "unchecked" :level 'file
+                                                         :file "a.txt" :type 'todo :status 'pending)))
         sent)
     (ygg-git-compare-submit-tests--with comments nil #'ignore
       (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session))))
@@ -510,7 +509,7 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                 ((symbol-function 'aob-trace) #'ignore))
         (ygg-git-compare-submit-agent))
       (should (eq (caar sent) 'session))
-      (should (string-search "1. **[ISSUE]** `a.txt` - for agent" (cdar sent)))
+      (should (string-search "1. **[TODO]** `a.txt` - for agent" (cdar sent)))
       (should-not (string-search "unchecked" (cdar sent)))
       (should-not (string-search "for pr" (cdar sent)))
       (should (equal ygg-git-compare-submit-tests--dropped '("for agent")))
@@ -518,8 +517,8 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
 
 (ert-deftest ygg-git-compare-submit-agent-refuses-when-nothing-qualifies ()
   (let ((comments (list (ygg-git-compare-submit-tests--c "for pr")
-                        (ygg-git-compare-submit-tests--c "unchecked" :to 'agent :level 'file
-                                                         :file "a.txt" :status 'pending)))
+                        (ygg-git-compare-submit-tests--c "unchecked" :level 'file
+                                                         :file "a.txt" :type 'todo :status 'pending)))
         sent)
     (ygg-git-compare-submit-tests--with comments nil #'ignore
       (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session))))
@@ -530,5 +529,52 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
         (should-error (ygg-git-compare-submit-agent) :type 'user-error)
         (should-not sent)
         (should-not ygg-git-compare-submit-tests--dropped)))))
+
+(ert-deftest ygg-git-compare-submit-select-picks-by-type ()
+  (ygg-git-compare-submit-tests--with
+      (list (ygg-git-compare-submit-tests--c "todo" :type 'todo)
+            (ygg-git-compare-submit-tests--c "fix" :type 'fix)
+            (ygg-git-compare-submit-tests--c "nit" :type 'nit)
+            (ygg-git-compare-submit-tests--c "plain")
+            (ygg-git-compare-submit-tests--c "old" :to 'agent :type 'nit))
+      nil #'ignore
+    (let ((ids (lambda (to) (mapcar (lambda (c) (plist-get c :id))
+                                    (ygg-git-compare-submit--select to)))))
+      (should (equal (funcall ids 'forge) '("nit" "plain" "old")))
+      (should (equal (funcall ids 'agent) '("todo" "fix")))
+      (should (equal (length (funcall ids nil)) 5)))))
+
+(defconst ygg-git-compare-submit-tests--typed
+  (list (ygg-git-compare-submit-tests--c "todo" :level 'file :file "a.txt" :type 'todo)
+        (ygg-git-compare-submit-tests--c "nit" :level 'file :file "b.txt" :type 'nit)))
+
+(ert-deftest ygg-git-compare-submit-forge-leaves-agent-comments-held ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--typed
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'comment)
+    (should (equal ygg-git-compare-submit-tests--dropped '("nit")))
+    (should (equal (ygg-git-compare-submit-tests--ids) '("todo")))
+    (should-not (string-search "a.txt" (plist-get (nth 2 (car (ygg-git-compare-submit-tests--posts))) :body)))))
+
+(ert-deftest ygg-git-compare-submit-agent-leaves-forge-comments-held ()
+  (let (sent)
+    (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--typed nil #'ignore
+      (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session))))
+                ((symbol-function 'completing-read) (lambda (&rest _) "live"))
+                ((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>"))
+                ((symbol-function 'aob-prompt) (lambda (_s text &rest _) (push text sent)))
+                ((symbol-function 'aob-trace) #'ignore))
+        (ygg-git-compare-submit-agent))
+      (should-not (string-search "b.txt" (car sent)))
+      (should (equal ygg-git-compare-submit-tests--dropped '("todo")))
+      (should (equal (ygg-git-compare-submit-tests--ids) '("nit"))))))
+
+(ert-deftest ygg-git-compare-submit-export-takes-every-checked-comment ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--typed nil #'ignore
+    (pcase-let ((`(,n . ,text) (ygg-git-compare-submit--export-text nil)))
+      (should (= n 2))
+      (should (string-search "a.txt" text))
+      (should (string-search "b.txt" text)))
+    (should (equal (ygg-git-compare-submit-tests--ids) '("todo" "nit")))))
 
 ;;; ygg-git-compare-submit-tests.el ends here

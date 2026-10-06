@@ -23,12 +23,17 @@
   :type '(repeat symbol)
   :group 'ygg-git-compare)
 
+(defcustom ygg-git-compare-agent-types '(todo fix)
+  "The comment types that go to an agent; every other comment goes to the PR."
+  :type '(repeat symbol)
+  :group 'ygg-git-compare)
+
 (defvar-local ygg-git-compare--store nil
   "(FILE . KEY) this compare's comments are kept under.")
 
 (defun ygg-git-compare-comment-types ()
-  "The types a comment can be given."
-  ygg-git-compare-comment-types)
+  "The types a comment can be given, the agent ones included."
+  (seq-union ygg-git-compare-comment-types ygg-git-compare-agent-types))
 
 ;;; Where comments are kept
 
@@ -144,18 +149,13 @@ with INCLUDE-PENDING."
 
 (defun ygg-git-compare--forge-p (comment)
   "Whether COMMENT goes to the pull request rather than an agent."
-  (eq (plist-get comment :to) 'forge))
-
-(defun ygg-git-compare--default-to ()
-  (with-current-buffer (ygg-git-compare--list)
-    (if (eq (car ygg-git-compare--b-spec) 'pr) 'forge 'agent)))
+  (not (memq (plist-get comment :type) ygg-git-compare-agent-types)))
 
 (defun ygg-git-compare--new-comment (level anchor)
   (append (list :id (ygg-git-compare--new-id) :level level :type nil :text nil)
           anchor
           (list :range (with-current-buffer (ygg-git-compare--list)
                          (ygg-git-compare--range-label))
-                :to (ygg-git-compare--default-to)
                 :created (float-time))))
 
 (defun ygg-git-compare--hunk-lines (hunk)
@@ -236,7 +236,7 @@ changed line to its last, a line when it changed only one."
           :old-path (or (and (slot-exists-p section 'source) (oref section source)) new)
           :new-path new)))
 
-(defun ygg-git-compare--where (comment &optional with-target)
+(defun ygg-git-compare--where (comment)
   (let ((level (plist-get comment :level))
         (file (plist-get comment :file)))
     (concat (pcase level
@@ -246,10 +246,7 @@ changed line to its last, a line when it changed only one."
                               (plist-get comment :line)))
               (_ (format "%s:%s" file (plist-get comment :line))))
             (if (and (memq level '(nil line range)) (eq (plist-get comment :side) 'old))
-                " (removed line)" "")
-            (cond ((not with-target) "")
-                  ((ygg-git-compare--forge-p comment) " → PR")
-                  (t " → agent")))))
+                " (removed line)" ""))))
 
 (defun ygg-git-compare--for-prompt (comment here)
   "COMMENT as an agent reads it in a review of HERE, a range label."
@@ -315,7 +312,7 @@ changed line to its last, a line when it changed only one."
     (list (point-min)
           (save-excursion (skip-chars-forward "[:alpha:]") (point))
           (ygg-git-compare-table (mapcar (lambda (type) (list (symbol-name type)))
-                                         ygg-git-compare-comment-types)
+                                         (ygg-git-compare-comment-types))
                                  'ygg-review-comment-type)
           :annotation-function (lambda (_) " type")
           :exit-function #'ygg-git-compare--draft-set-type
@@ -386,7 +383,7 @@ changed line to its last, a line when it changed only one."
 
 (defun ygg-git-compare--draft-header ()
   (let ((type (plist-get ygg-git-compare--draft :type)))
-    (concat " " (ygg-git-compare--where ygg-git-compare--draft t) "  "
+    (concat " " (ygg-git-compare--where ygg-git-compare--draft) "  "
             (if type
                 (propertize (format "[%s]" type) 'face (ygg-git-compare--type-face type))
               (propertize "untyped" 'face 'shadow))
@@ -440,7 +437,7 @@ saving keeps it on the compare.  Answer that buffer."
   (ygg-git-compare--draft-close))
 
 (defun ygg-git-compare--next-type (type step)
-  (let ((types (cons nil ygg-git-compare-comment-types)))
+  (let ((types (cons nil (ygg-git-compare-comment-types))))
     (nth (mod (+ (or (cl-position type types) 0) step) (length types)) types)))
 
 (defun ygg-git-compare-draft-cycle-type (&optional step)
@@ -590,9 +587,8 @@ ends it."
                           (and confidence (format " · %s" confidence)))
                   'face (if wrong 'error 'success)))))
 
-(defun ygg-git-compare--comment-block (comment &optional where target)
-  "COMMENT as lines to show, naming WHERE it is on and TARGET, its destination,
-when given."
+(defun ygg-git-compare--comment-block (comment &optional where)
+  "COMMENT as lines to show, naming WHERE it is on when given."
   (let* ((type (plist-get comment :type))
          (priority (plist-get comment :priority))
          (pending (ygg-git-compare--pending-p comment))
@@ -620,8 +616,7 @@ when given."
                            (and (not (plist-get comment :correctness))
                                 (plist-get comment :confidence)
                                 (propertize (format "%s" (plist-get comment :confidence))
-                                            'face 'shadow))
-                           (and target (propertize target 'face 'shadow)))))
+                                            'face 'shadow)))))
          (title (plist-get comment :title))
          (head (string-join (append meta (and title (list (propertize title 'face 'bold))))
                             " "))
@@ -660,7 +655,6 @@ it has no place for at the top of the diff of every file."
               ((bound-and-true-p magit-root-section)))
     (let ((files (seq-filter (lambda (s) (magit-section-match 'file s))
                              (oref magit-root-section children)))
-          (default-to (ygg-git-compare--default-to))
           (places nil)
           (stale nil)
           (top nil))
@@ -672,15 +666,12 @@ it has no place for at the top of the diff of every file."
                (stale-p (ygg-git-compare--stale-p c))
                (pos (and file (not stale-p) (memq level '(line range))
                          (ygg-git-compare--line-pos file c)))
-               (target (unless (eq (plist-get c :to) default-to)
-                         (if (ygg-git-compare--forge-p c) "→ PR" "→ agent")))
                (place (cond (stale-p nil)
                             (pos pos)
                             (file (save-excursion (goto-char (oref file start))
                                                   (line-end-position)))))
                (block (ygg-git-compare--comment-block
-                       c (unless (or pos (memq level '(file review))) (ygg-git-compare--where c))
-                       target)))
+                       c (unless (or pos (memq level '(file review))) (ygg-git-compare--where c)))))
           (cond (stale-p
                  (when (eq (current-buffer) list)
                    (push (list (plist-get c :id) block) stale)))
@@ -742,7 +733,7 @@ and place."
                    (delq nil (list (when-let* ((type (plist-get c :type))) (format "[%s]" type))
                                    (when-let* ((p (plist-get c :priority))) (format "P%s" p))
                                    (plist-get c :author)
-                                   (ygg-git-compare--where c t)))
+                                   (ygg-git-compare--where c)))
                    " ")))
         (while (assoc label rows) (setq label (concat label "'")))
         (push (cons (ygg-git-compare--group label (or group "Review") note) c) rows)))))
@@ -792,13 +783,6 @@ it was made on none."
   (let ((text (plist-get (ygg-git-compare--comment-at-point) :text)))
     (kill-new text)
     (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
-
-(defun ygg-git-compare-comment-toggle-destination ()
-  "Send the comment at point to the pull request instead of an agent, or back."
-  (interactive)
-  (let ((comment (ygg-git-compare--comment-at-point)))
-    (ygg-git-compare--put (plist-put (copy-sequence comment) :to
-                                     (if (ygg-git-compare--forge-p comment) 'agent 'forge)))))
 
 (defun ygg-git-compare-comment-accept ()
   "Accept the comment at point that an agent proposed."
@@ -865,7 +849,6 @@ past the last."
   "K" #'ygg-git-compare-comment-delete
   "a" #'ygg-git-compare-comment-accept
   "Y" #'ygg-git-compare-comment-copy
-  "t" #'ygg-git-compare-comment-toggle-destination
   "f" #'ygg-git-compare-comments-filter
   "A" #'ygg-git-compare-comments-accept-all)
 
@@ -889,8 +872,7 @@ past the last."
         (magit-insert-section (ygg-git-compare-comment (plist-get c :id))
           (insert (ygg-git-compare--comment-block
                    c (unless (memq (plist-get c :level) '(file review))
-                       (ygg-git-compare--where c))
-                   (if (ygg-git-compare--forge-p c) "→ PR" "→ agent"))
+                       (ygg-git-compare--where c)))
                   "\n")))
       (insert "\n"))))
 
@@ -979,10 +961,14 @@ comment from AUTHOR pending a check."
                      for name = (string-replace "_" "-" (string-remove-prefix
                                                          ":" (format "%s" key)))
                      append (list (intern (concat ":" name))
-                                  (if (and (stringp value)
+                                  (if (and value
                                            (member name '("side" "start-side" "type"
-                                                          "level" "to")))
-                                      (and (not (string-empty-p value)) (intern value))
+                                                          "level")))
+                                      (let ((text (format "%s" value)))
+                                        (and (not (string-empty-p text))
+                                             (intern (if (equal name "type")
+                                                         (downcase text)
+                                                       text))))
                                     value))))
          (file (plist-get c :file))
          (line (plist-get c :line))
@@ -1007,7 +993,6 @@ comment from AUTHOR pending a check."
           :start-old-line (plist-get c :start-old-line)
           :quote (plist-get c :quote)
           :range (plist-get c :range)
-          :to 'forge
           :created (or (plist-get c :created) (float-time))
           :author author
           :status 'pending)))
@@ -1033,6 +1018,10 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
 
 ;;; Dispatch
 
+(defun ygg-git-compare-comments--review-description ()
+  (format "agent review (+ %s)"
+          (mapconcat #'symbol-name ygg-git-compare-agent-types ", ")))
+
 (transient-define-prefix ygg-git-compare-dispatch ()
   "Comment on the compare, check what agents proposed, and send it."
   [["Comment"
@@ -1054,8 +1043,8 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
     ("u" "only unreviewed" ygg-git-compare-toggle-unreviewed)]
    ["Send"
     ("y" "copy as markdown" ygg-git-compare-export-markdown)
-    ("&" "submit" ygg-git-compare-submit)
-    ("@" "to an agent" ygg-git-compare-review)]
+    ("&" "submit to PR" ygg-git-compare-submit)
+    ("@" ygg-git-compare-comments--review-description ygg-git-compare-review)]
    ["View"
     ("I" "interdiff since last review" ygg-git-compare-interdiff)
     ("x" "explain the change" ygg-git-compare-explain)

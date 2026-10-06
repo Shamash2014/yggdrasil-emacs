@@ -494,10 +494,11 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
   (search-forward text)
   (beginning-of-line))
 
-(defun ygg-git-compare-tests--comment (text)
-  "Comment TEXT on the diff line at point, written in the comment buffer."
+(defun ygg-git-compare-tests--comment (text &optional type)
+  "Comment TEXT, typed TYPE, on the diff line at point, written in the comment buffer."
   (with-current-buffer (ygg-git-compare-comment)
     (insert text)
+    (setq ygg-git-compare--draft (plist-put ygg-git-compare--draft :type type))
     (ygg-git-compare-draft-save)))
 
 (defmacro ygg-git-compare-tests--with-compare (root &rest body)
@@ -636,9 +637,9 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
             sent shown offered meta)
         (ygg-git-compare-tests--with-compare root
           (ygg-git-compare-tests--goto "+two")
-          (ygg-git-compare-tests--comment "why two")
+          (ygg-git-compare-tests--comment "why two" 'todo)
           (ygg-git-compare-tests--goto "-2")
-          (ygg-git-compare-tests--comment "keep the digit")
+          (ygg-git-compare-tests--comment "keep the digit" 'todo)
           (cl-letf (((symbol-function 'completing-read)
                      (lambda (_p table &rest _)
                        (setq offered (all-completions "" table)
@@ -686,7 +687,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
           (feature (ygg-git-compare-tests--git root "rev-parse" "feature")))
       (ygg-git-compare-tests--with-compare root
         (ygg-git-compare-tests--goto "+two")
-        (ygg-git-compare-tests--comment "before the swap")
+        (ygg-git-compare-tests--comment "before the swap" 'todo)
         (ygg-git-compare-swap)
         (let ((m (ygg-git-compare-review-prompt)))
           (should (string-search (format "a.txt:2 · made on A: main ↔ B: feature  %s...%s\n"
@@ -721,7 +722,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
       (let ((aob-acp-agents '(("claude" :command ("x")))))
         (ygg-git-compare-tests--with-compare root
           (ygg-git-compare-tests--goto "+two")
-          (ygg-git-compare-tests--comment "kept")
+          (ygg-git-compare-tests--comment "kept" 'todo)
           (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "new: claude"))
                     ((symbol-function 'aob-acp-spawn) #'ignore))
             (should-error (ygg-git-compare-review) :type 'user-error))
@@ -739,7 +740,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
                                     :project aob-compose--dir :state 'starting))))
         (ygg-git-compare-tests--with-compare root
           (ygg-git-compare-tests--goto "+two")
-          (ygg-git-compare-tests--comment "plan this @build")
+          (ygg-git-compare-tests--comment "plan this @build" 'todo)
           (cl-letf (((symbol-function 'completing-read)
                      (lambda (_p table &rest _) (car (all-completions "" table))))
                     ((symbol-function 'ygg-aob--expand-presets)
