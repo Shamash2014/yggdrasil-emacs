@@ -204,18 +204,28 @@ extra lines of a multi-line prompt up to 0.8 of the frame."
           :min-height height
           :min-width width)))
 
+(defconst ygg--vertico-posframe-min-candidate 40
+  "Columns of a row the candidate keeps before its annotation may take the rest.")
+
 (defun ygg--vertico-posframe-fit-row (args)
   "Filter ARGS of `vertico--format-candidate' so its row fits the floating picker.
-An over-long candidate is cut with an ellipsis, keeping prefix and suffix."
+An over-long suffix is cut first, never below what the candidate needs; an
+over-long candidate is then cut with an ellipsis, keeping prefix and suffix."
   (if (not (bound-and-true-p vertico-posframe-mode))
       args
     (pcase-let* ((`(,cand ,prefix ,suffix . ,rest) args)
                  (room (- (plist-get (ygg--vertico-posframe-size (current-buffer)) :width)
-                          1 (string-width prefix) (string-width suffix))))
-      (if (<= (string-width cand) room)
-          args
-        (cons (truncate-string-to-width cand (max 8 room) nil nil "…")
-              (cons prefix (cons suffix rest)))))))
+                          1 (string-width prefix)))
+                 (suffix-room (max 0 (- room (min (string-width cand)
+                                                  ygg--vertico-posframe-min-candidate))))
+                 (suffix (if (<= (string-width suffix) suffix-room)
+                             suffix
+                           (truncate-string-to-width suffix suffix-room nil nil "…")))
+                 (cand-room (- room (string-width suffix))))
+      (cons (if (<= (string-width cand) cand-room)
+                cand
+              (truncate-string-to-width cand (max 8 cand-room) nil nil "…"))
+            (cons prefix (cons suffix rest))))))
 
 (defun ygg--vertico-posframe-enable (&optional frame)
   "Float the picker, once there is a FRAME that can show one."

@@ -26,6 +26,11 @@
                             (make-string 300 ?x) "→ " (make-string 20 ?a)))
              57)))
 
+(ert-deftest ygg-vertico-posframe-fit/command-name-outlives-its-annotation ()
+  (let ((fit (ygg-vertico-posframe-fit-tests--fit
+              "find-file" "" (concat "  " (make-string 200 ?d)))))
+    (should (equal fit "find-file"))))
+
 (ert-deftest ygg-vertico-posframe-fit/short-row-is-untouched ()
   (should (equal (ygg-vertico-posframe-fit-tests--fit "short" "→ " "") "short")))
 
