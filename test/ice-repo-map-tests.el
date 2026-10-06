@@ -216,7 +216,7 @@
     (ice-repo-map-tests--run root "--write")
     (let ((full (ice-repo-map-tests--slurp (expand-file-name "lat.md/repo-map.md" root)))
           (condensed (ice-repo-map-tests--run root)))
-      (should (= 400 (with-temp-buffer (insert full) (how-many "^- `gen-fn-[0-9]+`" (point-min) (point-max)))))
+      (should (= 400 (apply #'+ (mapcar (lambda (c) (ice-repo-map-tests--def-count (nth 2 c))) (ice-repo-map-tests--chunks root "lisp/gen.el")))))
       (should (< (with-temp-buffer (insert condensed) (how-many "^- `gen-fn-[0-9]+`" (point-min) (point-max))) 400))
       (should (> (string-bytes full) (* 2000 4))))
     (ice-repo-map-tests--lat-check root)))
@@ -395,5 +395,398 @@
                      (alist-get 'signature (ice-repo-map-tests--def data "lisp/wrap.el" "wrapped-nested-fn"))))
       (should (equal "(defun wrapped-single-fn () nil)"
                      (alist-get 'signature (ice-repo-map-tests--def data "lisp/wrap.el" "wrapped-single-fn")))))))
+
+(defconst ice-repo-map-tests--chunk-tokens 128)
+(defconst ice-repo-map-tests--chars-per-token 2.5)
+
+(defun ice-repo-map-tests--estimate (text)
+  (ceiling (/ (length text) ice-repo-map-tests--chars-per-token)))
+
+(defconst ice-repo-map-tests--big-defs
+  '(("aob-context-list" . "Show what the context holds.")
+    ("aob-mcp-host--write-key" . "Make a secret for this run and leave it where only its owner")
+    ("aob-schedule--read-target" . "Ask for a session to schedule into, or an agent and project")
+    ("aob-schedule--session-target" . "S as a target: a session, or a persisted conversation's")
+    ("aob-shells-stop" . "Stop the command in PAIR: by its agent when it can, else by")
+    ("aob-subagent--native-cancel" . "Stop the turn of the agent that runs S; a subagent has no")
+    ("aob-todo-open-at-line" . "Open the todo file at the current item's line.")
+    ("aob-todo-refresh" . "Refresh the todo view.")
+    ("aob-transcript--found-1" . "Read DIRS, which hold")
+    ("aob-transcript-asleep-p" . "Whether S is a conversation whose agent is not running.")
+    ("r-ts-mode--chain-anchor" . "Anchor continuation lines of an operator chain.")
+    ("ygg--float-frame" . "A child frame floating over this frame that takes focus, or")
+    ("ygg--macro-record-collect" . "Append this command's keys to an in-progress recording.")
+    ("ygg--select-match-step" . "Make the next unselected occurrence of the primary's word")
+    ("ygg--term-buffer" . "Return the dedicated terminal buffer if it is alive, else")
+    ("ygg-add-newline-above" . "Insert empty lines above each selection (Helix [[ and")
+    ("ygg-agent--replace-json" . "Swap TABLE in for PATH, pretty-printed, by rename.")
+    ("ygg-aob--embark-agent" . "Tell embark the cursor is on an agent, when it is.")
+    ("ygg-aob--show-new-trace" . "Show a new session's trace; a subagent its agent runs opens")
+    ("ygg-aob--sidebar-shows-clock-p" . "Whether the sidebar is on screen with a row drawn for S.")
+    ("ygg-aob--task-slug" . "The slug of the task S is on, read off the directory that")
+    ("ygg-aob-ensure-space" . "The space S works in, made now when S is top-level and its")
+    ("ygg-ark--auto-lsp" . "Serve this buffer's LSP from its ark kernel once it has one.")
+    ("ygg-ark--comm-open-data" . "Data for a server comm_open: where the kernel should bind.")
+    ("ygg-ast-grep--list-run" . "Stream PATTERN in LANG under DIR into a list next-error can")
+    ("ygg-call-graph-next" . "Move to the next node.")
+    ("ygg-call-graph-refresh" . "Walk the graph again from its root.")
+    ("ygg-change" . "Delete every selection after yanking, then insert at the")
+    ("ygg-code-build" . "Build the project the way this buffer's language does.")
+    ("ygg-code-run" . "Build and run the project the way this buffer's language")
+    ("ygg-code-test-file" . "Run the tests in this file.")
+    ("ygg-compose-preview--selector" . "CLI selector: --id for one of IDS, a --filter for several,")
+    ("ygg-dap-java--own" . "CONFIG carrying RELEASE, run once when the session's")
+    ("ygg-dap-js--read-container" . "Pick a running container.")
+    ("ygg-dap-kotlin--adapter-p" . "Whether eglot SERVER can open a debug adapter.")
+    ("ygg-dap-lldb-program" . "The binary a build of the project at point leaves, relative")
+    ("ygg-db--file-url" . "The usql URL of the database file at PATH under SCHEME.")
+    ("ygg-db--redis-scan" . "(KEYS . COMPLETE) of CONN matching the glob PATTERN, by SCAN.")
+    ("ygg-db--redis-tree" . "Lines drawing VALUE as a numbered, indented tree.")
+    ("ygg-debugpy--venv-env" . "ENV with VENV active, so the program's subprocesses stay in")
+    ("ygg-debugpy-adapter-python" . "An interpreter that runs the adapter: PYTHON itself if it")
+    ("ygg-device-devices" . "Every device the last listings found.")
+    ("ygg-device-log-app-output" . "Show the app's own stdout and stderr, which the device log")
+    ("ygg-device-log-stderr" . "Show what the log source printed on stderr.")
+    ("ygg-device-screenshot-command" . "The program and arguments writing a PNG of DEVICE to FILE.")
+    ("ygg-diagram-image-at-point" . "The image file the line at point names, absolute, or nil.")
+    ("ygg-diagram-toggle-any-at-point" . "Draw the fence or the image the line at point names, or")
+    ("ygg-eglot-x-configure" . "Choose which eglot-x extensions are on, before any server")
+    ("ygg-embark--space" . "The space the row at point is about, in the space tree.")
+    ("ygg-embr--enable-modal-io" . "Route the read-only-unsafe jk-escape, insert and paste to")
+    ("ygg-embr--side-by-side" . "Call LAUNCH with embr's buffer forced into a right split,")
+    ("ygg-ex--expand" . "STRING with Helix's command-line expansions replaced by")
+    ("ygg-ex--parse-pattern" . "Parse /re/ or ?re? pattern starting at (car POS-CELL) in")
+    ("ygg-ex--workspace-directory" . "The project root this buffer sits in, or where it sits.")
+    ("ygg-ex-repeat-last" . "Replay the last ex command COUNT times (for @:).")
+    ("ygg-extend-to-line-start" . "Extend every selection to the beginning of its line.")
+    ("ygg-flip-selections" . "Exchange anchor and cursor of every selection, keeping")
+    ("ygg-git-compare--hunk-lines" . "Each diff line of HUNK as (POS SIDE LINE), a removed line on")
+    ("ygg-git-compare--redraw" . "Resolve sides A-SPEC and B-SPEC afresh, worktrees as they")
+    ("ygg-git-compare--remote-github-states" . "A table of comment id to (RESOLVED . OUTDATED) from the")
+    ("ygg-git-compare--remote-requests" . "PR's requests as (KEY PROGRAM . ARGS).")
+    ("ygg-git-worktree--compared-in" . "A live compare with DIR as one of its sides, or nil.")
+    ("ygg-ice--markdown-setup" . "Wiki links and gd/gr through lat where lat is in use.")
+    ("ygg-ice--preset-skills" . "The skills PRESET names, each body in a block the session")
+    ("ygg-ice-approve-checkpoints" . "Show CHANGE's checkpoints and, on yes, set their Approved")
+    ("ygg-ice-maintain" . "Keep ROOT's verification skill and lat.md feature map honest.")
+    ("ygg-ice-root" . "The repository DIR is in, found by its ICE docs or its git")
+    ("ygg-jdk--pinned-version" . "The java version the mise CONFIG file pins, or nil.")
+    ("ygg-kernel-picker--buffer-language" . "The language code here is in: the chunk's, else the major")
+    ("ygg-kernel-picker--flavour" . "The parenthesised tail of a kernelspec DISPLAY-NAME, e.g. uv.")
+    ("ygg-kernel-picker--running-row" . "A row for KERNEL, already running on HOST, whose kernelspec")
+    ("ygg-kernel-vars--fit-type" . "TYPE in WIDTH columns, shortening the name before the")
+    ("ygg-lsp--block-bounds" . "Bounds of the enclosing block ({ } or similar).")
+    ("ygg-lsp--inner-node-bounds" . "Body/content of a node, excluding brackets/keywords/headers.")
+    ("ygg-lsp--ts-edge" . "Start of the Nth next (N>0) / previous (N<0) node whose type")
+    ("ygg-lsp-code-actions" . "Code actions at point or over the region.")
+    ("ygg-magit-keys" . "Show every magit key through which-key.")
+    ("ygg-match--unmoved" . "The `ygg-each-selection-update' result that leaves")
+    ("ygg-modeline-refresh-path" . "Re-read this buffer's file name against its project into the")
+    ("ygg-nb--chunk-face" . "Rule the chunk head, dim the tail, and leave the body")
+    ("ygg-nb-eval-cell-and-next" . "Evaluate the cell at point and move to the next one.")
+    ("ygg-nb-eval-region" . "Evaluate BEG..END in this buffer's kernel, else an inferior")
+    ("ygg-nb-history-next" . "Replace the REPL's input with the next history entry.")
+    ("ygg-nb-load-file" . "Evaluate a whole file in this buffer's kernel.")
+    ("ygg-number-increment-sequential" . "Vim/evil-numbers g C-a: the i-th selection (buffer order)")
+    ("ygg-preset--root" . "The checkout the presets are read for: the draft's, else")
+    ("ygg-preset-local-p" . "Whether D was shaped by the checkout rather than taken as")
+    ("ygg-preset-workers" . "The worker levels D names, as plists of :name and, when")
+    ("ygg-project-commands--just-recipes" . "Recipe names read off PATH, for when just itself cannot be")
+    ("ygg-project-commands--npm-workspaces" . "Members from DIR's package.json, in either the array or the")
+    ("ygg-project-setup--never" . "The projects that declined, with ADD among them when given.")
+    ("ygg-projects--due" . "TS, a time to come, said in a few columns.")
+    ("ygg-projects--entries" . "The things ROOT's KIND row stands for: (LABEL . PAYLOAD)")
+    ("ygg-projects--selected-entries" . "The session rows between mark and point, each once, top")
+    ("ygg-projects--worktree-entries" . "ROOT's other worktrees, from the cache only — safe on a")
+    ("ygg-projects-toggle-past" . "List ended conversations under the live sessions, or stop")
+    ("ygg-qf--filter-keep" . "Put QUERY on the stack of filters and show what they keep")
+    ("ygg-qf-from-comint" . "Push the current buffer's error locations into *quickfix*")
+    ("ygg-quickscope--backward-targets" . "Reuse the forward scanner on the reversed pre-point text for")
+    ("ygg-rass--wrap-guess" . "GUESS, what eglot--guess-contact returns, with its contact")
+    ("ygg-rn--bin" . "The project's own NAME binary, installed at ROOT or a")
+    ("ygg-rn--pick-target" . "The app runtime Metro's inspector lists, asked for when")
+    ("ygg-rn--when-metro-up" . "Call THEN once Metro serves ROOT, checking until DEADLINE.")
+    ("ygg-rn-hermes-resolve" . "CONFIG attached to the app runtime Metro's inspector lists.")
+    ("ygg-select-next-match" . "Add the next occurrence of the word under the cursor as the")
+    ("ygg-skill-index-files" . "Files beside SKILL's SKILL.md, relative to its directory.")
+    ("ygg-skill-index-find" . "The skill called NAME in PROJECT, matching the part after a")
+    ("ygg-space--spawn" . "Create a new tab as a child of PARENT (id) and tag it; land")
+    ("ygg-space--worktree-space" . "Open PATH as a space named for it and ROOT, and pinned to it.")
+    ("ygg-space-root" . "DIR's repository root, or DIR itself when it is not inside")
+    ("ygg-space-toggle-tab-bar" . "Show or hide the space-tree tab bar for this session.")
+    ("ygg-space-tree-parent" . "Move point to the parent of the space at point.")
+    ("ygg-swift-insert-mark" . "Open a MARK section comment above the line.")
+    ("ygg-swift-split-arguments" . "Put each argument or parameter of the call or declaration on")
+    ("ygg-todo--find-item" . "Find item in ITEMS by :id or :text. Return item or nil.")
+    ("ygg-treesit-prev-sibling" . "Select the previous named sibling of the node covering the")
+    ("ygg-ui--main-window-p" . "Whether WINDOW is a window of the main area a reader may")
+    ("ygg-upcase" . "Upcase every selection; count widens on a bare cursor.")
+    ("ygg-visidata--exportable-language" . "CLIENT's language, when VisiData can take data frames from")
+    ("ygg-visidata-remove-with-buffer" . "Delete DIRECTORY, and everything in it, when BUFFER is")))
+
+(defun ice-repo-map-tests--big-name (n)
+  (car (nth (1- n) ice-repo-map-tests--big-defs)))
+
+(defvar ice-repo-map-tests--big-pad "")
+
+(defun ice-repo-map-tests--big-file ()
+  (concat ";;; big.el --- Big file -*- lexical-binding: t; -*-\n\n" ice-repo-map-tests--big-pad
+          (mapconcat
+           (lambda (def)
+             (format "(defun %s (x)\n  \"%s\"\n  (core-compute-total x))\n" (car def) (cdr def)))
+           ice-repo-map-tests--big-defs "\n")))
+
+(defmacro ice-repo-map-tests--with-big (var &rest body)
+  (declare (indent 1))
+  `(ice-repo-map-tests--with-extra (list (cons "lisp/big.el" (ice-repo-map-tests--big-file)))
+     (let ((,var root))
+       (ice-repo-map-tests--run root "--write")
+       ,@body)))
+
+(defun ice-repo-map-tests--map (root)
+  (ice-repo-map-tests--slurp (expand-file-name "lat.md/repo-map.md" root)))
+
+(defun ice-repo-map-tests--sections (root)
+  (mapcar (lambda (section) (split-string section "\n\n"))
+          (cdr (split-string (ice-repo-map-tests--map root) "^## \\|\n## "))))
+
+(defun ice-repo-map-tests--chunks (root path)
+  (let ((prefix (concat path " · ")))
+    (seq-filter (lambda (section) (string-prefix-p prefix (car section)))
+                (ice-repo-map-tests--sections root))))
+
+(defun ice-repo-map-tests--section-text (section)
+  (concat "## " (string-join section "\n\n")))
+
+(defun ice-repo-map-tests--line-names (lines)
+  (cl-loop for l in (split-string lines "\n" t)
+           when (string-match "^- `\\(.*?\\)` " l) collect (match-string 1 l)))
+
+(ert-deftest ice-repo-map-big-file-splits-into-token-sized-flat-h2-chunks ()
+  (ice-repo-map-tests--with-big root
+    (let ((chunks (ice-repo-map-tests--chunks root "lisp/big.el")))
+      (should-not (string-match-p "^### " (ice-repo-map-tests--map root)))
+      (should (>= (length chunks) 20))
+      (dolist (chunk chunks)
+        (should (<= (ice-repo-map-tests--estimate (ice-repo-map-tests--section-text chunk))
+                    ice-repo-map-tests--chunk-tokens)))
+      (should (= 120 (apply #'+ (mapcar (lambda (c) (ice-repo-map-tests--def-count (nth 2 c))) chunks))))
+      (should (equal (length chunks) (length (delete-dups (mapcar #'car (copy-sequence chunks)))))))))
+
+(ert-deftest ice-repo-map-chunk-lead-lists-every-def-name ()
+  (ice-repo-map-tests--with-big root
+    (dolist (chunk (ice-repo-map-tests--chunks root "lisp/big.el"))
+      (should (<= (length (nth 1 chunk)) 250))
+      (dolist (name (ice-repo-map-tests--line-names (nth 2 chunk)))
+        (should (string-match-p (regexp-quote name) (nth 1 chunk)))))))
+
+(defun ice-repo-map-tests--wordpieces (text)
+  (let ((case-fold-search nil) (count 0))
+    (dolist (word (split-string text "[^[:alnum:]]+" t))
+      (cl-incf count (length (split-string word "\\(?:[a-z]\\)\\(?:[A-Z]\\)\\|[0-9]+\\|\\b" t))))
+    (+ count (with-temp-buffer (insert text) (how-many "[^[:alnum:][:space:]]" (point-min) (point-max))))))
+
+(ert-deftest ice-repo-map-chunks-stay-within-wordpiece-budget ()
+  (ice-repo-map-tests--with-big root
+    (dolist (chunk (ice-repo-map-tests--chunks root "lisp/big.el"))
+      (should (<= (ice-repo-map-tests--wordpieces (ice-repo-map-tests--section-text chunk)) 200)))))
+
+(defun ice-repo-map-tests--big-map-of (defs pad)
+  (let ((ice-repo-map-tests--big-defs defs) (ice-repo-map-tests--big-pad pad))
+    (ice-repo-map-tests--with-big root (ice-repo-map-tests--map root))))
+
+(defun ice-repo-map-tests--changed-sections (a b)
+  (let ((x (cdr (split-string a "^## \\|\n## "))) (y (cdr (split-string b "^## \\|\n## "))))
+    (length (seq-remove (lambda (section) (member section x)) y))))
+
+(ert-deftest ice-repo-map-chunks-are-stable-under-line-shifts-and-edits ()
+  (let* ((defs ice-repo-map-tests--big-defs)
+         (base (ice-repo-map-tests--big-map-of defs ""))
+         (shifted (ice-repo-map-tests--big-map-of defs ";; shifted by a comment\n\n"))
+         (added (ice-repo-map-tests--big-map-of
+                 (append (seq-take defs 60) '(("zz-inserted-helper" . "A freshly added definition.")) (nthcdr 60 defs)) ""))
+         (renamed (ice-repo-map-tests--big-map-of
+                   (append (seq-take defs 60) (list (cons "zz-renamed-helper" (cdr (nth 60 defs)))) (nthcdr 61 defs)) "")))
+    (should (= 0 (ice-repo-map-tests--changed-sections base shifted)))
+    (should (< (ice-repo-map-tests--changed-sections base added) 6))
+    (should (< (ice-repo-map-tests--changed-sections base renamed) 6))))
+
+(ert-deftest ice-repo-map-every-heading-has-a-short-leading-paragraph ()
+  (ice-repo-map-tests--with-big root
+    (let ((map (ice-repo-map-tests--map root)) (headings 0) (pos 0))
+      (while (string-match "^\\(#+\\) .*\n\n\\(.*\\)\n" map pos)
+        (setq pos (match-end 0))
+        (cl-incf headings)
+        (should (<= (length (match-string 2 map)) 250))
+        (should-not (string-match-p "\\`\\(#\\|- \\)" (match-string 2 map))))
+      (should (> headings 20))
+      (should (= headings (with-temp-buffer (insert map) (how-many "^#+ " (point-min) (point-max))))))))
+
+(ert-deftest ice-repo-map-file-section-lists-top-defs-within-budget ()
+  (ice-repo-map-tests--with-big root
+    (let* ((section (cl-find "lisp/big.el" (ice-repo-map-tests--sections root) :key #'car :test #'equal))
+           (top (mapcar (lambda (d) (alist-get 'name d))
+                        (alist-get 'defs (ice-repo-map-tests--file (ice-repo-map-tests--json root) "lisp/big.el")))))
+      (should (<= (ice-repo-map-tests--estimate (ice-repo-map-tests--section-text section))
+                  ice-repo-map-tests--chunk-tokens))
+      (let ((names (ice-repo-map-tests--line-names (nth 2 section))))
+        (should (<= 1 (length names) 10))
+        (should (equal names (seq-take top (length names))))))))
+
+(ert-deftest ice-repo-map-chunked-map-passes-lat-check-and-sections-stay-small ()
+  (ice-repo-map-tests--with-big root
+    (ice-repo-map-tests--lat-check root)
+    (let ((default-directory root))
+      (with-temp-buffer
+        (should (= 0 (call-process "lat" nil (list t nil) nil "section" "repo-map#Repo map#lisp/big.el")))
+        (should (<= (string-bytes (buffer-string)) 1600))
+        (should (string-match-p "lisp/big\\.el" (buffer-string)))
+        (erase-buffer)
+        (let ((heading (substring (car (nth 1 (ice-repo-map-tests--chunks root "lisp/big.el"))) (length "lisp/big.el · "))))
+          (should (string-match-p "\\`Functions · " heading))
+          (should (= 0 (call-process "lat" nil (list t nil) nil "section" (concat "repo-map#Repo map#lisp/big.el · " heading))))
+          (should (string-match-p (regexp-quote heading) (buffer-string))))))))
+
+(defun ice-repo-map-tests--search-hit (map name)
+  (with-temp-buffer
+    (call-process "lat" nil (list t nil) nil "search" name "--limit" "3")
+    (let ((lines (split-string map "\n")) (pos 0) hit)
+      (while (and (not hit) (string-match "Defined in [^:\n]+:\\([0-9]+\\)-\\([0-9]+\\)" (buffer-string) pos))
+        (setq pos (match-end 0))
+        (let ((from (string-to-number (match-string 1 (buffer-string))))
+              (to (string-to-number (match-string 2 (buffer-string)))))
+          (setq hit (string-match-p (format "`%s`" (regexp-quote name))
+                                    (string-join (seq-subseq lines (1- from) to) "\n")))))
+      (and hit t))))
+
+(ert-deftest ice-repo-map-search-finds-symbol-chunks ()
+  (unless (getenv "ICE_REPO_MAP_SEARCH") (ert-skip "set ICE_REPO_MAP_SEARCH=1 to run the lat search hit rate"))
+  (ice-repo-map-tests--with-big root
+    (unless (executable-find "lat") (ert-skip "lat is not on PATH"))
+    (let ((default-directory root)
+          (process-environment (append '("LAT_LLM_KEY=" "LAT_LLM_KEY_FILE=" "LAT_LLM_KEY_HELPER=") process-environment))
+          (start (float-time)))
+      (should (= 0 (call-process "lat" nil nil nil "reindex")))
+      (when (> (- (float-time) start) 120) (ert-skip "lat reindex took over 120s"))
+      (let* ((map (ice-repo-map-tests--map root))
+             (names (mapcar #'ice-repo-map-tests--big-name '(3 17 29 41 58 66 77 90 110 118)))
+             (hits (seq-count (lambda (name) (ice-repo-map-tests--search-hit map name)) names)))
+        (should (>= hits 7))))))
+
+(defconst ice-repo-map-tests--js-probes
+  '("const q = a / b / c; function foo() {}"
+    "x = (a + b) / 2; function foo() {} y = (c) / 3"
+    "const r = total\n  / count;\nfunction foo(){}"
+    "x = y / 2; z = /re\"/; function foo(){ return \"s\" }"
+    "const r = /ab+/g; // comment ' quote\nfunction foo(){}"
+    "x = /[/]\"/; function foo(){}"
+    "/a'b/.test(s)\nfunction foo(){}"
+    "function f(){ return /'/.test(s) }\nfunction foo(){}"
+    "const a = <div>hi</div>; function foo(){}"
+    "const a = <img src='x' />; function foo(){}"
+    "const a = <a href=\"/x/y\">t</a>; function foo(){}"
+    "const s = `a ${ `b ${ c } }` } d`; function foo(){}"
+    "const s = `a ${ '}' } b`; function foo(){}"
+    "const s = `a ${ x.replace(/}/g, '') } b`; function foo(){}"
+    "const s = `a ${ /* } */ x } b`; function foo(){}"
+    "const s = `a ${ {a:1}.a } b`; function foo(){}"
+    "const s = `http://x ${a}`; function foo(){}"
+    "a = b /c; function foo(){ 'x' }"
+    "i++ / 2; function foo(){}"
+    "y = a[0] / 2; z = \"it's\"; function foo(){}"
+    "const f = s => /x/.test(s); function foo(){}"
+    "x = typeof /a/; function foo(){}"
+    "if (x) /a'/.test(y); function foo(){}"
+    "const w = h / 2 + \"/\" ; function foo(){}"
+    "const o = {} / 2; function foo(){}"
+    "f = () => /\"/; function foo(){}"
+    "a = b\n/ c / d; function foo(){}"
+    "const s = `a ${ x.replace(/}/g, `y`) } b`; function foo(){}"
+    "const s = `a ${ x /* ` */ } b`; function foo(){}"
+    "const s = `a ${ x // }\n} b`; function foo(){}"
+    "const s = `a \\` ${x} b`; function foo(){}"
+    "const s = `a \\${ b`; function foo(){}"
+    "const s = `a ${ f(\"}\") } b`; function foo(){}"
+    "const s = tag`a ${b} 'c`; function foo(){}"
+    "const s = `1 ${ `2 ${ `3 ${x}` }` }`; function foo(){}"
+    "const s = `it's ${x}`; function foo(){}"
+    "x.split(/'/); function foo(){}"
+    "y = a + /'/.source; function foo(){}"
+    "if (a > /'/.test(b)) {} function foo(){}"
+    "switch(x){case /'/.test(y): break} function foo(){}"
+    "y = !/'/.test(s); function foo(){}"
+    "const p = a / b; const t = 'x'; function foo(){}"
+    "const p = a / b;\nconst q = c / d; const t = \"it\"; function foo(){}"
+    "x = y / 2; z = /re/; function foo(){}"
+    "const n = \"abc\".length / 2; const w = 'q'; function foo(){}"
+    "const n = `${a}` / 2 / 3; const w = \"q\"; function foo(){}"
+    "x = \"a\" / \"b\" ; function foo(){}"
+    "x = a - /'/.source; function foo(){}"
+    "x = a * /'/.source; function foo(){}"
+    "x = a % /'/.source; function foo(){}"
+    "x = a ^ /'/.source; function foo(){}"
+    "x = ~/'/.source; function foo(){}"
+    "x = a < /'/.source; function foo(){}"
+    "x = a in /'/; function foo(){}"
+    "for (x of /'/.exec(s)) {} function foo(){}"
+    "x = void /'/; function foo(){}"
+    "delete /'/.x; function foo(){}"
+    "x = a instanceof /'/; function foo(){}"
+    "throw /'/; function foo(){}"
+    "function* g(){ yield /'/; } function foo(){}"
+    "async function g(){ await /'/; } function foo(){}"
+    "while (x) /'/.test(y); function foo(){}"
+    "for (;;) /'/.test(y); function foo(){}"
+    "x = (a)/b; y = \"it's\"; function foo(){}"
+    "i-- / 2; z = \"it's\"; function foo(){}")
+  "JS snippets that end in a sentinel name which stripping must keep.")
+
+(defconst ice-repo-map-tests--ts-consumer
+  "const re = /[\"']/.test(s); rxUsedName();\nconst t = `p ${ `q ${ nestedLeakedName() } ` } r`;\nnestedRealName();\nconst d = 4 / 2; const e = a / b / c; divUsedName();\n")
+
+(ert-deftest ice-repo-map-js-regex-literals-and-nested-templates ()
+  (ice-repo-map-tests--with-extra
+      `(("web/lib.ts" . "export function rxUsedName() {}\nexport function nestedLeakedName() {}\nexport function nestedRealName() {}\nexport function divUsedName() {}\nexport function nobodyUsesThis() {}\n")
+        ("web/consumer.ts" . ,ice-repo-map-tests--ts-consumer))
+    (let* ((data (ice-repo-map-tests--json root))
+           (rank (lambda (name) (ice-repo-map-tests--def-rank data "web/lib.ts" name)))
+           (floor (funcall rank "nobodyUsesThis")))
+      (dolist (name '("rxUsedName" "nestedRealName" "divUsedName"))
+        (should (> (funcall rank name) (* 5 floor))))
+      (should (< (funcall rank "nestedLeakedName") (* 2 floor))))))
+
+(ert-deftest ice-repo-map-js-probes-keep-the-code-after-literals-and-comments ()
+  (let* ((names (cl-loop for i from 1 to (length ice-repo-map-tests--js-probes) collect (format "probeName%02d" i)))
+         (lib (concat (mapconcat (lambda (n) (format "export function %s() {}\n" n)) names "")
+                      "export function nobodyUsesThis() {}\n")))
+    (ice-repo-map-tests--with-extra
+        (cons (cons "web/probes.js" lib)
+              (cl-loop for src in ice-repo-map-tests--js-probes
+                       for name in names
+                       collect (cons (format "web/%s.js" name) (string-replace "foo" name src))))
+      (let* ((data (ice-repo-map-tests--json root))
+             (floor (ice-repo-map-tests--def-rank data "web/probes.js" "nobodyUsesThis")))
+        (should-not (seq-remove (lambda (name) (> (ice-repo-map-tests--def-rank data "web/probes.js" name) (* 5 floor)))
+                                names))))))
+
+(ert-deftest ice-repo-map-signature-double-brackets-cannot-form-links ()
+  (ice-repo-map-tests--with-extra '(("lisp/br.el" . "(defvar br-matrix '[[1 2] [3 4]])\n"))
+    (let ((out (ice-repo-map-tests--run root "--budget" "100000")))
+      (should (string-match-p (regexp-quote "'[ [1 2] [3 4] ]") out))
+      (should-not (string-match-p "\\[\\[1\\|4\\]\\]" out)))
+    (ice-repo-map-tests--run root "--write")
+    (ice-repo-map-tests--lat-check root)))
+
+(ert-deftest ice-repo-map-closed-stdout-pipe-exits-quietly ()
+  (ice-repo-map-tests--with-repo root t
+    (let ((err (make-temp-file "ice-repo-map-err")))
+      (unwind-protect
+          (let ((status (call-process "bash" nil nil nil "-c"
+                                      (format "set -o pipefail; %s --root %s --json 2>%s | head -c 1 >/dev/null"
+                                              (shell-quote-argument ice-repo-map-tests--script)
+                                              (shell-quote-argument root) (shell-quote-argument err)))))
+            (should (= 0 status))
+            (should (equal "" (ice-repo-map-tests--slurp err))))
+        (delete-file err)))))
 
 ;;; ice-repo-map-tests.el ends here
