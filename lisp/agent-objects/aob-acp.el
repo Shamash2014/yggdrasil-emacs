@@ -4811,8 +4811,8 @@ this is the other verb, for a session that is over for good."
       (message "%s deleted" name))))
 
 (declare-function aob-transcript-file "aob-transcript" (entry))
-(declare-function aob-transcript-turns "aob-transcript" (file &optional tools))
 (declare-function aob-transcript-restore "aob-transcript" (entry))
+(declare-function aob-transcript-turns "aob-transcript" (file &optional tools))
 
 (defun aob-acp--seed-history (s entry)
   "Put ENTRY\='s past turns in S, so a resumed conversation opens on itself.
@@ -4852,13 +4852,13 @@ than doubled: the one that comes back takes its trace, in the windows
 it was in, and its row in every list.  One that failed on an agent still
 running is let go of first, as a restart lets go of it, so the agent
 holds no turn, question or connection for a session no one reads."
-  (if-let* ((old (aob-acp--holder (plist-get e :acp-id))))
   (when (fboundp 'aob-transcript-restore)
     (condition-case err
         (aob-transcript-restore e)
       (error (user-error "Cannot restore %s: %s"
                          (or (ignore-errors (aob-transcript-file e)) (plist-get e :acp-id))
                          (error-message-string err)))))
+  (if-let* ((old (aob-acp--holder (plist-get e :acp-id))))
       (progn
         (when (process-live-p (aob-session-conn old))
           (aob-session-put old :restarting t)
