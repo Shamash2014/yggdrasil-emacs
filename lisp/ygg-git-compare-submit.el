@@ -265,6 +265,25 @@ RANGE-KEY, such as \"branch NAME\", for batch use and agents."
                                              (seq-filter #'ygg-git-compare-submit--inline-p
                                                          comments)))))))
 
+(defun ygg-git-compare-submit--github-refusal (text err)
+  "What GitHub said in the body TEXT of a refused call, as gh: STATUS DETAIL;
+nil when it said nothing readable.  ERR's HTTP code stands in for no status."
+  (when-let* ((body (ignore-errors (ygg-git-compare--json (string-trim text))))
+              ((plistp body))
+              (detail (or (and (consp (plist-get body :errors))
+                               (mapconcat (lambda (e)
+                                            (if (stringp e) e
+                                              (or (and (plistp e) (plist-get e :message))
+                                                  (format "%s" e))))
+                                          (plist-get body :errors) "; "))
+                          (plist-get body :message)))
+              ((stringp detail))
+              ((not (string-empty-p detail))))
+    (let ((status (or (plist-get body :status)
+                      (and (string-match "HTTP \\([0-9]+\\)" err) (match-string 1 err)))))
+      (format "gh: %s" (string-join (delq nil (list (and status (format "%s" status)) detail))
+                                    " ")))))
+
 (defun ygg-git-compare-submit--api (program body args done)
   "Run PROGRAM with ARGS without waiting, BODY, when non-nil, posted as JSON
 through api's --input; call DONE with (VALUE ERR REFUSED): what it printed
@@ -283,7 +302,11 @@ read as JSON, or nil and what went wrong, REFUSED when the forge said no."
            (cond ((null status) (funcall done nil (format "%s not found" program)))
                  ((eq status 'timeout) (funcall done nil (format "%s timed out" program)))
                  ((/= status 0)
-                  (funcall done nil (if (string-empty-p err) (format "%s failed" program) err) t))
+                  (funcall done nil
+                           (or (and (equal program "gh")
+                                    (ygg-git-compare-submit--github-refusal text err))
+                               (if (string-empty-p err) (format "%s failed" program) err))
+                           t))
                  (t (let ((value (condition-case nil
                                      (let ((out (string-trim text)))
                                        (list (unless (string-empty-p out)
@@ -295,6 +318,27 @@ read as JSON, or nil and what went wrong, REFUSED when the forge said no."
          ygg-git-compare-submit-timeout)
       (error (when input (ignore-errors (delete-file input)))
              (signal (car failure) (cdr failure))))))
+
+(defun ygg-git-compare-submit--own-pr (pr event done)
+  "Call DONE with whether PR is yours on a forge that refuses your own
+approval or request for changes: GitHub, for those two events."
+  (if (not (and (eq (plist-get pr :forge) 'github) (memq event '(approve request-changes))))
+      (funcall done nil)
+    (let ((host (plist-get pr :host)))
+      (ygg-git-compare-submit--api
+       "gh" nil (list "api" "--hostname" host
+                      (format "repos/%s/pulls/%s" (plist-get pr :path) (plist-get pr :number)))
+       (lambda (value err &rest _)
+         (let ((author (and (not err) (plist-get (plist-get value :user) :login)))
+               (known (and (boundp 'ygg-git-review-requests--users)
+                           (gethash host ygg-git-review-requests--users))))
+           (cond ((null author) (funcall done nil))
+                 (known (funcall done (equal known author)))
+                 (t (ygg-git-compare-submit--api
+                     "gh" nil (list "api" "--hostname" host "user")
+                     (lambda (value err &rest _)
+                       (funcall done (and (not err)
+                                          (equal (plist-get value :login) author)))))))))))))
 
 (defun ygg-git-compare-submit--github-steps (pr event comments)
   (list (list comments nil
@@ -499,6 +543,10 @@ before each; DONE with the comments posted and the first failure."
 (defconst ygg-git-compare-submit--event-past
   '((comment . "Posted") (approve . "Posted") (request-changes . "Posted") (draft . "Drafted")))
 
+(defconst ygg-git-compare-submit--event-failed
+  '((comment . "Comment") (approve . "Approve") (request-changes . "Request changes")
+    (draft . "Draft")))
+
 (defconst ygg-git-compare-submit--event-also
   '((approve . " and approved it") (request-changes . " and requested changes")))
 
@@ -517,6 +565,9 @@ before each; DONE with the comments posted and the first failure."
          (kept (- n (length posted)))
          (text (cond ((and failure (> kept 0))
                       (format "Posted %d of %d; %d kept: %s" (length posted) n kept failure))
+                     ((and failure (null posted))
+                      (format "%s failed on %s: %s"
+                              (alist-get event ygg-git-compare-submit--event-failed) name failure))
                      (failure
                       (format "Posted %d comment%s to %s, then failed: %s" n (if (= n 1) "" "s")
                               name failure))
@@ -566,13 +617,33 @@ send or one was made on another range."
   "Ask, then post the comments to PR in the background."
   (when ygg-git-compare-submit--busy
     (user-error "A review is already being posted; wait for it to land"))
-  (let* ((comments (ygg-git-compare-submit--held event max-priority))
+  (ygg-git-compare-submit--held event max-priority)
+  (let ((buffer (current-buffer)))
+    (ygg-git-compare-submit--own-pr
+     pr event
+     (lambda (own)
+       (when (buffer-live-p buffer)
+         (with-current-buffer buffer
+           (ygg-git-compare-submit--confirm event max-priority pr own)))))))
+
+(defun ygg-git-compare-submit--confirm (event max-priority pr own)
+  "Ask, then post the comments to PR; on your OWN pull request only a comment."
+  (when ygg-git-compare-submit--busy
+    (user-error "A review is already being posted; wait for it to land"))
+  (let* ((why (and own (format "GitHub refuses %s on your own pull request; "
+                               (if (eq event 'approve) "an approval" "a request for changes"))))
+         (event (if own 'comment event))
+         (comments (condition-case failure
+                       (ygg-git-compare-submit--held event max-priority)
+                     (user-error
+                      (user-error "%s" (concat why (cadr failure))))))
          (name (ygg-git-compare--pr-name pr))
          (n (length comments))
          (pending (ygg-git-compare-submit--pending-note))
          (buffer (current-buffer))
          (prior ygg-git-compare--note))
-    (unless (y-or-n-p (format "%s %d comment%s on %s%s? "
+    (unless (y-or-n-p (format "%s%s %d comment%s on %s%s? "
+                              (or why "")
                               (alist-get event ygg-git-compare-submit--event-names)
                               n (if (= n 1) "" "s") name
                               (if (string-empty-p pending) "" (concat " (" pending ")"))))

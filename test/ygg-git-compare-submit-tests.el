@@ -298,6 +298,61 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
     (should (string-search "Posted 0 of 4; 4 kept: gh api: one pending review per pull request"
                            (car ygg-git-compare-submit-tests--messages)))))
 
+(defun ygg-git-compare-submit-tests--author (author &optional me)
+  "An answer for a pull request by AUTHOR on a forge that knows you as ME."
+  (lambda (_program args _body)
+    (cond ((member "repos/o/r/pulls/12" args)
+           (format "{\"user\":{\"login\":\"%s\"}}" author))
+          ((member "user" args) (format "{\"login\":\"%s\"}" (or me "me")))
+          (t "{}"))))
+
+(ert-deftest ygg-git-compare-submit-own-pr-only-comments ()
+  (let ((comments (list (ygg-git-compare-submit-tests--c "l" :level 'review))))
+    (dolist (event '(approve request-changes))
+      (ygg-git-compare-submit-tests--with comments ygg-git-compare-submit-tests--github-pr
+          (ygg-git-compare-submit-tests--author "me")
+        (ygg-git-compare-submit-forge event)
+        (should (string-search "refuses" (car ygg-git-compare-submit-tests--prompts)))
+        (should (string-search "Comment with 1 comment" (car ygg-git-compare-submit-tests--prompts)))
+        (should-not (string-search "Approve" (car ygg-git-compare-submit-tests--prompts)))
+        (should (equal (plist-get (nth 2 (car (ygg-git-compare-submit-tests--posts))) :event)
+                       "COMMENT"))))))
+
+(ert-deftest ygg-git-compare-submit-own-pr-without-comments-says-why ()
+  (ygg-git-compare-submit-tests--with nil ygg-git-compare-submit-tests--github-pr
+      (ygg-git-compare-submit-tests--author "me")
+    (let ((failure (should-error (ygg-git-compare-submit-forge 'approve) :type 'user-error)))
+      (should (string-search "your own pull request" (cadr failure))))
+    (should-not (ygg-git-compare-submit-tests--posts))))
+
+(ert-deftest ygg-git-compare-submit-other-pr-still-approves ()
+  (ygg-git-compare-submit-tests--with nil ygg-git-compare-submit-tests--github-pr
+      (ygg-git-compare-submit-tests--author "someone")
+    (ygg-git-compare-submit-forge 'approve)
+    (should (string-prefix-p "Approve with 0 comments" (car ygg-git-compare-submit-tests--prompts)))
+    (should (equal (plist-get (nth 2 (car (ygg-git-compare-submit-tests--posts))) :event)
+                   "APPROVE"))))
+
+(ert-deftest ygg-git-compare-submit-github-refusal-carries-githubs-text ()
+  (should (equal (ygg-git-compare-submit--github-refusal
+                  "{\"message\":\"Unprocessable Entity\",\"errors\":[\"Can not approve your own pull request\"],\"status\":\"422\"}"
+                  "gh: Unprocessable Entity (HTTP 422)")
+                 "gh: 422 Can not approve your own pull request"))
+  (should (equal (ygg-git-compare-submit--github-refusal
+                  "{\"message\":\"Not Found\"}" "gh: Not Found (HTTP 404)")
+                 "gh: 404 Not Found"))
+  (should-not (ygg-git-compare-submit--github-refusal "" "gh: boom")))
+
+(ert-deftest ygg-git-compare-submit-failed-approval-says-so ()
+  (ygg-git-compare-submit-tests--with nil ygg-git-compare-submit-tests--github-pr
+      (lambda (_program args _body)
+        (if (member "--input" args)
+            (error "gh: 422 Can not approve your own pull request")
+          "{}"))
+    (ygg-git-compare-submit-forge 'approve)
+    (should (string-search "Approve failed on github PR #12: " (car ygg-git-compare-submit-tests--messages)))
+    (should-not (string-search "Posted 0" (car ygg-git-compare-submit-tests--messages)))))
+
 (ert-deftest ygg-git-compare-submit-confirm-no-sends-nothing ()
   (let ((ygg-git-compare-submit-tests--yes nil))
     (dolist (pr (list ygg-git-compare-submit-tests--github-pr
@@ -306,7 +361,7 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
           (lambda (&rest _) "{}")
         (dolist (event '(comment approve request-changes draft))
           (should-error (ygg-git-compare-submit-forge event) :type 'user-error))
-        (should-not ygg-git-compare-submit-tests--calls)
+        (should-not (ygg-git-compare-submit-tests--posts))
         (should-not ygg-git-compare-submit-tests--dropped)))))
 
 (ert-deftest ygg-git-compare-submit-refuses-another-range ()
