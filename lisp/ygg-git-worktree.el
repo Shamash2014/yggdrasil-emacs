@@ -340,12 +340,10 @@ git refuses."
   :type 'natnum
   :group 'magit-status)
 
-(defun ygg-git-worktree--counts (dir)
-  "DIR's (STAGED UNSTAGED UNTRACKED AHEAD BEHIND), AHEAD nil with no upstream."
-  (let ((default-directory (file-name-as-directory dir))
-        (staged 0) (unstaged 0) (untracked 0) ahead behind)
-    (dolist (line (magit-git-lines "--no-optional-locks" "status"
-                                   "--porcelain=v2" "--branch"))
+(defun ygg-git-worktree--parse-counts (lines)
+  "(STAGED UNSTAGED UNTRACKED AHEAD BEHIND) from porcelain v2 LINES, AHEAD nil with no upstream."
+  (let ((staged 0) (unstaged 0) (untracked 0) ahead behind)
+    (dolist (line lines)
       (cond ((string-match "\\`# branch\\.ab \\+\\([0-9]+\\) -\\([0-9]+\\)" line)
              (setq ahead (string-to-number (match-string 1 line))
                    behind (string-to-number (match-string 2 line))))
@@ -355,6 +353,152 @@ git refuses."
              (unless (equal (match-string 1 line) ".") (cl-incf staged))
              (unless (equal (match-string 2 line) ".") (cl-incf unstaged)))))
     (list staged unstaged untracked ahead behind)))
+
+(defvar ygg-git-worktree--cache (make-hash-table :test #'equal))
+(defvar ygg-git-worktree--commits (make-hash-table :test #'equal))
+(defvar ygg-git-worktree--queue nil)
+(defvar ygg-git-worktree--inflight (make-hash-table :test #'equal))
+(defvar ygg-git-worktree--running 0)
+(defvar-local ygg-git-worktree--renderers nil)
+
+(defcustom ygg-git-worktree-status-ttl 30
+  "Seconds a worktree's counts are trusted when its HEAD and index are unchanged."
+  :type 'natnum
+  :group 'magit-status)
+
+(defcustom ygg-git-worktree-status-timeout 20
+  "Seconds a worktree's git status may run before it is killed and shown unknown."
+  :type 'number
+  :group 'magit-status)
+
+(defcustom ygg-git-worktree-status-jobs 3
+  "How many worktrees' git status run at once."
+  :type 'natnum
+  :group 'magit-status)
+
+(defun ygg-git-worktree--gitdir (dir)
+  (let ((dot (expand-file-name ".git" dir)))
+    (if (file-directory-p dot)
+        dot
+      (or (ignore-errors
+            (with-temp-buffer
+              (insert-file-contents dot nil 0 512)
+              (when (looking-at "gitdir: \\(.+\\)$")
+                (expand-file-name (match-string 1) dir))))
+          dot))))
+
+(defun ygg-git-worktree--fingerprint (dir commit)
+  (if (file-remote-p dir)
+      (list commit)
+    (let ((gitdir (ygg-git-worktree--gitdir dir)))
+      (list commit
+            (file-attribute-modification-time (file-attributes (expand-file-name "HEAD" gitdir)))
+            (file-attribute-modification-time (file-attributes (expand-file-name "index" gitdir)))))))
+
+(defun ygg-git-worktree--stale-p (entry fingerprint)
+  (or (null entry)
+      (not (equal (plist-get entry :fp) fingerprint))
+      (> (- (float-time) (plist-get entry :at)) ygg-git-worktree-status-ttl)))
+
+(defun ygg-git-worktree--land (dir fingerprint counts)
+  (let ((wanted (cdr (gethash dir ygg-git-worktree--inflight))))
+    (remhash dir ygg-git-worktree--inflight)
+    (puthash dir (list :fp fingerprint :counts counts :at (float-time)) ygg-git-worktree--cache)
+    (run-at-time 0 nil #'ygg-git-worktree--redraw dir)
+    (when (and wanted (not (equal wanted fingerprint)))
+      (ygg-git-worktree--request dir wanted))))
+
+(defun ygg-git-worktree--abandon (dir)
+  (remhash dir ygg-git-worktree--inflight)
+  (unless (gethash dir ygg-git-worktree--cache)
+    (puthash dir (list :fp nil :counts :unknown :at (float-time)) ygg-git-worktree--cache)
+    (run-at-time 0 nil #'ygg-git-worktree--redraw dir)))
+
+(defun ygg-git-worktree--redraw (dir)
+  (dolist (buf (buffer-list))
+    (when (buffer-live-p buf)
+      (with-current-buffer buf
+        (when-let* ((render (cdr (assoc dir ygg-git-worktree--renderers)))
+                    (section (ygg-git-worktree--section dir)))
+          (ygg-git-worktree--replace-heading section
+                                             (funcall render (plist-get (gethash dir ygg-git-worktree--cache) :counts))))))))
+
+(defun ygg-git-worktree--section (dir)
+  (and (derived-mode-p 'magit-status-mode)
+       magit-root-section
+       (when-let* ((parent (seq-find (lambda (s) (eq (oref s type) 'worktrees))
+                                     (oref magit-root-section children))))
+         (seq-find (lambda (s) (equal (oref s value) dir)) (oref parent children)))))
+
+(defun ygg-git-worktree--replace-heading (section line)
+  (let* ((inhibit-read-only t)
+         (start (marker-position (oref section start)))
+         (props (list 'magit-section section))
+         (old-end (save-excursion (goto-char start) (line-end-position)))
+         (offset (and (<= start (point) old-end) (- (point) start))))
+    (when-let* ((map (get-text-property start 'keymap)))
+      (setq props (append props (list 'keymap map))))
+    (save-excursion
+      (goto-char (1+ start))
+      (insert (apply #'propertize line props))
+      (delete-region (point) (+ old-end (length line)))
+      (delete-region start (1+ start)))
+    (when offset
+      (goto-char (+ start (min offset (length line)))))))
+
+(defun ygg-git-worktree--spawn (dir fingerprint)
+  (let* ((default-directory (file-name-as-directory dir))
+         (out (generate-new-buffer " *ygg-wt-status*"))
+         (process-environment (magit-process-environment))
+         (done nil)
+         (timer nil)
+         (finish (lambda (counts timed-out)
+                   (unless done
+                     (setq done t)
+                     (when timer (cancel-timer timer))
+                     (cl-decf ygg-git-worktree--running)
+                     (when (buffer-live-p out) (kill-buffer out))
+                     (if timed-out
+                         (ygg-git-worktree--abandon dir)
+                       (ygg-git-worktree--land dir fingerprint counts))
+                     (ygg-git-worktree--pump)))))
+    (cl-incf ygg-git-worktree--running)
+    (condition-case nil
+        (let ((process
+               (make-process
+                :name "ygg-wt-status" :buffer out :noquery t :connection-type 'pipe
+                :file-handler t
+                :command (list (magit-git-executable) "--no-optional-locks" "status"
+                               "--porcelain=v2" "--branch")
+                :sentinel
+                (lambda (process _event)
+                  (unless (or done (process-live-p process))
+                    (funcall finish
+                             (and (zerop (process-exit-status process))
+                                  (buffer-live-p out)
+                                  (with-current-buffer out
+                                    (ygg-git-worktree--parse-counts
+                                     (split-string (buffer-string) "\n" t))))
+                             nil))))))
+          (when (and process (> ygg-git-worktree-status-timeout 0))
+            (setq timer (run-at-time ygg-git-worktree-status-timeout nil
+                                     (lambda ()
+                                       (unless done
+                                         (funcall finish nil t)
+                                         (delete-process process)))))))
+      (error (funcall finish nil nil)))))
+
+(defun ygg-git-worktree--pump ()
+  (while (and ygg-git-worktree--queue
+              (< ygg-git-worktree--running (max 1 ygg-git-worktree-status-jobs)))
+    (pcase-let ((`(,dir . ,fingerprint) (pop ygg-git-worktree--queue)))
+      (ygg-git-worktree--spawn dir fingerprint))))
+
+(defun ygg-git-worktree--request (dir fingerprint)
+  (if-let* ((job (gethash dir ygg-git-worktree--inflight)))
+      (setcdr job fingerprint)
+    (puthash dir (cons fingerprint fingerprint) ygg-git-worktree--inflight)
+    (setq ygg-git-worktree--queue (nconc ygg-git-worktree--queue (list (cons dir fingerprint))))))
 
 (defun ygg-git-worktree--state (counts)
   (pcase-let ((`(,staged ,unstaged ,untracked ,ahead ,behind) counts))
@@ -391,29 +535,105 @@ git refuses."
             ((or 'working 'starting) (propertize "●" 'font-lock-face 'warning))
             (_ (propertize "○" 'font-lock-face 'success)))))
 
+(defun ygg-git-worktree--parse-list (items)
+  "Worktrees from `worktree list --porcelain -z' ITEMS, nil when one is bare."
+  (let (worktrees worktree bare)
+    (dolist (line items)
+      (cond ((string-prefix-p "worktree" line)
+             (setq worktree (list (substring line 9) nil nil nil nil nil nil))
+             (push worktree worktrees))
+            ((string-prefix-p "HEAD" line) (setf (nth 1 worktree) (substring line 5)))
+            ((string-prefix-p "branch" line) (setf (nth 2 worktree) (substring line 18)))
+            ((string-equal line "bare") (setq bare t))
+            ((string-equal "detached" line) (setf (nth 4 worktree) t))
+            ((string-prefix-p "locked" line)
+             (setf (nth 5 worktree) (if (> (length line) 6) (substring line 7) t)))
+            ((string-prefix-p "prunable" line)
+             (setf (nth 6 worktree) (if (> (length line) 8) (substring line 9) t)))))
+    (unless bare (nreverse worktrees))))
+
+(defun ygg-git-worktree--list ()
+  "Like `magit-list-worktrees', without a toplevel lookup per worktree."
+  (or (and (not (file-remote-p default-directory))
+           (magit-git-version>= "2.36")
+           (ygg-git-worktree--parse-list
+            (magit-git-items "worktree" "list" "--porcelain" "-z")))
+      (magit-list-worktrees)))
+
+(defun ygg-git-worktree--log (commits)
+  (dolist (line (apply #'magit-git-lines "log" "--no-walk=unsorted"
+                       "--format=%H%x1f%h%x1f%s%x1f%ct" commits))
+    (pcase (split-string line "\x1f")
+      (`(,full ,abbrev ,subject ,time)
+       (puthash full (list abbrev subject (string-to-number time))
+                ygg-git-worktree--commits)))))
+
+(defun ygg-git-worktree--load-commits (commits)
+  (when-let* ((missing (seq-filter (lambda (c) (and c (not (gethash c ygg-git-worktree--commits))))
+                                   (delete-dups (copy-sequence commits)))))
+    (ygg-git-worktree--log missing)
+    (when-let* ((lost (seq-remove (lambda (c) (gethash c ygg-git-worktree--commits)) missing)))
+      (dolist (c lost)
+        (ygg-git-worktree--log (list c))
+        (unless (gethash c ygg-git-worktree--commits)
+          (puthash c 'unreachable ygg-git-worktree--commits))))))
+
 (defun ygg-git-worktree--head (config here)
   (pcase-let ((`(,path ,commit ,branch ,bare) config))
     (cond (branch (propertize branch 'font-lock-face
                               (if (equal path here) 'magit-branch-current 'magit-branch-local)))
           (commit (concat (propertize "detached " 'font-lock-face 'magit-dimmed)
-                          (propertize (magit-rev-abbrev commit) 'font-lock-face 'magit-hash)))
+                          (propertize (or (car-safe (gethash commit ygg-git-worktree--commits))
+                                          (substring commit 0 (min 7 (length commit))))
+                                      'font-lock-face 'magit-hash)))
           (bare "(bare)")
           (t ""))))
 
 (defun ygg-git-worktree--commit (commit)
-  (pcase-let ((`(,hash ,subject ,age)
-               (split-string (or (magit-git-string "log" "-1" "--format=%h%x1f%s%x1f%cr" commit)
-                                 "")
-                             "\x1f")))
-    (when age
-      (concat "    " (propertize hash 'font-lock-face 'magit-hash) " " subject "  "
-              (propertize age 'font-lock-face 'magit-dimmed) "\n"))))
+  (pcase (gethash commit ygg-git-worktree--commits)
+    (`(,hash ,subject ,time)
+     (concat "    " (propertize hash 'font-lock-face 'magit-hash) " " subject "  "
+             (propertize (pcase-let ((`(,cnt ,unit) (magit--age time)))
+                           (format "%d %s ago" cnt unit))
+                         'font-lock-face 'magit-dimmed)
+             "\n"))))
+
+(defun ygg-git-worktree--line (config head align path ctx counts)
+  (pcase-let* ((`(,dir ,_commit ,_branch ,bare ,_detached ,_locked ,prunable) config)
+               (`(,paths ,here ,made ,agents ,known) ctx)
+               (missing (not (file-directory-p dir))))
+    (concat
+     head (make-string (- align (string-width head)) ?\s)
+     (string-join
+      (delete
+       "" (list (propertize (abbreviate-file-name (directory-file-name dir)) 'font-lock-face 'shadow)
+                (cond ((or bare prunable missing (not known)) "")
+                      ((eq counts :unknown) (propertize "…" 'font-lock-face 'magit-dimmed))
+                      (counts (ygg-git-worktree--state counts))
+                      (t ""))
+                (propertize
+                 (string-join
+                  (delq nil (list (and (equal path (car paths)) "main")
+                                  (and (equal path here) "here")
+                                  (and (member path made) "made")
+                                  (and prunable "prunable")
+                                  (and missing (not prunable) "missing")
+                                  (and (fboundp 'ygg-space--for-dir)
+                                       (ygg-space--for-dir path)
+                                       "space")))
+                  " ")
+                 'font-lock-face 'magit-dimmed)
+                (mapconcat #'ygg-git-worktree--agent-label
+                           (cdr (assoc path agents)) " ")))
+      "  "))))
 
 ;;;###autoload
 (defun ygg-git-worktree-insert-section ()
-  "Insert the worktrees with their state; nothing when there is only one."
-  (let ((worktrees (magit-list-worktrees)))
+  "Insert the worktrees with their state; nothing when there is only one.
+Counts come from a cache and are refreshed in the background."
+  (let ((worktrees (ygg-git-worktree--list)))
     (when (length> worktrees 1)
+      (ygg-git-worktree--load-commits (mapcar #'cadr worktrees))
       (magit-insert-section (worktrees)
         (magit-insert-heading t "Worktrees")
         (let* ((paths (mapcar (lambda (w) (ygg-git-worktree--norm (car w))) worktrees))
@@ -426,42 +646,29 @@ git refuses."
                               worktrees))
                (align (1+ (apply #'max (mapcar #'string-width heads))))
                (shown 0))
+          (setq ygg-git-worktree--renderers nil)
           (cl-mapc
            (lambda (config head path)
              (pcase-let* ((`(,dir ,commit ,_branch ,bare ,_detached ,_locked ,prunable) config)
-                          (missing (not (file-directory-p dir))))
+                          (known (not (or bare prunable (not (file-directory-p dir))
+                                          (> (cl-incf shown) ygg-git-worktree-status-limit))))
+                          (fingerprint (and known (ygg-git-worktree--fingerprint dir commit)))
+                          (entry (and known (gethash dir ygg-git-worktree--cache)))
+                          (ctx (list paths here made agents known))
+                          (render (lambda (counts)
+                                    (ygg-git-worktree--line config head align path ctx counts))))
+               (when (and known (ygg-git-worktree--stale-p entry fingerprint))
+                 (ygg-git-worktree--request dir fingerprint))
+               (push (cons dir render) ygg-git-worktree--renderers)
                (magit-insert-section (worktree dir t)
-                 (insert
-                  head (make-string (- align (string-width head)) ?\s)
-                  (string-join
-                   (delete
-                    "" (list (propertize (abbreviate-file-name (directory-file-name dir)) 'font-lock-face 'shadow)
-                             (if (or bare prunable missing
-                                     (> (cl-incf shown) ygg-git-worktree-status-limit))
-                                 ""
-                               (ygg-git-worktree--state (ygg-git-worktree--counts dir)))
-                             (propertize
-                              (string-join
-                               (delq nil (list (and (equal path (car paths)) "main")
-                                               (and (equal path here) "here")
-                                               (and (member path made) "made")
-                                               (and prunable "prunable")
-                                               (and missing (not prunable) "missing")
-                                               (and (fboundp 'ygg-space--for-dir)
-                                                    (ygg-space--for-dir path)
-                                                    "space")))
-                               " ")
-                              'font-lock-face 'magit-dimmed)
-                             (mapconcat #'ygg-git-worktree--agent-label
-                                        (cdr (assoc path agents)) " ")))
-                   "  ")
-                  "\n")
+                 (insert (funcall render (if entry (plist-get entry :counts) :unknown)) "\n")
                  (magit-insert-heading)
                  (when (and commit (not prunable))
                    (magit-insert-section-body
                      (insert (or (ygg-git-worktree--commit commit) "")))))))
            worktrees heads paths))
-        (insert ?\n)))))
+        (insert ?\n)
+        (ygg-git-worktree--pump)))))
 
 (defun ygg-git-worktree-compare (dir)
   "Compare the worktree DIR against the repository's default branch."
