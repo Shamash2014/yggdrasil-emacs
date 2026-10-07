@@ -150,7 +150,6 @@
 ;; session that is, where the global leader has to ask
 (dolist (mode '(aob-trace-mode aob-plan-mode aob-subagents-mode))
   (yggdrasil-localleader-def mode "S" #'aob-cancel "stop turn (twice: drop queue)")
-  (yggdrasil-localleader-def mode "k" #'aob-kill-session "kill session")
   (yggdrasil-localleader-def mode "x" #'aob-acp-command "command")
   (yggdrasil-localleader-def mode "z" #'aob-acp-compact "compact context")
   (yggdrasil-localleader-def mode "Z" #'aob-acp-clear "clear context")
@@ -166,12 +165,13 @@
   (yggdrasil-localleader-def mode "E" #'aob-acp-config "effort / options")
   (yggdrasil-localleader-def mode "c" #'aob-acp-mcp "mcp servers")
   (yggdrasil-localleader-def mode "g" #'aob-acp-goal "goal")
-  (yggdrasil-localleader-def mode "w" #'aob-deliver-to "answer goes…")
   (yggdrasil-localleader-def mode "r" #'aob-transcript-wake "wake it (resume acp)")
   (yggdrasil-localleader-def mode "t" #'aob-subagents "subagents list (toggle)")
   (yggdrasil-localleader-def mode "F" #'aob-acp-add-folder "add a folder"))
 (dolist (mode '(aob-plan-mode aob-subagents-mode))
-  (yggdrasil-localleader-def mode "p" #'aob-compose "compose"))
+  (yggdrasil-localleader-def mode "p" #'aob-compose "compose")
+  (yggdrasil-localleader-def mode "k" #'aob-kill-session "kill session")
+  (yggdrasil-localleader-def mode "w" #'aob-deliver-to "answer goes…"))
 
 ;; a queued message is still yours until it goes: change it or take it
 ;; back, from the line it is drawn on
@@ -184,7 +184,6 @@
 (yggdrasil-localleader-def 'aob-trace-mode "u" #'aob-trace-usage "usage: time, tokens, cost")
 (yggdrasil-localleader-def 'aob-trace-mode "A" #'aob-answer "answer its questions")
 (yggdrasil-localleader-def 'aob-trace-mode "H" #'aob-handoff "hand off to a fresh session")
-(yggdrasil-localleader-def 'aob-trace-mode "$" #'aob-shells "running commands (stop one)")
 (yggdrasil-localleader-def 'aob-trace-mode "b" #'ygg-aob-browser "preview in a browser pane")
 (autoload 'ygg-projects-toggle-pin "ygg-projects" nil t)
 (dolist (mode '(aob-trace-mode aob-plan-mode))

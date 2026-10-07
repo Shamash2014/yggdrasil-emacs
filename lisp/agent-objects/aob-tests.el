@@ -3786,7 +3786,7 @@ under it included, and not for any other."
    '(progn
      (let ((trace (ygg-localleader--get-map 'aob-trace-mode))
            (plan (ygg-localleader--get-map 'aob-plan-mode)))
-       (pcase-dolist (`(,k . ,def) '(("S" . aob-cancel) ("k" . aob-kill-session)
+       (pcase-dolist (`(,k . ,def) '(("S" . aob-cancel)
                                       ("x" . aob-acp-command) ("d" . aob-todo)
                                       ("a" . ygg-aob-activity) ("M" . aob-acp-cycle-mode)
                                       ("e" . aob-trace-queue-edit) ("X" . aob-trace-queue-drop)
@@ -3795,6 +3795,9 @@ under it included, and not for any other."
                                       ("N" . aob-acp-new)))
          (should (eq (lookup-key trace k) def)))
        (should-not (lookup-key trace "C"))
+       (dolist (k '("k" "w" "$"))
+         (should-not (lookup-key trace k)))
+       (should (eq (lookup-key plan "k") #'aob-kill-session))
        (should-not (lookup-key trace "p"))
        (should (eq (lookup-key plan "p") #'aob-compose))
        (should (eq (lookup-key plan "S") #'aob-cancel))
