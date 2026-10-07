@@ -55,6 +55,13 @@
                  (kill-buffer buffer)))))
        (delete-directory root t))))
 
+(defun ygg-plan-tests--comment (text)
+  "Open the comment box on the claim at point, write TEXT after what it holds, save."
+  (with-current-buffer (ygg-plan-comment)
+    (goto-char (point-max))
+    (insert text)
+    (aob-compose-send)))
+
 (defun ygg-plan-tests--goto (text)
   (goto-char (point-min))
   (search-forward text)
@@ -169,8 +176,7 @@
     (ygg-plan-tests--goto "### 2.1 runScheduledSends")
     (ygg-plan-strike)
     (ygg-plan-tests--goto "### 1.1 createScheduled")
-    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "what about time zones?")))
-      (ygg-plan-comment))
+    (ygg-plan-tests--comment "what about time zones?")
     (let ((text (ygg-plan-response)))
       (should (string-match-p "## Struck\n- \\[2\\.1\\] runScheduledSends() claims retries\\.\n" text))
       (should (string-match-p
@@ -326,8 +332,7 @@
 (ert-deftest ygg-plan/comment-does-not-follow-a-renumbered-claim ()
   (ygg-plan-tests--with-plan
     (ygg-plan-tests--goto "### 1.1 createScheduled")
-    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "note")))
-      (ygg-plan-comment))
+    (ygg-plan-tests--comment "note")
     (ygg-plan-tests--replace "### 1.1 createScheduled()" "### 1.2 createScheduled()")
     (should-not (string-match-p "## Comments" (ygg-plan-response)))
     (ygg-plan--refresh)
@@ -418,14 +423,76 @@
 (ert-deftest ygg-plan/each-comment-on-a-claim-is-its-own-bullet ()
   (ygg-plan-tests--with-plan
     (ygg-plan-tests--goto "### 1.1 createScheduled")
-    (dolist (note '("first" "second"))
-      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) note)))
-        (ygg-plan-comment)))
+    (ygg-plan-tests--comment "first\n\nsecond")
     (should (string-match-p
              (concat "## Comments\n"
                      "- \\[1\\.1\\] createScheduled() refuses past times\\.\n  > first\n"
                      "- \\[1\\.1\\] createScheduled() refuses past times\\.\n  > second\n")
              (ygg-plan-response)))))
+
+(ert-deftest ygg-plan/comment-on-a-claim-edits-its-comments-in-the-same-box ()
+  (ygg-plan-tests--with-plan
+    (ygg-plan-tests--goto "### 1.1 createScheduled")
+    (ygg-plan-tests--comment "first\n\nsecond")
+    (with-current-buffer (ygg-plan-comment)
+      (should (equal (buffer-string) "first\n\nsecond"))
+      (erase-buffer)
+      (insert "only one")
+      (aob-compose-send))
+    (should (equal (cdar ygg-plan--comments) '("only one")))))
+
+(ert-deftest ygg-plan/saving-the-box-empty-clears-the-comments ()
+  (ygg-plan-tests--with-plan
+    (ygg-plan-tests--goto "### 1.1 createScheduled")
+    (ygg-plan-tests--comment "note")
+    (should ygg-plan--comments)
+    (with-current-buffer (ygg-plan-comment)
+      (erase-buffer)
+      (aob-compose-send))
+    (should-not ygg-plan--comments)
+    (should-not (string-match-p "## Comments" (ygg-plan-response)))))
+
+(ert-deftest ygg-plan/comment-quotes-the-selection-into-the-box ()
+  (ygg-plan-tests--with-plan
+    (transient-mark-mode 1)
+    (ygg-plan-tests--goto "### 1.1 createScheduled")
+    (let ((beg (search-forward "refuses")))
+      (set-mark (- beg (length "refuses")))
+      (activate-mark)
+      (with-current-buffer (ygg-plan-comment)
+        (should (equal (buffer-string) "> refuses\n"))
+        (insert "why?")
+        (aob-compose-send)))
+    (should (equal (cdar ygg-plan--comments) '("> refuses\nwhy?")))
+    (should-not (region-active-p))))
+
+(defun ygg-plan-tests--modal (form)
+  "Run FORM in a fresh Emacs with the modal layer and the plan loaded."
+  (unless (locate-library "yggdrasil") (ert-skip "no modal layer on the load path"))
+  (with-temp-buffer
+    (unless (eq 0 (call-process (expand-file-name invocation-name invocation-directory)
+                                nil t nil "-Q" "--batch"
+                                "--eval" (format "%S" `(progn (setq load-path ',load-path
+                                                                    load-prefer-newer t)
+                                                              (require 'ert)
+                                                              (defvar ygg-space-state-functions nil)
+                                                              (defvar ygg-space-detail-functions nil)
+                                                              (require 'yggdrasil)
+                                                              (require 'ygg-plan)
+                                                              ,form))))
+      (ert-fail (buffer-string)))))
+
+(ert-deftest ygg-plan/c-comments-in-normal-and-visual-and-the-old-keys-are-gone ()
+  (ygg-plan-tests--modal
+   '(with-temp-buffer
+      (ygg-plan-mode)
+      (dolist (state '(ygg-normal-state ygg-visual-state))
+        (funcall state)
+        (should (eq (key-binding "C") #'ygg-plan-comment)))
+      (let ((lead (ygg-localleader--get-map 'ygg-plan-mode)))
+        (dolist (key '("c" "C"))
+          (should-not (lookup-key lead key))))
+      (should-not (fboundp 'ygg-plan-clear-comments)))))
 
 (provide 'ygg-plan-tests)
 ;;; ygg-plan-tests.el ends here

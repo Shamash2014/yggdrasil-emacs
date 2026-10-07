@@ -13,6 +13,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'ygg-ui)
+(require 'ygg-comment)
 
 (defgroup aob nil "Agent objects." :group 'tools :prefix "aob-")
 
@@ -1693,6 +1694,41 @@ completes `@file' and `/skill' against the wrong tree."
     (aob-compose-show buf)
     buf))
 
+(defvar-local aob-compose--raw nil
+  "Non-nil in a comment box: its words go out as typed, nothing expanded.")
+
+(cl-defun aob-comment-box (name label save &key initial pos tags placeholder)
+  "Open the box every comment is written in, and answer its buffer.
+It floats under the line POS, point by default, and stands at the foot
+where nothing can float.  SAVE is called with the words, trimmed and
+empty when the box was cleared, once the owner saves; an error from it
+keeps the box open.  NAME keys the draft, LABEL titles it and TAGS follow
+the title.  INITIAL fills the box.  A box already open under NAME is
+shown as it is, so typed words are never replaced."
+  (let* ((origin (current-buffer))
+         (line (save-excursion (goto-char (or pos (point))) (line-beginning-position)))
+         (buffer-name (format "compose:%s" name)))
+    (if-let* ((old (get-buffer buffer-name))
+              ((buffer-live-p old)))
+        (progn (save-current-buffer (aob-compose-show old)) old)
+      (let ((buf (save-current-buffer
+                   (aob-compose nil initial name nil
+                                (list (get-buffer-window origin) line
+                                      (lambda (text _files)
+                                        (funcall save (string-trim text))))))))
+        (with-current-buffer buf
+          (setq aob-compose--raw t)
+          (setq aob-compose--label label
+                aob-compose--tags tags)
+          (setq-local aob-compose-allow-empty t
+                      aob-compose-placeholder (or placeholder "Write the comment"))
+          (aob-compose--placeholder-refresh)
+          (goto-char (point-max))
+          (when-let* ((win (get-buffer-window buf t)))
+            (set-window-point win (point-max)))
+          (force-mode-line-update))
+        buf))))
+
 (defvar aob-compose-history nil
   "Sent prompts, newest first.")
 
@@ -1781,14 +1817,16 @@ attachments whose [[ImageN]] survived the user's editing ride along."
                (raw (buffer-substring-no-properties (point-min) (point-max)))
                ;; a held comment is not a turn: what rides a turn joins it later
                (rewritten (if hold (list raw) (aob-compose--rewritten raw)))
-               (`(,text . ,atts) (aob-compose--harvest (or (car rewritten) raw)))
+               (`(,text . ,atts) (if aob-compose--raw
+                                     (cons (string-trim raw) nil)
+                                   (aob-compose--harvest (or (car rewritten) raw))))
                (atts (append atts (cdr rewritten)))
                (tgt aob-compose--target)
                (session (and (stringp tgt) (aob-session-get tgt))))
     (when (and (string-empty-p text) (null atts)
                (not aob-compose-allow-empty))
       (user-error "aob: empty prompt"))
-    (add-to-history 'aob-compose-history text)
+    (unless aob-compose--raw (add-to-history 'aob-compose-history text))
     ;; send before killing the buffer — a refused send must not eat the text
     ;; whatever the draft goes to — a session, a spawn, a caller — it is
     ;; words the owner typed, and a spawn queues its first turn right here

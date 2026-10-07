@@ -2874,8 +2874,7 @@ While the agent waits on a question or a plan, this answers it instead."
   :group 'aob)
 
 (defface aob-trace-comment
-  '((((background dark)) :background "#1c1c1c" :extend t)
-    (t :background "#ebe7dd" :extend t))
+  '((t :inherit ygg-comment))
   "Face behind a comment card."
   :group 'aob)
 
@@ -3264,7 +3263,9 @@ plan stays a plan.  With nothing waiting, ZQ does what it does elsewhere."
                       ((not (string-empty-p quoted)))
                       (at (string-search quoted copy)))
             (add-face-text-property at (+ at (length quoted))
-                                    'aob-trace-anchor t copy)))
+                                    'aob-trace-anchor t copy)
+            (put-text-property at (+ at (length quoted))
+                               'aob-comment (plist-get c :ts) copy)))
         (concat copy "\n"
                 (mapconcat
                  (lambda (c)
@@ -3272,6 +3273,8 @@ plan stays a plan.  With nothing waiting, ZQ does what it does elsewhere."
                                        (plist-get c :text) "\n")))
                      (add-face-text-property 0 (length line)
                                              'aob-trace-comment t line)
+                     (put-text-property 0 (length line)
+                                        'aob-comment (plist-get c :ts) line)
                      line))
                  cs ""))))))
 
@@ -3286,6 +3289,10 @@ FILES are images that ride with it when the held comments are sent."
                                        :ts (float-time))
                                  (and files (list :files files)))
                          (aob-session-ref s :comments)))
+  (aob-trace--comments-changed s))
+
+(defun aob-trace--comments-changed (s)
+  "Leave the draft state and redraw S's trace after its held comments changed."
   (when (bound-and-true-p yggdrasil-local-mode) (ygg-normal-state))
   (if (and (derived-mode-p 'aob-trace-mode)
            (equal aob-trace--session-id (aob-session-id s)))
@@ -3313,23 +3320,66 @@ of comments together."
                    (list (region-beginning) (region-end))
                  (list (line-beginning-position) (line-end-position))))
   (let* ((s (aob-session-get aob-trace--session-id))
+         (held (and (not (use-region-p))
+                    (aob-trace--comment-at s (get-text-property (point) 'aob-comment))))
          (seq (or (get-text-property start 'aob-item)
                   (get-text-property start 'aob-event)))
          (quoted (string-trim (substring-no-properties
                                (filter-buffer-substring start end)))))
     (unless s (user-error "aob: this trace has no session"))
-    (unless seq (user-error "aob: nothing to comment on here"))
+    (unless (or seq held) (user-error "aob: nothing to comment on here"))
     (deactivate-mark)
-    (if (and (display-graphic-p) (fboundp 'posframe-show)
-             (get-buffer-window (current-buffer)))
-        (aob-trace--comment-box (current-buffer) seq quoted end nil start)
+    (cond
+     (held (aob-trace--edit-comment s held (point)))
+     ((and (display-graphic-p) (fboundp 'posframe-show)
+           (get-buffer-window (current-buffer)))
+      (aob-trace--comment-box (current-buffer) seq quoted end nil start))
+     (t
       (let ((lit (aob-trace--light-commented start end seq quoted)))
         (aob-trace--add-comment
          s seq quoted
          (unwind-protect
              (read-string (format "Comment on %s: "
                                   (truncate-string-to-width quoted 40 nil nil t)))
-           (delete-overlay lit)))))))
+           (delete-overlay lit))))))))
+
+(defun aob-trace--comment-at (s ts)
+  "The comment of S held at time TS, or nil."
+  (and ts (seq-find (lambda (c) (eql (plist-get c :ts) ts))
+                    (aob-session-ref s :comments))))
+
+(defun aob-trace--replace-comment (s ts text files)
+  "Give S's comment held at TS the words TEXT and FILES; no words drops it.
+A comment gone since the box opened is an error, keeping the box's words."
+  (unless (aob-trace--comment-at s ts)
+    (user-error "aob: that comment was sent or dropped; ZQ closes this box"))
+  (aob-session-put
+   s :comments
+   (if (string-empty-p (string-trim text))
+       (seq-remove (lambda (c) (eql (plist-get c :ts) ts)) (aob-session-ref s :comments))
+     (mapcar (lambda (c)
+               (if (eql (plist-get c :ts) ts)
+                   (let ((c (plist-put (copy-sequence c) :text text)))
+                     (if files
+                         (plist-put c :files (append (plist-get c :files) files))
+                       c))
+                 c))
+             (aob-session-ref s :comments))))
+  (aob-trace--comments-changed s))
+
+(defun aob-trace--edit-comment (s comment pos)
+  "Reopen COMMENT of S on its words, in a box under the line POS is on."
+  (if (and (display-graphic-p) (fboundp 'posframe-show)
+           (get-buffer-window (current-buffer)))
+      (aob-trace--comment-box (current-buffer) (plist-get comment :seq)
+                              (plist-get comment :quote) pos s nil comment)
+    (aob-trace--replace-comment
+     s (plist-get comment :ts)
+     (read-string (format "Comment on %s: "
+                          (truncate-string-to-width (plist-get comment :quote)
+                                                    40 nil nil t))
+                  (plist-get comment :text))
+     nil)))
 
 (defvar-local aob-trace--commenting nil
   "In a comment draft, the overlay lighting the words it is on.")
@@ -3379,24 +3429,34 @@ Its send holds the comment for the next message; C-return holds it and
 sends every comment held."
   :lighter nil)
 
-(defun aob-trace--comment-box (trace seq quoted pos &optional s start)
+(defun aob-trace--comment-box (trace seq quoted pos &optional s start edit)
   "Open a draft under the line POS is on in TRACE, on QUOTED in SEQ.
 S is the session the comment goes to when TRACE is not its trace.  One
 draft per session, event and words: a comment left unsent is still
 there when the same line is commented on again.  With START, the text
-from START to POS stays lit in TRACE until the draft is held or gone."
+from START to POS stays lit in TRACE until the draft is held or gone.
+EDIT, a held comment, opens the draft on its words; holding it replaces
+them, and holding nothing drops the comment."
   (let ((s (or s (aob-session-get
                   (buffer-local-value 'aob-trace--session-id trace)))))
     (unless s (user-error "aob: no session to comment to"))
     (let* ((line (with-current-buffer trace
                    (save-excursion (goto-char pos) (line-beginning-position))))
+           (ts (plist-get edit :ts))
            (hold (lambda (text files)
-                   (aob-trace--hold-comment trace s seq quoted text files)
+                   (if edit
+                       (with-current-buffer trace
+                         (aob-trace--replace-comment s ts text files))
+                     (aob-trace--hold-comment trace s seq quoted text files))
                    (aob-trace--unlight-commented)))
-           (buf (aob-compose s nil
-                             (format "comment:%s:%s:%s" (aob-session-name s)
-                                     (or seq "-") (substring (md5 quoted) 0 6))
-                             nil (list (get-buffer-window trace) line hold))))
+           (name (format "comment:%s:%s:%s%s" (aob-session-name s)
+                         (or seq "-") (substring (md5 quoted) 0 6)
+                         (if edit (format ":%s" ts) "")))
+           (old (and edit (get-buffer (format "compose:%s" name))))
+           (buf (if (buffer-live-p old)
+                    (progn (save-current-buffer (aob-compose-show old)) old)
+                  (aob-compose s (and edit (plist-get edit :text)) name
+                               nil (list (get-buffer-window trace) line hold)))))
       (with-current-buffer buf
         (when start
           (let ((ov aob-trace--commenting))
@@ -3406,11 +3466,14 @@ from START to POS stays lit in TRACE until the draft is held or gone."
           (add-hook 'kill-buffer-hook #'aob-trace--unlight-commented nil t))
         (aob-trace-comment-mode 1)
         (setq aob-compose--label
-              (concat "comment on: "
+              (concat (if edit "edit comment on: " "comment on: ")
                       (truncate-string-to-width
                        (replace-regexp-in-string "\n" " " quoted)
                        60 nil nil "…")))
-        (setq aob-compose--tags '("ZZ holds" "C-RET sends all"))
+        (setq aob-compose--tags (if edit
+                                    '("ZZ saves" "empty drops it" "C-RET sends all")
+                                  '("ZZ holds" "C-RET sends all")))
+        (when edit (setq-local aob-compose-allow-empty t))
         (goto-char (point-max))
         (when-let* ((win (get-buffer-window buf t)))
           (set-window-point win (point-max)))
@@ -3881,6 +3944,7 @@ A call folded into a run since is found by the item it became."
              ((and n o (eql ns os))
               (if (and (> (length n) (length o))
                        (eq t (compare-strings o nil nil n nil (length o)))
+                       (not (text-property-not-all 0 (length n) 'aob-comment nil n))
                        (aob-trace--same-breaks-p o n))
                   (progn (goto-char (+ pos (length o)))
                          (insert (substring n (length o))))

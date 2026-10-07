@@ -278,8 +278,9 @@ Results below are read from docstrings and key labels, not driven live (unverifi
 1. `SPC a c c` asks for agent, project and model and spawns the session with a first prompt; its trace opens in a space.
 2. In the trace, `a`, `i` or `o` opens a compose buffer (in the plan and subagents lists `\ p` does); `c` steers the turn already running (`aob-steer`).
 3. `RET` on a pending question or decision answers it (`aob-trace-answer`).
-4. `SPC a c o` flashes labels over the agents in this space and jumps to the chosen one.
-5. `SPC a c p` lists every command the agents have running (`aob-shells`); `SPC a c q` kills this session (`aob-kill-session`).
+4. `C` in normal or visual state comments on the line or selection in a box under it (`aob-trace-comment`); `ZZ` holds the comment for the next message, `C-RET` holds it and sends every held comment, `ZQ` cancels. `C` on a held comment's card or its marked words opens the same box on its words; saving it empty drops the comment.
+5. `SPC a c o` flashes labels over the agents in this space and jumps to the chosen one.
+6. `SPC a c p` lists every command the agents have running (`aob-shells`); `SPC a c q` kills this session (`aob-kill-session`).
 
 ### Gotchas
 
@@ -683,8 +684,8 @@ Open from git, then work in the compare buffer; the second group are compare-buf
 - `SPC g r` — review a branch's PR or MR (`ygg-git-compare-review-branch`)
 - `= =` — compare at point in a magit buffer (`ygg-git-compare-at-point`)
 - `= r` — review the branch's PR or MR from a magit buffer (`ygg-git-compare-review-branch`)
-- `c` — comment on the line or selected lines (`ygg-git-compare-comment`)
-- `C` — comment on the file (`ygg-git-compare-comment-file`)
+- `C` — comment on the line, the selected lines, the hunk or the file at point, or edit the comment of yours there; saving it empty deletes it (`ygg-git-compare-comment`)
+- `d d` — delete the comment at point (`ygg-git-compare-comment-delete`)
 - `r` — mark the file reviewed (`ygg-git-compare-mark-file-reviewed`)
 - `R` — mark the hunk reviewed (`ygg-git-compare-mark-hunk-reviewed`)
 - `] u` — next unreviewed hunk (`ygg-git-compare-next-unreviewed`)
@@ -705,7 +706,7 @@ Results below are read from docstrings and key maps, not driven live (unverified
 
 1. `SPC g C` asks for side A and side B and opens their diff in the whole frame.
 2. `] c` and `] f` step hunks and files; `] m` steps comments.
-3. `c` on a line opens a draft; `C-c C-c` saves it and `C-c C-k` cancels (`ygg-git-compare-draft-save`, `ygg-git-compare-draft-cancel`).
+3. `C` on a line opens the comment box under it, the same box a trace comment uses; `TAB` or `C-c C-t` cycles the type shown in its title, `ZZ` or `C-c C-c` saves and `ZQ` or `C-c C-k` drops, as in every shared comment box (`ygg-git-compare-draft-cycle-type`). `C` on a commented line edits its comment in that box. In the summary list `C` edits and `d d` deletes the comment at point.
 4. `r` marks the file reviewed; `] u` jumps to the next unreviewed hunk.
 5. `;` opens the dispatch menu listing every comment, mark, send and view action.
 6. `q` leaves, bringing back the windows from before.
@@ -1118,8 +1119,7 @@ In a plan (`ygg-plan-mode`, any `.aob/plans/*.md`) these apply instead, with `\ 
 - `\ s` — send the response to the agent session (`ygg-plan-send`)
 - `\ y` — copy the response (`ygg-plan-copy`)
 - `\ x` — strike or restore the claim at point (`ygg-plan-strike`)
-- `\ c` — comment on the claim at point (`ygg-plan-comment`)
-- `\ C` — drop the claim's comments (`ygg-plan-clear-comments`)
+- `C` — in normal or visual state, open the claim's comments in the comment box; a blank line separates notes, saving replaces them and saving empty clears them, and a selection is quoted into the box with `> ` (`ygg-plan-comment`)
 - `\ a` — take the suggested option (`ygg-plan-accept`)
 - `\ A` — take every suggestion not yet picked (`ygg-plan-accept-all`)
 - `\ u` — take a pick back (`ygg-plan-clear-pick`)

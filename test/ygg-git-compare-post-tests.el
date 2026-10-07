@@ -133,7 +133,7 @@ a function of (PROGRAM ARGS BODY), says what it prints."
   (with-current-buffer (ygg-git-compare-comment)
     (insert text)
     (setq ygg-git-compare--draft (plist-put ygg-git-compare--draft :type type))
-    (ygg-git-compare-draft-save)))
+    (aob-compose-send)))
 
 (defmacro ygg-git-compare-post-tests--with-compare (a b &rest body)
   (declare (indent 2))

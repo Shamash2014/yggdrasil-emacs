@@ -5453,6 +5453,75 @@ next chunk does not pull the page back down."
       (should (equal while-read (list (cons beg end))))
       (should-not (aob-tests--commenting)))))
 
+(defun aob-tests--hold-draft (text)
+  "Hold TEXT from the comment draft open now, and close it."
+  (let ((draft (aob-tests--comment-draft)))
+    (with-current-buffer draft
+      (funcall (nth 2 aob-compose--anchor) text nil))
+    (kill-buffer draft)))
+
+(defun aob-tests--held-texts (s)
+  (mapcar (lambda (c) (plist-get c :text)) (aob-session-ref s :comments)))
+
+(ert-deftest aob-trace-comment-on-a-held-comment-edits-it-from-its-anchor-and-its-card ()
+  (aob-tests--commenting-on s beg end
+    (aob-trace-comment beg end)
+    (aob-tests--hold-draft "fix this")
+    (let* ((ts (plist-get (car (aob-session-ref s :comments)) :ts))
+           (anchor (text-property-any (point-min) (point-max) 'aob-comment ts))
+           (card (text-property-any (next-single-property-change anchor 'aob-comment)
+                                    (point-max) 'aob-comment ts)))
+      (should (< anchor card))
+      (dolist (pos (list anchor card))
+        (goto-char pos)
+        (aob-trace-comment (line-beginning-position) (line-end-position))
+        (should (equal (with-current-buffer (aob-tests--comment-draft) (buffer-string))
+                       (car (aob-tests--held-texts s))))
+        (aob-tests--hold-draft (concat (car (aob-tests--held-texts s)) "!"))
+        (setq anchor (text-property-any (point-min) (point-max) 'aob-comment ts)
+              card (text-property-any (next-single-property-change anchor 'aob-comment)
+                                      (point-max) 'aob-comment ts)))
+      (should (equal (aob-tests--held-texts s) '("fix this!!")))
+      (should (= (length (aob-session-ref s :comments)) 1))
+      (should (= ts (plist-get (car (aob-session-ref s :comments)) :ts))))))
+
+(ert-deftest aob-trace-comment-on-a-held-comment-saved-empty-drops-it ()
+  (aob-tests--commenting-on s beg end
+    (aob-trace-comment beg end)
+    (aob-tests--hold-draft "fix this")
+    (let ((ts (plist-get (car (aob-session-ref s :comments)) :ts)))
+      (goto-char (text-property-any (point-min) (point-max) 'aob-comment ts))
+      (aob-trace-comment (line-beginning-position) (line-end-position))
+      (aob-tests--hold-draft "")
+      (should-not (aob-session-ref s :comments))
+      (should-not (text-property-any (point-min) (point-max) 'aob-comment ts))
+      (should-not (string-search "fix this" (buffer-string))))))
+
+(ert-deftest aob-trace-comment-read-in-the-minibuffer-edits-and-drops-a-held-one ()
+  (aob-tests--commenting-on s beg end
+    (aob-trace-comment beg end)
+    (aob-tests--hold-draft "fix this")
+    (let (prefilled)
+      (cl-letf (((symbol-function 'display-graphic-p) #'ignore)
+                ((symbol-function 'read-string)
+                 (lambda (_prompt &optional initial &rest _)
+                   (push initial prefilled)
+                   (if (cdr prefilled) "" "fix that"))))
+        (dolist (_ '(1 2))
+          (goto-char (text-property-any (point-min) (point-max) 'aob-comment
+                                        (plist-get (car (aob-session-ref s :comments)) :ts)))
+          (aob-trace-comment (line-beginning-position) (line-end-position))))
+      (should (equal (nreverse prefilled) '("fix this" "fix that")))
+      (should-not (aob-session-ref s :comments)))))
+
+(ert-deftest aob-modal-trace-capital-c-comments-in-normal-and-visual ()
+  (aob-tests--modal
+   '(with-temp-buffer
+      (aob-trace-mode)
+      (dolist (state '(ygg-normal-state ygg-visual-state))
+        (funcall state)
+        (should (eq (key-binding "C") #'aob-trace-comment))))))
+
 (ert-deftest aob-trace-comment-box-leaves-the-tail-alone ()
   (aob-tests--with-session s
     (aob-tests--with-comment-trace trace s
@@ -9148,3 +9217,32 @@ nothing, TAB opens one whole and back, and copying passes over them."
         (aob-acp--prompt s "/clear"))
       (should (equal requested '("session/prompt" "session/prompt"))))
     (should (equal (aob-session-ref s :acp-id) "sess-test"))))
+
+(ert-deftest aob-trace-comment-edit-box-of-a-gone-comment-keeps-its-words ()
+  (aob-tests--commenting-on s beg end
+    (aob-trace-comment beg end)
+    (aob-tests--hold-draft "fix this")
+    (let ((ts (plist-get (car (aob-session-ref s :comments)) :ts)))
+      (goto-char (text-property-any (point-min) (point-max) 'aob-comment ts))
+      (aob-trace-comment (line-beginning-position) (line-end-position))
+      (aob-session-put s :comments nil)
+      (let ((draft (aob-tests--comment-draft)))
+        (with-current-buffer draft
+          (insert " more")
+          (should-error (aob-compose-send) :type 'user-error))
+        (should (buffer-live-p draft))
+        (should (equal (with-current-buffer draft (buffer-string)) "fix this more"))
+        (should-not (aob-session-ref s :comments))))))
+
+(ert-deftest aob-trace-comment-again-on-an-open-edit-box-reuses-it ()
+  (aob-tests--commenting-on s beg end
+    (aob-trace-comment beg end)
+    (aob-tests--hold-draft "fix this")
+    (let ((ts (plist-get (car (aob-session-ref s :comments)) :ts)))
+      (goto-char (text-property-any (point-min) (point-max) 'aob-comment ts))
+      (aob-trace-comment (line-beginning-position) (line-end-position))
+      (let ((draft (aob-tests--comment-draft)))
+        (with-current-buffer draft (insert " more"))
+        (aob-trace-comment (line-beginning-position) (line-end-position))
+        (should (eq (aob-tests--comment-draft) draft))
+        (should (equal (with-current-buffer draft (buffer-string)) "fix this more"))))))

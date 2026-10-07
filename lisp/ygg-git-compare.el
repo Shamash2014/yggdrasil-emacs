@@ -1858,8 +1858,6 @@ when that is known, and a compare that is not its range says why instead."
 (autoload 'ygg-git-compare-select-lines "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-next "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-previous "ygg-git-compare-comments" nil t)
-(autoload 'ygg-git-compare-comment-edit "ygg-git-compare-comments" nil t)
-(autoload 'ygg-git-compare-comment-append "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-delete "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-copy "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-accept "ygg-git-compare-comments" nil t)
@@ -1993,6 +1991,11 @@ around past the end."
   (interactive)
   (user-error "Read-only compare: stage, discard and apply from magit status"))
 
+(defun ygg-git-compare-comment-moved ()
+  "Say where commenting went: these keys no longer start a comment."
+  (interactive)
+  (message "Comments are on C; edit with C, delete with d d"))
+
 (defvar-keymap ygg-git-compare-mode-map
   "~" #'ygg-git-compare-swap
   "b" #'ygg-git-compare-switch-base
@@ -2011,16 +2014,16 @@ around past the end."
   "/" #'isearch-forward-regexp
   "n" #'ygg-git-compare-search-next
   "N" #'ygg-git-compare-search-previous
-  "c" #'ygg-git-compare-comment
-  "C" #'ygg-git-compare-comment-file
-  "<remap> <magit-commit-add-log>" #'ygg-git-compare-comment-file
+  "C" #'ygg-git-compare-comment
+  "<remap> <magit-commit-add-log>" #'ygg-git-compare-comment
   "v" #'ygg-git-compare-select-lines
   "V" #'ygg-git-compare-select-lines
   "x" #'ygg-git-compare-select-lines
-  "i" #'ygg-git-compare-comment-edit
-  "A" #'ygg-git-compare-comment-append
+  "c" #'ygg-git-compare-comment-moved
+  "i" #'ygg-git-compare-comment-moved
+  "A" #'ygg-git-compare-comment-moved
+  "K" #'ygg-git-compare-comment-moved
   "d" (cons "delete" ygg-git-compare-delete-map)
-  "K" #'ygg-git-compare-comment-delete
   "y" #'ygg-git-compare-export-markdown
   "Y" #'ygg-git-compare-comment-copy
   "a" #'ygg-git-compare-comment-accept
@@ -2058,11 +2061,11 @@ unreviewed hunk, and
 On a pull request, Conversation and Checks come before the diff; on a check,
 RET and o open its log and y copies its address.
 \\[isearch-forward-regexp] searches the diff; \\[ygg-git-compare-search-next] and \\[ygg-git-compare-search-previous] repeat it forward and back.
-\\[ygg-git-compare-comment] comments on the line at point, the lines selected or the file.
+\\[ygg-git-compare-comment] comments on the line at point, the lines selected, the hunk or the
+file, and on a comment of yours edits it; saving it empty deletes it.
 v, x or V select lines for a range comment; x, j and k extend it, Esc ends it.
-\\[ygg-git-compare-comment-file] comments on the file at point.
-On a comment, i and A edit it, d d and K delete it, Y copies it, and a
-accepts one an agent proposed; off one they say so.  A comment's type
+On a comment, d d deletes it, Y copies it, and a accepts one an agent
+proposed; off one they say so.  A comment's type
 decides where it goes: those in `ygg-git-compare-agent-types' to an
 agent, the rest to the pull request.  Staging, discarding and applying are
 refused: a compare is read-only.

@@ -19,9 +19,11 @@
 (require 'markdown-mode)
 (require 'yggdrasil-core)
 (require 'yggdrasil-localleader)
+(require 'ygg-comment)
 (require 'ygg-diagram)
 (require 'ygg-markdown-fences)
 
+(declare-function aob-comment-box "aob")
 (declare-function aob-live-sessions "aob" ())
 (declare-function aob-session-dir "aob" (s))
 (declare-function aob-session-project "aob" (s))
@@ -46,7 +48,7 @@
 (defface ygg-plan-struck '((t :inherit shadow :strike-through t))
   "A claim the owner struck." :group 'ygg-plan)
 
-(defface ygg-plan-note '((t :inherit font-lock-doc-face))
+(defface ygg-plan-note '((t :inherit ygg-comment))
   "A comment on a claim." :group 'ygg-plan)
 
 (defface ygg-plan-suggested '((t :inherit shadow))
@@ -443,22 +445,39 @@ Non-nil when something was dropped."
                              (append ygg-plan--struck (list id))))
     (ygg-plan--changed-answers)))
 
+(defun ygg-plan--notes (text)
+  "TEXT as separate notes, split on blank lines."
+  (split-string text "\n[ \t]*\n+" t "[ \t\n]+"))
+
 (defun ygg-plan-comment ()
-  "Comment on the claim at point."
+  "Write the comments of the claim at point in the comment box.
+Saving replaces them, each blank-line-separated part its own note; saving
+nothing clears them.  A selection is quoted into the box."
   (interactive)
   (let* ((c (ygg-plan--claim-here))
-         (text (string-trim (read-string (format "Comment on %s: "
-                                                 (or (plist-get c :no) (plist-get c :text)))))))
-    (unless (string-empty-p text)
-      (setf (alist-get (ygg-plan--claim-id c) ygg-plan--comments nil nil #'equal)
-            (append (cdr (assoc (ygg-plan--claim-id c) ygg-plan--comments)) (list text)))
-      (ygg-plan--changed-answers))))
-
-(defun ygg-plan-clear-comments ()
-  "Drop the comments on the claim at point."
-  (interactive)
-  (setf (alist-get (ygg-plan--claim-id (ygg-plan--claim-here)) ygg-plan--comments nil t #'equal) nil)
-  (ygg-plan--changed-answers))
+         (id (ygg-plan--claim-id c))
+         (plan (current-buffer))
+         (quoted (when (use-region-p)
+                   (prog1 (string-trim (buffer-substring-no-properties
+                                        (region-beginning) (region-end)))
+                     (deactivate-mark))))
+         (initial (string-join
+                   (append (cdr (assoc id ygg-plan--comments))
+                           (and quoted (not (string-empty-p quoted))
+                                (list (concat (replace-regexp-in-string "^" "> " quoted)
+                                              "\n"))))
+                   "\n\n")))
+    (require 'aob)
+    (aob-comment-box
+     (format "plan:%s" id)
+     (format "comment on: %s" (or (plist-get c :no) (plist-get c :text)))
+     (lambda (text)
+       (with-current-buffer plan
+         (setf (alist-get id ygg-plan--comments nil t #'equal) (ygg-plan--notes text))
+         (ygg-plan--changed-answers)))
+     :initial (and (not (string-empty-p initial)) initial)
+     :tags '("ZZ saves" "blank line splits notes" "empty clears")
+     :placeholder "Write the comment; a blank line starts another note")))
 
 (defun ygg-plan--label (no)
   (if no (format "[%s] " no) ""))
@@ -592,11 +611,12 @@ First its own exhibit and decision with its child claims, then the rest."
   "<tab>" #'ygg-plan-tab
   "<backtab>" #'ygg-plan-cycle)
 
+(yggdrasil-define-mode-keys 'ygg-plan-mode '(normal visual)
+  "C" #'ygg-plan-comment)
+
 (yggdrasil-localleader-def 'ygg-plan-mode "s" #'ygg-plan-send "send answers to the agent")
 (yggdrasil-localleader-def 'ygg-plan-mode "y" #'ygg-plan-copy "copy answers")
 (yggdrasil-localleader-def 'ygg-plan-mode "x" #'ygg-plan-strike "strike claim")
-(yggdrasil-localleader-def 'ygg-plan-mode "c" #'ygg-plan-comment "comment on claim")
-(yggdrasil-localleader-def 'ygg-plan-mode "C" #'ygg-plan-clear-comments "drop comments")
 (yggdrasil-localleader-def 'ygg-plan-mode "a" #'ygg-plan-accept "take suggestion")
 (yggdrasil-localleader-def 'ygg-plan-mode "A" #'ygg-plan-accept-all "take all suggestions")
 (yggdrasil-localleader-def 'ygg-plan-mode "u" #'ygg-plan-clear-pick "take pick back")

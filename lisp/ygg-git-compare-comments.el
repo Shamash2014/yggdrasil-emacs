@@ -14,6 +14,7 @@
 (require 'magit)
 (require 'transient)
 (require 'ygg-git-compare)
+(require 'ygg-comment)
 
 (declare-function yggdrasil-define-mode-keys "yggdrasil-core")
 (declare-function ygg-insert-state "yggdrasil-core")
@@ -263,30 +264,24 @@ changed line to its last, a line when it changed only one."
 
 ;;; Writing a comment
 
-(defvar-local ygg-git-compare--draft nil "The comment this buffer writes, a plist.")
+(declare-function aob-comment-box "aob")
+(defvar aob-compose--tags)
+
+(defvar-local ygg-git-compare--draft nil "The comment this box writes, a plist.")
 (defvar-local ygg-git-compare--draft-list nil "The compare the draft is kept on.")
 
-(defvar-keymap ygg-git-compare-draft-mode-map
-  "C-c C-c" #'ygg-git-compare-draft-save
-  "C-c C-k" #'ygg-git-compare-draft-cancel
-  "C-c C-t" #'ygg-git-compare-draft-cycle-type
-  "<remap> <ygg-save-and-kill-buffer>" #'ygg-git-compare-draft-save
-  "<remap> <ygg-kill-buffer-no-save>" #'ygg-git-compare-draft-cancel)
+(defvar-keymap ygg-git-compare-box-mode-map
+  "C-c C-t" #'ygg-git-compare-draft-cycle-type)
+
+(define-minor-mode ygg-git-compare-box-mode
+  "A comment box that writes a review comment, typed with TAB or \\[ygg-git-compare-draft-cycle-type]."
+  :lighter nil)
 
 (defvar-local ygg-git-compare--draft-files nil "The compare's changed files, once read.")
 (defvar-local ygg-git-compare--draft-words nil "The compare's words, once read.")
 (defvar cape-dabbrev-buffer-function)
 (defvar corfu-auto-prefix)
 (declare-function cape-dabbrev "cape" (&optional interactive))
-
-(define-derived-mode ygg-git-compare-draft-mode text-mode "Review comment"
-  "A review comment being written for a compare."
-  (setq header-line-format '(:eval (ygg-git-compare--draft-header)))
-  (add-hook 'completion-at-point-functions #'ygg-git-compare-draft-type-capf -30 t)
-  (add-hook 'completion-at-point-functions #'ygg-git-compare-draft-file-capf -20 t)
-  (add-hook 'completion-at-point-functions #'ygg-git-compare-draft-word-capf -10 t)
-  (setq-local corfu-auto-prefix 1
-              cape-dabbrev-buffer-function #'ygg-git-compare--draft-buffers))
 
 (defun ygg-git-compare--draft-buffers ()
   "The live panes of the compare the draft is kept on."
@@ -304,6 +299,7 @@ changed line to its last, a line when it changed only one."
       (when (looking-at (concat (regexp-quote name) "[[:blank:]]*"))
         (delete-region (match-beginning 0) (match-end 0))))
     (setq ygg-git-compare--draft (plist-put ygg-git-compare--draft :type (intern name)))
+    (setq aob-compose--tags (ygg-git-compare--box-tags))
     (force-mode-line-update)))
 
 (defun ygg-git-compare-draft-type-capf ()
@@ -360,7 +356,7 @@ changed line to its last, a line when it changed only one."
             :exclusive 'no))))
 
 (with-eval-after-load 'yggdrasil-core
-  (yggdrasil-define-mode-keys 'ygg-git-compare-draft-mode 'normal
+  (yggdrasil-define-mode-keys 'ygg-git-compare-box-mode 'normal
                               "TAB" #'ygg-git-compare-draft-cycle-type
                               "<tab>" #'ygg-git-compare-draft-cycle-type
                               "<backtab>" #'ygg-git-compare-draft-cycle-type-back))
@@ -374,67 +370,64 @@ changed line to its last, a line when it changed only one."
     ('nit 'shadow)
     (_ 'font-lock-type-face)))
 
-(defun ygg-git-compare--draft-hint ()
-  (if (fboundp 'ygg-save-and-kill-buffer)
-      "ZZ save · ZQ cancel · TAB type"
-    (substitute-command-keys
-     "\\<ygg-git-compare-draft-mode-map>\\[ygg-git-compare-draft-save] save · \
-\\[ygg-git-compare-draft-cancel] cancel · \\[ygg-git-compare-draft-cycle-type] type")))
+(defun ygg-git-compare--box-tags ()
+  "What the comment box says after its title: the type, then the keys."
+  (list (if-let* ((type (plist-get ygg-git-compare--draft :type)))
+            (format "[%s]" type)
+          "untyped")
+        "TAB type" "ZZ saves" "empty drops it"))
 
-(defun ygg-git-compare--draft-header ()
-  (let ((type (plist-get ygg-git-compare--draft :type)))
-    (concat " " (ygg-git-compare--where ygg-git-compare--draft) "  "
-            (if type
-                (propertize (format "[%s]" type) 'face (ygg-git-compare--type-face type))
-              (propertize "untyped" 'face 'shadow))
-            "    " (propertize (ygg-git-compare--draft-hint) 'face 'shadow))))
+(defun ygg-git-compare--keep (comment list text)
+  "Keep COMMENT with TEXT on the compare LIST; with no text, drop it."
+  (unless (buffer-live-p list) (user-error "Its compare is gone"))
+  (with-current-buffer list
+    (let ((id (plist-get comment :id)))
+      (cond ((not (string-empty-p text))
+             (ygg-git-compare--put
+              (ygg-git-compare--accepted (plist-put (copy-sequence comment) :text text))))
+            ((seq-find (lambda (c) (equal (plist-get c :id) id))
+                       (ygg-git-compare-comments-list t))
+             (ygg-git-compare-comments-drop (list id)))
+            (t (user-error "Empty comment, ZQ drops it"))))))
 
-(defun ygg-git-compare--compose (comment &optional at-end)
-  "Write COMMENT's text in a buffer below, point at its start or AT-END;
-saving keeps it on the compare.  Answer that buffer."
-  (let ((list (ygg-git-compare--list))
-        (buffer (get-buffer-create "*ygg-git-compare comment*")))
-    (with-current-buffer buffer
-      (when (and ygg-git-compare--draft
-                 (not (equal (string-trim (buffer-string))
-                             (string-trim (or (plist-get ygg-git-compare--draft :text) ""))))
-                 (not (y-or-n-p "Discard the unsaved comment? ")))
-        (user-error "The unsaved comment is kept"))
-      (ygg-git-compare-draft-mode)
-      (erase-buffer)
-      (setq ygg-git-compare--draft (copy-sequence comment)
-            ygg-git-compare--draft-list list)
-      (insert (or (plist-get comment :text) ""))
-      (unless at-end (goto-char (point-min))))
-    (save-current-buffer
-      (pop-to-buffer buffer '((display-buffer-reuse-window display-buffer-below-selected)
-                              (window-height . 10)))
-      (when (fboundp 'ygg-insert-state) (ygg-insert-state)))
-    buffer))
+(defun ygg-git-compare--box-name (comment list)
+  "The name of the box that writes COMMENT on the compare LIST.
+A new comment is keyed on its place, so asking again there finds the draft."
+  (if (with-current-buffer list
+        (seq-find (lambda (c) (equal (plist-get c :id) (plist-get comment :id)))
+                  (ygg-git-compare-comments-list t)))
+      (format "review:%s" (plist-get comment :id))
+    (format "review:new:%s"
+            (md5 (prin1-to-string
+                  (mapcar (lambda (key) (plist-get comment key))
+                          '(:level :file :side :line :start-side :start-line)))))))
 
-(defun ygg-git-compare--draft-close ()
-  (if-let* ((window (get-buffer-window (current-buffer))))
-      (quit-window t window)
-    (kill-buffer)))
-
-(defun ygg-git-compare-draft-save ()
-  "Keep the comment written here on its compare, checked when it was pending."
-  (interactive)
-  (let ((text (string-trim (buffer-substring-no-properties (point-min) (point-max))))
-        (comment ygg-git-compare--draft)
-        (list ygg-git-compare--draft-list))
-    (when (string-empty-p text)
-      (user-error "Empty comment; %s drops it"
-                  (substitute-command-keys "\\[ygg-git-compare-draft-cancel]")))
-    (unless (buffer-live-p list) (user-error "Its compare is gone"))
-    (ygg-git-compare--draft-close)
-    (with-current-buffer list
-      (ygg-git-compare--put (ygg-git-compare--accepted (plist-put comment :text text))))))
-
-(defun ygg-git-compare-draft-cancel ()
-  "Drop the comment written here."
-  (interactive)
-  (ygg-git-compare--draft-close))
+(defun ygg-git-compare--compose (comment)
+  "Write COMMENT's text in the comment box under point and answer the box.
+Saving keeps the comment on the compare; saving nothing drops it."
+  (require 'aob)
+  (let* ((list (ygg-git-compare--list))
+         (name (ygg-git-compare--box-name comment list))
+         (fresh (not (get-buffer (format "compose:%s" name))))
+         (box (aob-comment-box
+               name
+               (concat "comment on: " (ygg-git-compare--where comment))
+               (lambda (text)
+                 (ygg-git-compare--keep ygg-git-compare--draft
+                                        ygg-git-compare--draft-list text))
+               :initial (plist-get comment :text)
+               :placeholder "Write the comment; saving it empty drops it")))
+    (when fresh
+      (with-current-buffer box
+        (setq ygg-git-compare--draft (copy-sequence comment)
+              ygg-git-compare--draft-list list)
+        (ygg-git-compare-box-mode 1)
+        (add-hook 'completion-at-point-functions #'ygg-git-compare-draft-type-capf -30 t)
+        (add-hook 'completion-at-point-functions #'ygg-git-compare-draft-file-capf -20 t)
+        (add-hook 'completion-at-point-functions #'ygg-git-compare-draft-word-capf -10 t)
+        (setq-local cape-dabbrev-buffer-function #'ygg-git-compare--draft-buffers)
+        (setq aob-compose--tags (ygg-git-compare--box-tags))))
+    box))
 
 (defun ygg-git-compare--next-type (type step)
   (let ((types (cons nil (ygg-git-compare-comment-types))))
@@ -447,6 +440,7 @@ saving keeps it on the compare.  Answer that buffer."
         (plist-put ygg-git-compare--draft :type
                    (ygg-git-compare--next-type (plist-get ygg-git-compare--draft :type)
                                                (or step 1))))
+  (setq aob-compose--tags (ygg-git-compare--box-tags))
   (force-mode-line-update))
 
 (defun ygg-git-compare-draft-cycle-type-back ()
@@ -458,7 +452,27 @@ saving keeps it on the compare.  Answer that buffer."
 
 (defun ygg-git-compare-comment ()
   "Comment on the diff line at point, on the lines selected, on the file whose
-heading point is on, or on the hunk whose heading it is."
+heading point is on, or on the hunk whose heading it is.  On a comment of
+yours, write it again in the same box; saving it empty deletes it."
+  (interactive)
+  (if-let* ((own (and (not (region-active-p)) (ygg-git-compare--own-here))))
+      (ygg-git-compare--compose own)
+    (when (derived-mode-p 'ygg-git-compare-comments-summary-mode)
+      (user-error "No comment here"))
+    (ygg-git-compare-comment-new)))
+
+(defun ygg-git-compare--own-here ()
+  "The comment of yours shown on this line, asked for among several.
+A comment on the review as a whole is edited from the summary or the dispatch."
+  (let ((summary (derived-mode-p 'ygg-git-compare-comments-summary-mode)))
+    (when (seq-some (lambda (c) (or summary (not (eq (plist-get c :level) 'review))))
+                    (ygg-git-compare--comments-at-point))
+      (ygg-git-compare--comment-at-point
+       (lambda (c) (or summary (not (eq (plist-get c :level) 'review))))))))
+
+(defun ygg-git-compare-comment-new ()
+  "Start a comment on the diff line at point, on the lines selected, on the file
+whose heading point is on, or on the hunk whose heading it is."
   (interactive)
   (let ((section (magit-current-section)))
     (cond
@@ -515,7 +529,7 @@ heading point is on, or on the hunk whose heading it is."
   "v" #'ygg-git-compare-select-lines
   "V" #'ygg-git-compare-select-lines
   "<escape>" #'ygg-git-compare-select-lines
-  "c" #'ygg-git-compare-comment
+  "C" #'ygg-git-compare-comment
   "RET" #'ygg-git-compare-comment)
 
 (defvar ygg--modeline-tag)
@@ -670,10 +684,14 @@ is on, anywhere on the line, and to what it was otherwise."
          (body (split-string (or (plist-get comment :text) "") "\n")))
     (if (plist-get comment :remote)
         (ygg-git-compare--remote-block comment)
-      (mapconcat (lambda (line) (concat bar line))
-                 (append (unless (string-empty-p head) (list head))
+      (mapconcat #'identity
+                 (append (unless (string-empty-p head) (list (concat bar head)))
                          (mapcar (lambda (line)
-                                   (if pending (propertize line 'face '(shadow italic)) line))
+                                   (let ((shown (concat bar (if pending
+                                                                (propertize line 'face '(shadow italic))
+                                                              line))))
+                                     (add-face-text-property 0 (length shown) 'ygg-comment t shown)
+                                     shown))
                                  body))
                  "\n"))))
 
@@ -831,16 +849,6 @@ it was made on none."
       (plist-put comment :range (with-current-buffer (ygg-git-compare--list)
                                   (ygg-git-compare--range-label))))))
 
-(defun ygg-git-compare-comment-edit ()
-  "Edit the comment at point; one pending a check is accepted on saving."
-  (interactive)
-  (ygg-git-compare--compose (ygg-git-compare--comment-at-point)))
-
-(defun ygg-git-compare-comment-append ()
-  "Edit the comment at point from the end of its text."
-  (interactive)
-  (ygg-git-compare--compose (ygg-git-compare--comment-at-point) t))
-
 (defun ygg-git-compare-comment-delete ()
   "Delete the comment at point, asking first unless it is pending a check."
   (interactive)
@@ -918,8 +926,8 @@ past the last."
 
 (defvar-keymap ygg-git-compare-comments-summary-mode-map
   "RET" #'ygg-git-compare-comment-goto
-  "i" #'ygg-git-compare-comment-edit
-  "K" #'ygg-git-compare-comment-delete
+  "C" #'ygg-git-compare-comment
+  "d" (cons "delete" ygg-git-compare-delete-map)
   "a" #'ygg-git-compare-comment-accept
   "Y" #'ygg-git-compare-comment-copy
   "f" #'ygg-git-compare-comments-filter

@@ -53,7 +53,7 @@ and adds b.txt; main stays checked out."
            (git "checkout" "-q" "main")
            ,@body)
        (dolist (b (buffer-list))
-         (when (or (equal (buffer-name b) "*ygg-git-compare comment*")
+         (when (or (string-prefix-p "compose:review:" (buffer-name b))
                    (and (with-current-buffer b (derived-mode-p 'magit-mode))
                         (file-in-directory-p (buffer-local-value 'default-directory b)
                                              ,root)))
@@ -76,7 +76,7 @@ and adds b.txt; main stays checked out."
   (with-current-buffer buffer
     (insert text)
     (setq ygg-git-compare--draft (plist-put ygg-git-compare--draft :type type))
-    (ygg-git-compare-draft-save)))
+    (aob-compose-send)))
 
 (defun ygg-git-compare-comments-tests--shown ()
   "Every comment block shown in this buffer, as one string."
@@ -146,20 +146,20 @@ and adds b.txt; main stays checked out."
     (ygg-git-compare-comments-tests--with-compare root
       (ygg-git-compare-comments-tests--goto "+two")
       (with-current-buffer (ygg-git-compare-comment)
-        (should (string-search "a.txt:2" (ygg-git-compare--draft-header)))
-        (should (string-search "untyped" (ygg-git-compare--draft-header)))
+        (should (string-search "a.txt:2" aob-compose--label))
+        (should (member "untyped" aob-compose--tags))
         (ygg-git-compare-draft-cycle-type)
         (should (eq (plist-get ygg-git-compare--draft :type) 'issue))
         (ygg-git-compare-draft-cycle-type-back)
         (ygg-git-compare-draft-cycle-type-back)
         (should (eq (plist-get ygg-git-compare--draft :type) 'fix))
-        (should (string-search "[fix]" (ygg-git-compare--draft-header)))
+        (should (member "[fix]" aob-compose--tags))
         (insert "nice")
-        (ygg-git-compare-draft-save))
+        (aob-compose-send))
       (should (eq (plist-get (car (ygg-git-compare-comments-list)) :type) 'fix))
       (ygg-git-compare-comments-tests--goto "+three")
       (with-current-buffer (ygg-git-compare-comment)
-        (ygg-git-compare-draft-cancel))
+        (aob-compose-abort))
       (should (= (length (ygg-git-compare-comments-list)) 1)))))
 
 (ert-deftest ygg-git-compare-comments-are-kept-across-reopening ()
@@ -212,10 +212,11 @@ and adds b.txt; main stays checked out."
                               (all-completions "" table)))))
         (ygg-git-compare-comment-copy)
         (should (equal (car kill-ring) "first"))
-        (with-current-buffer (ygg-git-compare-comment-append)
-          (should (eobp))
+        (with-current-buffer (ygg-git-compare-comment)
+          (should (equal (buffer-string) "first"))
+          (goto-char (point-max))
           (insert ", again")
-          (ygg-git-compare-draft-save))
+          (aob-compose-send))
         (should (equal (plist-get (car (ygg-git-compare-comments-list)) :text)
                        "first, again"))))))
 
@@ -346,7 +347,7 @@ and adds b.txt; main stays checked out."
       (with-current-buffer (ygg-git-compare-comment)
         (dotimes (_ 6) (ygg-git-compare-draft-cycle-type))
         (insert "tidy")
-        (ygg-git-compare-draft-save))
+        (aob-compose-send))
       (ygg-git-compare-comments-tests--goto "+b1")
       (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-file) "whole file" 'fix)
       (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-review) "overall" 'todo)
@@ -367,8 +368,8 @@ and adds b.txt; main stays checked out."
                                         "claude")
       (ygg-git-compare-comments-tests--goto "+two")
       (pcase-dolist (`(,key ,command)
-                     '(("c" ygg-git-compare-comment)
-                       ("C" ygg-git-compare-comment-file)
+                     '(("C" ygg-git-compare-comment)
+                       ("c" ygg-git-compare-comment-moved)
                        ("v" ygg-git-compare-select-lines)
                        ("V" ygg-git-compare-select-lines)
                        ("x" ygg-git-compare-select-lines)
@@ -389,10 +390,10 @@ and adds b.txt; main stays checked out."
                        ("/" isearch-forward-regexp)
                        ("n" ygg-git-compare-search-next)
                        ("N" ygg-git-compare-search-previous)
-                       ("i" ygg-git-compare-comment-edit)
-                       ("A" ygg-git-compare-comment-append)
+                       ("i" ygg-git-compare-comment-moved)
+                       ("A" ygg-git-compare-comment-moved)
                        ("d d" ygg-git-compare-comment-delete)
-                       ("K" ygg-git-compare-comment-delete)
+                       ("K" ygg-git-compare-comment-moved)
                        ("y" ygg-git-compare-export-markdown)
                        ("Y" ygg-git-compare-comment-copy)
                        ("a" ygg-git-compare-comment-accept)
@@ -412,14 +413,14 @@ and adds b.txt; main stays checked out."
                        ("q" ygg-git-compare-quit)))
         (should (equal (list key (key-binding (kbd key) nil nil (point))) (list key command))))
       (ygg-git-compare-comments-tests--goto "+three")
-      (dolist (key '("i" "A" "Y" "a" "K"))
+      (dolist (key '("Y" "a" "d d"))
         (should (string-search "No comment here"
-                               (cadr (should-error (call-interactively (key-binding key))
+                               (cadr (should-error (call-interactively (key-binding (kbd key)))
                                                    :type 'user-error)))))
       (dolist (key '("s" "S" "u" "U"))
         (should (eq (key-binding key) #'ygg-git-compare-read-only)))
       (should-not (eq (key-binding "k") #'ygg-git-compare-read-only))
-      (should (eq (key-binding "C" nil nil (point)) #'ygg-git-compare-comment-file)))))
+      (should (eq (key-binding "C" nil nil (point)) #'ygg-git-compare-comment)))))
 
 (defvar ygg--modeline-tag " NORMAL ")
 
@@ -587,7 +588,7 @@ and adds b.txt; main stays checked out."
         (pcase-let ((`(,beg ,end ,table . ,props) (ygg-git-compare-draft-word-capf)))
           (should (member "three" (all-completions (buffer-substring beg end) table)))
           (should (eq (plist-get props :exclusive) 'no)))
-        (ygg-git-compare-draft-cancel)))))
+        (aob-compose-abort)))))
 
 (ert-deftest ygg-git-compare-comments-selection-keys-end-with-the-selection ()
   (ygg-git-compare-comments-tests--with-repo root
@@ -598,28 +599,99 @@ and adds b.txt; main stays checked out."
       (let ((draft (ygg-git-compare-comment)))
         (with-current-buffer draft
           (should-not (eq (key-binding "j") #'ygg-git-compare-select-down))
-          (should-not (eq (key-binding "c") #'ygg-git-compare-comment))
-          (ygg-git-compare-draft-cancel)))
+          (should-not (eq (key-binding "C") #'ygg-git-compare-comment))
+          (aob-compose-abort)))
       (ygg-git-compare-select-lines)
       (should (eq (key-binding "j") #'ygg-git-compare-select-down))
       (ygg-git-compare-select-lines)
       (should-not (eq (key-binding "j") #'ygg-git-compare-select-down))
       (should-not (eq (key-binding (kbd "<escape>")) #'ygg-git-compare-select-lines)))))
 
-(ert-deftest ygg-git-compare-comments-unsaved-draft-is-not-discarded-silently ()
+(defun ygg-git-compare-comments-tests--comment-command-p (def)
+  (and (symbolp def)
+       (string-prefix-p "ygg-git-compare-comment" (symbol-name def))
+       (not (memq def '(ygg-git-compare-comment-next ygg-git-compare-comment-previous
+                        ygg-git-compare-comment-copy ygg-git-compare-comment-accept ygg-git-compare-comment-moved
+                        ygg-git-compare-comment-delete ygg-git-compare-comment-goto)))))
+
+(ert-deftest ygg-git-compare-comments-capital-c-is-the-one-comment-key ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (run-hooks 'pre-command-hook)
+      (dolist (at '("+two" "@@ -1" "b.txt"))
+        (ygg-git-compare-comments-tests--goto at)
+        (should (eq (key-binding "C" nil nil (point)) #'ygg-git-compare-comment))
+        (dolist (key '("c" "i" "A" "K"))
+          (should-not (ygg-git-compare-comments-tests--comment-command-p
+                       (key-binding key nil nil (point))))))
+      (ygg-git-compare-comments-tests--goto " 1")
+      (ygg-git-compare-select-lines)
+      (ygg-git-compare-select-down)
+      (should (eq (key-binding "C") #'ygg-git-compare-comment))
+      (should (eq (key-binding (kbd "RET")) #'ygg-git-compare-comment))
+      (dolist (key '("c" "i" "A" "K"))
+        (should-not (ygg-git-compare-comments-tests--comment-command-p (key-binding key))))
+      (with-current-buffer (call-interactively (key-binding "C"))
+        (should (eq (plist-get ygg-git-compare--draft :level) 'range))
+        (aob-compose-abort)))))
+
+(ert-deftest ygg-git-compare-comments-capital-c-on-a-file-heading-comments-on-the-file ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "b.txt")
+      (ygg-git-compare-comments-tests--write (call-interactively (key-binding "C")) "whole file")
+      (should (eq (plist-get (car (ygg-git-compare-comments-list)) :level) 'file)))))
+
+(ert-deftest ygg-git-compare-comments-capital-c-edits-a-comment-and-saving-it-empty-deletes-it ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "mine")
+      (let ((id (plist-get (car (ygg-git-compare-comments-list)) :id)))
+        (with-current-buffer (call-interactively (key-binding "C"))
+          (should (equal (buffer-string) "mine"))
+          (erase-buffer)
+          (insert "better")
+          (aob-compose-send))
+        (should (equal (mapcar (lambda (c) (list (plist-get c :id) (plist-get c :text)))
+                               (ygg-git-compare-comments-list))
+                       (list (list id "better"))))
+        (with-current-buffer (call-interactively (key-binding "C"))
+          (should (equal (buffer-string) "better"))
+          (erase-buffer)
+          (aob-compose-send))
+        (should-not (ygg-git-compare-comments-list t))
+        (should-not (string-search "better" (ygg-git-compare-comments-tests--shown)))))))
+
+(ert-deftest ygg-git-compare-comments-an-empty-new-comment-is-refused ()
   (ygg-git-compare-comments-tests--with-repo root
     (ygg-git-compare-comments-tests--with-compare root
       (ygg-git-compare-comments-tests--goto "+two")
       (with-current-buffer (ygg-git-compare-comment)
-        (insert "half written"))
-      (ygg-git-compare-comments-tests--goto "+three")
-      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
-        (should-error (ygg-git-compare-comment) :type 'user-error))
-      (with-current-buffer "*ygg-git-compare comment*"
-        (should (equal (buffer-string) "half written")))
-      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
-        (with-current-buffer (ygg-git-compare-comment)
-          (should (equal (buffer-string) "")))))))
+        (should-error (aob-compose-send) :type 'user-error)
+        (aob-compose-abort))
+      (should-not (ygg-git-compare-comments-list t)))))
+
+(ert-deftest ygg-git-compare-comments-summary-takes-capital-c-and-d-d ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "in a")
+      (with-current-buffer (ygg-git-compare-comments-summary)
+        (should (eq (key-binding "C") #'ygg-git-compare-comment))
+        (should (eq (key-binding (kbd "d d")) #'ygg-git-compare-comment-delete))
+        (should (eq (key-binding "A") #'ygg-git-compare-comments-accept-all))
+        (should (eq (key-binding "a") #'ygg-git-compare-comment-accept))
+        (dolist (key '("i" "K"))
+          (should-not (ygg-git-compare-comments-tests--comment-command-p (key-binding key))))
+        (should-not (eq (key-binding "K") #'ygg-git-compare-comment-delete))
+        (goto-char (point-min))
+        (search-forward "in a")
+        (with-current-buffer (call-interactively (key-binding "C"))
+          (should (equal (buffer-string) "in a"))
+          (erase-buffer)
+          (aob-compose-send))
+        (should-not (ygg-git-compare-comments-list t))))))
 
 (ert-deftest ygg-git-compare-comments-ids-are-unique-within-a-millisecond ()
   (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 1.0))
@@ -745,3 +817,50 @@ and adds b.txt; main stays checked out."
   (should-not (fboundp 'ygg-git-compare-comment-toggle-destination)))
 
 ;;; ygg-git-compare-comments-tests.el ends here
+
+(ert-deftest ygg-git-compare-comments-a-second-c-on-a-new-line-reuses-its-box ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (let ((box (ygg-git-compare-comment)))
+        (with-current-buffer box (insert "typed"))
+        (ygg-git-compare-comments-tests--goto "+two")
+        (should (eq (ygg-git-compare-comment) box))
+        (should (equal (with-current-buffer box (buffer-string)) "typed"))
+        (ygg-git-compare-comments-tests--goto "+three")
+        (should-not (eq (ygg-git-compare-comment) box))
+        (aob-compose-abort)
+        (with-current-buffer box (aob-compose-abort))))))
+
+(ert-deftest ygg-git-compare-comments-a-second-c-on-an-edit-keeps-the-typed-words ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "first")
+      (ygg-git-compare-comments-tests--goto "+two")
+      (let ((box (ygg-git-compare-comment)))
+        (with-current-buffer box (insert " more"))
+        (should (eq (ygg-git-compare-comment) box))
+        (should (equal (with-current-buffer box (buffer-string)) "first more"))
+        (with-current-buffer box (aob-compose-abort))))))
+
+(ert-deftest ygg-git-compare-comments-box-sends-its-words-as-typed ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (let ((aob-compose-history nil))
+        (with-current-buffer (ygg-git-compare-comment)
+          (insert "see #foo and [[Image1]]  ")
+          (aob-compose-send))
+        (should-not aob-compose-history)
+        (should (equal (plist-get (car (ygg-git-compare-comments-list)) :text)
+                       "see #foo and [[Image1]]"))))))
+
+(ert-deftest ygg-git-compare-comments-summary-c-off-a-comment-says-so ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (with-current-buffer (ygg-git-compare-comments-summary)
+        (let ((err (should-error (ygg-git-compare-comment) :type 'user-error)))
+          (should (string-search "No comment here" (cadr err))))
+        (should-not (seq-some (lambda (b) (string-prefix-p "compose:review:" (buffer-name b)))
+                              (buffer-list)))))))

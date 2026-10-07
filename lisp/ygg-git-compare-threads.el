@@ -21,6 +21,7 @@
 (defvar ygg-git-compare--b)
 (autoload 'ygg-git-compare--pr-info-refresh "ygg-git-compare-pr-info")
 (autoload 'ygg-git-compare--conversation-section "ygg-git-compare-pr-info")
+(declare-function ygg-git-compare-comment-new "ygg-git-compare-comments")
 (declare-function ygg-markdown-fences-mode "ygg-markdown-fences" (lang))
 (declare-function ygg-markdown-fences--fontify "ygg-markdown-fences" (mode body))
 
@@ -764,7 +765,7 @@ with BY-THREAD, the first comment of a thread, asked for among threads."
   (interactive)
   (if (eq (plist-get (ygg-git-compare--remote-at-point t) :level) 'review)
       (ygg-git-compare-comment-review)
-    (ygg-git-compare-comment)))
+    (ygg-git-compare-comment-new)))
 
 (defun ygg-git-compare-threads-toggle-fold ()
   "Fold the thread of the forge's comment at point, or open it."
