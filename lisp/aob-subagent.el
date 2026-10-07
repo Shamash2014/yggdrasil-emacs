@@ -13,6 +13,7 @@
 (require 'aob)
 
 (declare-function aob-trace "aob-trace" (s))
+(declare-function aob-session-model-now "aob" (s))
 (declare-function aob-acp--resolve "aob-acp" (s decision answer))
 
 (defun aob-subagent-parent (s)
@@ -125,6 +126,8 @@ SENDING is non-nil while the turn that made the call is still going."
                            :native-tool-id tid
                            :agent (aob-session-ref root :agent)))))
     (puthash tid (aob-session-id kid) (aob-subagent--native-kids root))
+    (aob-session-put kid :parent-model
+                     (or (plist-get ev :parent-model) (aob-session-model-now owner)))
     (aob-turn-begin kid)
     (aob-subagent--check-cap owner)
     kid))
@@ -281,7 +284,8 @@ one working alone."
              (aob--dirty owner))
     (aob-event owner 'tool :tool-id (plist-get ev :tool-id)
                :kind "think" :title (aob-session-name kid) :raw (plist-get ev :raw)
-               :subagent t :stand-in t :status "in_progress")))
+               :subagent t :stand-in t :status "in_progress"
+               :parent-model (aob-session-model-now owner))))
 
 (defun aob-subagent--stand-in-drop (owner kid)
   "Take KID's stand-in row out of OWNER's trace: the real call came."

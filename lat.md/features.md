@@ -247,7 +247,7 @@ Spawning, trace buffer, subagents, modes and models, shells, todo, transcripts, 
 
 - Spawn an agent on a project with a model, resume, fork, archive, delete.
 - Trace: the conversation as operations, with a queue of prompts waiting to send.
-- Subagents: a delegation you can hold, list and open.
+- Subagents: a delegation you can hold, list and open, each with its model (the call's own, the subagent session's own, or inherited from its parent at spawn and marked ↑; `?` when unknown) and tokens (a native subagent's own spend, else its context as `ctx`; `—` otherwise).
 - Session modes, model, goal and worker effort per session.
 - Running shell commands across agents, with a way to stop one.
 - Todo list kept by you and the agent; transcripts of ended conversations.

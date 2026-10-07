@@ -959,6 +959,7 @@ before it is dispatched.")
           (when (fboundp 'ygg-usage-note) (ygg-usage-note s u))
           (unless (aob-subagent-native-p s)
             (aob-acp--autocompact-check s))
+          (aob-session-kid-changed s)
           (aob--dirty s))
          ("subagent_spawned" (aob-acp--subagent-spawned s u))
          ("subagent_state_update" (aob-acp--subagent-ended s u))
@@ -1105,6 +1106,7 @@ are plists with :value/:name/:description."
       (aob-session-put s :model-id cur)
       (aob-session-put s :model-name name)
       (unless (equal old cur) (aob-session-put s :model-live nil))
+      (aob-session-kid-changed s)
       (when (and old cur (not (equal old cur)))
         (aob-event s 'state :title (format "model: %s" name)
                    :via (aob-session-ref s :model-via))
@@ -1385,7 +1387,8 @@ A picture keeps its data on the event, for a trace that can draw it."
         (description (plist-get u :description)))
     (when (and (equal title "Model rerouted") (stringp description)
                (string-match " to \\([^ ]+\\) (" description))
-      (aob-session-put s :model-live (match-string 1 description)))
+      (aob-session-put s :model-live (match-string 1 description))
+      (aob-session-kid-changed s))
     (aob-event s 'state
                :title (if (and (stringp description) (not (string-empty-p description)))
                           (format "%s: %s" title
@@ -1512,6 +1515,10 @@ never learns there was more than one."
                                    (aob-acp--tool-title u raw))
                         :raw raw
                         :subagent (and (or task spawn (cdr codex)) t)
+                        :parent-model (and (or task spawn (cdr codex))
+                                           (if-let* ((old (gethash id (aob-acp--tools s))))
+                                               (plist-get old :parent-model)
+                                             (aob-session-model-now s)))
                         :codex-spawn spawn
                         :subagent-type (and spawn (aob-acp--codex-role s raw))
                         :parent (or (aob-acp--parent-of u)
@@ -2085,6 +2092,7 @@ can't parse: the reference survives, and the demotion is said."
   (aob-session-put s :stop-warning nil)
   ;; codex says nothing when a turn runs on the picked model again
   (aob-session-put s :model-live nil)
+  (aob-session-kid-changed s)
   (unless queued
     ;; the tokens you wrote come back as tokens: what you sent is what the
     ;; trace shows, counted in the same [[Image]] the compose buffer used
@@ -2928,6 +2936,8 @@ Runs entirely in the background — the kill that triggers it never waits."
       (ignore-errors (funcall unclosed nil nil)))))
 
 (declare-function aob-trace "aob-trace" (s))
+(declare-function aob-session-model-now "aob" (s))
+(declare-function aob-session-kid-changed "aob" (kid))
 (declare-function aob-trace-buffer "aob-trace" (s))
 
 (defun aob-acp--focus (s)
@@ -4571,6 +4581,7 @@ The resume reads the asleep entry, so that is where the choice goes."
       (aob-session-put s :asleep (plist-put entry :model want)))
     (aob-session-put s :want-model want)
     (aob-session-put s :model-id want)
+    (aob-session-kid-changed s)
     (aob--dirty s)
     (message "aob: %s wakes on %s" (aob-session-name s) want)))
 

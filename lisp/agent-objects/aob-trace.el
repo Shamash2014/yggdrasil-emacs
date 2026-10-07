@@ -16,6 +16,7 @@
 (require 'ygg-diagram nil t)
 
 (declare-function ygg-ui-markdown "ygg-ui" (text))
+(declare-function aob-session-model-now "aob" (s))
 (defvar ygg-modeline-name)
 (declare-function ygg-diagram-fence-at-point "ygg-diagram" ())
 (declare-function ygg-diagram-toggle-at-point "ygg-diagram" ())
@@ -718,12 +719,69 @@ line."
     ("failed" (propertize "✗" 'face 'error))
     (_ "")))
 
+(defun aob-trace--sub-model-info (s ev)
+  "S's subagent call EV's model and whether it is inherited: (NAME . INHERITED).
+Explicit in the call or on its own session, else the parent's model as
+it was when the call began."
+  (let* ((raw (and (consp (plist-get ev :raw)) (keywordp (car (plist-get ev :raw)))
+                   (plist-get ev :raw)))
+         (kid (aob-session-native-child s ev))
+         (own (or (let ((m (plist-get raw :model)))
+                    (and (stringp m) (not (string-empty-p m)) m))
+                  (and kid (aob-session-model-now kid))))
+         (inherited (or (plist-get ev :parent-model)
+                        (and kid (aob-session-ref kid :parent-model)))))
+    (cond (own (cons own nil))
+          (inherited (cons inherited t))
+          (t (cons "?" nil)))))
+
+(defun aob-trace--sub-model (s ev)
+  "S's subagent call EV's model, quiet, with a trailing arrow when inherited."
+  (pcase-let ((`(,name . ,inherited) (aob-trace--sub-model-info s ev)))
+    (propertize (if inherited (concat name " ↑") name) 'face 'shadow)))
+
+(defun aob-trace--spend (s)
+  "The (KIND . TOKENS) session S is known by: tokens spent, else context used."
+  (let* ((tk (aob-session-ref s :tokens))
+         (spent (or (plist-get tk :totalTokens)
+                    (and (plist-get tk :inputTokens) (plist-get tk :outputTokens)
+                         (+ (plist-get tk :inputTokens) (plist-get tk :outputTokens)))))
+         (ctx (aob-session-ref s :ctx-used)))
+    (cond ((and (numberp spent) (> spent 0)) (cons 'tok spent))
+          ((and (numberp ctx) (> ctx 0)) (cons 'ctx ctx)))))
+
+(defun aob-trace--sub-usage (s ev)
+  "The (KIND . TOKENS) S's subagent call EV is known to use, or nil."
+  (when-let* ((kid (aob-session-native-child s ev)))
+    (aob-trace--spend kid)))
+
+(defun aob-trace--tokens-string (u)
+  "Usage U (KIND . TOKENS) as a quiet string, `—' when unknown."
+  (propertize (if u (format "%s %s" (aob-tokens-short (cdr u)) (car u)) "—")
+              'face 'shadow))
+
+(defun aob-trace--sub-tail (s ev)
+  "The model and tokens slots of S's subagent call EV, never empty."
+  (if (or (plist-get ev :subagent) (plist-get ev :children))
+      (concat (propertize " · " 'face 'shadow)
+              (aob-trace--sub-model s ev)
+              (propertize " · " 'face 'shadow)
+              (aob-trace--tokens-string (aob-trace--sub-usage s ev)))
+    ""))
+
+(defun aob-trace--kid-model (kid)
+  "KID's header model: its own, else its parent's at spawn marked inherited."
+  (let ((own (aob-session-model-now kid))
+        (up (aob-session-ref kid :parent-model)))
+    (propertize (cond (own own) (up (concat up " ↑")) (t "?")) 'face 'shadow)))
+
 (defun aob-trace--rollup (ev)
   "A Task's subagent digest: how many steps, how many running, how many
 failed, what they changed.  Never what they are doing — a trace that
 echoed each subagent's current step would be five agents talking over
 the one you asked.  `aob-subagents' keeps them all in one place under the trace."
-  (if-let* ((n (plist-get ev :children)))
+  (concat
+   (if-let* ((n (plist-get ev :children)))
       (concat
        (propertize (format " %d" n) 'face 'shadow)
        (let ((live (or (plist-get ev :child-live) 0)))
@@ -731,7 +789,12 @@ the one you asked.  `aob-subagents' keeps them all in one place under the trace.
        (let ((f (or (plist-get ev :child-fail) 0)))
          (if (> f 0) (propertize (format "✗%d" f) 'face 'error) ""))
        (if-let* ((cs (plist-get ev :child-stat))) (concat " " cs) ""))
-    ""))
+    "")
+   (if-let* ((s (and aob-trace--session-id (aob-session-get aob-trace--session-id))))
+       (let ((tail (aob-trace--sub-tail s ev)))
+         (plist-put ev :tail-drawn tail)
+         tail)
+     "")))
 
 (defcustom aob-trace-speakers t
   "Whether words get a speaker line above them rather than a timestamp.
@@ -2442,8 +2505,9 @@ reported; a subagent that lost its agent says disconnected."
                  (and (equal (aob-subagents--status ev) "running") (float-time)))))
     (and start end (max 0 (- end start)))))
 
-(defun aob-subagents--row (s ev)
-  "The row for S's subagent call EV: status, time, steps, what it was sent to do."
+(defun aob-subagents--row (s ev tail)
+  "The row for S's subagent call EV: status, time, steps, what it was sent to do.
+TAIL is its model and tokens."
   (let* ((status (aob-subagents--status ev))
          (secs (aob-subagents--secs ev))
          (n (or (plist-get ev :children) 0)))
@@ -2459,7 +2523,8 @@ reported; a subagent that lost its agent says disconnected."
              (propertize (format "%5d " n) 'face 'shadow)
              (if (aob-trace--sub-p ev) "└ " "")
              (aob--first-line (or (plist-get ev :title) "subagent") 72)
-             (if-let* ((cs (plist-get ev :child-stat))) (concat "  " cs) ""))
+             (if-let* ((cs (plist-get ev :child-stat))) (concat "  " cs) "")
+             tail)
      'aob-session (aob-session-id s)
      'aob-event (plist-get ev :seq))))
 
@@ -2473,11 +2538,12 @@ reported; a subagent that lost its agent says disconnected."
 
 (defun aob-subagents--render (&optional force)
   (when-let* ((s (aob-session-get aob-subagents--session-id)))
-    (let ((tick (or (aob-session-ref s :tick) 0)))
-      (unless (and (not force) (eql aob-subagents--tick tick))
+    (let* ((subs (aob-session-subagents s))
+           (tails (mapcar (lambda (e) (aob-trace--sub-tail s e)) subs))
+           (tick (cons (or (aob-session-ref s :tick) 0) tails)))
+      (unless (and (not force) (equal aob-subagents--tick tick))
         (setq aob-subagents--tick tick)
-        (let* ((subs (aob-session-subagents s))
-               (live (seq-count (lambda (e)
+        (let* ((live (seq-count (lambda (e)
                                   (equal (aob-subagents--status e) "running"))
                                 subs))
                (line (line-number-at-pos))
@@ -2489,7 +2555,8 @@ reported; a subagent that lost its agent says disconnected."
                         (if (> live 0) (format " · %d running" live) "")))
           (erase-buffer)
           (if subs
-              (dolist (ev subs) (insert (aob-subagents--row s ev) "\n"))
+              (cl-mapc (lambda (ev tail) (insert (aob-subagents--row s ev tail) "\n"))
+                       subs tails)
             (insert (propertize " working alone\n" 'face 'shadow)))
           (aob-subagents--restore line))))))
 
@@ -3700,6 +3767,8 @@ The full account is \\ u; the header carries only what is looked at."
          (parts (if aob-trace--own-parent
                     (list (and parent (concat "subagent of " (aob-session-name parent)))
                           (unless parent "subagent")
+                          (aob-trace--kid-model s)
+                          (aob-trace--tokens-string (aob-trace--spend s))
                           "read-only"
                           (format "%s" (aob-session-state s))
                           clock)

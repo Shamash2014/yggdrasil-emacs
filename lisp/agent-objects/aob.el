@@ -310,6 +310,23 @@ voices taking turns in it."
               (id (gethash (plist-get ev :tool-id) kids)))
     (aob-session-get id)))
 
+(declare-function aob-trace--sub-tail "aob-trace" (s ev))
+
+(defun aob-session-kid-changed (kid)
+  "Redraw the owner's Task line when KID's model or tokens change what it shows."
+  (when-let* ((_ (aob-session-ref kid :native-tool-id))
+              (owner (aob-session-get (aob-session-ref kid :parent-session)))
+              (_ (fboundp 'aob-trace--sub-tail))
+              (tid (aob-session-ref kid :native-tool-id))
+              (ev (seq-find (lambda (e) (and (equal tid (plist-get e :tool-id))
+                                             (plist-get e :subagent)))
+                            (aob-session-events owner)))
+              (tail (aob-trace--sub-tail owner ev))
+              ((not (equal tail (plist-get ev :tail-drawn)))))
+    (plist-put ev :tail-drawn tail)
+    (plist-put ev :line nil)
+    (aob--dirty owner)))
+
 (defun aob-session-subagents (s)
   "Every subagent S delegated to, in the order it sent them.
 A subagent is the Task event other tool calls name as their parent —
@@ -324,6 +341,12 @@ what the trace already rolls up, read back as a list."
   (let ((x (aob-session-summary s)))
     (cond ((stringp x) x)
           (x (aob-event-summary x)))))
+
+(defun aob-session-model-now (s)
+  "The model S is running on now, or nil."
+  (or (aob-session-ref s :model-live)
+      (aob-session-ref s :model-id)
+      (aob-session-ref s :model-name)))
 
 (defun aob-tokens-short (n)
   (cond ((null n) nil)
@@ -528,6 +551,7 @@ nothing: a crashed or failed start reports one before the count goes on."
                          (plist-put (aob-session-ref s :tokens) k
                                     (+ n (or (plist-get (aob-session-ref s :tokens) k) 0)))))))
   (aob-session-put s :turns (1+ (or (aob-session-ref s :turns) 0)))
+  (aob-session-kid-changed s)
   (run-hook-with-args 'aob-meter-change-hook s))
 
 (defun aob-session-spend (s)
