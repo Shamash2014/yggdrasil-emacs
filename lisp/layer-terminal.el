@@ -163,9 +163,10 @@ lookups."
                                         (remq #'ygg-agent--terminal-env
                                               ghostel-pre-spawn-hook)
                                       ghostel-pre-spawn-hook))
-            (default-directory (if (and dir (not (file-remote-p dir))
-                                        (file-directory-p dir))
-                                   (ygg-term--normalize dir)
+            (default-directory (if (and dir (not (file-remote-p dir)))
+                                   (ygg-term--normalize
+                                    (or (locate-dominating-file dir #'file-directory-p)
+                                        "~"))
                                  default-directory))
             (mise (if over-there "" (ygg-mise-prefix)))
             ;; when injecting mise, drive the shell ourselves: a login shell
@@ -253,6 +254,21 @@ the space's folder, then `default-directory'."
         (progn (kill-buffer buf) nil)
       buf)))
 
+(defun ygg-term-open-in (root)
+  "Show the toggle terminal of the project at ROOT, creating it when absent."
+  (let* ((buf (ygg-term--live-toggle-buffer root))
+         (b (or buf (ygg--ghostel-shell
+                     (format "*ygg-term:%s*" (ygg-term--label root)) root)))
+         (win (or (get-buffer-window b) (ygg--term-split-window))))
+    (with-current-buffer b (setq ygg-term--toggle-root root))
+    (when (and (fboundp 'ygg-space-claim-buffer)
+               (fboundp 'ygg-space--current-id))
+      (ygg-space-claim-buffer b (ygg-space--current-id) t))
+    (set-window-buffer win b)
+    (select-window win)
+    (ghostel-semi-char-mode)
+    b))
+
 (defun ygg-terminal-toggle ()
   "Toggle the current project's terminal split, toggleterm.nvim-style.
 Shows or creates the terminal that belongs to this buffer's project,
@@ -263,16 +279,7 @@ starting at its root, and hides it when already visible."
          (shown (and buf (get-buffer-window buf))))
     (if shown
         (delete-window shown)
-      (let ((b (or buf (ygg--ghostel-shell
-                        (format "*ygg-term:%s*" (ygg-term--label root)) root)))
-            (win (ygg--term-split-window)))
-        (with-current-buffer b (setq ygg-term--toggle-root root))
-        (when (and (fboundp 'ygg-space-claim-buffer)
-                   (fboundp 'ygg-space--current-id))
-          (ygg-space-claim-buffer b (ygg-space--current-id) t))
-        (set-window-buffer win b)
-        (select-window win)
-        (ghostel-semi-char-mode)))))
+      (ygg-term-open-in root))))
 
 ;;; Named terminals + jobs (tmux-window feel; everything async)
 
@@ -291,12 +298,13 @@ starting at its root, and hides it when already visible."
                 (provided-mode-derived-p (buffer-local-value 'major-mode b) 'ghostel-mode))
               (buffer-list)))
 
-(defun ygg-term-new (name)
-  "Spawn a named terminal `*ygg-term:NAME*' in a terminal split."
+(defun ygg-term-new (name &optional dir)
+  "Spawn a named terminal `*ygg-term:NAME*' in a terminal split.
+DIR is where it starts, instead of the root of the current buffer."
   (interactive "sTerminal name: ")
   (when (string-empty-p name)
     (setq name (number-to-string (1+ (length (ygg--term-buffers))))))
-  (ygg--term-display (ygg--ghostel-shell (format "*ygg-term:%s*" name) (ygg-term--root))))
+  (ygg--term-display (ygg--ghostel-shell (format "*ygg-term:%s*" name) (or dir (ygg-term--root)))))
 
 (defun ygg-term-pick ()
   "Pick one of the current project's terminals and show it in a split."

@@ -7,6 +7,8 @@
 (require 'seq)
 (require 'project)
 (require 'ygg-term-env-tests)
+(require 'ygg-projects)
+(require 'ygg-embark)
 
 (defun ygg-term-ptests--proj (name)
   (let ((root (ygg-term-tests--dir name)))
@@ -244,6 +246,46 @@
           (should-not (eq new old))
           (should (process-live-p (get-buffer-process new)))
           (should (equal (buffer-local-value 'ygg-term--toggle-root new) root)))))))
+
+(defun ygg-term-ptests--processes (root)
+  (with-temp-buffer
+    (insert (propertize "row\n" 'ygg-project root 'ygg-row 'processes))
+    (goto-char (point-min))
+    (ygg-projects-visit)))
+
+(ert-deftest ygg-term-projects-processes-row-is-per-root ()
+  (ygg-term-ptests--with
+    (let ((p (ygg-term-ptests--proj "p"))
+          (q (ygg-term-ptests--proj "q")))
+      (cl-letf (((symbol-function 'ygg-projects--docker-p) (lambda (_) nil)))
+        (ygg-term-ptests--processes p)
+        (let ((bp (ygg-term-ptests--toggle-buffer)))
+          (ygg-term-ptests--processes q)
+          (let ((bq (ygg-term-ptests--toggle-buffer)))
+            (should-not (eq bp bq))
+            (should (equal (buffer-local-value 'ygg-term--buffer-root bp) p))
+            (should (equal (buffer-local-value 'ygg-term--buffer-root bq) q))))))))
+
+(ert-deftest ygg-term-embark-space-terminal-starts-at-checkout ()
+  (ygg-term-ptests--with
+    (let* ((p (ygg-term-ptests--proj "p"))
+           (q (ygg-term-ptests--proj "q")))
+      (cl-letf (((symbol-function 'ygg-embark--space-root) (lambda () q))
+                ((symbol-function 'read-string) (lambda (&rest _) "co")))
+        (ygg-term-ptests--in (ygg-term-ptests--file p) #'ygg-terminal-toggle)
+        (with-current-buffer (ygg-term-ptests--toggle-buffer)
+          (ygg-embark-space-terminal))
+        (should (equal (ygg-term-ptests--cwd "*ygg-term:co*") q))
+        (should (equal (buffer-local-value 'ygg-term--buffer-root (get-buffer "*ygg-term:co*")) q))))))
+
+(ert-deftest ygg-term-missing-root-falls-back-to-existing-ancestor ()
+  (ygg-term-ptests--with
+    (let* ((p (ygg-term-ptests--proj "p"))
+           (gone (expand-file-name "no/such/dir/" p)))
+      (ygg-term-ptests--in (ygg-term-ptests--file p)
+                           (lambda () (ygg-term-new "gone" gone)))
+      (should (equal (ygg-term-ptests--cwd "*ygg-term:gone*")
+                     (ygg-term--normalize p))))))
 
 (provide 'ygg-term-project-tests)
 ;;; ygg-term-project-tests.el ends here

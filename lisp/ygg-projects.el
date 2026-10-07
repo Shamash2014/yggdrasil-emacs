@@ -21,6 +21,8 @@
 (require 'ygg-git nil t)
 (require 'vui nil t)
 
+(declare-function ygg-term-open-in "layer-terminal" (root))
+(declare-function ygg-term--project-root "layer-terminal" (dir))
 (declare-function ygg-project-roots "ygg-project-scan" (&optional refresh))
 (declare-function ygg-project-candidates "ygg-project-scan" (&optional refresh))
 (declare-function ygg-project-import-mark "ygg-project-scan" (root))
@@ -2481,7 +2483,7 @@ umbrella's Folders row moves that repository."
          ;; where there is a stack, the stack is what the row is about
          (cond ((and (ygg-projects--docker-p root) (fboundp 'docker-compose))
                 (call-interactively #'docker-compose))
-               ((fboundp 'ghostel) (call-interactively #'ghostel))
+               ((fboundp 'ygg-term-open-in) (ygg-term-open-in (ygg-term--project-root root)))
                (t (user-error "projects: no terminal")))))
       ('context (let ((default-directory root)) (ygg-ice-changes-list))))))))
 

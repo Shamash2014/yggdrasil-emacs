@@ -41,7 +41,8 @@
 (declare-function ygg-space--tab-by-id "yggdrasil-spacetree" (id))
 (declare-function ygg-space-root "yggdrasil-spacetree" (dir))
 (declare-function ygg-space-close "yggdrasil-spacetree" ())
-(declare-function ygg-term-new "layer-terminal" (name))
+(declare-function ygg-term-new "layer-terminal" (name &optional dir))
+(declare-function ygg-term--project-root "layer-terminal" (dir))
 (declare-function aob-compose "aob" (&optional target initial name dir))
 (declare-function aob-session-at-point "aob" ())
 (declare-function aob-session-id "aob" (session))
@@ -158,8 +159,8 @@ than stopping where the path does.")
 (defun ygg-embark-space-terminal ()
   "Open a terminal in the checkout the space at point stands on."
   (interactive)
-  (let ((default-directory (file-name-as-directory (ygg-embark--space-root))))
-    (call-interactively #'ygg-term-new)))
+  (let ((dir (file-name-as-directory (ygg-embark--space-root))))
+    (ygg-term-new (read-string "Terminal name: ") (ygg-term--project-root dir))))
 
 (defun ygg-embark--qf-here ()
   "The quickfix row a verb here acts on, refusing when point names none."
