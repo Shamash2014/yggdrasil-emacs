@@ -86,6 +86,10 @@ left out of a review."
   "This compare's review comments as kept, newest first.")
 (defvar-local ygg-git-compare--list-buffer nil
   "In the right pane, the diff of every file it belongs to.")
+(defvar-local ygg-git-compare--tour-status nil
+  "The guided-review step shown in the header, or nil off the tour.")
+(defvar ygg-git-compare-redraw-hook nil
+  "Run in a compare buffer after its sides are resolved and diffed again.")
 (defvar-local ygg-git-compare--note nil
   "What the header says is still under way, or nil.")
 (defvar-local ygg-git-compare--review-token nil
@@ -1081,7 +1085,9 @@ Nothing is selected and no window layout is remembered for magit's q."
                                  (plist-get ygg-git-compare--b :pending)
                                  (plist-get ygg-git-compare--a :note)
                                  (plist-get ygg-git-compare--b :note))))
-             (concat "  " note)))))
+             (concat "  " note))
+           (when ygg-git-compare--tour-status
+             (concat "  " ygg-git-compare--tour-status)))))
 
 (defun ygg-git-compare--fold ()
   "Fold every file to its heading, the diffstat and untracked files left open,
@@ -1128,6 +1134,7 @@ be diffed, the compare stays as it was."
           magit-buffer-diff-args args))
   (magit-refresh-buffer)
   (ygg-git-compare--fold)
+  (run-hooks 'ygg-git-compare-redraw-hook)
   (ygg-git-compare--follow (current-buffer)))
 
 (defun ygg-git-compare--file-buffer-name ()
@@ -1814,6 +1821,11 @@ when that is known, and a compare that is not its range says why instead."
 (autoload 'ygg-git-compare-next-unreviewed "ygg-git-compare-marks" nil t)
 (autoload 'ygg-git-compare-previous-unreviewed "ygg-git-compare-marks" nil t)
 (autoload 'ygg-git-compare-toggle-unreviewed "ygg-git-compare-marks" nil t)
+(autoload 'ygg-git-compare-tour "ygg-git-compare-tour" nil t)
+(autoload 'ygg-git-compare-tour-next "ygg-git-compare-tour" nil t)
+(autoload 'ygg-git-compare-tour-previous "ygg-git-compare-tour" nil t)
+(autoload 'ygg-git-compare-tour-leave "ygg-git-compare-tour" nil t)
+(autoload 'ygg-git-compare-tour-receive "ygg-git-compare-tour")
 (autoload 'ygg-git-compare-interdiff "ygg-git-compare-interdiff" nil t)
 (autoload 'ygg-git-compare-export-markdown "ygg-git-compare-submit" nil t)
 (autoload 'ygg-git-compare-submit "ygg-git-compare-submit" nil t)
@@ -1939,13 +1951,15 @@ around past the end."
   "c" (cons "next hunk" #'ygg-git-compare-next-hunk)
   "f" (cons "next file" #'ygg-git-compare-next-file)
   "u" (cons "next unreviewed hunk" #'ygg-git-compare-next-unreviewed)
-  "m" (cons "next comment" #'ygg-git-compare-comment-next))
+  "m" (cons "next comment" #'ygg-git-compare-comment-next)
+  "t" (cons "next tour step" #'ygg-git-compare-tour-next))
 
 (defvar-keymap ygg-git-compare-previous-map
   "c" (cons "previous hunk" #'ygg-git-compare-previous-hunk)
   "f" (cons "previous file" #'ygg-git-compare-previous-file)
   "u" (cons "previous unreviewed hunk" #'ygg-git-compare-previous-unreviewed)
-  "m" (cons "previous comment" #'ygg-git-compare-comment-previous))
+  "m" (cons "previous comment" #'ygg-git-compare-comment-previous)
+  "t" (cons "previous tour step" #'ygg-git-compare-tour-previous))
 
 (defvar-keymap ygg-git-compare-delete-map
   "d" (cons "delete comment" #'ygg-git-compare-comment-delete))
@@ -1993,6 +2007,8 @@ around past the end."
   "r" #'ygg-git-compare-mark-file-reviewed
   "R" #'ygg-git-compare-mark-hunk-reviewed
   "I" #'ygg-git-compare-interdiff
+  "t" #'ygg-git-compare-tour
+  "T" #'ygg-git-compare-tour-leave
   "e" #'ygg-git-compare-visit-b
   "'" #'ygg-git-compare-visit-b
   ";" #'ygg-git-compare-dispatch
@@ -2013,6 +2029,7 @@ around past the end."
 ] c and [ c go to the next and previous hunk, ] f and [ f (or } and {)
 to the next and previous file, ] u and [ u to the next and previous
 unreviewed hunk, and
+] t and [ t walk a tour an agent ordered, \\[ygg-git-compare-tour] asks for one and T leaves it.
 ] m and [ m (or \\[ygg-git-compare-comment-next] and \\[ygg-git-compare-comment-previous]) to the next and previous comment.
 \\[isearch-forward-regexp] searches the diff; \\[ygg-git-compare-search-next] and \\[ygg-git-compare-search-previous] repeat it forward and back.
 \\[ygg-git-compare-comment] comments on the line at point, the lines selected or the file.

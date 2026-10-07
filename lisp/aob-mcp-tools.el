@@ -688,6 +688,115 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
                          ',(and bad (cons "skipped:" bad))))
                (error (list (error-message-string err))))))))))))
 
+;;; review tour
+
+(defun aob-mcp-tools--tour-hunk (raw dir)
+  "RAW, one hunk of a tour step, as a plist, or why not."
+  (if (not (aob-mcp-tools--object-p raw))
+      "hunk is not an object"
+    (let* ((file-raw (plist-get raw :file))
+           (file (if (and (stringp file-raw) (stringp dir))
+                     (aob-mcp-tools--repo-relative file-raw dir)
+                   file-raw))
+           (start (aob-mcp-tools--int (plist-get raw :start)))
+           (end (if (plist-get raw :end) (aob-mcp-tools--int (plist-get raw :end)) start))
+           (side (or (plist-get raw :side) "new")))
+      (cond ((not (and (stringp file-raw) (not (string-blank-p file-raw)))) "file missing")
+            ((null file) "file is outside the repository")
+            ((not (and start (> start 0))) "start is not a positive integer")
+            ((not (and end (>= end start))) "end is not an integer from start on")
+            ((not (member side '("new" "old"))) (format "side %S is not new or old" side))
+            (t (list :file file :start start :end end :side side))))))
+
+(defun aob-mcp-tools--tour-step (raw dir)
+  "RAW, one tour step, as a plist, or why not."
+  (if (not (aob-mcp-tools--object-p raw))
+      "not an object"
+    (let* ((title (plist-get raw :title))
+           (check (plist-get raw :check))
+           (risk (plist-get raw :risk))
+           (hunks (aob-mcp-tools--json (plist-get raw :hunks)))
+           (made (and (listp hunks) (not (eq hunks 'unparsed))
+                      (mapcar (lambda (h) (aob-mcp-tools--tour-hunk h dir)) hunks)))
+           (bad (seq-find #'stringp made)))
+      (cond ((not (and (stringp title) (not (string-blank-p title)))) "title missing")
+            ((not (and (stringp check) (not (string-blank-p check)))) "check missing")
+            ((and risk (not (member risk '("low" "medium" "high"))))
+             (format "risk %S is not low, medium or high" risk))
+            ((null made) "hunks is not a non-empty array")
+            (bad (format "hunk: %s" bad))
+            (t (list :title title :check check :risk risk :hunks made))))))
+
+(defun aob-mcp-tools--branch-name-p (name)
+  "Whether NAME is a branch name git accepts."
+  (and (stringp name)
+       (not (string-blank-p name))
+       (not (string-match-p
+             "\\.\\.\\|//\\|\\`[-/.]\\|[/.]\\'\\|/\\.\\|\\.lock\\(/\\|\\'\\)\\|@{\\|\\`\\(?:@\\|HEAD\\)\\'\\|[][ ~^:?*\\[:cntrl:]]"
+             name))))
+
+(defun aob-mcp-tools--tour-steps (args)
+  "The steps ARGS carries as (GOOD . BAD).\nGOOD are tour plists; BAD are lines naming each rejected step."
+  (let ((steps (aob-mcp-tools--json (plist-get args :steps)))
+        good bad)
+    (cond ((eq steps 'unparsed) (push "steps is not a JSON array" bad))
+          ((not (listp steps)) (push "steps is not an array" bad))
+          ((null steps) (push "no steps given" bad))
+          (t (seq-do-indexed
+              (lambda (raw i)
+                (let ((made (aob-mcp-tools--tour-step raw (plist-get args :dir))))
+                  (if (stringp made)
+                      (push (format "step %d: %s" (1+ i) made) bad)
+                    (push made good))))
+              steps)))
+    (cons (nreverse good) (nreverse bad))))
+
+(aob-mcp-deftool
+ :name "review_tour"
+ :description "After reading a branch's diff, hand back the order a reviewer should walk it in: steps grouped by behaviour, each naming the hunks it covers. The compare shows one step at a time; nothing is posted anywhere."
+ :args '((:name "dir" :type string
+          :description "Absolute path of the repository.")
+         (:name "branch" :type string
+          :description "Branch toured.")
+         (:name "steps" :type array :items (:type "object")
+          :description "[{title, check (what the reviewer must confirm), risk: low|medium|high, hunks: [{file, start, end (lines of the hunk on that side), side: new|old}]}], in the order to read them; every step needs title, check and at least one hunk.  Notes only: send comments with review_submit.")
+         (:name "author" :type string :optional t
+          :description "Who ordered the tour; your session's name if omitted."))
+ :handler
+ (lambda (args conn id)
+   (let* ((dir (plist-get args :dir))
+          (branch (plist-get args :branch))
+          (parsed (and (stringp dir) (aob-mcp-tools--tour-steps args)))
+          (good (car parsed))
+          (bad (cdr parsed))
+          (author (plist-get args :author)))
+     (cond
+      ((not (and (stringp dir) (not (string-blank-p dir)))) "which repository? pass dir")
+      ((not (and (stringp branch) (not (string-blank-p branch)))) "which branch? pass branch")
+      ((not (aob-mcp-tools--branch-name-p branch))
+       (format "%S is not a branch name git accepts" branch))
+      (bad
+       (string-join (cons "tour not delivered:" bad) "\n"))
+      (t
+       (aob-mcp-relay
+        conn id
+        `(progn
+           (ignore-errors (require 'ygg-git-compare))
+           (if (not (fboundp 'ygg-git-compare-tour-receive))
+               (list "review tour not available in this Emacs")
+             (condition-case err
+                 (let* ((author (or ,(and (stringp author) (not (string-blank-p author)) author)
+                                    (when-let* ((s ,(aob-mcp-tools--parent-form aob-mcp-session)))
+                                      (aob-session-name s))
+                                    "agent"))
+                        (got (ygg-git-compare-tour-receive ,dir ,branch ',good author)))
+                   (list (format "%d step%s delivered for %s; the reviewer walks them with ] t%s"
+                                 (car got) (if (= (car got) 1) "" "s") ,branch
+                                 (if (> (or (cdr got) 0) 0)
+                                     (format "; %d name hunks the diff does not have" (cdr got))
+                                   ""))))
+               (error (list (error-message-string err))))))))))))
+
 ;;; todo list
 
 (aob-mcp-deftool

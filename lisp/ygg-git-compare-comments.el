@@ -1111,6 +1111,7 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
     ("H" "hide or show resolved threads" ygg-git-compare-threads-toggle-resolved)
     ("I" "interdiff since last review" ygg-git-compare-interdiff)
     ("x" "explain the change" ygg-git-compare-explain)
+    ("t" "guided review tour" ygg-git-compare-tour)
     ("b" "switch base" ygg-git-compare-switch-base)
     ("~" "swap sides" ygg-git-compare-swap)
     ("." "A...B or A..B" ygg-git-compare-toggle-dots)

@@ -617,6 +617,7 @@ Compare buffer, comments, marks, interdiff, explain, dispatch menu.
 - Marks: check files and hunks off as reviewed; jump to the next unreviewed.
 - Interdiff: what B changed since it was last seen.
 - Explain: ask a new agent session to explain the change.
+- Guided tour: an agent orders the change into steps by behaviour; walk them one at a time, the rest folded, each step left marked reviewed, the hunks no step covers last.
 - Dispatch transient bound to `;` and `?`.
 
 ### How to get to it
@@ -633,6 +634,10 @@ Open from git, then work in the compare buffer; the second group are compare-buf
 - `R` — mark the hunk reviewed (`ygg-git-compare-mark-hunk-reviewed`)
 - `] u` — next unreviewed hunk (`ygg-git-compare-next-unreviewed`)
 - `I` — interdiff since last review (`ygg-git-compare-interdiff`)
+- `t` — walk the branch's guided tour from step 1, or ask an agent to order one when there is none, a step went stale or the tour is already being walked (`ygg-git-compare-tour`)
+- `] t` — next tour step, marking the step left reviewed (`ygg-git-compare-tour-next`)
+- `[ t` — previous tour step (`ygg-git-compare-tour-previous`)
+- `T` — leave the tour, hunks folded to their files again (`ygg-git-compare-tour-leave`)
 - `;` — dispatch menu (`ygg-git-compare-dispatch`)
 - `@` — send the review to an agent (`ygg-git-compare-review`)
 - `P` — merge this compare's pull or merge request, choosing target, method and branch deletion (`ygg-git-pr-merge`)
@@ -649,6 +654,7 @@ Results below are read from docstrings and key maps, not driven live (unverified
 4. `r` marks the file reviewed; `] u` jumps to the next unreviewed hunk.
 5. `;` opens the dispatch menu listing every comment, mark, send and view action.
 6. `q` leaves, bringing back the windows from before.
+7. `t` asks an agent to order the change; it answers through the `review_tour` MCP tool, kept per branch beside its review in the common git directory. `] t` and `[ t` walk its steps, the header showing step, title, risk and check; the last step is the hunks no step covers.
 
 ### Gotchas
 
@@ -656,6 +662,7 @@ What the code shows.
 
 - A compare is read-only: `s`, `S`, `u`, `U` refuse with "stage, discard and apply from magit status" (`ygg-git-compare-read-only`).
 - `SPC g w c` is the same compare opened from the worktree menu; the `g w` worktree map exists only when `wt` is on the path, otherwise `SPC g w` is plain `magit-worktree` (`lisp/layer-git.el`).
+- A tour follows a pushed branch by each hunk's mark key: a step that lost a hunk is stale and its hunks go to the last step until `t` asks again; steps carry notes only, comments still come through `review_submit`.
 - A compare buffer's keys are the bare keys in `ygg-git-compare-mode-map`, not leader keys.
 
 ### Code
@@ -667,6 +674,7 @@ The main files, then the test files that map to them by name.
 - `lisp/ygg-git-compare-marks.el`
 - `lisp/ygg-git-compare-interdiff.el`
 - `lisp/ygg-git-compare-explain.el`
+- `lisp/ygg-git-compare-tour.el`
 
 Tests:
 
@@ -677,6 +685,7 @@ Tests:
 - `test/ygg-git-compare-interdiff-tests.el`
 - `test/ygg-git-compare-marks-tests.el`
 - `test/ygg-git-compare-tests.el`
+- `test/ygg-git-compare-tour-tests.el`
 
 ## Review threads and submit
 

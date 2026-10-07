@@ -73,13 +73,17 @@ or unreadable.  A key kept without a time is the oldest."
                                               (nreverse changed))
                                         "\n"))))))
 
+(defvar ygg-git-compare-marks--keys (make-hash-table :test #'eq :weakness 'key)
+  "Hunk section to its mark key.")
+
 (defun ygg-git-compare-marks--key (hunk)
   "HUNK's hash, numbered among the hunks of its file with the same changed lines."
-  (let* ((base (ygg-git-compare-marks--base hunk))
-         (twins (seq-count (lambda (h) (equal (ygg-git-compare-marks--base h) base))
-                           (seq-take-while (lambda (h) (not (eq h hunk)))
-                                           (ygg-git-compare-marks--hunks (oref hunk parent))))))
-    (if (zerop twins) base (format "%s#%d" base twins))))
+  (with-memoization (gethash hunk ygg-git-compare-marks--keys)
+    (let* ((base (ygg-git-compare-marks--base hunk))
+           (twins (seq-count (lambda (h) (equal (ygg-git-compare-marks--base h) base))
+                             (seq-take-while (lambda (h) (not (eq h hunk)))
+                                             (ygg-git-compare-marks--hunks (oref hunk parent))))))
+      (if (zerop twins) base (format "%s#%d" base twins)))))
 
 (defun ygg-git-compare-marks--hunks (&optional file)
   "Every hunk section of FILE's section, or of the buffer, in order."
