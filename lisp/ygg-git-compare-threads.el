@@ -19,6 +19,8 @@
 (require 'ygg-git-compare-comments)
 
 (defvar ygg-git-compare--b)
+(autoload 'ygg-git-compare--pr-info-refresh "ygg-git-compare-pr-info")
+(autoload 'ygg-git-compare--conversation-section "ygg-git-compare-pr-info")
 (declare-function ygg-markdown-fences-mode "ygg-markdown-fences" (lang))
 (declare-function ygg-markdown-fences--fontify "ygg-markdown-fences" (mode body))
 
@@ -360,6 +362,8 @@ author, age, replies and state, a reply indented under it with no state."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq ygg-git-compare--remote-rewrap-timer nil)
+      (when (ygg-git-compare--conversation-section)
+        (ygg-git-compare--pr-info-refresh buffer :conversation))
       (ignore-errors (ygg-git-compare--draw-comments)))))
 
 (defun ygg-git-compare--remote-watch-width ()
@@ -633,6 +637,7 @@ fetched, redrawing LIST's compare when they land."
                       (lambda (&rest _)
                         (when (buffer-live-p list)
                           (with-current-buffer list (setq ygg-git-compare--remote-waiting nil))
+                          (ygg-git-compare--pr-info-refresh list)
                           (ygg-git-compare--redraw-comments list))))))
     (when waiter (setq ygg-git-compare--remote-waiting t))
     (condition-case failure
@@ -671,17 +676,6 @@ is folded on every one, and a GitLab note made on another head outdated."
                              (list :replies (cdr (assoc (plist-get c :thread) counts))))
                         c)))
             comments)))
-
-(defun ygg-git-compare--remote-discussion (comments)
-  "COMMENTS led by a heading before the first of those on the review."
-  (let ((review (seq-filter (lambda (c) (and (eq (plist-get c :level) 'review) (not (plist-get c :notice))))
-                              comments)))
-    (if-let* ((first (car review)))
-        (append (seq-take-while (lambda (c) (not (eq c first))) comments)
-                (list (list :remote t :heading t :id "remote:discussion" :level 'review
-                            :text (format "Discussion (%d)" (length review))))
-                (member first comments))
-      comments)))
 
 (defun ygg-git-compare--remote-notice (text)
   (list :remote t :notice t :id "remote:notice" :level 'review :text text))
@@ -725,7 +719,7 @@ waits for nothing."
             (when-let* ((pr (ygg-git-compare--remote-pr)))
               (ygg-git-compare--remote-watch-width)
               (ygg-git-compare--remote-start list pr (ygg-git-compare--remote-key pr)))
-            (ygg-git-compare--remote-discussion (ygg-git-compare--remote-shown list t)))
+            (ygg-git-compare--remote-shown list t))
         (error
          (list (ygg-git-compare--remote-notice
                 (concat "forge comments: " (error-message-string err)))))))))
@@ -783,6 +777,7 @@ with BY-THREAD, the first comment of a thread, asked for among threads."
       (puthash (plist-get comment :thread)
                (if (plist-get comment :folded) 'open 'folded)
                ygg-git-compare--thread-folds))
+    (ygg-git-compare--pr-info-refresh list)
     (ygg-git-compare--redraw-comments list)))
 
 (defun ygg-git-compare-threads-toggle-resolved ()

@@ -1061,8 +1061,12 @@ PLAN is too large to wash, since --no-patch cancels what comes before it."
   "Whether untracked FILE is a repository of its own, listed as a directory."
   (string-suffix-p "/" file))
 
+(autoload 'ygg-git-compare--insert-pr-info "ygg-git-compare-pr-info")
+(autoload 'ygg-git-compare--checks-badge "ygg-git-compare-pr-info")
+
 (defun ygg-git-compare--sections-hook ()
-  (append (default-value 'magit-diff-sections-hook)
+  (append (list #'ygg-git-compare--insert-pr-info)
+          (default-value 'magit-diff-sections-hook)
           (list #'ygg-git-compare--insert-untracked)))
 
 (defun ygg-git-compare--display-in (window)
@@ -1090,6 +1094,9 @@ Nothing is selected and no window layout is remembered for magit's q."
    (concat "A: " (ygg-git-compare--side-label ygg-git-compare--a)
            " ↔ B: " (ygg-git-compare--side-label ygg-git-compare--b)
            (if (equal ygg-git-compare--dots "...") "  A...B" "  A..B")
+           (when-let* (((eq (car-safe ygg-git-compare--b-spec) 'pr))
+                       (badge (ygg-git-compare--checks-badge)))
+             (concat "  " badge))
            (when-let* ((note (or ygg-git-compare--note
                                  (plist-get ygg-git-compare--a :pending)
                                  (plist-get ygg-git-compare--b :pending)
@@ -1101,12 +1108,19 @@ Nothing is selected and no window layout is remembered for magit's q."
 
 (defun ygg-git-compare--fold ()
   "Fold every file to its heading, the diffstat and untracked files left open,
-point on the first file."
-  (magit-section-show-level-1-all)
+point on the first file.  The conversation and checks stay open unless they
+were made folded."
   (let* ((top (oref magit-root-section children))
+         (info (seq-remove (lambda (s) (oref s hidden))
+                           (seq-filter (lambda (s) (memq (oref s type)
+                                                         '(ygg-git-compare-conversation
+                                                           ygg-git-compare-checks)))
+                                       top)))
          (open (seq-filter (lambda (s) (memq (oref s type)
                                              '(diffstat ygg-git-compare-untracked)))
                            top)))
+    (magit-section-show-level-1-all)
+    (mapc #'magit-section-show info)
     (mapc #'magit-section-show open)
     (goto-char (if-let* ((file (seq-some (lambda (s) (car (oref s children))) open)))
                    (oref file start)
@@ -2041,6 +2055,8 @@ to the next and previous file, ] u and [ u to the next and previous
 unreviewed hunk, and
 ] t and [ t walk a tour an agent ordered, \\[ygg-git-compare-tour] asks for one and T leaves it.
 ] m and [ m (or \\[ygg-git-compare-comment-next] and \\[ygg-git-compare-comment-previous]) to the next and previous comment.
+On a pull request, Conversation and Checks come before the diff; on a check,
+RET and o open its log and y copies its address.
 \\[isearch-forward-regexp] searches the diff; \\[ygg-git-compare-search-next] and \\[ygg-git-compare-search-previous] repeat it forward and back.
 \\[ygg-git-compare-comment] comments on the line at point, the lines selected or the file.
 v, x or V select lines for a range comment; x, j and k extend it, Esc ends it.
@@ -2064,6 +2080,7 @@ refused: a compare is read-only.
                               #'ygg-git-compare--imenu-index)
              (remove-hook 'imenu-after-jump-hook #'ygg-git-compare--reveal t))
     (require 'ygg-git-compare-comments)
+    (require 'ygg-git-compare-pr-info)
     (add-function :override (local 'imenu-create-index-function)
                   #'ygg-git-compare--imenu-index)
     (add-hook 'imenu-after-jump-hook #'ygg-git-compare--reveal nil t)

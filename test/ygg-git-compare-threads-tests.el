@@ -68,10 +68,15 @@ a.txt and adds b.txt; main stays checked out.  The forge is never reached."
            (git "checkout" "-q" "main")
            (cl-letf (((symbol-function 'ygg-git-compare--forge-async)
                       (lambda (program args callback &optional timeout)
-                        (if ygg-git-compare-threads-tests--real
-                            (funcall async program args callback timeout)
-                          (push (list program args callback timeout)
-                                ygg-git-compare-threads-tests--spawned))))
+                        (cond (ygg-git-compare-threads-tests--real
+                               (funcall async program args callback timeout))
+                              ((member "statusCheckRollup" args)
+                               (funcall callback 0 "{\"statusCheckRollup\":[]}" ""))
+                              ((and (equal program "glab")
+                                    (string-match-p "merge_requests/[0-9]+\\'" (car (last args))))
+                               (funcall callback 0 "{}" ""))
+                              (t (push (list program args callback timeout)
+                                       ygg-git-compare-threads-tests--spawned)))))
                      ((symbol-function 'browse-url) (lambda (url &rest _) (setq browsed url))))
              ,@body))
        (dolist (b (buffer-list))
@@ -229,12 +234,20 @@ string, or (STATUS . WHAT-IT-SAID)."
                          (overlays-in (point-min) (point-max)))
              "\n"))
 
+(defun ygg-git-compare-threads-tests--conversation ()
+  (if-let* ((section (ygg-git-compare--conversation-section)))
+      (buffer-substring-no-properties (oref section start) (oref section end))
+    ""))
+
 (defun ygg-git-compare-threads-tests--line-above (text)
   "The diff line the overlay showing TEXT sits under."
   (let ((ov (seq-find (lambda (ov) (string-search text (or (overlay-get ov 'after-string) "")))
                       (overlays-in (point-min) (point-max)))))
     (save-excursion (goto-char (overlay-end ov))
                     (buffer-substring-no-properties (line-beginning-position) (line-end-position)))))
+
+(defun ygg-git-compare-threads-tests--notices ()
+  (concat (ygg-git-compare-threads-tests--conversation) (ygg-git-compare-threads-tests--top)))
 
 (defun ygg-git-compare-threads-tests--top ()
   (mapconcat (lambda (ov) (or (overlay-get ov 'before-string) ""))
@@ -312,8 +325,9 @@ string, or (STATUS . WHAT-IT-SAID)."
         (should (string-search "y ago" shown))
         (should (string-search "1 reply" shown))
         (should (string-search "resolved" shown))
-        (should (string-search "approved" shown))
-        (should (string-search "conversation note" (ygg-git-compare-threads-tests--top)))
+        (should (string-search "approved" (ygg-git-compare-threads-tests--conversation)))
+        (should (string-search "conversation note" (ygg-git-compare-threads-tests--conversation)))
+        (should-not (string-search "conversation note" shown))
         (should-not ygg-git-compare-threads-tests--spawned)))))
 
 (ert-deftest ygg-git-compare-threads-outdated-and-file-comments-list-under-their-file ()
@@ -377,7 +391,7 @@ string, or (STATUS . WHAT-IT-SAID)."
   (ygg-git-compare-threads-tests--with-repo root head
     (ygg-git-compare-threads-tests--with-compare head 'github
       (ygg-git-compare-threads-tests--answer (lambda (_) '(1 . "HTTP 404: Not Found\nmore")))
-      (let ((top (ygg-git-compare-threads-tests--top)))
+      (let ((top (ygg-git-compare-threads-tests--notices)))
         (should (string-search "forge comments: HTTP 404: Not Found" top))
         (should-not (string-search "more" top))))))
 
@@ -618,7 +632,7 @@ string, or (STATUS . WHAT-IT-SAID)."
         (should (memq 'warning (ygg-git-compare-threads-tests--faces
                                 shown (+ 2 (string-search "· state unknown" shown))))))
       (should (string-search "resolved state unknown: graphql down"
-                             (ygg-git-compare-threads-tests--top)))
+                             (ygg-git-compare-threads-tests--notices)))
       (ygg-git-compare-threads-toggle-resolved)
       (should (string-search "alice" (ygg-git-compare-threads-tests--shown))))))
 
@@ -681,7 +695,7 @@ string, or (STATUS . WHAT-IT-SAID)."
         (dolist (request spawned) (funcall (nth 2 request) 'timeout "" "")))
       (should (zerop (hash-table-count ygg-git-compare--inflight)))
       (should-not ygg-git-compare--remote-waiting)
-      (should (string-search "forge comments: gh timed out" (ygg-git-compare-threads-tests--top)))
+      (should (string-search "forge comments: gh timed out" (ygg-git-compare-threads-tests--notices)))
       (ygg-git-compare--draw-comments)
       (should-not ygg-git-compare-threads-tests--spawned)
       (let ((ygg-git-compare-forge-retry -1))
@@ -700,7 +714,7 @@ string, or (STATUS . WHAT-IT-SAID)."
                         (< (float-time) deadline))
               (accept-process-output nil 0.05)))
           (should (zerop (hash-table-count ygg-git-compare--inflight)))
-          (should (string-search "timed out" (ygg-git-compare-threads-tests--top))))))))
+          (should (string-search "timed out" (ygg-git-compare-threads-tests--notices))))))))
 
 ;;; Rendering
 
@@ -857,16 +871,17 @@ string, or (STATUS . WHAT-IT-SAID)."
       (call-interactively (key-binding (kbd "H")))
       (should (string-search "alice" (ygg-git-compare-threads-tests--shown))))))
 
-(ert-deftest ygg-git-compare-threads-discussion-section-is-chronological ()
+(ert-deftest ygg-git-compare-threads-conversation-section-is-chronological ()
   (ygg-git-compare-threads-tests--with-repo root head
     (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
     (ygg-git-compare-threads-tests--with-compare head 'github
-      (let ((top (ygg-git-compare-threads-tests--top)))
-        (should (string-search "Discussion (2)" top))
-        (should (< (string-search "Discussion (2)" top) (string-search "frank" top)))
-        (should (< (string-search "frank" top) (string-search "hank" top)))
-        (should (string-search "approved" top))
-        (should (string-search "ship it" top))))))
+      (let ((text (ygg-git-compare-threads-tests--conversation)))
+        (should (string-search "Conversation (2)" text))
+        (should (< (string-search "Conversation (2)" text) (string-search "frank" text)))
+        (should (< (string-search "frank" text) (string-search "hank" text)))
+        (should (string-search "approved" text))
+        (should (string-search "ship it" text))
+        (should-not (string-search "frank" (ygg-git-compare-threads-tests--top)))))))
 
 (ert-deftest ygg-git-compare-threads-draft-follows-the-thread-it-replies-to ()
   (ygg-git-compare-threads-tests--with-repo root head

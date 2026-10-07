@@ -597,6 +597,7 @@ those of the forge.")
 (declare-function ygg-git-compare--remote-comments "ygg-git-compare-threads" (list))
 (declare-function ygg-git-compare--remote-block "ygg-git-compare-threads" (comment))
 (autoload 'ygg-git-compare--remote-comments "ygg-git-compare-threads")
+(autoload 'ygg-git-compare--conversation-spans "ygg-git-compare-pr-info")
 (autoload 'ygg-git-compare--remote-block "ygg-git-compare-threads")
 (autoload 'ygg-git-compare-threads-toggle-resolved "ygg-git-compare-threads" nil t)
 (autoload 'ygg-git-compare-threads-open "ygg-git-compare-threads" nil t)
@@ -708,6 +709,11 @@ it has no place for at the top of the diff of every file."
               (comments (append (ygg-git-compare--remote-comments list)
                                 (reverse (buffer-local-value 'ygg-git-compare--comments list))))
               ((bound-and-true-p magit-root-section)))
+    (when-let* ((spans (and (eq (current-buffer) list)
+                            (ygg-git-compare--conversation-spans))))
+      (pcase-dolist (`(,id ,beg ,end) spans)
+        (overlay-put (make-overlay beg end) 'ygg-git-compare-comments (list id)))
+      (setq comments (seq-remove (lambda (c) (assoc (plist-get c :id) spans)) comments)))
     (let ((ygg-git-compare--mark-drafts
            (seq-find (lambda (c) (and (plist-get c :remote) (not (plist-get c :notice))))
                      comments))
@@ -743,11 +749,16 @@ it has no place for at the top of the diff of every file."
           (overlay-put ov 'after-string
                        (concat "\n" (ygg-git-compare--shown-text shown)))))
       (when (or stale top)
-        (let ((ov (make-overlay (point-min)
-                                (if (seq-some #'ygg-git-compare--remote-id-p
-                                              (mapcar #'car top))
-                                    (save-excursion (goto-char (point-min)) (line-end-position))
-                                  (point-min)))))
+        (let* ((first (seq-find (lambda (s)
+                                  (not (memq (oref s type)
+                                             '(ygg-git-compare-conversation ygg-git-compare-checks))))
+                                (oref magit-root-section children)))
+               (begin (if first (marker-position (oref first start)) (point-min)))
+               (ov (make-overlay begin
+                                 (if (seq-some #'ygg-git-compare--remote-id-p
+                                               (mapcar #'car top))
+                                     (save-excursion (goto-char begin) (line-end-position))
+                                   begin))))
           (overlay-put ov 'ygg-git-compare-comments (mapcar #'car (append stale top)))
           (overlay-put ov 'before-string
                        (concat (when stale

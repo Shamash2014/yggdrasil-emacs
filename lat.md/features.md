@@ -750,6 +750,8 @@ The forge's comments on a pull request shown inside its compare, and sending you
 Thread display and replies, submit transient, markdown export.
 
 - Threads: open, copy, reply, fold, hide resolved.
+- Conversation: a pull request's top-level comments and review summaries (with approved, changes requested or commented) in a foldable section ahead of the diff; inline threads stay under their diff lines. Folded from the start when it holds more than `ygg-git-compare-conversation-fold-over` (5) comments.
+- Checks: each CI check or job with state (failed, cancelled, running, pending, passed, skipped in that order), duration and workflow or stage, in a foldable section after the Conversation; the header line carries a badge such as `CI ✓ 12 · ✗ 1 · ! 1 · ● 2`, where `! N` counts failures the pipeline allows. GitHub reads `gh pr view --json statusCheckRollup`; GitLab reads the merge request's head pipeline and its jobs.
 - Submit transient: comment, approve, request changes, draft, to an agent.
 - Export the review as markdown to the kill ring, a buffer or a file.
 
@@ -762,6 +764,9 @@ Both are reached from a compare buffer.
 - `; H` — hide or show resolved threads (`ygg-git-compare-threads-toggle-resolved`)
 - `r` — reply to the thread on this line, by `ygg-git-compare-threads-reply`
 - `TAB` — fold the thread, by `ygg-git-compare-threads-toggle-fold`
+- `RET` — open the log of the check on this row in the browser (`ygg-git-compare-check-open`)
+- `o` — open the log of the check on this row in the browser (`ygg-git-compare-check-open`)
+- `y` — copy the address of the check on this row (`ygg-git-compare-check-copy`)
 
 ### Driving it
 
@@ -770,12 +775,16 @@ Results below are read from code, not driven live (unverified).
 1. Open a pull request compare with `SPC g r`; the forge's threads appear under the lines they anchor to.
 2. `r` on a thread replies; `TAB` folds it.
 3. After commenting, `&` opens the submit menu: `c` comment, `a` approve, `r` request changes, `d` draft, `@` to an agent.
+4. The header shows the CI badge once the forge answers; the Checks section lists the jobs, failed first, and `RET` on one opens its log. `g` fetches the comments and checks again.
 
 ### Gotchas
 
 What the code shows.
 
-- The thread keys `o`, `y`, `r`, `TAB` act on thread rows, not on diff lines.
+- The thread keys `o`, `y`, `r`, `TAB` act on thread rows, not on diff lines; on a Checks row `RET`, `o` and `y` act on the check.
+- Checks are kept per head commit for `ygg-git-compare-checks-ttl` (300) seconds, or `ygg-git-compare-checks-running-ttl` (30) while any is running; while the compare is on screen and a check is running it asks again every 30 seconds, and stops when none is running, the buffer is hidden (resuming when it shows again) or three asks in a row failed (until `g`).
+- A cancelled check counts as failing in the badge, as the merge row counts it; skipped checks are listed but not counted. A pull request with no checks has no section; a failed lookup shows one error row and `CI ?`. A Checks section where every check passed starts folded.
+- Conversation is real text in a section, so `TAB` on a comment folds its thread and `TAB` on the heading folds the section; folding a thread draws the section again.
 - The submit transient has a `-p` argument; what it sets is not read here (unverified).
 
 ### Code
@@ -783,11 +792,13 @@ What the code shows.
 The main files, then the test files that map to them by name.
 
 - `lisp/ygg-git-compare-threads.el`
+- `lisp/ygg-git-compare-pr-info.el`
 - `lisp/ygg-git-compare-submit.el`
 
 Tests:
 
 - `test/ygg-git-compare-post-tests.el`
+- `test/ygg-git-compare-pr-info-tests.el`
 - `test/ygg-git-compare-submit-tests.el`
 - `test/ygg-git-compare-threads-tests.el`
 
