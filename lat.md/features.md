@@ -400,6 +400,7 @@ Skill install and uninstall, skill index, config homes, presets.
 
 Skills and presets sit under SPC a.
 
+- `SPC a m` — repo map now, and a feature map agent session (`ygg-agent-maps-generate`)
 - `SPC a s` — install skills (`ygg-agent-skill-install`)
 - `SPC a S` — uninstall a skill (`ygg-agent-skill-uninstall`)
 - `SPC a U` — new preset (`ygg-preset-new`)
@@ -975,6 +976,7 @@ Repo map, feature facts, feature summary.
 
 These are command-line tools, run from the repo root.
 
+- `SPC a m` — regenerate the repo map now and start an agent session that writes or refreshes `lat.md/features.md` with create-verification-skill or maintain-verification-skill; the session is skipped while another agent is live in the project, and the filter install is asked first when `latgen` is missing (`ygg-agent-maps-generate`)
 - `M-x ygg-ice-lat-search` — search the map from Emacs (`ygg-ice-lat-search`)
 
 ### Driving it
@@ -1002,6 +1004,7 @@ The main files, then the test files that map to them by name.
 - `etc/ice/ice-repo-map`
 - `etc/ice/ice-core.mjs`
 - `etc/ice/ice-latgen-filter`
+- `lisp/ygg-agent-maps.el`
 - `etc/ice/ice-feature-facts`
 - `etc/ice/ice-feature-summary`
 - `test/ice-repo-map-tests.el`
@@ -1009,6 +1012,7 @@ The main files, then the test files that map to them by name.
 Tests:
 
 - `test/ice-feature-map-tests.el`
+- `test/ygg-agent-maps-tests.el`
 
 ## Markdown
 

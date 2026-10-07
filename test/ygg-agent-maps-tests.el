@@ -15,12 +15,13 @@
 (defvar ygg-agent-maps-tests--hang nil)
 (defvar ygg-agent-maps-tests--held nil)
 (defvar ygg-agent-maps-tests--attr t)
+(defvar ygg-agent-maps-tests--toplevel t)
 (defvar ygg-agent-maps-tests--hold-summary nil)
 (defvar ygg-agent-maps-tests--held-summary nil)
 
 (defconst ygg-agent-maps-tests--marker "<!-- ice-repo-map:generated -->")
 
-(defun ygg-agent-maps-tests--runner (_dir argv done)
+(defun ygg-agent-maps-tests--runner (dir argv done &optional _merge)
   (push argv ygg-agent-maps-tests--calls)
   (if ygg-agent-maps-tests--hang
       (push done ygg-agent-maps-tests--held)
@@ -32,6 +33,12 @@
                                        ygg-agent-maps-tests--dirty)
                                       (ygg-agent-maps-tests--dirty
                                        "1 .M N... 100644 100644 100644 a b x\0")))))
+       ((and (equal cmd "git") (member "rev-parse" argv))
+        (cond ((stringp ygg-agent-maps-tests--toplevel)
+               (funcall done 0 (concat ygg-agent-maps-tests--toplevel "\n")))
+              (ygg-agent-maps-tests--toplevel
+               (funcall done 0 (concat (directory-file-name dir) "\n")))
+              (t (funcall done 128 ""))))
        ((and (equal cmd "git") (member "check-attr" argv))
         (if ygg-agent-maps-tests--attr
             (funcall done 0 "lat.md/lat.md: filter: latgen\n")
@@ -74,6 +81,7 @@
           (ygg-agent-maps-tests--hang nil)
           (ygg-agent-maps-tests--held nil)
           (ygg-agent-maps-tests--attr t)
+          (ygg-agent-maps-tests--toplevel t)
           (ygg-agent-maps-tests--hold-summary nil)
           (ygg-agent-maps-tests--held-summary nil))
      (unwind-protect
@@ -501,6 +509,158 @@
             (aob-remove-session s)))
       (delete-directory root t)
       (delete-directory tools t))))
+
+(defvar ygg-agent-maps-tests--spawned nil)
+
+(defmacro ygg-agent-maps-tests--stubbed (&rest body)
+  `(let ((ygg-agent-maps-tests--spawned nil)
+         (messages nil))
+     (cl-letf (((symbol-function 'aob-acp-spawn)
+                (lambda (agent prompt &rest _)
+                  (push (list agent prompt) ygg-agent-maps-tests--spawned)
+                  'session))
+               ((symbol-function 'message)
+                (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+       ,@body)))
+
+(ert-deftest ygg-agent-maps-generate-forces-when-fresh ()
+  (ygg-agent-maps-tests--with '("features.md")
+    (ygg-agent-maps-tests--stubbed
+     (ygg-agent-maps-refresh root)
+     (should (= 1 (ygg-agent-maps-tests--calls-of "ice-repo-map")))
+     (ygg-agent-maps-generate root)
+     (should (= 2 (ygg-agent-maps-tests--calls-of "ice-repo-map")))
+     (should (= 2 (ygg-agent-maps-tests--calls-of "ice-feature-summary")))
+     (should (= 2 (ygg-agent-maps-tests--calls-of "ice-repo-map" "--write")))
+     (should (cl-some (lambda (m) (string-match-p "repo map ~.* tokens.*full map written" m))
+                      messages)))))
+
+(ert-deftest ygg-agent-maps-generate-without-filter-declined-writes-condensed-only ()
+  (ygg-agent-maps-tests--with '("features.md")
+    (ygg-agent-maps-tests--stubbed
+     (let ((ygg-agent-maps-tests--filter nil) asked)
+       (set-file-modes (expand-file-name "ice-latgen-filter" tools) #o755)
+       (cl-letf (((symbol-function 'y-or-n-p)
+                  (lambda (prompt) (setq asked prompt) nil)))
+         (ygg-agent-maps-generate root))
+       (should (string-match-p "\.gitattributes" asked))
+       (should (string-match-p "filter\.latgen" asked))
+       (should (= 1 (ygg-agent-maps-tests--calls-of "ice-repo-map")))
+       (should (= 0 (ygg-agent-maps-tests--calls-of "ice-repo-map" "--write")))
+       (should (cl-some (lambda (m) (string-match-p "not written: git filter latgen" m))
+                        messages))))))
+
+(ert-deftest ygg-agent-maps-generate-without-filter-accepted-installs ()
+  (ygg-agent-maps-tests--with '("features.md")
+    (ygg-agent-maps-tests--stubbed
+     (let ((ygg-agent-maps-tests--filter nil) installed)
+       (set-file-modes (expand-file-name "ice-latgen-filter" tools) #o755)
+       (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
+                 ((symbol-function 'ygg-agent-maps--run)
+                  (lambda (dir argv done &optional merge)
+                    (if (equal (file-name-nondirectory (car argv)) "ice-latgen-filter")
+                        (progn (setq installed t
+                                     ygg-agent-maps-tests--filter t)
+                               (funcall done 0 "set\n"))
+                      (ygg-agent-maps-tests--runner dir argv done merge)))))
+         (ygg-agent-maps-generate root))
+       (should installed)
+       (should (= 1 (ygg-agent-maps-tests--calls-of "ice-repo-map" "--write")))))))
+
+(ert-deftest ygg-agent-maps-generate-starts-feature-session-by-features-md ()
+  (ygg-agent-maps-tests--with '("features.md")
+    (ygg-agent-maps-tests--stubbed
+     (ygg-agent-maps-generate root)
+     (should (string-match-p "maintain-verification-skill"
+                             (cadr (car ygg-agent-maps-tests--spawned))))))
+  (ygg-agent-maps-tests--with '()
+    (ygg-agent-maps-tests--stubbed
+     (ygg-agent-maps-generate root)
+     (should (string-match-p "create-verification-skill"
+                             (cadr (car ygg-agent-maps-tests--spawned)))))))
+
+(ert-deftest ygg-agent-maps-generate-live-session-skips-agent-only ()
+  (ygg-agent-maps-tests--with '("features.md")
+    (ygg-agent-maps-tests--stubbed
+     (let* ((s (ygg-agent-maps-tests--session root))
+            (before (ygg-agent-maps-tests--calls-of "ice-repo-map")))
+       (ygg-agent-maps-generate root)
+       (should-not ygg-agent-maps-tests--spawned)
+       (should (= (1+ before) (ygg-agent-maps-tests--calls-of "ice-repo-map")))
+       (should (cl-some (lambda (m) (string-match-p "skipped: 1 live" m)) messages))
+       (should-error (ygg-agent-maps-features root) :type 'user-error)
+       (aob-remove-session s)))))
+
+(ert-deftest ygg-agent-maps-generate-asks-before-the-feature-agent-starts ()
+  (ygg-agent-maps-tests--with '("features.md")
+    (let ((ygg-agent-maps-tests--filter nil) order)
+      (set-file-modes (expand-file-name "ice-latgen-filter" tools) #o755)
+      (cl-letf (((symbol-function 'aob-acp-spawn)
+                 (lambda (&rest _) (push 'spawn order) 'session))
+                ((symbol-function 'message) #'ignore)
+                ((symbol-function 'y-or-n-p) (lambda (_) (push 'ask order) nil)))
+        (ygg-agent-maps-generate root))
+      (should (equal '(ask spawn) (reverse order))))))
+
+(ert-deftest ygg-agent-maps-generate-install-counts-as-pending-and-reports-stderr ()
+  (ygg-agent-maps-tests--with '("features.md")
+    (ygg-agent-maps-tests--stubbed
+     (let ((ygg-agent-maps-tests--filter nil) during)
+       (set-file-modes (expand-file-name "ice-latgen-filter" tools) #o755)
+       (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
+                 ((symbol-function 'ygg-agent-maps--run)
+                  (lambda (dir argv done &optional merge)
+                    (if (equal (file-name-nondirectory (car argv)) "ice-latgen-filter")
+                        (progn
+                          (setq during (plist-get (ygg-agent-maps--entry root) :pending))
+                          (should merge)
+                          (funcall done 1 "boom: no .git\nmore\n"))
+                      (ygg-agent-maps-tests--runner dir argv done merge)))))
+         (ygg-agent-maps-generate root))
+       (should (> during 0))
+       (should (cl-some (lambda (m) (string-match-p "install failed: boom: no \\.git$" m))
+                        messages))))))
+
+(ert-deftest ygg-agent-maps-generate-no-install-offer-outside-git-toplevel ()
+  (dolist (case '((nil . "not a git repo") ("/elsewhere" . "not at the git toplevel")))
+    (ygg-agent-maps-tests--with '("features.md")
+      (ygg-agent-maps-tests--stubbed
+       (let ((ygg-agent-maps-tests--filter nil)
+             (ygg-agent-maps-tests--toplevel (car case)) asked)
+         (set-file-modes (expand-file-name "ice-latgen-filter" tools) #o755)
+         (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) (setq asked t) t)))
+           (ygg-agent-maps-generate root))
+         (should-not asked)
+         (should (cl-some (lambda (m) (string-match-p (regexp-quote (cdr case)) m))
+                          messages)))))))
+
+(ert-deftest ygg-agent-maps-features-works-in-the-root-never-a-worktree ()
+  (ygg-agent-maps-tests--with '("features.md")
+    (let (seen)
+      (cl-letf (((symbol-function 'aob-acp-spawn)
+                 (lambda (agent prompt &rest _)
+                   (setq seen (list (aob-acp--project)
+                                    (plist-get (aob-acp-preset agent) :worktree)
+                                    (plist-get (aob-acp-preset agent) :mode)
+                                    aob-acp-start-worktree
+                                    prompt))
+                   'session))
+                (aob-acp-start-worktree '("/elsewhere" . "br"))
+                (aob-acp-presets (list (cons aob-acp-default-agent
+                                             '(:agent "claude" :worktree t :mode "bypass")))))
+        (ygg-agent-maps-features root))
+      (should (equal (file-truename root) (file-truename (car seen))))
+      (should-not (nth 1 seen))
+      (should (equal "bypass" (nth 2 seen)))
+      (should-not (nth 3 seen))
+      (should (string-match-p "not available" (nth 4 seen)))
+      (should (string-match-p "verify each feature's keys and commands" (nth 4 seen)))
+      (should-not (string-match-p "live" (nth 4 seen))))))
+
+(ert-deftest ygg-agent-maps-works-without-ice ()
+  (should-not (featurep 'ygg-ice))
+  (should (commandp 'ygg-agent-maps-generate))
+  (should (commandp 'ygg-agent-maps-features)))
 
 (provide 'ygg-agent-maps-tests)
 ;;; ygg-agent-maps-tests.el ends here

@@ -8,6 +8,14 @@
 (declare-function aob-session-project "aob")
 (declare-function aob-session-dir "aob")
 (declare-function aob-session-backend "aob")
+(declare-function project-root "project")
+(declare-function aob-live-sessions "aob")
+(declare-function aob-acp-spawn "aob-acp")
+(declare-function aob-acp-preset "aob-acp")
+(defvar aob-acp-default-agent)
+(defvar aob-acp-start-dir)
+(defvar aob-acp-start-worktree)
+(defvar aob-acp-presets)
 (defvar aob-acp-before-first-prompt-functions)
 (defvar aob-state-change-hook)
 (defvar aob-session-created-hook)
@@ -76,15 +84,17 @@
              (executable-find ygg-agent-maps-interpreter))
          file)))
 
-(defun ygg-agent-maps--run (dir argv done)
+(defun ygg-agent-maps--run (dir argv done &optional merge-err)
   "Run ARGV in DIR; DONE gets the exit status and stdout when it ends.
-Returns the process, or nil when none started."
+MERGE-ERR puts stderr into that text.  Returns the process, or nil when
+none started."
   (let* ((default-directory dir)
          (out (generate-new-buffer " *ygg-agent-maps*"))
          (err (generate-new-buffer " *ygg-agent-maps-err*")))
     (condition-case nil
         (make-process
-         :name "ygg-agent-maps" :command argv :buffer out :stderr err
+         :name "ygg-agent-maps" :command argv :buffer out
+         :stderr (if merge-err out err)
          :noquery t :connection-type 'pipe
          :sentinel
          (lambda (proc _event)
@@ -105,14 +115,19 @@ Returns the process, or nil when none started."
 (defun ygg-agent-maps--bump (entry n)
   (plist-put entry :pending (+ n (plist-get entry :pending))))
 
-(defun ygg-agent-maps--spawn (root argv done)
+(defun ygg-agent-maps--spawn (root argv done &optional merge-err)
   (let ((entry (ygg-agent-maps--entry root)))
     (ygg-agent-maps--bump entry 1)
-    (let ((proc (ygg-agent-maps--run
+    (let ((proc (apply #'ygg-agent-maps--run
                  root argv
                  (lambda (status out)
                    (unwind-protect (funcall done status out)
-                     (ygg-agent-maps--bump entry -1))))))
+                     (ygg-agent-maps--bump entry -1)
+                     (when-let* ((_ (zerop (plist-get entry :pending)))
+                                 (idle (plist-get entry :on-idle)))
+                       (plist-put entry :on-idle nil)
+                       (funcall idle))))
+                 (and merge-err '(t)))))
       (when (processp proc)
         (plist-put entry :procs (cons proc (plist-get entry :procs)))))))
 
@@ -181,32 +196,42 @@ paths they list."
         (when (re-search-forward "^marker='\\(.+\\)'$" nil t)
           (match-string 1))))))
 
-(defun ygg-agent-maps--write (root entry tool key)
-  (when (and tool
-             (file-directory-p (expand-file-name "lat.md" root))
-             (not (equal key (plist-get entry :write-key))))
-    (ygg-agent-maps--spawn
-     root (list "git" "-C" (directory-file-name root) "config" "filter.latgen.clean")
-     (lambda (status out)
-       (when-let* ((marker (ygg-agent-maps--marker))
-                   (_ (and (eql status 0) (string-search marker out))))
+(defun ygg-agent-maps--filter-ok (root done)
+  "Call DONE with non-nil when ROOT's latgen filter is installed and applied."
+  (ygg-agent-maps--spawn
+   root (list "git" "-C" (directory-file-name root) "config" "filter.latgen.clean")
+   (lambda (status out)
+     (if-let* ((marker (ygg-agent-maps--marker))
+               (_ (and (eql status 0) (string-search marker out))))
          (ygg-agent-maps--spawn
           root (list "git" "-C" (directory-file-name root)
                      "check-attr" "filter" "--" "lat.md/lat.md")
           (lambda (status out)
-            (when (and (eql status 0)
-                       (equal (string-trim out) "lat.md/lat.md: filter: latgen"))
-              (plist-put entry :write-key key)
-              (ygg-agent-maps--spawn
-               root (list tool "--root" (directory-file-name root) "--write")
-               #'ignore)))))))))
+            (funcall done (and (eql status 0)
+                               (equal (string-trim out) "lat.md/lat.md: filter: latgen")))))
+       (funcall done nil)))))
 
-(defun ygg-agent-maps-refresh (root)
-  "Regenerate what is stale for ROOT in the background; at most one run at a time."
+(defun ygg-agent-maps--write (root entry tool key)
+  (when (and tool
+             (file-directory-p (expand-file-name "lat.md" root))
+             (not (equal key (plist-get entry :write-key))))
+    (ygg-agent-maps--filter-ok
+     root
+     (lambda (ok)
+       (when ok
+         (plist-put entry :write-key key)
+         (ygg-agent-maps--spawn
+          root (list tool "--root" (directory-file-name root) "--write")
+          (lambda (status _out)
+            (plist-put entry :written (eql status 0)))))))))
+
+(defun ygg-agent-maps-refresh (root &optional force)
+  "Regenerate what is stale for ROOT in the background; at most one run at a time.
+FORCE starts the run even while another call's own processes are pending."
   (unless (file-remote-p root)
     (let* ((root (ygg-agent-maps--root root))
            (entry (ygg-agent-maps--entry root)))
-      (when (zerop (plist-get entry :pending))
+      (when (or force (zerop (plist-get entry :pending)))
         (ygg-agent-maps--spawn
          root (list "git" "-C" (directory-file-name root)
                     "status" "--porcelain=v2" "--branch" "-uno" "-z")
@@ -362,6 +387,148 @@ still to come. POINTER-ONLY keeps just the lat pointer line."
       (aob-session-put s :maps-sent (append (aob-session-ref s :maps-flight)
                                             (aob-session-ref s :maps-sent)))
       (aob-session-put s :maps-pending (aob-session-ref s :maps-more)))))
+
+(defun ygg-agent-maps--default-root ()
+  (or (and (fboundp 'project-current)
+           (when-let* ((project (project-current)))
+             (project-root project)))
+      (locate-dominating-file default-directory ".git")
+      (user-error "No project here")))
+
+(defun ygg-agent-maps--tokens (text)
+  (ceiling (length text) 2.5))
+
+(defun ygg-agent-maps--live-sessions-in (root)
+  (let ((root (file-truename (file-name-as-directory (expand-file-name root)))))
+    (and (fboundp 'aob-live-sessions)
+         (seq-filter
+          (lambda (s)
+            (when-let* ((dir (ygg-agent-maps--project s)))
+              (string-prefix-p
+               root (file-truename (file-name-as-directory (expand-file-name dir))))))
+          (aob-live-sessions)))))
+
+(defun ygg-agent-maps--report (root entry filter-ok why)
+  (let* ((map (plist-get entry :map))
+         (summary (plist-get entry :summary))
+         (name (abbreviate-file-name (directory-file-name root)))
+         (parts
+          (delq nil
+                (list (if map
+                          (format "repo map ~%d tokens" (ygg-agent-maps--tokens map))
+                        "repo map not generated")
+                      (and summary
+                           (format "feature summary ~%d tokens"
+                                   (ygg-agent-maps--tokens summary)))
+                      (cond ((plist-get entry :written)
+                             "full map written to lat.md/repo-map.md")
+                            ((not (file-directory-p (expand-file-name "lat.md" root)))
+                             "full map not written: no lat.md folder")
+                            (why (format "full map not written: %s" why))
+                            ((not filter-ok)
+                             "full map not written: git filter latgen not installed")
+                            (t "full map not written"))))))
+    (message "maps %s: %s" name (string-join parts "; "))))
+
+(defun ygg-agent-maps--regenerate (root filter-ok &optional why)
+  (let ((entry (ygg-agent-maps--entry root)))
+    (dolist (key '(:map-key :sum-key :write-key :written)) (plist-put entry key nil))
+    (plist-put entry :on-idle (lambda () (ygg-agent-maps--report root entry filter-ok why)))
+    (ygg-agent-maps-refresh root t)))
+
+(defun ygg-agent-maps--install (root script proceed)
+  (ygg-agent-maps--spawn
+   root (list script (directory-file-name root))
+   (lambda (status out)
+     (let ((line (car (split-string (string-trim out) "\n"))))
+       (message "latgen filter %s"
+                (cond ((eql status 0) (string-trim out))
+                      ((and line (not (string-empty-p line)))
+                       (format "install failed: %s" line))
+                      (t "install failed")))
+       (funcall proceed (eql status 0))))
+   t))
+
+(defun ygg-agent-maps--offer-install (root script proceed)
+  "Offer the latgen filter for ROOT when it is the git toplevel, else say why not.
+PROCEED gets whether the filter is in place and, if not, why."
+  (ygg-agent-maps--spawn
+   root (list "git" "-C" (directory-file-name root) "rev-parse" "--show-toplevel")
+   (lambda (status out)
+     (let ((top (and (eql status 0) (string-trim out))))
+       (cond
+        ((not top) (funcall proceed nil "not a git repo"))
+        ((not (equal (file-name-as-directory (file-truename top))
+                     (file-name-as-directory (file-truename root))))
+         (funcall proceed nil "lat.md is not at the git toplevel"))
+        ((y-or-n-p
+          (format "Install the latgen git filter in %s so the full map can be written? It sets filter.latgen.clean and .smudge in .git/config and appends `lat.md/lat.md filter=latgen' to .gitattributes. "
+                  (abbreviate-file-name (directory-file-name root))))
+         (ygg-agent-maps--install root script proceed))
+        (t (funcall proceed nil)))))))
+
+(defun ygg-agent-maps--start-feature-agent (root)
+  (if-let* ((live (ygg-agent-maps--live-sessions-in root)))
+      (message "Feature map session skipped: %d live agent session%s in %s"
+               (length live) (if (cdr live) "s" "")
+               (abbreviate-file-name (directory-file-name root)))
+    (ygg-agent-maps-features root)))
+
+;;;###autoload
+(defun ygg-agent-maps-generate (&optional root)
+  "Regenerate ROOT's repo map now and start the feature map agent session.
+The repo map is rebuilt in the background even when not stale; without the
+latgen git filter the full map is not written, and the filter is offered
+first.  Only after that is settled does the feature agent start, unless
+another agent is live in ROOT.  The feature summary follows features.md the
+next time the maps refresh."
+  (interactive)
+  (let ((root (ygg-agent-maps--root (or root (ygg-agent-maps--default-root)))))
+    (when (file-remote-p root) (user-error "Maps are not generated over TRAMP"))
+    (unless (zerop (plist-get (ygg-agent-maps--entry root) :pending))
+      (user-error "Maps are already generating for %s" root))
+    (let ((script (expand-file-name "ice-latgen-filter" ygg-agent-maps-tools-dir))
+          (lat (file-directory-p (expand-file-name "lat.md" root))))
+      (ygg-agent-maps--filter-ok
+       root
+       (lambda (ok)
+         (let ((proceed (lambda (ok &optional why)
+                          (ygg-agent-maps--regenerate root ok why)
+                          (ygg-agent-maps--start-feature-agent root))))
+           (if (or ok (not lat) (not (file-executable-p script)))
+               (funcall proceed ok)
+             (ygg-agent-maps--offer-install root script proceed))))))))
+
+(defun ygg-agent-maps--in-root-preset (agent)
+  (let ((spec (copy-sequence (aob-acp-preset agent))))
+    (cons agent (cl-loop for (k v) on spec by #'cddr
+                         unless (eq k :worktree) append (list k v)))))
+
+(defun ygg-agent-maps-features (&optional root)
+  "Start an agent session that writes or refreshes ROOT's lat.md/features.md.
+Uses create-verification-skill when the file is missing, else
+maintain-verification-skill.  Works in ROOT itself, never a new worktree.
+Refused while an agent session is live in ROOT."
+  (interactive)
+  (let ((root (ygg-agent-maps--root (or root (ygg-agent-maps--default-root)))))
+    (when (file-remote-p root) (user-error "Maps are not generated over TRAMP"))
+    (when-let* ((live (ygg-agent-maps--live-sessions-in root)))
+      (user-error "Feature map skipped in %s: %d live agent session%s there"
+                  (abbreviate-file-name (directory-file-name root))
+                  (length live) (if (cdr live) "s" "")))
+    (require 'aob-acp)
+    (let* ((exists (file-exists-p (expand-file-name "lat.md/features.md" root)))
+           (skill (if exists "maintain-verification-skill" "create-verification-skill"))
+           (verb (if exists "refresh" "write"))
+           (aob-acp-start-dir root)
+           (aob-acp-start-worktree nil)
+           (aob-acp-presets (cons (ygg-agent-maps--in-root-preset aob-acp-default-agent)
+                                  aob-acp-presets))
+           (prompt (format "Use the %s skill to %s lat.md/features.md from source. If that skill is not available, %s lat.md/features.md from source yourself, following the format of %s. Then verify each feature's keys and commands exist in the source, and correct any that do not."
+                           skill verb verb
+                           (if exists "the existing file" "the other notes in lat.md and lat.md/lat.md"))))
+      (or (aob-acp-spawn aob-acp-default-agent prompt nil "feature map")
+          (user-error "Could not start %s" aob-acp-default-agent)))))
 
 (with-eval-after-load 'aob-acp
   (add-hook 'aob-acp-before-first-prompt-functions #'ygg-agent-maps-on-ready)

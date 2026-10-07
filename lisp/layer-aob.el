@@ -2066,7 +2066,8 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "u" #'ygg-preset-edit :label "edit a preset"
   "U" #'ygg-preset-new :label "new preset"
   "s" #'ygg-agent-skill-install :label "install skills"
-  "S" #'ygg-agent-skill-uninstall :label "uninstall a skill")
+  "S" #'ygg-agent-skill-uninstall :label "uninstall a skill"
+  "m" #'ygg-agent-maps-generate :label "repo + feature map")
 
 (yggdrasil-define-keys 'ygg-leader-acp-map
   ;; c is the way in: agent, project, model, then the first turn
