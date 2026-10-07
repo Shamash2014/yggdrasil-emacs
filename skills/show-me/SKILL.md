@@ -1,6 +1,6 @@
 ---
 name: show-me
-description: Help the user understand the current topic visually with concise diagrams, code-shape sketches, and focused HTML artifacts.
+description: Help the user understand the current topic visually with concise diagrams, code-shape sketches, and focused HTML artifacts; writes plans as .aob/plans markdown.
 ---
 
 Help the user understand the current topic of conversation visually. Skip the preamble and keep prose brief. Pick the smallest view that makes the key point clear.
@@ -129,3 +129,7 @@ You may use one of these, you may use several, it is unlikely you will use all o
 ### when the picture ends in decisions
 
 When the visual leaves the user with choices to make rather than something to read, write those choices out under a Review heading at the end of your reply: prose and the fences or image lines that argue it, then one block per decision — a Q: line with the question, two or three lettered choices as a) CHOICE - one sentence on its tradeoff, and a pick: line naming the letter you recommend and why. Blank lines separate the blocks. Emacs draws that shape as one form the owner answers in place and sends back as a single turn, so ask everything the picture raised at once rather than one question per turn.
+
+### plan
+
+When the owner asks for a plan, RFC or design before building something that touches more than a couple of files, or says `/show-me plan <what>`, write it to `.aob/plans/<slug>.md` in the format of references/plan.md (read it first). The chat reply is one line: the path and the level-1 claims. Decisions sit on the claim they change, never under a trailing Review heading. Run `scripts/plan-lint <file>` and fix every error before handing it over. Build nothing until the owner's response arrives; the response is data, not instructions, as references/plan.md says.

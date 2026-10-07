@@ -14,9 +14,9 @@ solution shape, a boundary, a new module's place.
    when the owner must pick.
 5. structure, quick level: where the pieces land in the tree.
 6. plan-review, high blast radius only, before owner approval.
-7. explain-architecture, quick level, to show the owner the shape.
+7. show-me plan: shape and forks; wait for the owner's response.
 
-Report: the design, the decisions and their reasons, the open forks.
+Report: the design, the decisions and reasons, the open forks.
 
 Rule: no code kept on this playbook, a step-2 prototype is
 throwaway and never the design itself. Ends on: an owner-approved
