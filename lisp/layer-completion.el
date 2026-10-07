@@ -62,6 +62,17 @@
     ;; ESC cancels the picker (helix/evil), not just C-g
     (define-key vertico-map [escape] #'abort-minibuffers)))
 
+(setq minibuffer-prompt-properties
+      '(read-only t cursor-intangible t face minibuffer-prompt))
+(add-hook 'minibuffer-setup-hook #'cursor-intangible-mode)
+
+(defun ygg--vertico-insert-past-prompt (&rest _)
+  (when (< (point) (minibuffer-prompt-end))
+    (goto-char (minibuffer-prompt-end))))
+
+(with-eval-after-load 'vertico
+  (advice-add 'vertico-insert :before #'ygg--vertico-insert-past-prompt))
+
 (when (fboundp 'elpaca)
   (elpaca orderless
     (setq completion-styles '(orderless basic)

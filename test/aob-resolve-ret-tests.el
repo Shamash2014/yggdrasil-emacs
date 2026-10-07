@@ -7,6 +7,7 @@
 (require 'prescient nil t)
 (require 'vertico-prescient nil t)
 (require 'orderless nil t)
+(require 'layer-completion)
 
 (defmacro aob-resolve-ret--with-pickers (&rest body)
   `(let ((completion-styles '(orderless basic))
@@ -144,3 +145,24 @@
     (setf (aob-session-state s) 'failed)
     (should (process-live-p (aob-session-conn s)))
     (should (eq (aob-session-awaiting-answer) s))))
+
+(defun aob-resolve-ret--point-to-prompt ()
+  (interactive)
+  (goto-char (point-min)))
+
+(ert-deftest aob-resolve-ret-with-point-in-the-prompt-still-answers ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--request s 73 "session/request_permission"
+                        (list :toolCall (list :title (make-string 277 ?x))
+                              :options [(:optionId "allow" :name "Allow" :kind "allow_once")
+                                        (:optionId "reject" :name "Reject" :kind "reject_once")]))
+    (aob-resolve-ret--with-pickers
+     (aob-tests--capturing sent
+       (let ((minibuffer-local-map (copy-keymap minibuffer-local-map)))
+         (define-key vertico-map (kbd "C-a") #'aob-resolve-ret--point-to-prompt)
+         (with-timeout (10 (ignore-errors (abort-minibuffers)))
+           (ert-simulate-keys (vconcat (kbd "C-a") (kbd "RET")) (aob-resolve s))))
+       (should (equal (aob-tests--replies sent)
+                      (list (concat "{\"jsonrpc\":\"2.0\",\"id\":73,\"result\":{\"outcome\":"
+                                    "{\"outcome\":\"selected\",\"optionId\":\"allow\"}}}"))))))))
