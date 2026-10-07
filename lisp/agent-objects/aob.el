@@ -923,6 +923,13 @@ keeps writing into the trace it was already writing into."
   (interactive (list (aob-target)))
   (aob--call s :focus))
 
+(defun aob-session-awaiting-answer ()
+  "The first session still able to take an answer to a pending Decision."
+  (seq-find (lambda (s)
+              (and (aob-session-decisions s)
+                   (not (eq (aob-session-state s) 'dead))))
+            (aob-sessions)))
+
 (defun aob-resolve (s)
   "Answer S's pending Decision — a permission, or an agent's question."
   (interactive (list (aob-target)))
@@ -945,7 +952,7 @@ keeps writing into the trace it was already writing into."
                             (if-let* ((detail (plist-get d :detail)))
                                 (format "  [%s]" detail)
                               ""))
-                    (mapcar #'car opts) nil t))
+                    (mapcar #'car opts) nil t nil nil (caar opts)))
              (id (cdr (assoc pick opts))))
         (aob--call s :resolve d id)
         (when (aob--rejects-p d id)

@@ -31,6 +31,7 @@
 (declare-function ygg-mise-prefix "layer-terminal")
 (declare-function ygg-jump-back "yggdrasil-motions")
 (declare-function ygg-jump-forward "yggdrasil-motions")
+(declare-function aob-session-awaiting-answer "aob" ())
 
 ;; jumplist nav works in agent buffers too; Tab keeps expanding via the
 ;; distinct <tab> event while C-i (the TAB character) jumps forward
@@ -1808,7 +1809,7 @@ needs no key."
   "Answer the first pending Decision of any session.
 A worker holding one is stopped where it stands, so the oldest waits least."
   (interactive)
-  (if-let* ((s (seq-find #'aob-session-decisions (aob-sessions))))
+  (if-let* ((s (aob-session-awaiting-answer)))
       (aob-resolve s)
     (user-error "no pending decisions")))
 

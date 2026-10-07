@@ -703,6 +703,10 @@ one, and failing that the newest line that is not noise."
         (when (aob-session-get (aob-session-id s))
           (aob-session-put s :fail-reason
                            (or (aob-acp--fail-reason tail) "process exited"))
+          (dolist (d (aob-session-decisions s))
+            (when-let* ((ev (aob-acp--decision-event s d)))
+              (plist-put ev :line nil)))
+          (setf (aob-session-decisions s) nil)
           (aob-set-state s 'dead)
           (push s died)
           (aob-event s 'error :title "process exited" :text tail)
@@ -2624,6 +2628,28 @@ The agent swaps its runtime for a new one, and the subagents the old
 one ran end without a word."
   (and (stringp answer) (string-prefix-p "exit-plan-clear-" answer)))
 
+(defun aob-acp--close-decision (s decision)
+  "Take DECISION off S, and let S go back to what it was doing if it was the last."
+  (setf (aob-session-decisions s) (delq decision (aob-session-decisions s)))
+  (unless (aob-session-decisions s)
+    (when (eq (aob-session-state s) 'blocked)
+      (aob-set-state s (or (plist-get decision :was) 'working))))
+  (aob--dirty s))
+
+(defun aob-acp--respond-or-drop (s decision result)
+  "Send RESULT as the reply to DECISION; when the connection cannot carry it,
+drop DECISION, as it can never be answered, and say so."
+  (condition-case nil
+      (progn
+        (unless (process-live-p (aob-acp--proc-of s)) (error "closed"))
+        (aob-acp--respond s (plist-get decision :reply-id) result))
+    (error
+     (when-let* ((ev (aob-acp--decision-event s decision)))
+       (plist-put ev :line nil))
+     (aob-acp--close-decision s decision)
+     (user-error "aob: %s is no longer running; its question is dropped"
+                 (aob-session-name s)))))
+
 (defun aob-acp--resolve (s decision answer)
   "Reply to DECISION with ANSWER: a permission's option id, or an
 elicitation's ((FIELD . VALUE)...) alist, or decline to leave it unanswered.
@@ -2631,8 +2657,8 @@ A login offer is answered with the method to run, which replies to nothing."
   (unless (memq decision (aob-session-decisions s))
     (user-error "aob: %s no longer waits on that answer" (aob-session-name s)))
   (unless (eq (plist-get decision :kind) 'auth)
-    (aob-acp--respond
-     s (plist-get decision :reply-id)
+    (aob-acp--respond-or-drop
+     s decision
      (cond
       ((eq (plist-get decision :kind) 'url) (aob-acp--url-answer decision answer))
       ((not (eq (plist-get decision :kind) 'elicitation))
@@ -2655,11 +2681,7 @@ A login offer is answered with the method to run, which replies to nothing."
                                            :name)
                                 answer)))
     (plist-put ev :line nil))
-  (setf (aob-session-decisions s)
-        (delq decision (aob-session-decisions s)))
-  (unless (aob-session-decisions s)
-    (when (eq (aob-session-state s) 'blocked)
-      (aob-set-state s (or (plist-get decision :was) 'working))))
+  (aob-acp--close-decision s decision)
   (when (aob-acp--clears-context-p answer)
     (aob-subagent-announced-settle s))
   (when (eq (plist-get decision :kind) 'auth)
