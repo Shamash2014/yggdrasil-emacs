@@ -3795,8 +3795,30 @@ under it included, and not for any other."
                                       ("N" . aob-acp-new)))
          (should (eq (lookup-key trace k) def)))
        (should-not (lookup-key trace "C"))
+       (should-not (lookup-key trace "p"))
+       (should (eq (lookup-key plan "p") #'aob-compose))
        (should (eq (lookup-key plan "S") #'aob-cancel))
        (should (eq (lookup-key plan "c") #'aob-acp-mcp))))))
+
+(ert-deftest aob-modal-trace-actions-have-one-key ()
+  (aob-tests--modal
+   '(progn
+     (with-temp-buffer
+       (aob-trace-mode)
+       (ygg-normal-state)
+       (let ((lead (ygg-localleader--get-map 'aob-trace-mode))
+             (direct (make-hash-table :test 'eq))
+             (seen (make-hash-table :test 'eq)))
+         (dolist (k '("a" "i" "o" "c" "A" "C" "Q" "ZZ" "ZQ" "RET"))
+           (when-let* ((def (key-binding (kbd k))))
+             (puthash def k direct)))
+         (dolist (k (append (mapcar #'char-to-string (number-sequence 33 126)) '("RET")))
+           (let ((def (lookup-key lead (kbd k))))
+             (when (and def (symbolp def))
+               (should-not (gethash def seen))
+               (should-not (gethash def direct))
+               (puthash def k seen))))
+         (should (gethash 'aob-compose direct)))))))
 
 (ert-deftest aob-modal-zz-sends-only-in-the-trace ()
   (aob-tests--modal

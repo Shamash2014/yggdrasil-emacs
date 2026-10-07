@@ -275,7 +275,7 @@ Agents live under SPC a; the trace buffer has its own keys and localleader.
 Results below are read from docstrings and key labels, not driven live (unverified).
 
 1. `SPC a c c` asks for agent, project and model and spawns the session with a first prompt; its trace opens in a space.
-2. In the trace, `a` or `i` opens a compose buffer; `c` steers the turn already running (`aob-steer`).
+2. In the trace, `a`, `i` or `o` opens a compose buffer (in the plan and subagents lists `\ p` does); `c` steers the turn already running (`aob-steer`).
 3. `RET` on a pending question or decision answers it (`aob-trace-answer`).
 4. `SPC a c o` flashes labels over the agents in this space and jumps to the chosen one.
 5. `\ $` lists every command the agents have running (`aob-shells`); `\ k` kills this session (`aob-kill-session`).

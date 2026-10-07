@@ -157,7 +157,6 @@
   (yggdrasil-localleader-def mode "N" #'aob-acp-new "new session here")
   (yggdrasil-localleader-def mode "d" #'aob-todo "todo list")
   (yggdrasil-localleader-def mode "a" #'ygg-aob-activity "activity → quickfix")
-  (yggdrasil-localleader-def mode "p" #'aob-compose "compose")
   (yggdrasil-localleader-def mode "y" #'aob-resolve "answer the decision")
   (yggdrasil-localleader-def mode "n" #'aob-rename-session "rename")
   (yggdrasil-localleader-def mode "f" #'aob-dired "files (dired)")
@@ -171,6 +170,8 @@
   (yggdrasil-localleader-def mode "r" #'aob-transcript-wake "wake it (resume acp)")
   (yggdrasil-localleader-def mode "t" #'aob-subagents "subagents list (toggle)")
   (yggdrasil-localleader-def mode "F" #'aob-acp-add-folder "add a folder"))
+(dolist (mode '(aob-plan-mode aob-subagents-mode))
+  (yggdrasil-localleader-def mode "p" #'aob-compose "compose"))
 
 ;; a queued message is still yours until it goes: change it or take it
 ;; back, from the line it is drawn on
