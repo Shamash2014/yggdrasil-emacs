@@ -566,6 +566,7 @@ Listing in magit status, open, browse, copy URL, refetch.
 - The list is a magit status section controlled by `ygg-git-review-requests`; heading "Pull requests (N)", "Merge requests (N)" on GitLab; empty groups are hidden and drafts are marked.
 - A forge failure shows the first meaningful line of the tool's own stderr (for example an unresolvable host).
 - Open a request as a compare; open in the browser; copy its URL.
+- Merge a request from its row or its compare: the forge is asked in the background for the request and the repository's settings (re-read up to three times while GitHub is still computing mergeability), you pick the target (the request's base, the default branch or another offered branch, retargeted first), a method the repository allows (GitLab fast-forward and semi-linear projects show as such), whether to auto-merge when the checks or pipeline pass (default yes while they run, no otherwise) and whether to delete the remote branch, then one question confirms with the pinned head commit, checks, review, mergeable state and any blocked state. The reviewed head is pinned (`--match-head-commit` / `--sha`), GitLab always gets `--auto-merge` explicitly, GitHub gets `--auto`, and a branch is deleted through the API only after an immediate GitHub merge (auto-merge leaves it to the repository setting). Drafts, conflicts and closed requests are refused, a second merge of the same request is refused while one runs, the forge's own words show on failure (tokens scrubbed), and the result says merged, auto-merge enabled or queued before the list is fetched again.
 
 ### How to get to it
 
@@ -577,6 +578,7 @@ The section appears in magit status; from it the keys act on the request row.
 - `o` — open it in the browser (`ygg-git-review-requests-browse`)
 - `y` — copy its URL (`ygg-git-review-requests-copy-url`)
 - `r` — fetch again (`ygg-git-review-requests-refetch`)
+- `m` — merge the request on the row (`ygg-git-pr-merge`)
 
 ### Driving it
 
@@ -633,6 +635,7 @@ Open from git, then work in the compare buffer; the second group are compare-buf
 - `I` — interdiff since last review (`ygg-git-compare-interdiff`)
 - `;` — dispatch menu (`ygg-git-compare-dispatch`)
 - `@` — send the review to an agent (`ygg-git-compare-review`)
+- `P` — merge this compare's pull or merge request, choosing target, method and branch deletion (`ygg-git-pr-merge`)
 - `~` — swap sides (`ygg-git-compare-swap`)
 - `q` — leave the compare (`ygg-git-compare-quit`)
 

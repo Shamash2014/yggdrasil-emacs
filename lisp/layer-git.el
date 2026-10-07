@@ -70,6 +70,9 @@
 (declare-function magit-add-section-hook "magit-section")
 (autoload 'ygg-git-worktree-insert-section "ygg-git-worktree")
 (autoload 'ygg-git-review-requests-insert-section "ygg-git-review-requests")
+(autoload 'ygg-git-pr-merge "ygg-git-pr-merge" nil t)
+(dolist (feature '(ygg-git-review-requests ygg-git-compare))
+  (eval-after-load feature '(require 'ygg-git-pr-merge)))
 
 ;; it inserts nothing when the repository has one worktree
 (with-eval-after-load 'magit-status
