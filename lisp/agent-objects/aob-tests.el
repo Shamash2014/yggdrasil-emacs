@@ -8844,3 +8844,55 @@ nothing, TAB opens one whole and back, and copying passes over them."
           (aob-trace--render)
           (should (= 1 (length (aob-tests--thumbs))))
           (should (= 1 (length made))))))))
+
+(defun aob-tests--asked (s text)
+  (aob-trace--questions s (list :type 'message :seq 7) text))
+
+(defun aob-tests--line-with (str text)
+  (seq-find (lambda (l) (string-search text l)) (split-string str "\n")))
+
+(ert-deftest aob-trace-q-label-asks-without-a-question-mark ()
+  (aob-tests--with-trace-session s
+    (let* ((out (aob-tests--asked s "Q: Keep cancelled rows\na) yes - audit trail\nb) no - claim 2.1 goes"))
+           (q (aob-tests--line-with out "Keep cancelled")))
+      (should (string-prefix-p "◇ " q))
+      (should (equal (get-text-property 0 'aob-question q) "Keep cancelled rows"))
+      (should (equal (get-text-property 0 'aob-option (aob-tests--line-with out "b) no"))
+                     '("Keep cancelled rows" "no - claim 2.1 goes"))))))
+
+(ert-deftest aob-trace-pick-line-marks-the-suggested-option ()
+  (aob-tests--with-trace-session s
+    (let* ((out (aob-tests--asked s (concat "Q: How many per user?\n"
+                                            "a) 50 - enough\n"
+                                            "b) 500 - needs paging\n"
+                                            "pick: b - nobody asked for more\n"
+                                            "- not an option")))
+           (a (aob-tests--line-with out "a) 50"))
+           (b (aob-tests--line-with out "b) 500")))
+      (should-not (string-search "suggested" a))
+      (should (string-search "suggested" b))
+      (should (get-text-property 0 'aob-option b))
+      (should (get-text-property 0 'aob-option a))
+      (should (aob-tests--line-with out "pick: b"))
+      (should-not (get-text-property 0 'aob-option (aob-tests--line-with out "- not an option"))))))
+
+(ert-deftest aob-trace-pick-line-does-not-end-the-question-early ()
+  (aob-tests--with-trace-session s
+    (let ((out (aob-tests--asked s "Which cache?\n- Redis\n- Memcached\nI would take Redis.")))
+      (should (get-text-property 0 'aob-option (aob-tests--line-with out "- Redis")))
+      (should (get-text-property 0 'aob-option (aob-tests--line-with out "- Memcached")))
+      (should-not (get-text-property 0 'aob-option (aob-tests--line-with out "I would take"))))))
+
+(ert-deftest aob-trace-opens-a-plan-a-reply-names ()
+  (let ((dir (file-name-as-directory (make-temp-file "aob-plan" t))))
+    (unwind-protect
+        (aob-tests--with-trace-session s
+          (setf (aob-session-dir s) dir)
+          (make-directory (expand-file-name ".aob/plans" dir) t)
+          (write-region "# T\n" nil (expand-file-name ".aob/plans/x.md" dir))
+          (let* ((out (aob-trace--plan-links "Plan is in .aob/plans/x.md now, not .aob/plans/gone.md"))
+                 (at (string-search ".aob/plans/x.md" out)))
+            (should (equal (get-text-property at 'aob-file out)
+                           (list (expand-file-name ".aob/plans/x.md" dir) nil nil)))
+            (should-not (get-text-property (string-search ".aob/plans/gone.md" out) 'aob-file out))))
+      (delete-directory dir t))))

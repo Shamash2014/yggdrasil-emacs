@@ -2009,6 +2009,10 @@ A collapsed block IS the cached line string, so an unchanged event stays
             ((eq (plist-get ev :type) 'permission)
              (aob-trace--mark (and (aob-trace--pending s (plist-get ev :seq)) 'waiting)
                               (aob-trace--annotate s ev (aob-trace--line-cached s ev))))
+            ((eq (plist-get ev :type) 'message)
+             (aob-trace--annotate
+              s ev (aob-trace--plan-links
+                    (aob-trace--questions s ev (aob-trace--line-cached s ev)))))
             (t (aob-trace--annotate
                 s ev (aob-trace--questions s ev (aob-trace--line-cached s ev))))))
      ;; subagent steps are NOT inlined here — they have their own trace
@@ -2896,6 +2900,15 @@ While the agent waits on a question or a plan, this answers it instead."
   "\\`[ \t]*\\(?:[-*+]\\|[0-9A-Za-z][.)]\\|\\[[ xX]\\]\\)[ \t]+"
   "A line that offers an answer: a list item under a question.")
 
+(defconst aob-trace--asked-re "\\`[ \t]*\\(?:[-*+][ \t]+\\)?\\**Q:"
+  "A line that asks by its label, with or without a question mark.")
+
+(defconst aob-trace--pick-re "\\`[ \t]*\\**pick:\\**[ \t]*\\([0-9A-Za-z]\\)\\_>"
+  "A line naming the option the question's author suggests.")
+
+(defconst aob-trace--plan-re "[^ \t\n`\"'()<>]*\\.aob/plans/[A-Za-z0-9._-]+\\.md"
+  "A path to a plan file.")
+
 (defun aob-trace--visible (str)
   "STR without what markdown hid in it, and trimmed."
   (let ((out nil) (i 0) (n (length str)))
@@ -2911,20 +2924,23 @@ what choosing it says.  Answers are held like comments and go with the
 next message, so a questionnaire is answered in the trace itself."
   (if (not (and (eq (plist-get ev :type) 'message)
                 (not (aob-trace--live-p ev))
-                (string-search "?" str)))
+                (or (string-search "?" str) (string-search "Q:" str))))
       str
     (let* ((seq (plist-get ev :seq))
            (held (aob-trace--comments-for s seq))
            (lines (split-string str "\n"))
            (question nil)
+           (offered nil)
            out)
       (dolist (line lines)
         (let ((seen (aob-trace--visible line)))
           (cond
            ((and (not (string-empty-p seen))
-                 (string-match-p aob-trace--question-re seen))
-            (setq question (replace-regexp-in-string
-                            "\\`[ \t]*\\(?:[0-9]+[.)]\\|[-*+]\\)[ \t]*" "" seen))
+                 (or (string-match-p aob-trace--question-re seen)
+                     (string-match-p aob-trace--asked-re seen)))
+            (setq offered nil
+                  question (replace-regexp-in-string
+                            "\\`[ \t]*\\(?:\\(?:[0-9]+[.)]\\|[-*+]\\)[ \t]*\\)?\\(?:\\**Q:\\**[ \t]*\\)?" "" seen))
             (let* ((done (seq-find (lambda (c) (equal (plist-get c :quote) question)) held))
                    (mark (propertize (if done "◆ " "◇ ") 'font-lock-face 'shadow))
                    (l (concat mark line)))
@@ -2938,7 +2954,17 @@ next message, so a questionnaire is answered in the trace itself."
                                      held))
                    (l (concat line (if picked (propertize "  ✓" 'font-lock-face 'shadow) ""))))
               (put-text-property 0 (length l) 'aob-option (list question choice) l)
-              (push l out)))
+              (push l out)
+              (when (string-match "\\`[ \t]*\\([0-9A-Za-z]\\)[.)]" seen)
+                (push (cons (downcase (match-string 1 seen)) out) offered))))
+           ((and question (string-match aob-trace--pick-re seen))
+            (when-let* ((cell (cdr (assoc (downcase (match-string 1 seen)) offered))))
+              (let ((l (concat (car cell) (propertize "  ← suggested" 'font-lock-face 'success))))
+                (put-text-property 0 (length l) 'aob-option
+                                   (get-text-property 0 'aob-option (car cell)) l)
+                (setcar cell l)))
+            (setq question nil offered nil)
+            (push line out))
            (t
             (unless (string-empty-p seen) (setq question nil))
             (push line out)))))
@@ -2949,6 +2975,23 @@ next message, so a questionnaire is answered in the trace itself."
           (when-let* ((v (get-text-property 0 prop str)))
             (put-text-property 0 (length joined) prop v joined)))
         joined))))
+
+(defun aob-trace--plan-links (str)
+  "STR with each plan file it names made a button RET opens."
+  (if (not (string-search ".aob/plans/" str))
+      str
+    (let ((root (aob-trace--root)) (out (copy-sequence str)) (pos 0))
+      (while (string-match aob-trace--plan-re out pos)
+        (let ((beg (match-beginning 0)) (end (match-end 0)))
+          (let ((file (let ((file-name-handler-alist nil))
+                        (expand-file-name (match-string 0 out) root))))
+            (when (file-exists-p file)
+              (add-text-properties beg end (list 'aob-file (list file nil nil)
+                                                 'help-echo (abbreviate-file-name file))
+                                   out)
+              (aob-trace--add-face out 'aob-trace-target beg end)))
+          (setq pos end)))
+      out)))
 
 (defun aob-trace--answered-count (s)
   "How many questions S's held answers speak to."

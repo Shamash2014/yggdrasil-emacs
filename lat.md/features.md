@@ -1012,15 +1012,16 @@ Tests:
 
 ## Markdown
 
-Markdown buffers with fenced code rendered inline by language, diagrams and math drawn below their source, and clipboard images pasted as files.
+Markdown buffers with fenced code rendered inline by language, diagrams and math drawn below their source, clipboard images pasted as files, and show-me plans in `.aob/plans` answered in place.
 
 ### Sub-features
 
-Inline fences, diagrams and math, image paste.
+Inline fences, diagrams and math, image paste, plan mode.
 
 - Fenced code blocks shown inline by language.
 - Diagrams and math as transient images below their source.
 - Paste a clipboard image into a markdown or org file.
+- Plans open folded to their level-1 claims; decisions are picked with RET, claims struck or commented, and one key sends the response to the agent.
 
 ### How to get to it
 
@@ -1030,6 +1031,17 @@ These are localleader keys in markdown buffers.
 - `\ m` — diagrams and math (`ygg-diagram-toggle`)
 - `\ p` — paste a clipboard image (`ygg-md-paste-image`)
 
+In a plan (`ygg-plan-mode`, any `.aob/plans/*.md`) these apply instead, with `\ f` and `\ m` kept.
+
+- `\ s` — send the response to the agent session (`ygg-plan-send`)
+- `\ y` — copy the response (`ygg-plan-copy`)
+- `\ x` — strike or restore the claim at point (`ygg-plan-strike`)
+- `\ c` — comment on the claim at point (`ygg-plan-comment`)
+- `\ C` — drop the claim's comments (`ygg-plan-clear-comments`)
+- `\ a` — take the suggested option (`ygg-plan-accept`)
+- `\ A` — take every suggestion not yet picked (`ygg-plan-accept-all`)
+- `\ u` — take a pick back (`ygg-plan-clear-pick`)
+
 ### Driving it
 
 Results below are read from docstrings, not driven live (unverified).
@@ -1037,6 +1049,7 @@ Results below are read from docstrings, not driven live (unverified).
 1. In a markdown file `\ f` shows the fence lines as written, or the inline look again.
 2. `\ m` draws the diagram or math images below their sources.
 3. `\ p` saves the clipboard image next to the file and inserts the link.
+4. In a plan, RET on `b) …` shows a check on it, then `\ s` sends the decisions, strikes and comments to the agent whose directory holds the plan, or asks which.
 
 ### Gotchas
 
@@ -1044,6 +1057,10 @@ What the code shows.
 
 - `ygg-diagram-toggle-at-point` and `ygg-diagram-toggle-image-at-point` draw one fence or image, not the whole buffer.
 - `ygg-diagram-magit-tab` makes TAB draw the fence at point in magit buffers.
+- In a plan Tab draws the mermaid fence at point, else opens the claim a level at a time (`ygg-plan-tab`); Shift-Tab folds the whole plan a level deeper (`ygg-plan-cycle`); Return picks the option on the line, or the suggested one on the pick line (`ygg-plan-ret`).
+- Picks, strikes, comments and opened decisions live in `<slug>.answers.eld` beside the plan, never in the plan text.
+- A decision never opened is sent as `not opened; default kept`, which is not agreement.
+- `src="path" lines="a-b"` fences show the file range as an overlay only when their body is empty.
 
 ### Code
 
@@ -1053,11 +1070,13 @@ The main files, then the test files that map to them by name.
 - `lisp/ygg-markdown-fences.el`
 - `lisp/ygg-diagram.el`
 - `lisp/ygg-md-image.el`
+- `lisp/ygg-plan.el`
 
 Tests:
 
 - `test/md-image-tests.el`
 - `test/ygg-markdown-fences-tests.el`
+- `test/ygg-plan-tests.el`
 
 ## Notebooks and data
 
