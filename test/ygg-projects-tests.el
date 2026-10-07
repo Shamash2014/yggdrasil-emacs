@@ -932,7 +932,7 @@ by its title, and opening it resumes it; one discarded here stays gone."
                                                           past))
                                     :name)
                          "Listed only"))))
-      (should (= asked 2))
+      (should (= asked 3))
       (let ((listed (seq-find (lambda (e) (not (plist-get e :file)))
                               (ygg-projects--past "/tmp/p/"))))
         (with-temp-buffer

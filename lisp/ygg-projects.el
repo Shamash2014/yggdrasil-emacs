@@ -366,14 +366,14 @@ or not this Emacs was there for it."
          (ignore-errors (aob-acp-archived-entries)))))
 
 (defun ygg-projects--found (root &optional where)
-  "What the default agent and Codex left on disk for ROOT, put away in WHERE.
-Codex keeps its own history whichever agent sessions here start with.
+  "What the default agent, Codex and pi left on disk for ROOT, put away in WHERE.
+Codex and pi keep their own history whichever agent sessions here start with.
 Outside WHERE, what a running agent lists as its own is merged in."
   (seq-mapcat (lambda (agent)
                 (let ((found (ignore-errors (aob-transcript-found root agent where))))
                   (if where found (ygg-projects--with-listed found agent root))))
               (delete-dups (list (or (bound-and-true-p aob-acp-default-agent) "claude")
-                                 "codex"))))
+                                 "codex" "pi"))))
 
 (defvar ygg-projects--listed (make-hash-table :test #'equal)
   "The sessions each (AGENT . ROOT) last listed as its own.")

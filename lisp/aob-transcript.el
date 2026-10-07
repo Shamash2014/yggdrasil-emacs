@@ -21,6 +21,16 @@
 (declare-function ygg-agent--config-env "ygg-agent-conf" (preset cmd project &optional isolate))
 (declare-function ygg-agent--own-home "ygg-agent-conf" (kind repo &optional isolate))
 (declare-function ygg-agent--repo-home "ygg-agent-conf" (project))
+(declare-function aob-transcript-pi-p "aob-transcript-pi" (agent))
+(declare-function aob-transcript-pi--dirs "aob-transcript-pi" (agent project where))
+(declare-function aob-transcript-pi--head "aob-transcript-pi" (file))
+(declare-function aob-transcript-pi-file "aob-transcript-pi" (id dir homes))
+(declare-function aob-transcript-pi--active "aob-transcript-pi" (file recs))
+(declare-function aob-transcript-pi--turn "aob-transcript-pi" (rec))
+(declare-function aob-transcript-pi--tools "aob-transcript-pi" (rec))
+(declare-function aob-transcript-pi-forget "aob-transcript-pi" ())
+(declare-function aob-transcript-pi-move "aob-transcript-pi" (file where then))
+(declare-function aob-transcript-pi-restore "aob-transcript-pi" (entry))
 (declare-function aob-acp-resume-entry "aob-acp" (e &optional pref))
 (declare-function aob-acp-delete-entry "aob-acp" (entry &optional then))
 (declare-function aob-acp--tool-title "aob-acp" (u raw))
@@ -42,10 +52,21 @@ keychains, and every row of the sidebar asks for it.")
 (defun aob-transcript--home-1 (agent dir)
   "Work out AGENT's config home in DIR from its configuration."
   (or (when (fboundp 'ygg-agent--config-env)
-        (when-let* ((entry (ygg-agent--config-env agent agent dir))
+        (when-let* ((kind (aob-transcript--kind agent))
+                    (entry (ygg-agent--config-env kind kind dir))
                     ((string-match "=\\(.*\\)\\'" entry)))
           (match-string 1 entry)))
-      (expand-file-name (if (equal agent "codex") "~/.codex" "~/.claude"))))
+      (aob-transcript--default-home agent)))
+
+(defun aob-transcript--kind (agent)
+  "The agent kind AGENT\='s config is filed under: pi for any alias of it."
+  (if (aob-transcript-pi-p agent) "pi" agent))
+
+(defun aob-transcript--default-home (agent)
+  "The config home AGENT\='s CLI uses when nothing points it elsewhere."
+  (expand-file-name (cond ((equal agent "codex") "~/.codex")
+                          ((aob-transcript-pi-p agent) "~/.pi/agent")
+                          (t "~/.claude"))))
 
 (defun aob-transcript--slug (dir)
   "DIR as the CLI spells it when naming a folder.
@@ -66,7 +87,8 @@ still holds everything it was written before that."
                              (bound-and-true-p ygg-agent-conf-root)
                              (ignore-errors
                                (ygg-agent--own-home
-                                agent (ygg-agent--repo-home dir))))
+                                (aob-transcript--kind agent)
+                                (ygg-agent--repo-home dir))))
                         'none))
         (puthash key known aob-transcript--homes))
       (unless (eq known 'none) known))))
@@ -79,8 +101,7 @@ project has a history from all three."
   (delete-dups
    (delq nil (list (aob-transcript--home agent dir)
                    (aob-transcript--own-home agent dir)
-                   (expand-file-name
-                    (if (equal agent "codex") "~/.codex" "~/.claude"))))))
+                   (aob-transcript--default-home agent)))))
 
 (defvar aob-transcript--codex-files (make-hash-table :test 'equal)
   "Codex session id to its file: finding one walks a folder per day.")
@@ -111,15 +132,19 @@ sessions/YYYY/MM/DD/rollout-<time>-ID.jsonl."
                   (dir (or (plist-get entry :dir) (plist-get entry :project))))
         (let* ((agent (or (plist-get entry :agent) "claude"))
                (homes (aob-transcript--homes agent dir)))
-          (if (equal agent "codex")
-              (aob-transcript--codex-file id homes)
+          (cond
+           ((equal agent "codex")
+            (aob-transcript--codex-file id homes))
+           ((aob-transcript-pi-p agent)
+            (aob-transcript-pi-file id dir homes))
+           (t
             (seq-some
              (lambda (home)
                (let ((file (expand-file-name
                             (format "projects/%s/%s.jsonl" (aob-transcript--slug dir) id)
                             home)))
                  (and (file-readable-p file) file)))
-             homes))))))
+             homes)))))))
 
 (defvar aob-transcript--titles (make-hash-table :test 'equal)
   "File to (MTIME . TITLE): reading the head of one is not free.")
@@ -212,14 +237,15 @@ line."
   "The name FILE\='s conversation was given, looking only at its last BYTES.
 Claude appends the name you set and the one it makes up itself after
 turns, and again as they change, so the newest of each is near the end;
-yours wins.  Codex appends its thread name the same way."
+yours wins.  Codex appends its thread name the same way, and pi a
+session_info entry."
   (let ((size (or (file-attribute-size (file-attributes file)) 0))
         names)
     (with-temp-buffer
       (ignore-errors (insert-file-contents file nil (max 0 (- size bytes)) size))
       (goto-char (point-min))
       (while (re-search-forward
-              "\"type\":\"\\(custom-title\\|ai-title\\|thread_name_updated\\)\"" nil t)
+              "\"type\":\"\\(custom-title\\|ai-title\\|thread_name_updated\\|session_info\\)\"" nil t)
         (when-let* ((kind (match-string 1))
                     (rec (ignore-errors
                            (json-parse-string
@@ -227,7 +253,8 @@ yours wins.  Codex appends its thread name the same way."
                              (line-beginning-position) (line-end-position))
                             :object-type 'alist :null-object nil :false-object nil)))
                     (name (or (alist-get 'customTitle rec) (alist-get 'aiTitle rec)
-                              (alist-get 'thread_name (alist-get 'payload rec))))
+                              (alist-get 'thread_name (alist-get 'payload rec))
+                              (and (equal kind "session_info") (alist-get 'name rec))))
                     ((stringp name))
                     (name (string-trim name))
                     ((not (string-empty-p name))))
@@ -235,7 +262,8 @@ yours wins.  Codex appends its thread name the same way."
         (forward-line 1)))
     (when-let* ((name (or (cdr (assoc "custom-title" names))
                           (cdr (assoc "ai-title" names))
-                          (cdr (assoc "thread_name_updated" names)))))
+                          (cdr (assoc "thread_name_updated" names))
+                          (cdr (assoc "session_info" names)))))
       (truncate-string-to-width name 44 nil nil t))))
 
 (defun aob-transcript--title-in (file bytes)
@@ -283,14 +311,16 @@ you have only just taken in is none of them."
   (let ((agent (or agent (bound-and-true-p aob-acp-default-agent) "claude")))
     (if (equal agent "codex")
         (aob-transcript--codex-found project where)
-      (let* ((dirs (seq-filter
-                    #'file-directory-p
-                    (mapcar (lambda (home)
-                              (expand-file-name
-                               (format "projects/%s%s" (aob-transcript--slug project)
-                                       (if where (concat "/" where) ""))
-                               home))
-                            (aob-transcript--homes agent project))))
+      (let* ((dirs (if (aob-transcript-pi-p agent)
+                       (aob-transcript-pi--dirs agent project where)
+                     (seq-filter
+                      #'file-directory-p
+                      (mapcar (lambda (home)
+                                (expand-file-name
+                                 (format "projects/%s%s" (aob-transcript--slug project)
+                                         (if where (concat "/" where) ""))
+                                 home))
+                              (aob-transcript--homes agent project)))))
              (key (list agent dirs where)))
         (when dirs
           ;; the folder's own clock says when a conversation was added to it
@@ -308,8 +338,10 @@ you have only just taken in is none of them."
 WHERE, when given, is the folder they were put away in."
   (aob-transcript--entries
    project agent where
-   (mapcar (lambda (file) (list file (file-name-base file) project))
-           (seq-mapcat (lambda (dir) (directory-files dir t "\\.jsonl\\'")) dirs))))
+   (let ((files (seq-mapcat (lambda (dir) (directory-files dir t "\\.jsonl\\'")) dirs)))
+     (if (aob-transcript-pi-p agent)
+         (delq nil (mapcar #'aob-transcript-pi--head files))
+       (mapcar (lambda (file) (list file (file-name-base file) project)) files)))))
 
 (defun aob-transcript--entries (project agent where found)
   "AGENT\='s conversations about PROJECT as entries, newest first.
@@ -510,30 +542,44 @@ is asked, so the copy is all that remains.  An agent that has not
 answered within `aob-transcript-delete-wait' seconds is not waited for.
 THEN is called when the move is done."
   (when-let* ((file (aob-transcript-file entry)))
-    (let* ((dir (expand-file-name where (file-name-directory file)))
-           (to (expand-file-name (file-name-nondirectory file) dir))
-           (done nil)
-           (timer nil)
-           (finish (lambda (&rest _)
-                     (unless done
-                       (setq done t)
-                       (when timer (cancel-timer timer))
-                       (when (file-exists-p file) (delete-file file))
-                       (aob-transcript-forget)
-                       (when then (funcall then))))))
-      (make-directory dir t)
-      (if (not (equal where "discarded"))
-          (progn (rename-file file to t)
-                 (aob-transcript-forget)
-                 (when then (funcall then)))
-        (copy-file file to t t)
-        (aob-transcript-forget)
-        (if (and (fboundp 'aob-acp-delete-entry)
-                 (ignore-errors (aob-acp-delete-entry entry finish)))
-            (unless done
-              (setq timer (run-at-time aob-transcript-delete-wait nil finish)))
-          (funcall finish)))
-      to)))
+    (if (aob-transcript-pi-p (plist-get entry :agent))
+        (aob-transcript-pi-move file where then)
+      (aob-transcript--move file entry where then))))
+
+(defun aob-transcript--move (file entry where then)
+  "Move FILE, ENTRY\='s conversation, into WHERE beside it.
+THEN is called when it is done; see `aob-transcript-move\='."
+  (let* ((dir (expand-file-name where (file-name-directory file)))
+         (to (expand-file-name (file-name-nondirectory file) dir))
+         (done nil)
+         (timer nil)
+         (finish (lambda (&rest _)
+                   (unless done
+                     (setq done t)
+                     (when timer (cancel-timer timer))
+                     (when (file-exists-p file) (delete-file file))
+                     (aob-transcript-forget)
+                     (when then (funcall then))))))
+    (make-directory dir t)
+    (if (not (equal where "discarded"))
+        (progn (rename-file file to t)
+               (aob-transcript-forget)
+               (when then (funcall then)))
+      (copy-file file to t t)
+      (aob-transcript-forget)
+      (if (and (fboundp 'aob-acp-delete-entry)
+               (ignore-errors (aob-acp-delete-entry entry finish)))
+          (unless done
+            (setq timer (run-at-time aob-transcript-delete-wait nil finish)))
+        (funcall finish)))
+    to))
+
+(defun aob-transcript-restore (entry)
+  "Put ENTRY\='s conversation back where its agent looks for it, if it was put away.
+Only pi keeps what it put away out of reach of its own lookup; the
+rest read it where it lies."
+  (when (aob-transcript-pi-p (plist-get entry :agent))
+    (aob-transcript-pi-restore entry)))
 
 ;;;###autoload
 (defun aob-transcript-forget ()
@@ -546,6 +592,7 @@ home moving is a change of mind, and nothing on disk says when."
   (clrhash aob-transcript--titles)
   (clrhash aob-transcript--codex-files)
   (clrhash aob-transcript--codex-heads)
+  (aob-transcript-pi-forget)
   (setq aob-transcript--queue nil))
 
 (defun aob-transcript--text (content)
@@ -594,28 +641,38 @@ start of the file."
         (forward-line extra)
         (delete-region (point-min) (point))))))
 
+(defun aob-transcript--tail-records (file lines)
+  "The last LINES records of FILE, parsed, oldest first."
+  (let (recs)
+    (with-temp-buffer
+      (aob-transcript--insert-tail file lines)
+      (goto-char (point-min))
+      (while (not (eobp))
+        (let ((line (buffer-substring-no-properties
+                     (line-beginning-position) (line-end-position))))
+          (when-let* (((not (string-empty-p line)))
+                      (rec (ignore-errors
+                             (json-parse-string line :object-type 'alist
+                                                :null-object nil :false-object nil)))
+                      ((listp rec)))
+            (push rec recs)))
+        (forward-line 1)))
+    (nreverse recs)))
+
 (defun aob-transcript-turns (file &optional tools)
   "FILE as a list of (WHO . TEXT), oldest first.
 WHO is \"user\" or \"assistant\", and with TOOLS also \"tool\", a
 tool\='s TEXT the line naming what it did.  Only its last records: a
-session keeps `aob-event-cap' events and drops the older half past
-that, so reading further back is work thrown away."
+session keeps `aob-event-cap\=' events and drops the older half past
+that, so reading further back is work thrown away.  A pi file is a tree
+of records, and what it shows is the branch the session ended on."
   (let (out)
-    (with-temp-buffer
-      (aob-transcript--insert-tail file aob-event-cap)
-      (goto-char (point-min))
-      (while (not (eobp))
-        (let* ((line (buffer-substring-no-properties
-                      (line-beginning-position) (line-end-position)))
-               (rec (and (not (string-empty-p line))
-                         (ignore-errors
-                           (json-parse-string line :object-type 'alist
-                                              :null-object nil :false-object nil))))
-               (turn (and rec (aob-transcript--turn rec))))
-          (when turn (push turn out))
-          (dolist (tool (and tools rec (aob-transcript--tools rec)))
-            (push (cons "tool" tool) out)))
-        (forward-line 1)))
+    (dolist (rec (aob-transcript-pi--active
+                  file (aob-transcript--tail-records file aob-event-cap)))
+      (when-let* ((turn (aob-transcript--turn rec)))
+        (push turn out))
+      (dolist (tool (and tools (aob-transcript--tools rec)))
+        (push (cons "tool" tool) out)))
     (nreverse out)))
 
 (defun aob-transcript--harness-text-p (text)
@@ -644,7 +701,14 @@ that, so reading further back is work thrown away."
 (defun aob-transcript--turn (rec)
   "REC as (WHO . TEXT) when it is something said, else nil.
 Claude writes a turn as {type: user|assistant, message: {content}};
-Codex as {type: response_item, payload: {type: message, role, content}}."
+Codex as {type: response_item, payload: {type: message, role, content}};
+pi as {type: message, message: {role, content}}."
+  (if (equal (alist-get 'type rec) "message")
+      (aob-transcript-pi--turn rec)
+    (aob-transcript--turn-1 rec)))
+
+(defun aob-transcript--turn-1 (rec)
+  "REC as (WHO . TEXT) when it is something Claude or Codex said, else nil."
   (let* ((codex (equal (alist-get 'type rec) "response_item"))
          (body (alist-get (if codex 'payload 'message) rec))
          (who (cond (codex (and (equal (alist-get 'type body) "message")
@@ -667,11 +731,13 @@ Codex as {type: response_item, payload: {type: message, role, content}}."
 
 (defun aob-transcript--tools (rec)
   "The tools REC calls, each as the line a live session would show.
-Claude puts a call among an answer\='s parts; Codex writes each as its
-own record, its input a string of json or of code."
+Claude puts a call among an answer\='s parts, as does pi; Codex writes
+each as its own record, its input a string of json or of code."
   (let ((body (alist-get 'payload rec))
         (message (alist-get 'message rec)))
     (cond
+     ((equal (alist-get 'type rec) "message")
+      (aob-transcript-pi--tools rec))
      ((equal (alist-get 'type rec) "response_item")
       (pcase (alist-get 'type body)
         ("function_call"
@@ -836,4 +902,5 @@ there."
     live))
 
 (provide 'aob-transcript)
+(require 'aob-transcript-pi)
 ;;; aob-transcript.el ends here
