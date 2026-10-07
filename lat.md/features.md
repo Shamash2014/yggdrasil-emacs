@@ -251,6 +251,7 @@ Spawning, trace buffer, subagents, modes and models, shells, todo, transcripts, 
 - Session modes, model, goal and worker effort per session.
 - Running shell commands across agents, with a way to stop one.
 - Todo list kept by you and the agent; transcripts of ended conversations.
+- Overall LiteLLM usage in a pi session's header (`LiteLLM $2.46 / $200 · 30d`): the key (from `models.json`, else the provider's entry in the project's pi home `auth.json`) is asked for `/key/info` in the background and cached five minutes per base URL and key, so all projects sharing it make one request. Nothing shows without a LiteLLM provider and key, and `LiteLLM ?` shows when the request fails and there was never a figure (otherwise the last good one stays) (`aob-litellm`, `aob-overall-usage-functions`).
 
 ### How to get to it
 
