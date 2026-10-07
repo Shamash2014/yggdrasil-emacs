@@ -1516,9 +1516,7 @@ never learns there was more than one."
                         :raw raw
                         :subagent (and (or task spawn (cdr codex)) t)
                         :parent-model (and (or task spawn (cdr codex))
-                                           (if-let* ((old (gethash id (aob-acp--tools s))))
-                                               (plist-get old :parent-model)
-                                             (aob-session-model-now s)))
+                                           (aob-session-model-now s))
                         :codex-spawn spawn
                         :subagent-type (and spawn (aob-acp--codex-role s raw))
                         :parent (or (aob-acp--parent-of u)

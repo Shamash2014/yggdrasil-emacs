@@ -1194,6 +1194,26 @@ to the call that started it."
               (ms (round (* 1000 (- end start)))))
     (if (< ms 1000) (format "%dms" ms) (format "%.1fs" (/ ms 1000.0)))))
 
+(defun aob-trace--quiet (str)
+  "STR flattened to the quiet face a card draws its tail in."
+  (propertize (substring-no-properties str) 'font-lock-face 'shadow))
+
+(defun aob-trace--card-tails (ev)
+  "(FULL . MODEL-ONLY) tails for EV when it is a subagent drawn as a card."
+  (when-let* ((_ (or (plist-get ev :subagent) (plist-get ev :children)))
+              (s (and aob-trace--session-id (aob-session-get aob-trace--session-id))))
+    (let ((full (aob-trace--sub-tail s ev)))
+      (plist-put ev :tail-drawn full)
+      (cons (aob-trace--quiet full)
+            (aob-trace--quiet (concat " · " (aob-trace--sub-model s ev)))))))
+
+(defun aob-trace--fit-tail (tails room floor)
+  "The fullest of TAILS leaving FLOOR of ROOM; else the model cut to fit."
+  (or (seq-find (lambda (tl) (>= (- room (string-width tl)) floor))
+                (list (car tails) (cdr tails)))
+      (aob-trace--quiet
+       (truncate-string-to-width (cdr tails) (max 5 (- room floor)) nil nil "…"))))
+
 (defun aob-trace--shell-card (ev)
   "EV, a command the agent ran, as a card: the command, its output cut to
 `aob-trace-shell-lines\=' unless opened, and how it ended on the right."
@@ -1212,14 +1232,20 @@ to the call that started it."
                                            ((equal status "failed") "failed"))))
                                 (aob-trace--shell-elapsed ev)))
                 " · "))
-         (room (max 20 (- (aob-trace--text-width) (string-width meta) 6)))
          (first (if (or aob-trace--opening (null (cdr cmd)))
                     (car cmd)
                   (concat (car cmd) " …")))
+         (tails (aob-trace--card-tails ev))
+         (base (- (aob-trace--text-width) (string-width meta) 6))
+         (tail (cond ((null tails) "")
+                     (aob-trace--opening (car tails))
+                     (t (aob-trace--fit-tail tails base (min 8 (string-width first))))))
+         (room (if tails (max 1 (- base (string-width tail))) (max 20 base)))
          (head (aob-trace--right
                 (concat (propertize "$ " 'font-lock-face 'shadow)
                         (if aob-trace--opening first
-                          (truncate-string-to-width first room nil nil "…")))
+                          (truncate-string-to-width first room nil nil "…"))
+                        tail)
                 meta))
          (cap (if aob-trace--opening 2000 aob-trace-shell-lines))
          (root (or (aob-trace--root) default-directory))
@@ -1395,8 +1421,17 @@ the change itself, cut to `aob-trace-diff-lines\=' unless opened."
                                       ops)
                             (seq-find (lambda (o) (eq (car o) 'same)) ops))))
              (chip (aob-trace--chip path))
-             (head (concat chip (propertize (format "  +%d −%d" plus minus)
-                                            'font-lock-face 'shadow)))
+             (count (propertize (format "  +%d −%d" plus minus) 'font-lock-face 'shadow))
+             (tails (and (not lines) (aob-trace--card-tails ev)))
+             (base (- (aob-trace--text-width) (string-width count) 1))
+             (tail (cond ((null tails) "")
+                         (aob-trace--opening (car tails))
+                         (t (aob-trace--fit-tail tails base (min 8 (string-width chip))))))
+             (chip (if (and tails (not aob-trace--opening))
+                       (truncate-string-to-width chip (max 1 (- base (string-width tail)))
+                                                 nil nil "…")
+                     chip))
+             (head (concat chip count tail))
              (body (aob-trace--diff-lines ops)))
         (setq head (propertize head 'aob-file
                                (list (car (get-text-property 0 'aob-file chip)) nil

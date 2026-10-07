@@ -192,10 +192,85 @@
 (ert-deftest aob-subagent-resent-tool-call-keeps-parent-model ()
   (aob-sub-model-tests--with s
     (aob-session-put s :model-id "opus")
-    (aob-sub-model-tests--call s :rawInput (list :description "d"))
-    (aob-session-put s :model-id "haiku")
     (let ((ev (aob-sub-model-tests--call s :rawInput (list :description "d"))))
+      (aob-session-put s :model-id "haiku")
+      (aob-acp--on-notification
+       s "session/update"
+       (list :update (list :sessionUpdate "tool_call" :toolCallId "T1" :kind "think"
+                           :title "Task" :status "in_progress"
+                           :rawInput (list :description "d"))))
+      (should (eq ev (gethash "T1" (aob-acp--tools s))))
       (should (equal "opus" (plist-get ev :parent-model))))))
+
+(ert-deftest aob-subagent-card-task-shows-model-and-tokens ()
+  (aob-sub-model-tests--with-kid s ev kid
+    (plist-put ev :kind "execute")
+    (plist-put ev :line nil)
+    (aob--dirty s)
+    (should (aob-trace--card-p ev))
+    (should (string-match-p "\\$ .*opus ↑ · —" (aob-sub-model-tests--trace-text s)))
+    (should (equal (aob-trace--sub-tail s ev) (plist-get ev :tail-drawn)))
+    (aob-session-put kid :model-id "haiku")
+    (aob-session-put kid :tokens (list :totalTokens 50000))
+    (aob-session-kid-changed kid)
+    (should (string-match-p " haiku · 50\\.0k tok" (aob-sub-model-tests--trace-text s)))
+    (should-not (string-match-p "opus ↑" (aob-sub-model-tests--trace-text s)))))
+
+(defun aob-sub-model-tests--head (s ev width)
+  (let ((aob-trace--session-id (aob-session-id s))
+        (aob-trace--width width))
+    (car (split-string (substring-no-properties (aob-trace--shell-card ev)) "\n"))))
+
+(ert-deftest aob-subagent-card-head-fits-narrow-windows-and-keeps-model ()
+  (aob-sub-model-tests--with s
+    (let ((ev (aob-event s 'tool :tool-id "T1" :kind "execute" :subagent t
+                         :title "t" :status "in_progress"
+                         :parent-model "claude-opus-4-7-extended-context"
+                         :raw (list :command (make-string 120 ?x)))))
+      (dolist (w '(40 60 100))
+        (let ((head (aob-sub-model-tests--head s ev w)))
+          (should (<= (string-width head) w))
+          (should (string-match-p " · claude-" head))))
+      (should (string-match-p "claude-opus-4-7-extended-context ↑ · —"
+                              (aob-sub-model-tests--head s ev 100)))
+      (let ((head (aob-sub-model-tests--head s ev 60)))
+        (should (string-match-p "claude-opus-4-7-extended-con[^ ]*…" head))
+        (should-not (string-match-p "—" head))))))
+
+(ert-deftest aob-subagent-card-tail-is-model-and-tokens-only ()
+  (aob-sub-model-tests--with s
+    (let ((ev (aob-event s 'tool :tool-id "T1" :kind "execute" :subagent t
+                         :title "t" :status "in_progress" :children 3
+                         :parent-model "opus" :raw (list :command "ls"))))
+      (should (string-match-p "ls · opus ↑ · —" (aob-sub-model-tests--head s ev 100)))
+      (should (equal (aob-trace--sub-tail s ev) (plist-get ev :tail-drawn))))))
+
+(ert-deftest aob-plain-shell-card-is-unchanged ()
+  (aob-sub-model-tests--with s
+    (let ((ev (aob-event s 'tool :tool-id "X" :kind "execute" :title "t" :status "completed"
+                         :raw (list :command "echo some quite long command line that will be cut for width reasons here")))
+          (aob-trace--session-id (aob-session-id s)))
+      (let ((aob-trace--width 40))
+        (should (equal-including-properties
+                 (aob-trace--shell-card ev)
+                 #("$ echo some quite long command line…" 0 2 (wrap-prefix #("  " 0 2 (face aob-trace-small)) font-lock-face (shadow aob-trace-small)) 2 36 (wrap-prefix #("  " 0 2 (face aob-trace-small)) font-lock-face (aob-trace-small))))))
+      (let ((aob-trace--width 60))
+        (should (equal-including-properties
+                 (aob-trace--shell-card ev)
+                 #("$ echo some quite long command line that will be cut fo…" 0 2 (wrap-prefix #("  " 0 2 (face aob-trace-small)) font-lock-face (shadow aob-trace-small)) 2 56 (wrap-prefix #("  " 0 2 (face aob-trace-small)) font-lock-face (aob-trace-small)))))))))
+
+(ert-deftest aob-subagent-diff-card-truncates-long-name-before-tail ()
+  (aob-sub-model-tests--with s
+    (let* ((ev (aob-event s 'tool :tool-id "D1" :kind "edit" :subagent t
+                          :title "e" :status "completed" :parent-model "opus"
+                          :content (list (list :type "diff"
+                                               :path (concat "/tmp/proj/" (make-string 80 ?n) ".el")
+                                               :oldText "a" :newText "b"))))
+           (aob-trace--session-id (aob-session-id s))
+           (aob-trace--width 40)
+           (head (car (split-string (substring-no-properties (aob-trace--diff-card ev)) "\n"))))
+      (should (<= (string-width head) 40))
+      (should (string-match-p "opus ↑" head)))))
 
 (provide 'aob-subagent-model-tests)
 ;;; aob-subagent-model-tests.el ends here
