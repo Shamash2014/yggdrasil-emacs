@@ -466,6 +466,40 @@
     (should (equal (cdar ygg-plan--comments) '("> refuses\nwhy?")))
     (should-not (region-active-p))))
 
+(ert-deftest ygg-plan/two-plans-with-the-same-claim-get-their-own-boxes ()
+  (ygg-plan-tests--with-plan
+    (ygg-plan-tests--goto "### 1.1 createScheduled")
+    (let ((first (ygg-plan-comment))
+          (other (generate-new-buffer "other-plan")))
+      (unwind-protect
+          (progn
+            (with-current-buffer other
+              (insert-buffer-substring buffer)
+              (setq ygg-plan--comments nil)
+              (goto-char (point-min))
+              (search-forward "### 1.1 createScheduled")
+              (beginning-of-line))
+            (let ((second (with-current-buffer other (ygg-plan-comment))))
+              (should-not (eq first second))
+              (with-current-buffer second (aob-compose-abort))))
+        (kill-buffer other)
+        (with-current-buffer first (aob-compose-abort))))))
+
+(ert-deftest ygg-plan/a-selection-is-quoted-into-a-box-already-open ()
+  (ygg-plan-tests--with-plan
+    (transient-mark-mode 1)
+    (ygg-plan-tests--goto "### 1.1 createScheduled")
+    (let ((box (ygg-plan-comment)))
+      (with-current-buffer box (insert "typed"))
+      (ygg-plan-tests--goto "### 1.1 createScheduled")
+      (let ((beg (search-forward "refuses")))
+        (set-mark (- beg (length "refuses")))
+        (activate-mark)
+        (should (eq (ygg-plan-comment) box)))
+      (with-current-buffer box
+        (should (string-match-p "\\`typed\n\n> refuses\n" (buffer-string)))
+        (aob-compose-abort)))))
+
 (defun ygg-plan-tests--modal (form)
   "Run FORM in a fresh Emacs with the modal layer and the plan loaded."
   (unless (locate-library "yggdrasil") (ert-skip "no modal layer on the load path"))

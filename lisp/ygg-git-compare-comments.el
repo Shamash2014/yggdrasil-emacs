@@ -269,6 +269,7 @@ changed line to its last, a line when it changed only one."
 
 (defvar-local ygg-git-compare--draft nil "The comment this box writes, a plist.")
 (defvar-local ygg-git-compare--draft-list nil "The compare the draft is kept on.")
+(defvar-local ygg-git-compare--draft-existing nil "Whether the draft edits a comment already kept.")
 
 (defvar-keymap ygg-git-compare-box-mode-map
   "C-c C-t" #'ygg-git-compare-draft-cycle-type)
@@ -377,11 +378,16 @@ changed line to its last, a line when it changed only one."
           "untyped")
         "TAB type" "ZZ saves" "empty drops it"))
 
-(defun ygg-git-compare--keep (comment list text)
-  "Keep COMMENT with TEXT on the compare LIST; with no text, drop it."
+(defun ygg-git-compare--keep (comment list text &optional existing)
+  "Keep COMMENT with TEXT on the compare LIST; with no text, drop it.
+EXISTING says COMMENT was already kept when its box opened."
   (unless (buffer-live-p list) (user-error "Its compare is gone"))
   (with-current-buffer list
     (let ((id (plist-get comment :id)))
+      (when (and existing
+                 (not (seq-find (lambda (c) (equal (plist-get c :id) id))
+                                (ygg-git-compare-comments-list t))))
+        (user-error "That comment is gone"))
       (cond ((not (string-empty-p text))
              (ygg-git-compare--put
               (ygg-git-compare--accepted (plist-put (copy-sequence comment) :text text))))
@@ -392,15 +398,20 @@ changed line to its last, a line when it changed only one."
 
 (defun ygg-git-compare--box-name (comment list)
   "The name of the box that writes COMMENT on the compare LIST.
-A new comment is keyed on its place, so asking again there finds the draft."
-  (if (with-current-buffer list
-        (seq-find (lambda (c) (equal (plist-get c :id) (plist-get comment :id)))
-                  (ygg-git-compare-comments-list t)))
+A new comment is keyed on its compare and place, so asking again there
+finds the draft."
+  (if (ygg-git-compare--kept-p comment list)
       (format "review:%s" (plist-get comment :id))
     (format "review:new:%s"
             (md5 (prin1-to-string
-                  (mapcar (lambda (key) (plist-get comment key))
-                          '(:level :file :side :line :start-side :start-line)))))))
+                  (cons (buffer-name list)
+                        (mapcar (lambda (key) (plist-get comment key))
+                                '(:level :file :side :line :start-side :start-line))))))))
+
+(defun ygg-git-compare--kept-p (comment list)
+  (with-current-buffer list
+    (seq-find (lambda (c) (equal (plist-get c :id) (plist-get comment :id)))
+              (ygg-git-compare-comments-list t))))
 
 (defun ygg-git-compare--compose (comment)
   "Write COMMENT's text in the comment box under point and answer the box.
@@ -408,19 +419,22 @@ Saving keeps the comment on the compare; saving nothing drops it."
   (require 'aob)
   (let* ((list (ygg-git-compare--list))
          (name (ygg-git-compare--box-name comment list))
+         (existing (and (ygg-git-compare--kept-p comment list) t))
          (fresh (not (get-buffer (format "compose:%s" name))))
          (box (aob-comment-box
                name
                (concat "comment on: " (ygg-git-compare--where comment))
                (lambda (text)
                  (ygg-git-compare--keep ygg-git-compare--draft
-                                        ygg-git-compare--draft-list text))
+                                        ygg-git-compare--draft-list text
+                                        ygg-git-compare--draft-existing))
                :initial (plist-get comment :text)
                :placeholder "Write the comment; saving it empty drops it")))
     (when fresh
       (with-current-buffer box
         (setq ygg-git-compare--draft (copy-sequence comment)
-              ygg-git-compare--draft-list list)
+              ygg-git-compare--draft-list list
+              ygg-git-compare--draft-existing existing)
         (ygg-git-compare-box-mode 1)
         (add-hook 'completion-at-point-functions #'ygg-git-compare-draft-type-capf -30 t)
         (add-hook 'completion-at-point-functions #'ygg-git-compare-draft-file-capf -20 t)

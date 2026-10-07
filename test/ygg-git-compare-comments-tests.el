@@ -693,6 +693,36 @@ and adds b.txt; main stays checked out."
           (aob-compose-send))
         (should-not (ygg-git-compare-comments-list t))))))
 
+(ert-deftest ygg-git-compare-comments-a-new-comment-box-is-its-own-compares ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (let (first second)
+      (ygg-git-compare-comments-tests--with-compare root
+        (ygg-git-compare-comments-tests--goto "+two")
+        (setq first (ygg-git-compare-comment)))
+      (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") '(rev . "feature"))
+        (rename-buffer "second compare")
+        (magit-section-show-level-4-all)
+        (ygg-git-compare-comments-tests--goto "+two")
+        (setq second (ygg-git-compare-comment)))
+      (should-not (eq first second))
+      (with-current-buffer first (aob-compose-abort))
+      (with-current-buffer second (aob-compose-abort)))))
+
+(ert-deftest ygg-git-compare-comments-a-box-on-a-deleted-comment-keeps-it-gone ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "mine")
+      (let ((box (ygg-git-compare-comment)))
+        (ygg-git-compare-comments-drop
+         (mapcar (lambda (c) (plist-get c :id)) (ygg-git-compare-comments-list t)))
+        (with-current-buffer box
+          (erase-buffer)
+          (insert "again")
+          (should-error (aob-compose-send) :type 'user-error)
+          (aob-compose-abort))
+        (should-not (ygg-git-compare-comments-list t))))))
+
 (ert-deftest ygg-git-compare-comments-ids-are-unique-within-a-millisecond ()
   (cl-letf (((symbol-function 'float-time) (lambda (&rest _) 1.0))
             ((symbol-function 'random) (lambda (&rest _) 5)))

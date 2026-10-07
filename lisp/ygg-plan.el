@@ -457,6 +457,7 @@ nothing clears them.  A selection is quoted into the box."
   (let* ((c (ygg-plan--claim-here))
          (id (ygg-plan--claim-id c))
          (plan (current-buffer))
+         (name (format "plan:%s" (md5 (prin1-to-string (cons (buffer-name plan) id)))))
          (quoted (when (use-region-p)
                    (prog1 (string-trim (buffer-substring-no-properties
                                         (region-beginning) (region-end)))
@@ -468,8 +469,15 @@ nothing clears them.  A selection is quoted into the box."
                                               "\n"))))
                    "\n\n")))
     (require 'aob)
+    (when-let* ((open (get-buffer (format "compose:%s" name)))
+                (quoted quoted)
+                ((not (string-empty-p quoted))))
+      (with-current-buffer open
+        (goto-char (point-max))
+        (insert (if (bobp) "" "\n\n")
+                (replace-regexp-in-string "^" "> " quoted) "\n")))
     (aob-comment-box
-     (format "plan:%s" id)
+     name
      (format "comment on: %s" (or (plist-get c :no) (plist-get c :text)))
      (lambda (text)
        (with-current-buffer plan
