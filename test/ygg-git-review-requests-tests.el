@@ -55,6 +55,7 @@ as (COMMAND . CALLBACK) in `spawned'."
          (ygg-git-review-requests t)
          (spawned nil)
          (refreshed 0))
+     (puthash "github.com" "me" ygg-git-review-requests--users)
      (cl-letf (((symbol-function 'ygg-git-compare--remote) (lambda () "origin"))
                ((symbol-function 'magit-get) (lambda (&rest _) "url"))
                ((symbol-function 'magit-toplevel) (lambda (&rest _) "/top/"))
@@ -91,7 +92,7 @@ as (COMMAND . CALLBACK) in `spawned'."
       (ygg-git-review-requests-tests--seed (list (ygg-git-review-requests-tests--row)))
       (ygg-git-review-requests-tests--render)
       (should-not spawned)
-      (should (string-match-p "Review requests (1)" (buffer-string)))
+      (should (string-match-p "Pull requests (1)" (buffer-string)))
       (should (string-match-p "#12  Add thing  ann  feat→main  2h" (buffer-string))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-stale-cache-fetches-once
@@ -103,15 +104,16 @@ as (COMMAND . CALLBACK) in `spawned'."
       (ygg-git-review-requests-tests--render)
       (ygg-git-review-requests-tests--render)
       (should (= 1 (length spawned)))
-      (should (string-match-p "Review requests (0)" (buffer-string))))))
+      (should (string-match-p "Pull requests (0)" (buffer-string))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-first-fetch-says-fetching
   (ygg-git-review-requests-tests--with
     (with-temp-buffer
       (ygg-git-review-requests-tests--render)
-      (should (string-match-p "Review requests (fetching…)" (buffer-string)))
+      (should (string-match-p "Pull requests (fetching…)" (buffer-string)))
       (should (= 1 (length spawned)))
-      (should (member "--search" (car (car spawned)))))))
+      (should (member "--json" (car (car spawned))))
+      (should-not (member "--search" (car (car spawned)))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-completion-refreshes-once-without-loop
   (ygg-git-review-requests-tests--with
@@ -122,8 +124,8 @@ as (COMMAND . CALLBACK) in `spawned'."
       (should (= 1 (length spawned)))
       (should-not (gethash ygg-git-review-requests-tests--repo
                            ygg-git-review-requests--running))
-      (should (string-match-p "Review requests (1)" (buffer-string)))
-      (should (string-match-p "#12  Add thing  ann  feat→main" (buffer-string))))))
+      (should (string-match-p "Pull requests (1)" (buffer-string)))
+      (should (string-match-p "#12  \\[draft\\] Add thing  ann  feat→main" (buffer-string))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-parses-github
   (let ((row (car (ygg-git-review-requests--parse
@@ -149,9 +151,9 @@ as (COMMAND . CALLBACK) in `spawned'."
         (funcall (cdr (car spawned)) 0 "{\"username\":\"me\"}")
         (let ((list-command (car (car spawned))))
           (should (equal (car (last list-command))
-                         "projects/o%2Fr/merge_requests?state=opened&per_page=100&reviewer_username=me")))
+                         "projects/o%2Fr/merge_requests?state=opened&per_page=100")))
         (funcall (cdr (car spawned)) 0 ygg-git-review-requests-tests--gitlab)
-        (should (string-match-p "Review requests (1)" (buffer-string)))
+        (should (string-match-p "Merge requests (1)" (buffer-string)))
         (should (string-match-p "#7  Fix it  bob  fix→dev" (buffer-string)))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-failure-lines
@@ -159,17 +161,17 @@ as (COMMAND . CALLBACK) in `spawned'."
     (with-temp-buffer
       (ygg-git-review-requests-tests--render)
       (funcall (cdr (car spawned)) 1 "" "To get started, run: gh auth login")
-      (should (string-match-p "reviews: gh not authenticated" (buffer-string))))
+      (should (string-match-p "prs: gh not authenticated (run gh auth login)" (buffer-string))))
     (clrhash ygg-git-review-requests--cache)
     (with-temp-buffer
       (ygg-git-review-requests-tests--render)
       (funcall (cdr (car spawned)) nil "")
-      (should (string-match-p "reviews: gh not found" (buffer-string))))
+      (should (string-match-p "prs: gh not found" (buffer-string))))
     (clrhash ygg-git-review-requests--cache)
     (with-temp-buffer
       (ygg-git-review-requests-tests--render)
       (funcall (cdr (car spawned)) 0 "not json")
-      (should (string-match-p "reviews: gh answered nothing readable" (buffer-string))))
+      (should (string-match-p "prs: gh answered nothing readable" (buffer-string))))
     (clrhash ygg-git-review-requests--repos)
     (cl-letf (((symbol-function 'ygg-git-compare--forge-repo)
                (lambda (&optional _) (user-error "x is neither GitHub nor GitLab"))))
@@ -177,7 +179,7 @@ as (COMMAND . CALLBACK) in `spawned'."
         (setq spawned nil)
         (ygg-git-review-requests-tests--render)
         (should-not spawned)
-        (should (string-match-p "reviews: not a forge remote" (buffer-string)))))))
+        (should (string-match-p "prs: not a forge remote" (buffer-string)))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-spawn-reports-a-missing-program
   (let (got)
@@ -218,7 +220,7 @@ as (COMMAND . CALLBACK) in `spawned'."
       (puthash "gl.example" "me" ygg-git-review-requests--users)
       (with-temp-buffer
         (ygg-git-review-requests-tests--render)
-        (should (string-match-p "&per_page=100&" (car (last (car (car spawned))))))))))
+        (should (string-match-p "&per_page=100" (car (last (car (car spawned))))))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-null-branch-renders-a-question-mark
   (ygg-git-review-requests-tests--with
@@ -239,7 +241,7 @@ as (COMMAND . CALLBACK) in `spawned'."
     (with-temp-buffer
       (ygg-git-review-requests-tests--seed (list (ygg-git-review-requests-tests--row)))
       (ygg-git-review-requests-refetch)
-      (should (string-match-p "Review requests (fetching…)" (buffer-string))))))
+      (should (string-match-p "Pull requests (fetching…)" (buffer-string))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-expiry-kills-and-reports
   (ygg-git-review-requests-tests--with
@@ -257,7 +259,7 @@ as (COMMAND . CALLBACK) in `spawned'."
                 (should (eq killed process))
                 (should-not (gethash ygg-git-review-requests-tests--repo
                                      ygg-git-review-requests--running))
-                (should (string-match-p "reviews: gh timed out" (buffer-string)))))
+                (should (string-match-p "prs: gh timed out" (buffer-string)))))
           (delete-process process))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-timer-expires-a-hung-fetch
@@ -327,8 +329,10 @@ as (COMMAND . CALLBACK) in `spawned'."
          (ygg-git-review-requests--running (make-hash-table :test 'equal))
          (ygg-git-review-requests--watchers (make-hash-table :test 'equal))
          (ygg-git-review-requests--repos (make-hash-table :test 'equal))
+         (ygg-git-review-requests--users (make-hash-table :test 'equal))
          (ygg-git-review-requests t)
          spawned)
+    (puthash "github.com" "me" ygg-git-review-requests--users)
     (unwind-protect
         (progn
           (make-directory repo)
@@ -355,7 +359,7 @@ as (COMMAND . CALLBACK) in `spawned'."
                        (lambda (command _) (push command spawned) nil)))
               (with-temp-buffer
                 (ygg-git-review-requests-tests--render)
-                (should (string-match-p "Review requests (fetching…)" (buffer-string)))
+                (should (string-match-p "Pull requests (fetching…)" (buffer-string)))
                 (should (equal (nth 4 (car spawned)) "github.com/o/r"))))))
       (delete-directory root t))))
 
@@ -389,7 +393,7 @@ as (COMMAND . CALLBACK) in `spawned'."
           (with-temp-buffer
             (ygg-git-review-requests-tests--render)
             (should-not spawned)
-            (should (string-match-p "Review requests (1)" (buffer-string)))
+            (should (string-match-p "Pull requests (1)" (buffer-string)))
             (should (string-match-p "#12  Add thing" (buffer-string))))
         (delete-file ygg-git-review-requests-file)))))
 
@@ -403,9 +407,9 @@ as (COMMAND . CALLBACK) in `spawned'."
             (ygg-git-review-requests-tests--render)
             (ygg-git-review-requests-tests--render)
             (should (= 1 (length spawned)))
-            (should (string-match-p "Review requests (1)" (buffer-string)))
+            (should (string-match-p "Pull requests (1)" (buffer-string)))
             (funcall (cdr (car spawned)) 0 "[]")
-            (should (string-match-p "Review requests (0)" (buffer-string)))
+            (should (string-match-p "Pull requests (0)" (buffer-string)))
             (should (= 1 (length spawned)))
             (let ((saved (with-temp-buffer
                            (insert-file-contents ygg-git-review-requests-file)
@@ -471,7 +475,7 @@ as (COMMAND . CALLBACK) in `spawned'."
           (should-not (process-live-p process))
           (should-not (memq process (process-list)))
           (should-not (ygg-git-review-requests-tests--ours))
-          (should (string-match-p "reviews: gh timed out" (buffer-string))))))))
+          (should (string-match-p "prs: gh timed out" (buffer-string))))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-replaced-fetch-late-answer-is-ignored
   (ygg-git-review-requests-tests--with
@@ -517,7 +521,7 @@ as (COMMAND . CALLBACK) in `spawned'."
               (with-temp-file file (insert text))
               (with-temp-buffer
                 (ygg-git-review-requests-tests--render)
-                (should (string-match-p "Review requests (fetching…)" (buffer-string)))
+                (should (string-match-p "Pull requests (fetching…)" (buffer-string)))
                 (should (= 1 (length spawned)))))
           (delete-file file))))))
 
@@ -535,7 +539,7 @@ as (COMMAND . CALLBACK) in `spawned'."
             (with-temp-buffer
               (ygg-git-review-requests-tests--render)
               (should-not spawned)
-              (should (string-match-p "Review requests (0)" (buffer-string)))))
+              (should (string-match-p "Pull requests (0)" (buffer-string)))))
         (delete-file file)))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-save-merges-prunes-and-caps
@@ -580,9 +584,9 @@ as (COMMAND . CALLBACK) in `spawned'."
             (with-temp-buffer
               (ygg-git-review-requests-refetch)
               (funcall (cdr (car spawned)) 1 "" "HTTP 401")
-              (should (string-match-p "Review requests (1)" (buffer-string)))
+              (should (string-match-p "Pull requests (1)" (buffer-string)))
               (should (string-match-p "#12  Add thing" (buffer-string)))
-              (should (string-match-p "reviews: gh not authenticated (showing last list)"
+              (should (string-match-p "prs: gh not authenticated (run gh auth login) (showing last list)"
                                       (buffer-string)))
               (should (string-match-p ":rows ((:number 12"
                                       (with-temp-buffer (insert-file-contents file) (buffer-string))))
@@ -626,7 +630,7 @@ as (COMMAND . CALLBACK) in `spawned'."
                        (current-buffer)))
               (with-temp-buffer
                 (ygg-git-review-requests-tests--render)
-                (should (string-match-p "Review requests (fetching…)" (buffer-string)))
+                (should (string-match-p "Pull requests (fetching…)" (buffer-string)))
                 (should (= 1 (length spawned)))))
           (delete-file file))))))
 
@@ -646,7 +650,7 @@ as (COMMAND . CALLBACK) in `spawned'."
             (with-temp-buffer
               (ygg-git-review-requests-tests--render)
               (should-not spawned)
-              (should (string-match-p "Review requests (1)" (buffer-string)))))
+              (should (string-match-p "Pull requests (1)" (buffer-string)))))
         (delete-file file)))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-odd-values-in-memory-do-not-break-render
@@ -657,7 +661,7 @@ as (COMMAND . CALLBACK) in `spawned'."
         (ygg-git-review-requests-tests--seed
          (list (apply #'plist-put (ygg-git-review-requests-tests--row) bad)))
         (ygg-git-review-requests-tests--render)
-        (should (string-match-p "Review requests (1)" (buffer-string)))))))
+        (should (string-match-p "Pull requests (1)" (buffer-string)))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-render-error-becomes-one-dim-line
   (ygg-git-review-requests-tests--with
@@ -666,12 +670,12 @@ as (COMMAND . CALLBACK) in `spawned'."
       (cl-letf (((symbol-function 'ygg-git-review-requests--row)
                  (lambda (_) (error "kaput"))))
         (ygg-git-review-requests-tests--render))
-      (should (string-match-p "reviews: kaput" (buffer-string))))
+      (should (string-match-p "prs: kaput" (buffer-string))))
     (with-temp-buffer
       (cl-letf (((symbol-function 'ygg-git-review-requests--repo)
                  (lambda () (signal 'wrong-type-argument '(x)))))
         (ygg-git-review-requests-tests--render))
-      (should (string-match-p "reviews: Wrong type argument" (buffer-string))))))
+      (should (string-match-p "prs: Wrong type argument" (buffer-string))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-failure-shows-first-stderr-line
   (let ((script (expand-file-name "gh" ygg-git-review-requests-tests--fake-dir))
@@ -687,14 +691,15 @@ as (COMMAND . CALLBACK) in `spawned'."
             (while (gethash ygg-git-review-requests-tests--repo
                             ygg-git-review-requests--running)
               (accept-process-output nil 0.05)))
-          (should (string-match-p "reviews: gh: boom$" (buffer-string)))
+          (should (string-match-p "prs: gh: boom$" (buffer-string)))
           (should-not (string-match-p "second\\|not authenticated" (buffer-string))))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-failure-text-is-trimmed-and-mapped
   (should (equal (ygg-git-review-requests--failure "gh" 1 (make-string 200 ?x))
                  (concat "gh: " (make-string 80 ?x))))
   (dolist (text '("run gh auth login" "HTTP 401" "you are not logged in"))
-    (should (equal (ygg-git-review-requests--failure "gh" 1 text) "gh not authenticated")))
+    (should (equal (ygg-git-review-requests--failure "gh" 1 text)
+                   "gh not authenticated (run gh auth login)")))
   (should (equal (ygg-git-review-requests--failure "gh" 3 "") "gh failed (exit 3)")))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-two-repos-on-one-host-ask-for-the-user-once
@@ -712,8 +717,8 @@ as (COMMAND . CALLBACK) in `spawned'."
                                spawned :key #'car :test #'equal)))
         (should (equal (sort (mapcar (lambda (s) (car (last (car s)))) (butlast spawned))
                              #'string<)
-                       '("projects/o%2Fa/merge_requests?state=opened&per_page=100&reviewer_username=me"
-                         "projects/o%2Fb/merge_requests?state=opened&per_page=100&reviewer_username=me")))
+                       '("projects/o%2Fa/merge_requests?state=opened&per_page=100"
+                         "projects/o%2Fb/merge_requests?state=opened&per_page=100")))
         (should-not (gethash "gl.example" ygg-git-review-requests--lookups))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-failed-user-lookup-fails-every-waiter
@@ -833,6 +838,138 @@ as (COMMAND . CALLBACK) in `spawned'."
                                                           collect (format "%s%d" tag i)))
                                  #'string<)))))
       (delete-directory dir t))))
+
+(defun ygg-git-review-requests-tests--gh-json (&rest specs)
+  (json-serialize
+   (vconcat
+    (cl-loop for (number author reviewers draft updated) in specs
+             collect (list :number number :title (format "T%d" number)
+                           :author (list :login author)
+                           :reviewRequests (vconcat (mapcar (lambda (r) (list :login r)) reviewers))
+                           :headRefName "h" :baseRefName "b"
+                           :url (format "https://x/%d" number)
+                           :isDraft (if draft t :false)
+                           :updatedAt (format "2026-10-%02dT10:00:00Z" updated))))))
+
+(defun ygg-git-review-requests-tests--lines ()
+  (split-string (buffer-substring-no-properties (point-min) (point-max)) "\n" t))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-groups-requested-mine-open
+  (ygg-git-review-requests-tests--with
+    (with-temp-buffer
+      (ygg-git-review-requests-tests--render)
+      (funcall (cdr (car spawned)) 0
+               (ygg-git-review-requests-tests--gh-json
+                '(1 "zed" () nil 1) '(2 "me" () nil 2) '(3 "ann" ("me") nil 3)
+                '(4 "me" () t 4) '(5 "bob" ("other" "me") nil 5)))
+      (let ((lines (ygg-git-review-requests-tests--lines)))
+        (should (equal (mapcar (lambda (l) (car (split-string l "  "))) lines)
+                       '("Pull requests (5)" "Review requested (2)" "#5" "#3"
+                         "Mine (2)" "#4" "#2" "Open (1)" "#1")))
+        (should (string-match-p "#4  \\[draft\\] T4" (buffer-string)))))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-empty-groups-are-hidden
+  (ygg-git-review-requests-tests--with
+    (with-temp-buffer
+      (ygg-git-review-requests-tests--render)
+      (funcall (cdr (car spawned)) 0
+               (ygg-git-review-requests-tests--gh-json '(1 "zed" () nil 1)))
+      (should (string-match-p "Open (1)" (buffer-string)))
+      (should-not (string-match-p "Review requested\\|Mine" (buffer-string))))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-limit-caps-in-group-order
+  (ygg-git-review-requests-tests--with
+    (let ((ygg-git-review-requests-limit 3))
+      (with-temp-buffer
+        (ygg-git-review-requests-tests--render)
+        (funcall (cdr (car spawned)) 0
+                 (ygg-git-review-requests-tests--gh-json
+                  '(1 "zed" () nil 1) '(2 "me" () nil 2) '(3 "ann" ("me") nil 3)
+                  '(4 "me" () nil 4) '(5 "bob" () nil 5)))
+        (should (string-match-p "Pull requests (3 of 5)" (buffer-string)))
+        (should (string-match-p "Review requested (1)" (buffer-string)))
+        (should (string-match-p "Mine (2)" (buffer-string)))
+        (should-not (string-match-p "Open" (buffer-string)))))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-old-cache-rows-render-as-review-requested
+  (ygg-git-review-requests-tests--with
+    (with-temp-buffer
+      (ygg-git-review-requests-tests--seed (list (ygg-git-review-requests-tests--row)))
+      (ygg-git-review-requests-tests--render)
+      (should (string-match-p "Review requested (1)" (buffer-string)))
+      (should-not (string-match-p "Mine\\|Open" (buffer-string))))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-github-asks-for-the-user-once
+  (ygg-git-review-requests-tests--with
+    (clrhash ygg-git-review-requests--users)
+    (with-temp-buffer
+      (ygg-git-review-requests-tests--render)
+      (should (equal (car (car spawned))
+                     '("gh" "api" "--hostname" "github.com" "user" "--jq" ".login")))
+      (funcall (cdr (car spawned)) 0 "me\n")
+      (should (= 2 (length spawned)))
+      (should (equal (gethash "github.com" ygg-git-review-requests--users) "me"))
+      (should (member "number,title,author,reviewRequests,headRefName,baseRefName,url,isDraft,updatedAt"
+                      (car (car spawned)))))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-gitlab-groups-by-reviewers
+  (let ((ygg-git-review-requests-tests--repo '(gitlab "gl.example" "o/r")))
+    (ygg-git-review-requests-tests--with
+      (puthash "gl.example" "me" ygg-git-review-requests--users)
+      (with-temp-buffer
+        (ygg-git-review-requests-tests--render)
+        (funcall (cdr (car spawned)) 0
+                 "[{\"iid\":1,\"author\":{\"username\":\"me\"},\"reviewers\":[]},{\"iid\":2,\"author\":{\"username\":\"x\"},\"reviewers\":[{\"username\":\"me\"}]},{\"iid\":3,\"author\":{\"username\":\"y\"},\"reviewers\":[]}]")
+        (should (equal (mapcar (lambda (l) (car (split-string l "  ")))
+                               (ygg-git-review-requests-tests--lines))
+                       '("Merge requests (3)" "Review requested (1)" "#2" "Mine (1)" "#1"
+                         "Open (1)" "#3")))))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-glab-banner-and-dns-failure-say-why
+  (let ((stderr "\n   ERROR  \n          \n  Get \"https://gitlab.example.int/api/v4/user\": dial tcp: lookup gitlab.example.int: no such host.\n"))
+    (should (equal (ygg-git-review-requests--failure "glab" 1 stderr)
+                   "glab: cannot resolve gitlab.example.int (VPN or network down?)"))
+    (should (equal (ygg-git-review-requests--failure "glab" 1 "\n  ERROR\n\n  something odd happened\n")
+                   "glab: something odd happened"))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-glab-stderr-surfaces-in-the-error-row
+  (let ((script (expand-file-name "glab" ygg-git-review-requests-tests--fake-dir))
+        (real (symbol-function 'ygg-git-review-requests--spawn))
+        (ygg-git-review-requests-tests--repo '(gitlab "gl.example" "o/r")))
+    (with-temp-file script
+      (insert "#!/bin/sh\nprintf '\\n   ERROR  \\n\\n  Get \"https://gl.example/api/v4/user\": dial tcp: lookup gl.example: no such host.\\n' >&2\nexit 1\n"))
+    (should (equal (executable-find "glab") script))
+    (ygg-git-review-requests-tests--with
+      (cl-letf (((symbol-function 'ygg-git-review-requests--spawn)
+                 (lambda (&rest args) (apply real args))))
+        (with-temp-buffer
+          (ygg-git-review-requests-tests--render)
+          (with-timeout (5 (ert-fail "no answer"))
+            (while (gethash ygg-git-review-requests-tests--repo
+                            ygg-git-review-requests--running)
+              (accept-process-output nil 0.05)))
+          (should (string-match-p
+                   (regexp-quote "mrs: glab: cannot resolve gl.example (VPN or network down?)")
+                   (buffer-string))))))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-fake-gh-end-to-end
+  (let ((real (symbol-function 'ygg-git-review-requests--spawn)))
+    (with-temp-file (expand-file-name "gh" ygg-git-review-requests-tests--fake-dir)
+      (insert "#!/bin/sh\nif [ \"$1\" = api ]; then echo me; exit 0; fi\ncat <<'EOF'\n"
+              (ygg-git-review-requests-tests--gh-json '(9 "me" () nil 3) '(8 "ann" ("me") nil 2))
+              "\nEOF\n"))
+    (ygg-git-review-requests-tests--with
+      (clrhash ygg-git-review-requests--users)
+      (cl-letf (((symbol-function 'ygg-git-review-requests--spawn)
+                 (lambda (&rest args) (apply real args))))
+        (with-temp-buffer
+          (ygg-git-review-requests-tests--render)
+          (with-timeout (5 (ert-fail "no answer"))
+            (while (gethash ygg-git-review-requests-tests--repo
+                            ygg-git-review-requests--running)
+              (accept-process-output nil 0.05)))
+          (should (string-match-p "Review requested (1)\n#8" (buffer-string)))
+          (should (string-match-p "Mine (1)\n#9" (buffer-string))))))))
 
 (provide 'ygg-git-review-requests-tests)
 ;;; ygg-git-review-requests-tests.el ends here

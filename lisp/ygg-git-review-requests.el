@@ -1,9 +1,10 @@
-;;; ygg-git-review-requests.el --- pull and merge requests awaiting your review -*- lexical-binding: t; -*-
+;;; ygg-git-review-requests.el --- open pull and merge requests in magit status -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; A magit status section listing the open pull and merge requests that
-;; ask for your review.  The forge is asked in the background; the
-;; section draws from the last answer and never waits for the next.
+;; A magit status section listing the open pull and merge requests:
+;; those asking for your review, yours, and the rest.  The forge is asked
+;; in the background; the section draws from the last answer and never
+;; waits for the next.
 
 ;;; Code:
 
@@ -18,15 +19,19 @@
 (declare-function ygg-git-compare-review-branch "ygg-git-compare" (&optional target))
 
 (defgroup ygg-git-review-requests nil
-  "Review requests in magit status."
+  "Pull and merge requests in magit status."
   :group 'magit)
 
 (defcustom ygg-git-review-requests t
-  "Whether magit status lists the requests waiting for your review."
+  "Whether magit status lists the open pull and merge requests."
   :type 'boolean)
 
+(defcustom ygg-git-review-requests-limit 30
+  "Most requests the section lists, review requested first."
+  :type 'integer)
+
 (defcustom ygg-git-review-requests-ttl 300
-  "Seconds before a repository's review requests are asked for again."
+  "Seconds before a repository's requests are asked for again."
   :type 'integer)
 
 (defcustom ygg-git-review-requests-timeout 30
@@ -91,29 +96,45 @@ standard output and standard error; a status of nil means it did not start."
   (when stamp
     (ignore-errors (float-time (encode-time (iso8601-parse stamp))))))
 
-(defun ygg-git-review-requests--parse (forge text)
-  "The requests in TEXT, a forge's JSON, as plists."
+(defun ygg-git-review-requests--group (user author reviewers)
+  (cond ((null user) 'open)
+        ((member user reviewers) 'requested)
+        ((equal user author) 'mine)
+        (t 'open)))
+
+(defun ygg-git-review-requests--parse (forge text &optional user)
+  "The requests in TEXT, a forge's JSON, as plists grouped for USER."
   (let ((items (json-parse-string text :object-type 'plist :array-type 'list
                                   :null-object nil :false-object nil)))
     (mapcar (lambda (item)
               (if (eq forge 'github)
-                  (list :number (plist-get item :number)
+                  (let ((author (plist-get (plist-get item :author) :login)))
+                    (list :number (plist-get item :number)
+                          :title (plist-get item :title)
+                          :author author
+                          :head (plist-get item :headRefName)
+                          :base (plist-get item :baseRefName)
+                          :url (plist-get item :url)
+                          :draft (plist-get item :isDraft)
+                          :updated (ygg-git-review-requests--time (plist-get item :updatedAt))
+                          :group (ygg-git-review-requests--group
+                                  user author
+                                  (mapcar (lambda (r) (plist-get r :login))
+                                          (plist-get item :reviewRequests)))))
+                (let ((author (plist-get (plist-get item :author) :username)))
+                  (list :number (plist-get item :iid)
                         :title (plist-get item :title)
-                        :author (plist-get (plist-get item :author) :login)
-                        :head (plist-get item :headRefName)
-                        :base (plist-get item :baseRefName)
-                        :url (plist-get item :url)
-                        :draft (plist-get item :isDraft)
-                        :updated (ygg-git-review-requests--time (plist-get item :updatedAt)))
-                (list :number (plist-get item :iid)
-                      :title (plist-get item :title)
-                      :author (plist-get (plist-get item :author) :username)
-                      :head (plist-get item :source_branch)
-                      :base (plist-get item :target_branch)
-                      :url (plist-get item :web_url)
-                      :draft (or (plist-get item :draft)
-                                 (plist-get item :work_in_progress))
-                      :updated (ygg-git-review-requests--time (plist-get item :updated_at)))))
+                        :author author
+                        :head (plist-get item :source_branch)
+                        :base (plist-get item :target_branch)
+                        :url (plist-get item :web_url)
+                        :draft (or (plist-get item :draft)
+                                   (plist-get item :work_in_progress))
+                        :updated (ygg-git-review-requests--time (plist-get item :updated_at))
+                        :group (ygg-git-review-requests--group
+                                user author
+                                (mapcar (lambda (r) (plist-get r :username))
+                                        (plist-get item :reviewers)))))))
             items)))
 
 (defconst ygg-git-review-requests--max-age (* 30 86400))
@@ -129,7 +150,8 @@ standard output and standard error; a status of nil means it did not start."
                  '(:title :author :head :base :url))
        (let ((updated (plist-get row :updated)))
          (or (null updated) (numberp updated)))
-       (memq (plist-get row :draft) '(nil t))))
+       (memq (plist-get row :draft) '(nil t))
+       (memq (plist-get row :group) '(nil requested mine open))))
 
 (defun ygg-git-review-requests--valid (entry)
   (and (consp entry)
@@ -229,13 +251,18 @@ standard output and standard error; a status of nil means it did not start."
           (magit-refresh-buffer))))))
 
 (defun ygg-git-review-requests--failure (program status stderr)
-  (let ((line (or (car (split-string (or stderr "") "\n" t "[ \t\r]+")) "")))
-    (cond ((string-match-p "auth login\\|401\\|not logged" (or stderr ""))
-           (format "%s not authenticated" program))
+  (let* ((stderr (or stderr ""))
+         (lines (seq-remove (lambda (l) (string-match-p "\\`\\(?:ERROR\\|FATAL\\)[:.]?\\'" l))
+                            (split-string stderr "\n" t "[ \t\r]+")))
+         (line (or (car lines) "")))
+    (cond ((string-match "lookup \\([^ :\"]+\\)[: ].*no such host" stderr)
+           (format "%s: cannot resolve %s (VPN or network down?)" program (match-string 1 stderr)))
+          ((string-match-p "auth login\\|401\\|not logged" stderr)
+           (format "%s not authenticated (run %s auth login)" program program))
           ((string-empty-p line) (format "%s failed (exit %s)" program status))
           (t (format "%s: %s" program (truncate-string-to-width line 80))))))
 
-(defun ygg-git-review-requests--finish (repo program status text &optional stderr)
+(defun ygg-git-review-requests--finish (repo program status text &optional stderr user)
   (let ((buffers (gethash repo ygg-git-review-requests--watchers)))
     (remhash repo ygg-git-review-requests--watchers)
     (ygg-git-review-requests--store
@@ -244,7 +271,7 @@ standard output and standard error; a status of nil means it did not start."
            ((/= status 0)
             (list :error (ygg-git-review-requests--failure program status stderr)))
            (t (condition-case nil
-                  (list :rows (ygg-git-review-requests--parse (car repo) text))
+                  (list :rows (ygg-git-review-requests--parse (car repo) text user))
                 (error (list :error (format "%s answered nothing readable" program)))))))))
 
 (defun ygg-git-review-requests--list (repo user)
@@ -254,18 +281,18 @@ standard output and standard error; a status of nil means it did not start."
        (ygg-git-review-requests--run
         repo
         (list "gh" "pr" "list" "--repo" (concat host "/" path)
-              "--search" "review-requested:@me" "--state" "open" "--limit" "100" "--json"
-              "number,title,author,headRefName,baseRefName,url,isDraft,updatedAt")
+              "--state" "open" "--limit" "100" "--json"
+              "number,title,author,reviewRequests,headRefName,baseRefName,url,isDraft,updatedAt")
         (lambda (status text &optional stderr)
-          (ygg-git-review-requests--finish repo "gh" status text stderr))))
+          (ygg-git-review-requests--finish repo "gh" status text stderr user))))
       ('gitlab
        (ygg-git-review-requests--run
         repo
         (list "glab" "api" "--hostname" host
-              (format "projects/%s/merge_requests?state=opened&per_page=100&reviewer_username=%s"
-                      (url-hexify-string path) (url-hexify-string user)))
+              (format "projects/%s/merge_requests?state=opened&per_page=100"
+                      (url-hexify-string path)))
         (lambda (status text &optional stderr)
-          (ygg-git-review-requests--finish repo "glab" status text stderr)))))))
+          (ygg-git-review-requests--finish repo "glab" status text stderr user)))))))
 
 (defun ygg-git-review-requests--run (repo command callback)
   (let* ((cell (gethash repo ygg-git-review-requests--running))
@@ -303,7 +330,14 @@ standard output and standard error; a status of nil means it did not start."
     (dolist (waiter (reverse (nth 2 entry)))
       (funcall waiter nil 1 "timed out"))))
 
-(defun ygg-git-review-requests--lookup-user (host waiter)
+(defun ygg-git-review-requests--user-name (forge text)
+  (if (eq forge 'github)
+      (let ((name (string-trim text)))
+        (and (string-match-p "\\`[^ \t\n]+\\'" name) name))
+    (plist-get (json-parse-string text :object-type 'plist :null-object nil)
+               :username)))
+
+(defun ygg-git-review-requests--lookup-user (forge host waiter)
   "Call WAITER with the user name, exit status and standard error once HOST
 has been asked who you are; concurrent askers share one question."
   (if-let* ((entry (gethash host ygg-git-review-requests--lookups)))
@@ -315,7 +349,9 @@ has been asked who you are; concurrent askers share one question."
           (progn
             (setf (nth 0 entry)
                   (ygg-git-review-requests--spawn
-                   (list "glab" "api" "--hostname" host "user")
+                   (if (eq forge 'github)
+                       (list "gh" "api" "--hostname" host "user" "--jq" ".login")
+                     (list "glab" "api" "--hostname" host "user"))
                    (lambda (status text &optional stderr)
                      (when (eq entry (gethash host ygg-git-review-requests--lookups))
                        (remhash host ygg-git-review-requests--lookups)
@@ -323,9 +359,7 @@ has been asked who you are; concurrent askers share one question."
                          (cancel-timer (nth 1 entry)))
                        (let ((name (and (eql status 0)
                                         (ignore-errors
-                                          (plist-get (json-parse-string text :object-type 'plist
-                                                                        :null-object nil)
-                                                     :username)))))
+                                          (ygg-git-review-requests--user-name forge text)))))
                          (when name
                            (puthash host name ygg-git-review-requests--users))
                          (dolist (waiter (reverse (nth 2 entry)))
@@ -350,16 +384,17 @@ has been asked who you are; concurrent askers share one question."
                              #'ygg-git-review-requests--expire repo cell))
           (let* ((host (nth 1 repo))
                  (user (gethash host ygg-git-review-requests--users)))
-            (if (or (eq (car repo) 'github) user)
+            (if user
                 (ygg-git-review-requests--list repo user)
               (ygg-git-review-requests--lookup-user
-               host
+               (car repo) host
                (lambda (name status stderr)
                  (when (eq cell (gethash repo ygg-git-review-requests--running))
                    (if name
                        (ygg-git-review-requests--list repo name)
                      (ygg-git-review-requests--finish
-                      repo "glab" (if (eql status 0) 1 status) "" stderr)))))))
+                      repo (if (eq (car repo) 'github) "gh" "glab")
+                      (if (eql status 0) 1 status) "" stderr)))))))
           (setq started t))
       (unless started
         (when (eq cell (gethash repo ygg-git-review-requests--running))
@@ -418,46 +453,97 @@ and no question is already out."
     (magit-insert-section (review-request pr)
       (magit-insert-heading
         (propertize
-         (format "#%s  %s  %s  %s→%s  %s"
-                 (plist-get pr :number) (plist-get pr :title)
+         (format "#%s  %s%s  %s  %s→%s  %s"
+                 (plist-get pr :number)
+                 (if (plist-get pr :draft) "[draft] " "")
+                 (plist-get pr :title)
                  (or (plist-get pr :author) "")
                  (or (plist-get pr :head) "?") (or (plist-get pr :base) "?")
                  (ygg-git-review-requests--age (plist-get pr :updated)))
          'font-lock-face (or face 'default))))))
 
+(defconst ygg-git-review-requests--groups
+  '((requested . "Review requested") (mine . "Mine") (open . "Open")))
+
+(defun ygg-git-review-requests--grouped (rows)
+  "ROWS split into (GROUP . ROWS) in display order, newest first, capped."
+  (let ((budget (max 0 ygg-git-review-requests-limit))
+        (sorted (sort (copy-sequence rows)
+                      (lambda (a b)
+                        (> (or (and (numberp (plist-get a :updated)) (plist-get a :updated)) 0)
+                           (or (and (numberp (plist-get b :updated)) (plist-get b :updated)) 0)))))
+        result)
+    (pcase-dolist (`(,group . ,_) ygg-git-review-requests--groups)
+      (let ((members (seq-filter (lambda (row)
+                                   (eq (or (plist-get row :group) 'requested) group))
+                                 sorted)))
+        (setq members (seq-take members budget))
+        (cl-decf budget (length members))
+        (when members
+          (push (cons group members) result))))
+    (nreverse result)))
+
+(defun ygg-git-review-requests--label (repo)
+  (if (eq (car-safe repo) 'gitlab) "Merge requests" "Pull requests"))
+
+(defun ygg-git-review-requests--tag (repo)
+  (if (eq (car-safe repo) 'gitlab) "mrs" "prs"))
+
+(defun ygg-git-review-requests--insert-group (group rows)
+  (magit-insert-section (review-request-group group)
+    (magit-insert-heading
+      (propertize (format "%s (%d)" (alist-get group ygg-git-review-requests--groups)
+                          (length rows))
+                  'font-lock-face 'magit-section-secondary-heading))
+    (mapc #'ygg-git-review-requests--row rows)))
+
 ;;;###autoload
 (defun ygg-git-review-requests-insert-section ()
-  "Insert the requests waiting for your review, from the last answer."
+  "Insert the open requests, from the last answer."
   (when ygg-git-review-requests
     (magit-insert-section (review-requests)
-      (condition-case err
-          (let* ((repo (ygg-git-review-requests--repo))
-                 (answer (and repo (ygg-git-review-requests--ensure repo))))
-            (cond ((null repo)
-                   (magit-insert-heading "Review requests")
-                   (ygg-git-review-requests--note "reviews: not a forge remote"))
-                  ((null answer)
-                   (magit-insert-heading "Review requests (fetching…)")
-                   (insert ?\n))
-                  ((and (plist-get answer :error) (not (plist-member answer :rows)))
-                   (magit-insert-heading "Review requests")
-                   (ygg-git-review-requests--note
-                    (concat "reviews: " (plist-get answer :error))))
-                  (t
-                   (let ((rows (plist-get answer :rows)))
-                     (magit-insert-heading (format "Review requests (%d)" (length rows)))
-                     (mapc #'ygg-git-review-requests--row rows)
-                     (if (plist-get answer :error)
-                         (ygg-git-review-requests--note
-                          (format "reviews: %s (showing last list)" (plist-get answer :error)))
-                       (insert ?\n))))))
-        (error
-         (ygg-git-review-requests--note
-          (format "reviews: %s" (error-message-string err))))))))
+      (let (repo)
+        (condition-case err
+            (let* ((found (ygg-git-review-requests--repo))
+                   (answer (and found (ygg-git-review-requests--ensure found))))
+              (setq repo found)
+              (cond ((null repo)
+                     (magit-insert-heading "Pull requests")
+                     (ygg-git-review-requests--note "prs: not a forge remote"))
+                    ((null answer)
+                     (magit-insert-heading
+                       (format "%s (fetching…)" (ygg-git-review-requests--label repo)))
+                     (insert ?\n))
+                    ((and (plist-get answer :error) (not (plist-member answer :rows)))
+                     (magit-insert-heading (ygg-git-review-requests--label repo))
+                     (ygg-git-review-requests--note
+                      (format "%s: %s" (ygg-git-review-requests--tag repo)
+                              (plist-get answer :error))))
+                    (t
+                     (let* ((rows (plist-get answer :rows))
+                            (groups (ygg-git-review-requests--grouped rows))
+                            (shown (apply #'+ (mapcar (lambda (g) (length (cdr g))) groups))))
+                       (magit-insert-heading
+                         (if (< shown (length rows))
+                             (format "%s (%d of %d)" (ygg-git-review-requests--label repo)
+                                     shown (length rows))
+                           (format "%s (%d)" (ygg-git-review-requests--label repo) shown)))
+                       (pcase-dolist (`(,group . ,members) groups)
+                         (ygg-git-review-requests--insert-group group members))
+                       (if (plist-get answer :error)
+                           (ygg-git-review-requests--note
+                            (format "%s: %s (showing last list)"
+                                    (ygg-git-review-requests--tag repo)
+                                    (plist-get answer :error)))
+                         (insert ?\n))))))
+          (error
+           (ygg-git-review-requests--note
+            (format "%s: %s" (ygg-git-review-requests--tag repo)
+                    (error-message-string err)))))))))
 
 (defun ygg-git-review-requests--at-point ()
   (or (magit-section-value-if 'review-request)
-      (user-error "No review request at point")))
+      (user-error "No pull request at point")))
 
 (defun ygg-git-review-requests-open ()
   "Open the compare review of the request at point."
@@ -480,7 +566,7 @@ and no question is already out."
     (message "%s" url)))
 
 (defun ygg-git-review-requests-refetch ()
-  "Ask the forge for the review requests now, whatever the cache holds."
+  "Ask the forge for the open requests now, whatever the cache holds."
   (interactive)
   (ygg-git-review-requests--ensure
    (or (ygg-git-review-requests--repo)

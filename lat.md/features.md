@@ -554,15 +554,16 @@ Tests:
 - `test/git-worktree-tests.el`
 - `test/ygg-git-worktree-tests.el`
 
-## Review requests
+## Pull requests in status
 
-Pull and merge requests waiting for your review, listed in magit status, from the forge, cached on disk and fetched in the background.
+Open pull and merge requests of the repository, listed in magit status in three groups (review requested, mine, open; capped by `ygg-git-review-requests-limit`), from the forge, cached on disk and fetched in the background.
 
 ### Sub-features
 
 Listing in magit status, open, browse, copy URL, refetch.
 
-- The list is a magit status section controlled by `ygg-git-review-requests`.
+- The list is a magit status section controlled by `ygg-git-review-requests`; heading "Pull requests (N)", "Merge requests (N)" on GitLab; empty groups are hidden and drafts are marked.
+- A forge failure shows the first meaningful line of the tool's own stderr (for example an unresolvable host).
 - Open a request as a compare; open in the browser; copy its URL.
 
 ### How to get to it
@@ -580,7 +581,7 @@ The section appears in magit status; from it the keys act on the request row.
 
 Results below are read from code, not driven live (unverified).
 
-1. `SPC g g`, find the review-requests section.
+1. `SPC g g`, find the pull-requests section.
 2. `RET` on a row opens that request as a compare review.
 3. `r` refetches from the forge.
 
