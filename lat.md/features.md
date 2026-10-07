@@ -604,6 +604,60 @@ Tests:
 
 - `test/ygg-git-review-requests-tests.el`
 
+## Stacked pull requests
+
+Branches that build on one another, shown bottom to top in magit status, restacked and pushed with one key, native to git, magit and the forge calls already here (no git-spice, git-town or Graphite).
+
+### Sub-features
+
+Stack section, restack, branch on top, retarget after a merge, compare against the parent.
+
+- A branch's parent is `branch.X.ygg-parent` in git config, else the base of its pull request from the cached request list; the list also feeds the review and CI state (`reviewDecision` and the check rollup, GitHub only).
+- The section "Stack (N)" sits after Worktrees and before the requests, controlled by `ygg-git-stack`; each row shows the branch, `#number`, draft, approved, changes or review, CI ok, failed or running, `+N on parent` and `behind M`. It is hidden for one branch alone and on the default branch.
+- The stack is the current branch's parents up to the default branch plus the children above it; a fork follows the first child by name.
+- Restack walks the stack from the first branch that no longer contains its parent and rebases the rest onto that parent with `--update-refs`, in the background, the old base being the reflog fork point. Only branches whose tip moved, and that the remote already has, are listed in one question and pushed with `--force-with-lease=<ref>:<expected sha>`; the default branch is never pushed.
+- A dirty worktree or a rebase in progress refuses the restack; a conflict stops it, opens magit status on the rebase, and the push question comes when the rebase is over, found on the next refresh, whether it was continued or aborted.
+- Make a branch on top of the current one with `magit-branch-and-checkout`, recording `branch.<name>.ygg-parent`.
+- After a merge from `ygg-git-pr-merge`, or when a request the section saw open is gone and the forge says it was merged, one question asks "Retarget #N to <target> and restack?": it edits the request's base through the merge command's retarget step, fetches, sets the child's parent to the target and restacks the stack above the merged branch onto it.
+- A compare of a stacked branch's request diffs against its recorded parent rather than the default branch (`ygg-git-compare--parent-base`).
+- v1 does not open pull requests.
+
+### How to get to it
+
+The section appears in magit status; the keys act on the section or a branch row.
+
+- `R` — restack the stack (`ygg-git-stack-restack`)
+- `b` — new branch on top of the current one (`ygg-git-stack-branch`)
+- `RET` — check out the branch on the row (`ygg-git-stack-visit`)
+- `m` — merge the request of the branch on the row (`ygg-git-stack-merge`)
+
+### Driving it
+
+Results below are read from code and driven only in temp repositories (unverified live).
+
+1. `SPC g g`, find "Stack".
+2. `b` on a stack row, name the branch; it is made on top and its parent recorded.
+3. Amend a lower branch, `R`; the stack is rebased and one question lists the force-pushes.
+4. After the bottom request is merged, answer the retarget question.
+
+### Gotchas
+
+What the code shows.
+
+- A branch with no remote counterpart is rebased but never pushed.
+- The lower branch you amended is not pushed by the restack unless the rebase moved it.
+- Merge detection of a vanished request only knows requests the section saw open in this session.
+
+### Code
+
+The main files, then the test files that map to them by name.
+
+- `lisp/ygg-git-stack.el`
+
+Tests:
+
+- `test/ygg-git-stack-tests.el`
+
 ## Compare review
 
 Compare any two sides (worktrees, branches, commits, pull requests) read-only in the whole frame, with line, hunk and file comments, review marks, interdiff, and an explain action.

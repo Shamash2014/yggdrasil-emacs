@@ -909,7 +909,7 @@ as (COMMAND . CALLBACK) in `spawned'."
       (funcall (cdr (car spawned)) 0 "me\n")
       (should (= 2 (length spawned)))
       (should (equal (gethash "github.com" ygg-git-review-requests--users) "me"))
-      (should (member "number,title,author,reviewRequests,headRefName,baseRefName,url,isDraft,updatedAt"
+      (should (member "number,title,author,reviewRequests,headRefName,baseRefName,url,isDraft,updatedAt,reviewDecision,statusCheckRollup"
                       (car (car spawned)))))))
 
 (ygg-git-review-requests-tests--deftest ygg-git-review-requests-gitlab-groups-by-reviewers

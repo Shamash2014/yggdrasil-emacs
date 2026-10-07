@@ -40,6 +40,8 @@
           "\\|\\(?:PRIVATE-TOKEN\\|JOB-TOKEN\\|CI_JOB_TOKEN\\)[:=][ \t]*[^ \t\n]+\\)"))
 
 (defvar ygg-git-pr-merge-retry-delay 2)
+(defvar ygg-git-pr-merge-merged-hook nil
+  "Run with (REPO INFO CHOICE ORIGIN) once a request is merged for certain.")
 (defvar ygg-git-pr-merge--active nil)
 (defvar ygg-git-pr-merge--asking nil)
 
@@ -207,6 +209,13 @@ GitHub is still computing mergeability."
                          #'ygg-git-pr-merge--read repo number (1- retries) callback))
            (t (funcall callback nil "GitHub is still computing mergeability; try again"))))))
 
+(defun ygg-git-pr-merge--retarget-command (repo number target)
+  (let ((number (if (numberp number) (number-to-string number) number))
+        (slug (ygg-git-pr-merge--slug repo)))
+    (if (eq (car repo) 'github)
+        (list "gh" "pr" "edit" number "--repo" slug "--base" target)
+      (list "glab" "mr" "update" number "-R" slug "--target-branch" target))))
+
 (defun ygg-git-pr-merge--commands (repo info target method auto delete)
   "The commands that retarget when needed, then merge, as (PROGRAM . ARGS)."
   (let* ((number (number-to-string (plist-get info :number)))
@@ -216,14 +225,14 @@ GitHub is still computing mergeability."
     (if (eq (car repo) 'github)
         (append
          (and retarget
-              (list (list "gh" "pr" "edit" number "--repo" slug "--base" target)))
+              (list (ygg-git-pr-merge--retarget-command repo number target)))
          (list (append (list "gh" "pr" "merge" number "--repo" slug
                              (format "--%s" method)
                              "--match-head-commit" sha)
                        (and auto '("--auto")))))
       (append
        (and retarget
-            (list (list "glab" "mr" "update" number "-R" slug "--target-branch" target)))
+            (list (ygg-git-pr-merge--retarget-command repo number target)))
        (list (append (list "glab" "mr" "merge" number "-R" slug)
                      (pcase method ('squash '("--squash")) ('rebase '("--rebase")))
                      (list "--sha" sha
@@ -395,7 +404,9 @@ return them as a plist, or nil after saying why not."
                ('auto (format "Auto-merge enabled for #%s (merges when %s)" number
                               (ygg-git-pr-merge--passes repo)))
                (_ (format "Queued #%s" number))))
-    (ygg-git-pr-merge--refetch repo origin)))
+    (ygg-git-pr-merge--refetch repo origin)
+    (when (eq outcome 'merged)
+      (run-hook-with-args 'ygg-git-pr-merge-merged-hook repo info choice origin))))
 
 (defun ygg-git-pr-merge--execute (repo info choice origin key)
   (let* ((target (plist-get choice :target))

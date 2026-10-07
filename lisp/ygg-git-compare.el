@@ -627,6 +627,14 @@ else the primary one."
                        (concat remote "/" base))))
     (if (and remote-base (magit-rev-verify remote-base)) remote-base base)))
 
+(declare-function ygg-git-stack--config-parent "ygg-git-stack" (branch))
+
+(defun ygg-git-compare--parent-base (head remote)
+  "The recorded parent of HEAD, a stacked branch, as `--pr-base' has it."
+  (when (and head (require 'ygg-git-stack nil t))
+    (when-let* ((parent (ygg-git-stack--config-parent head)))
+      (ygg-git-compare--pr-base parent remote))))
+
 ;;; Sides
 
 (defun ygg-git-compare--head-key (remote number)
@@ -852,8 +860,10 @@ this worktree when it has uncommitted changes, else the repository's
 default branch."
   (ygg-git-compare--with-git-cache
    (cond ((eq (car b) 'pr)
-          (cons 'rev (ygg-git-compare--pr-base (plist-get (cdr b) :base)
-                                               (plist-get (cdr b) :remote))))
+          (cons 'rev (or (ygg-git-compare--parent-base (plist-get (cdr b) :head)
+                                                       (plist-get (cdr b) :remote))
+                         (ygg-git-compare--pr-base (plist-get (cdr b) :base)
+                                                   (plist-get (cdr b) :remote)))))
          ((and (eq (car b) 'worktree)
                (file-equal-p (cdr b) (cdr (ygg-git-compare--here-spec)))
                (ygg-git-compare--dirty-p (cdr b)))
@@ -2250,7 +2260,8 @@ are old."
   (let ((head (plist-get pr :head))
         (start (plist-get pr :start)))
     (when (and (magit-commit-p head) (magit-commit-p start))
-      (cons (cons 'rev (or (plist-get (ygg-git-compare--with-base pr) :base)
+      (cons (cons 'rev (or (ygg-git-compare--parent-base name remote)
+                           (plist-get (ygg-git-compare--with-base pr) :base)
                            (ygg-git-compare--pr-base (plist-get pr :base-ref) remote)))
             (cons 'pr (append (list :number (plist-get pr :number) :sha head :head name
                                     :base (plist-get pr :base-ref) :remote remote)

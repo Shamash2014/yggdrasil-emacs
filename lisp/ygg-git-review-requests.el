@@ -17,6 +17,7 @@
 (declare-function ygg-git-compare--remote "ygg-git-compare" ())
 (declare-function ygg-git-compare--forge-repo "ygg-git-compare" (&optional remote))
 (declare-function ygg-git-compare-review-branch "ygg-git-compare" (&optional target))
+(declare-function ygg-git-pr-merge--checks "ygg-git-pr-merge" (rollup))
 
 (defgroup ygg-git-review-requests nil
   "Pull and merge requests in magit status."
@@ -120,7 +121,14 @@ standard output and standard error; a status of nil means it did not start."
                           :group (ygg-git-review-requests--group
                                   user author
                                   (mapcar (lambda (r) (plist-get r :login))
-                                          (plist-get item :reviewRequests)))))
+                                          (plist-get item :reviewRequests)))
+                          :review (let ((decision (plist-get item :reviewDecision)))
+                                    (and (stringp decision) (not (string-empty-p decision))
+                                         (downcase decision)))
+                          :checks (and (plist-member item :statusCheckRollup)
+                                       (progn (require 'ygg-git-pr-merge)
+                                              (ygg-git-pr-merge--checks
+                                               (plist-get item :statusCheckRollup))))))
                 (let ((author (plist-get (plist-get item :author) :username)))
                   (list :number (plist-get item :iid)
                         :title (plist-get item :title)
@@ -282,7 +290,7 @@ standard output and standard error; a status of nil means it did not start."
         repo
         (list "gh" "pr" "list" "--repo" (concat host "/" path)
               "--state" "open" "--limit" "100" "--json"
-              "number,title,author,reviewRequests,headRefName,baseRefName,url,isDraft,updatedAt")
+              "number,title,author,reviewRequests,headRefName,baseRefName,url,isDraft,updatedAt,reviewDecision,statusCheckRollup")
         (lambda (status text &optional stderr)
           (ygg-git-review-requests--finish repo "gh" status text stderr user))))
       ('gitlab
