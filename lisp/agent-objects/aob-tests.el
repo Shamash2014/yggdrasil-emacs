@@ -3790,7 +3790,9 @@ under it included, and not for any other."
                                       ("x" . aob-acp-command) ("d" . aob-todo)
                                       ("a" . ygg-aob-activity) ("M" . aob-acp-cycle-mode)
                                       ("e" . aob-trace-queue-edit) ("X" . aob-trace-queue-drop)
-                                      ("s" . aob-trace-queue-steer)))
+                                      ("s" . aob-trace-queue-steer)
+                                      ("z" . aob-acp-compact) ("Z" . aob-acp-clear)
+                                      ("N" . aob-acp-new)))
          (should (eq (lookup-key trace k) def)))
        (should-not (lookup-key trace "C"))
        (should (eq (lookup-key plan "S") #'aob-cancel))
@@ -8896,3 +8898,228 @@ nothing, TAB opens one whole and back, and copying passes over them."
                            (list (expand-file-name ".aob/plans/x.md" dir) nil nil)))
             (should-not (get-text-property (string-search ".aob/plans/gone.md" out) 'aob-file out))))
       (delete-directory dir t))))
+
+(defun aob-tests--as (s agent)
+  (aob-session-put s :agent agent)
+  (aob-set-state s 'idle))
+
+(ert-deftest aob-pi-advertises-clear-and-new-beside-its-own-commands ()
+  (aob-tests--with-session s
+    (aob-tests--as s "pi")
+    (aob-tests--update s '(:sessionUpdate "available_commands_update"
+                           :availableCommands [(:name "compact") (:name "session")]))
+    (should (equal (mapcar (lambda (c) (plist-get c :name))
+                           (aob-session-ref s :commands))
+                   '("compact" "session" "clear" "new")))
+    (aob-tests--as s "claude")
+    (aob-tests--update s '(:sessionUpdate "available_commands_update"
+                           :availableCommands [(:name "compact")]))
+    (should (equal (mapcar (lambda (c) (plist-get c :name))
+                           (aob-session-ref s :commands))
+                   '("compact")))))
+
+(ert-deftest aob-compact-sends-the-agents-own-command ()
+  (dolist (agent '("pi" "claude"))
+    (aob-tests--with-session s
+      (aob-tests--as s agent)
+      (aob-session-put s :commands '((:name "compact")))
+      (aob-tests--prompts sent
+        (aob-acp-compact s)
+        (aob-acp-compact s "decisions")
+        (should (equal (mapcar #'car (reverse sent))
+                       '("/compact" "/compact decisions"))))
+      (aob-session-put s :commands nil)
+      (should-error (aob-acp-compact s) :type 'user-error))))
+
+(ert-deftest aob-pi-compact-turn-draws-a-compaction-line-and-drops-the-meter ()
+  (aob-tests--with-session s
+    (aob-tests--as s "pi")
+    (aob-session-put s :ctx-used 90000)
+    (aob-session-put s :ctx-size 200000)
+    (let (sent)
+      (cl-letf (((symbol-function 'aob-acp--request)
+                 (lambda (_s method params cb)
+                   (push (cons method params) sent)
+                   (aob-tests--update
+                    s '(:sessionUpdate "agent_message_chunk"
+                        :content (:type "text" :text "Compaction completed.\nSummary body")))
+                   (should (equal (plist-get (aob-session-ref s :compaction-ev) :title)
+                                  "compacting context"))
+                   (funcall cb '(:stopReason "end_turn") nil))))
+        (aob-acp--prompt s "/compact keep decisions"))
+      (should (equal (caar sent) "session/prompt"))
+      (should (equal (plist-get (aref (plist-get (cdar sent) :prompt) 0) :text)
+                     "/compact keep decisions"))
+      (let ((ev (aob-session-ref s :compaction-ev)))
+        (should (equal (plist-get ev :title) "context compacted"))
+        (should (string-match-p "Summary body" (aob-event-text ev))))
+      (should-not (seq-find (lambda (e) (eq (plist-get e :type) 'message))
+                            (aob-session-events s)))
+      (should-not (aob-session-ref s :ctx-used))
+      (should-not (aob-session-ref s :local-compaction))
+      (should (eq (aob-session-state s) 'idle)))))
+
+(ert-deftest aob-pi-compact-failure-marks-the-line-failed-and-keeps-the-meter ()
+  (aob-tests--with-session s
+    (aob-tests--as s "pi")
+    (aob-session-put s :ctx-used 90000)
+    (cl-letf (((symbol-function 'aob-acp--request)
+               (lambda (_s _m _p cb) (funcall cb nil '(:message "boom")))))
+      (aob-acp--prompt-1 s "/compact"))
+    (should (string-match-p "compaction failed: boom"
+                            (plist-get (aob-session-ref s :compaction-ev) :title)))
+    (should (= (aob-session-ref s :ctx-used) 90000))))
+
+(ert-deftest aob-pi-clear-opens-a-new-acp-session-in-place ()
+  (aob-tests--with-session s
+    (aob-tests--as s "pi")
+    (process-put (aob-session-conn s) 'aob-init '(done (:agentCapabilities nil)))
+    (aob-session-put s :ctx-used 5000)
+    (aob-event s 'message :text "old history")
+    (let (sent)
+      (cl-letf (((symbol-function 'aob-acp--request)
+                 (lambda (_s method params cb)
+                   (push (cons method params) sent)
+                   (funcall cb '(:sessionId "sess-fresh") nil))))
+        (aob-acp--prompt s "/clear"))
+      (should (equal (mapcar #'car sent) '("session/new")))
+      (should (equal (plist-get (cdar sent) :cwd) "/tmp/proj")))
+    (should (equal (aob-session-ref s :acp-id) "sess-fresh"))
+    (let ((tbl (aob-acp--proc-sessions (aob-session-conn s))))
+      (should (eq (gethash "sess-fresh" tbl) s))
+      (should-not (gethash "sess-test" tbl)))
+    (should-not (aob-session-ref s :ctx-used))
+    (should (= (aob-session-nevents s) 1))
+    (should (equal (plist-get (car (aob-session-events s)) :title) "context cleared"))
+    (should (eq (aob-session-state s) 'idle))))
+
+(ert-deftest aob-pi-clear-keeps-model-and-mode-and-drops-per-conversation-state ()
+  (aob-tests--with-session s
+    (aob-tests--as s "pi")
+    (process-put (aob-session-conn s) 'aob-init '(done (:agentCapabilities nil)))
+    (aob-session-put s :model-id "m-1")
+    (aob-session-put s :mode-id "high")
+    (aob-session-put s :tools (make-hash-table :test #'equal))
+    (aob-session-put s :threads (make-hash-table :test #'equal))
+    (aob-session-put s :place-told "note")
+    (let (wanted cleared)
+      (cl-letf (((symbol-function 'aob-acp--request)
+                 (lambda (_s _m _p cb) (funcall cb '(:sessionId "sess-fresh") nil)))
+                ((symbol-function 'aob-acp--want-model)
+                 (lambda (_s w) (push (cons 'model w) wanted)))
+                ((symbol-function 'aob-acp--want-mode)
+                 (lambda (_s w) (push (cons 'mode w) wanted)))
+                (aob-acp-context-cleared-functions (list (lambda (x) (push x cleared)))))
+        (aob-acp-clear s))
+      (should (equal (reverse wanted) '((model . "m-1") (mode . "high"))))
+      (should (equal cleared (list s))))
+    (should-not (aob-session-ref s :place-told))
+    (should-not (aob-session-ref s :tools))
+    (should-not (aob-session-ref s :threads))))
+
+(ert-deftest aob-pi-clear-counts-abandoned-processes-and-says-when-many ()
+  (aob-tests--with-session s
+    (aob-tests--as s "pi")
+    (process-put (aob-session-conn s) 'aob-init '(done (:agentCapabilities nil)))
+    (let ((aob-acp-plain-clear-limit 2))
+      (cl-letf (((symbol-function 'aob-acp--request)
+                 (lambda (_s _m _p cb) (funcall cb '(:sessionId "sess-fresh") nil))))
+        (aob-acp-clear s)
+        (should-not (seq-find (lambda (e) (string-match-p "idle pi processes"
+                                                          (or (plist-get e :title) "")))
+                              (aob-session-events s)))
+        (aob-acp-clear s))
+      (should (= (process-get (aob-session-conn s) 'aob-abandoned) 2))
+      (should (seq-find (lambda (e) (string-match-p "holds 2 idle pi processes"
+                                                    (or (plist-get e :title) "")))
+                        (aob-session-events s))))))
+
+(defun aob-tests--compile-log (src)
+  (let ((dir (make-temp-file "aob-elc" t))
+        (args nil))
+    (dolist (d (cons (file-name-directory src)
+                     (cl-remove-if-not #'file-directory-p
+                                       (cl-remove-duplicates load-path :test #'equal))))
+      (push d args)
+      (push "-L" args))
+    (unwind-protect
+        (with-temp-buffer
+          (apply #'call-process
+                 (expand-file-name invocation-name invocation-directory) nil t nil
+                 "-Q" "--batch"
+                 (append (nreverse args)
+                         (list "--eval"
+                               (format "(setq byte-compile-dest-file-function (lambda (_) %S))"
+                                       (expand-file-name "out.elc" dir))
+                               "--eval" (format "(byte-compile-file %S)" src))))
+          (buffer-string))
+      (delete-directory dir t))))
+
+(defun aob-tests--start-dir-warnings (log)
+  (seq-filter (lambda (l)
+                (string-match-p
+                 "\\(?:Unused lexical variable ['‘]aob-acp-\\(?:start-dir\\|mcp-servers\\)['’]\\|['‘]aob-acp-\\(?:start-dir\\|mcp-servers\\)['’] declared after its first use\\)"
+                 l))
+              (split-string log "\n")))
+
+(ert-deftest aob-acp-compiled-binds-start-dir-and-mcp-servers-dynamically ()
+  (let* ((src (locate-library "aob-acp.el"))
+         (log (aob-tests--compile-log src)))
+    (should (string-match-p "aob-acp.el" log))
+    (should-not (aob-tests--start-dir-warnings log))))
+
+(ert-deftest aob-pi-clear-refuses-while-a-turn-runs ()
+  (aob-tests--with-session s
+    (aob-tests--as s "pi")
+    (aob-set-state s 'working)
+    (should-error (aob-acp-clear s) :type 'user-error)
+    (should (equal (aob-session-ref s :acp-id) "sess-test"))))
+
+(ert-deftest aob-pi-new-spawns-a-sibling-and-leaves-the-old-session ()
+  (aob-tests--with-session s
+    (aob-tests--as s "pi")
+    (let (call)
+      (cl-letf (((symbol-function 'aob-acp-spawn)
+                 (lambda (&rest args) (setq call (cons aob-acp-start-dir args)))))
+        (aob-acp--prompt s "/new"))
+      (should (equal call '("/tmp/proj/" "pi" nil nil nil "/tmp/proj/"))))
+    (should (equal (aob-session-ref s :acp-id) "sess-test"))
+    (should (aob-session-get (aob-session-id s)))))
+
+(ert-deftest aob-new-hands-the-sibling-the-session-s-mcp-servers ()
+  (aob-tests--with-session s
+    (aob-tests--as s "pi")
+    (let ((servers '((:name "x" :command "y"))) seen)
+      (aob-session-put s :mcp-declared servers)
+      (cl-letf (((symbol-function 'aob-acp-spawn)
+                 (lambda (&rest _) (setq seen aob-acp-mcp-servers))))
+        (aob-acp-new s))
+      (should (equal seen servers)))))
+
+(ert-deftest aob-session-opened-applies-model-before-mode ()
+  (aob-tests--with-session s
+    (let ((aob-acp-persist-file nil) order)
+      (cl-letf (((symbol-function 'aob-acp--want-model)
+                 (lambda (_s w) (push (cons 'model w) order)))
+                ((symbol-function 'aob-acp--want-mode)
+                 (lambda (_s w) (push (cons 'mode w) order))))
+        (aob-session-put s :want-mode "high")
+        (aob-session-put s :want-model "m-1")
+        (aob-acp--session-opened s '(:sessionId "sess-test"))
+        (should (equal (reverse order) '((model . "m-1") (mode . "high"))))))))
+
+(ert-deftest aob-claude-clear-and-new-slash-stay-prompts ()
+  (aob-tests--with-session s
+    (aob-tests--as s "claude")
+    (aob-tests--prompts sent
+      (aob-acp-clear s)
+      (should (equal (caar sent) "/clear")))
+    (let (requested)
+      (cl-letf (((symbol-function 'aob-acp--request)
+                 (lambda (_s method _p cb)
+                   (push method requested)
+                   (funcall cb '(:stopReason "end_turn") nil))))
+        (aob-acp--prompt s "/new")
+        (aob-acp--prompt s "/clear"))
+      (should (equal requested '("session/prompt" "session/prompt"))))
+    (should (equal (aob-session-ref s :acp-id) "sess-test"))))

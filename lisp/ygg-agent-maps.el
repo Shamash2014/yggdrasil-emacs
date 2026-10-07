@@ -17,6 +17,7 @@
 (defvar aob-acp-start-worktree)
 (defvar aob-acp-presets)
 (defvar aob-acp-before-first-prompt-functions)
+(defvar aob-acp-context-cleared-functions)
 (defvar aob-state-change-hook)
 (defvar aob-session-created-hook)
 
@@ -388,6 +389,11 @@ still to come. POINTER-ONLY keeps just the lat pointer line."
                                             (aob-session-ref s :maps-sent)))
       (aob-session-put s :maps-pending (aob-session-ref s :maps-more)))))
 
+(defun ygg-agent-maps--cleared (s)
+  (dolist (k '(:maps-sent :maps-flight :maps-more))
+    (aob-session-put s k nil))
+  (aob-session-put s :maps-pending t))
+
 (defun ygg-agent-maps--default-root ()
   (or (and (fboundp 'project-current)
            (when-let* ((project (project-current)))
@@ -534,6 +540,7 @@ Refused while an agent session is live in ROOT."
   (add-hook 'aob-acp-before-first-prompt-functions #'ygg-agent-maps-on-ready)
   (add-hook 'aob-session-created-hook #'ygg-agent-maps-warm)
   (add-hook 'aob-state-change-hook #'ygg-agent-maps--settle)
+  (add-hook 'aob-acp-context-cleared-functions #'ygg-agent-maps--cleared)
   (advice-add 'aob-acp--place-block :around #'ygg-agent-maps--place))
 
 (provide 'ygg-agent-maps)

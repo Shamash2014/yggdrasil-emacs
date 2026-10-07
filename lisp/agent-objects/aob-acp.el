@@ -925,7 +925,12 @@ before it is dispatched.")
           (when (member (plist-get u :status) '("completed" "failed"))
             (aob-note-progress s))
           (aob-acp--tool-update s u))
-         ("agent_message_chunk" (aob-acp--chunk s :msg-ev 'message u))
+         ("agent_message_chunk"
+          (if-let* ((id (aob-session-ref s :local-compaction)))
+              (aob-acp--compaction
+               s (list :sessionUpdate "compaction_summary_chunk"
+                       :compactionId id :content (plist-get u :content)))
+            (aob-acp--chunk s :msg-ev 'message u)))
          ("agent_thought_chunk" (aob-acp--chunk s :thought-ev 'thought u))
          ;; only a load or a replay speaks for you: a live turn's prompt is
          ;; already in the trace, from when it was sent
@@ -936,7 +941,8 @@ before it is dispatched.")
          ((or "compaction_update" "compaction_summary_chunk")
           (aob-acp--compaction s u))
          ("available_commands_update"
-          (aob-session-put s :commands (plist-get u :availableCommands)))
+          (aob-session-put s :commands (aob-acp--with-local-commands
+                                        s (plist-get u :availableCommands))))
          ("current_mode_update"
           (aob-session-put s :mode-id (plist-get u :currentModeId))
           (aob-event s 'state
@@ -2011,11 +2017,13 @@ matched back to the file here."
 (defun aob-acp--prompt (s text &optional atts)
   ;; prompting is never destructive: mid-turn (or mid-handshake, e.g. a
   ;; just-resumed session) it queues; interject is the explicit steer
-  (if (memq (aob-session-state s) '(working starting))
-      (progn
-        (aob-acp--queue s text atts)
-        (message "aob: queued for %s" (aob-session-name s)))
-    (aob-acp--prompt-1 s text atts)))
+  (cond
+   ((aob-acp--local-command s text)
+    (funcall (aob-acp--local-command s text) s))
+   ((memq (aob-session-state s) '(working starting))
+    (aob-acp--queue s text atts)
+    (message "aob: queued for %s" (aob-session-name s)))
+   (t (aob-acp--prompt-1 s text atts))))
 
 (defun aob-acp--clear-p (text)
   "Non-nil when TEXT is the /clear slash command (context reset)."
@@ -2083,6 +2091,7 @@ can't parse: the reference survives, and the demotion is said."
     (aob-event s 'prompt :text text :images (length atts) :image-files atts
                :typed aob-prompt-typed))
   (aob-set-state s 'working)
+  (aob-acp--local-compaction-begin s text)
   (let* ((stamp (aob-turn-begin s))
          (retry aob-acp--overflow-retry)
          (told aob-told-pending)
@@ -2099,6 +2108,7 @@ can't parse: the reference survives, and the demotion is said."
       (when-let* ((meta (aob-acp--prompt-meta s))) (list :_meta meta)))
      (lambda (res err)
        (aob-acp--break-accum s)
+       (aob-acp--local-compaction-end s res err)
        (unless err
          (aob-tell-all s told)
          (aob-acp--tell-embeds s blocks))
@@ -2139,7 +2149,9 @@ can't parse: the reference survives, and the demotion is said."
            (when (aob-acp--clear-p text)
              (setf (aob-session-events s) nil
                    (aob-session-nevents s) 0)
-             (aob-event s 'state :title "context cleared"))
+             (aob-session-put s :place-told nil)
+             (aob-event s 'state :title "context cleared")
+             (run-hook-with-args 'aob-acp-context-cleared-functions s))
            (aob-acp--compact-done s text res)
            (unless (aob-acp--overflow-resume s text res)
              (aob-set-state s 'idle)
@@ -2371,8 +2383,161 @@ held back; non-nil when it did."
 
 (add-hook 'aob-state-change-hook #'aob-acp--autocompact-on-idle)
 
-;; no dedicated key/verb for manual compaction — the `x' command picker
-;; already offers /compact; autosummarize handles it hands-off otherwise
+;;; Compact, clear, new — one verb each, whatever the agent
+
+(defvar aob-acp-start-dir)
+(defvar aob-acp-mcp-servers)
+
+(defvar aob-acp-context-cleared-functions nil
+  "Abnormal hook run with a session whose agent context was just wiped.")
+
+(defcustom aob-acp-plain-clear-limit 5
+  "Idle conversations a plain adapter's connection may hold before aob says so.
+Each /clear leaves the old conversation's process running, and only
+`aob-acp-restart' frees them."
+  :type 'natnum :group 'aob)
+
+(defcustom aob-acp-plain-adapter-agents '("pi")
+  "Agents whose adapter has no /clear and streams no compaction events.
+Their /clear starts a fresh conversation on the same connection, a typed
+/new opens another session beside this one, and a /compact turn is drawn
+as a compaction line with the context reading dropped until the next."
+  :type '(repeat string) :group 'aob)
+
+(defun aob-acp--plain-adapter-p (s)
+  (let ((agent (aob-session-ref s :agent)))
+    (and (stringp agent)
+         (member (aob-acp-preset-agent agent) aob-acp-plain-adapter-agents))))
+
+(defun aob-acp--with-local-commands (s commands)
+  "COMMANDS S's agent advertises, plus the /clear and /new aob answers itself."
+  (let ((cmds (append commands nil)))
+    (if (aob-acp--plain-adapter-p s)
+        (append cmds
+                (delq nil
+                      (mapcar (lambda (c)
+                                (unless (seq-find (lambda (x) (equal (plist-get x :name)
+                                                                     (car c)))
+                                                  cmds)
+                                  (list :name (car c) :description (cdr c))))
+                              '(("clear" . "Start a fresh conversation in this session")
+                                ("new" . "Open a new session beside this one")))))
+      cmds)))
+
+(defun aob-acp--local-command (s text)
+  "The verb aob answers TEXT with in place of sending it to S, or nil."
+  (when (and (stringp text) (aob-acp--plain-adapter-p s))
+    (cond ((aob-acp--clear-p text) #'aob-acp-clear)
+          ((string-match-p "\\`/new\\(?:[ \t].*\\)?\\'" (string-trim text))
+           #'aob-acp-new))))
+
+(defun aob-acp--local-compaction-begin (s text)
+  (when (and (aob-acp--plain-adapter-p s) (aob-acp--compact-text-p text))
+    (let ((id (aob-acp--span-id)))
+      (aob-session-put s :local-compaction id)
+      (aob-acp--compaction s (list :sessionUpdate "compaction_update"
+                                   :compactionId id :status "in_progress")))))
+
+(defun aob-acp--local-compaction-end (s res err)
+  "Close the compaction line a plain adapter's /compact turn opened.
+The adapter reports no usage afterwards, so the old reading goes."
+  (when-let* ((id (aob-session-ref s :local-compaction)))
+    (aob-session-put s :local-compaction nil)
+    (let ((stop (plist-get res :stopReason)))
+      (aob-acp--compaction
+       s (list :sessionUpdate "compaction_update" :compactionId id
+               :status (cond (err "failed")
+                             ((equal stop "cancelled") "cancelled")
+                             (t "completed"))
+               :error (and err (plist-get err :message))))
+      (unless (or err (equal stop "cancelled"))
+        (aob-acp--forget-context-reading s)))))
+
+(defun aob-acp--forget-context-reading (s)
+  (dolist (k '(:ctx-used :ctx-size :usage :usage-latest :autocompact-fired))
+    (aob-session-put s k nil))
+  (aob--dirty s))
+
+;;;###autoload
+(defun aob-acp-compact (s &optional instructions)
+  "Compact S's context; INSTRUCTIONS, when given, say what the summary keeps."
+  (interactive (list (aob-target)
+                     (read-string "Compact, keeping (empty for plain): ")))
+  (unless (aob-acp--offers-compact-p s)
+    (user-error "aob: %s offers no /compact" (aob-session-name s)))
+  (aob-prompt s (string-trim (concat "/compact " (or instructions "")))))
+
+;;;###autoload
+(defun aob-acp-clear (s)
+  "Wipe S's context: /clear where the agent has one, else a fresh conversation."
+  (interactive (list (aob-target)))
+  (if (aob-acp--plain-adapter-p s)
+      (aob-acp--fresh-conversation s)
+    (aob-prompt s "/clear")))
+
+;;;###autoload
+(defun aob-acp-new (s)
+  "Open a new session of S's agent in S's place, leaving S as it is."
+  (interactive (list (aob-target)))
+  (let ((aob-acp-start-dir (aob-session-project s))
+        (aob-acp-mcp-servers (aob-session-ref s :mcp-declared)))
+    (aob-acp-spawn (or (aob-session-ref s :preset) (aob-session-ref s :agent))
+                   nil nil nil (aob-session-dir s))))
+
+(defun aob-acp--fresh-conversation (s)
+  "Start a new ACP session for S on its connection and move S onto it.
+The conversation it leaves stays with the adapter, where its session
+file keeps it resumable."
+  (unless (eq (aob-session-state s) 'idle)
+    (user-error "aob: %s is busy; stop the turn first" (aob-session-name s)))
+  (let ((proc (aob-session-conn s)))
+    (aob-set-state s 'starting)
+    (aob-acp--with-init
+     proc
+     (lambda (init err)
+       (if err
+           (progn (aob-set-state s 'idle)
+                  (aob-event s 'error :title (plist-get err :message)))
+         (let* ((aob-acp-mcp-servers (aob-session-ref s :mcp-declared))
+                (params (aob-acp--with-limits
+                         s init "session/new"
+                         (list :cwd (aob-acp--wire-dir
+                                     (directory-file-name
+                                      (expand-file-name (aob-session-dir s))))
+                               :mcpServers (aob-acp--mcp-servers
+                                            init (aob-session-project s))))))
+           (when-let* ((dirs (aob-acp--extra-dirs s init)))
+             (setq params (plist-put (copy-sequence params)
+                                     :additionalDirectories dirs)))
+           (aob-acp--request
+            s "session/new" params
+            (lambda (res err)
+              (if err
+                  (progn (aob-set-state s 'idle)
+                         (aob-event s 'error :title (plist-get err :message)))
+                (aob-acp--deregister proc s)
+                (setf (aob-session-events s) nil
+                      (aob-session-nevents s) 0)
+                (dolist (k '(:compact-read :compact-modified :context-told
+                             :embeds-told :compaction-ev :local-compaction
+                             :tools :threads :place-told))
+                  (aob-session-put s k nil))
+                (aob-session-put s :want-model (aob-session-ref s :model-id))
+                (aob-session-put s :want-mode (aob-session-ref s :mode-id))
+                (aob-acp--forget-context-reading s)
+                (run-hook-with-args 'aob-acp-context-cleared-functions s)
+                (aob-acp--session-opened s res nil "context cleared")
+                (aob-acp--note-abandoned proc s))))))))))
+
+(defun aob-acp--note-abandoned (proc s)
+  "Count the conversation S left running on PROC, and say when it adds up."
+  (let ((n (1+ (or (process-get proc 'aob-abandoned) 0))))
+    (process-put proc 'aob-abandoned n)
+    (when (>= n aob-acp-plain-clear-limit)
+      (aob-event s 'state :warning t
+                 :title (format "%s holds %d idle %s processes; restart it to free them"
+                                (aob-session-name s) n
+                                (aob-session-ref s :agent))))))
 
 (defun aob-acp--drop-queue (s)
   "Drop S's pending prompts so a cancel leaves nothing to flush back in."
@@ -3466,14 +3631,15 @@ session must not be poorer than a fresh one."
     (aob-acp--config-apply s opts))
   ;; before the queue flushes below — the wire is ordered, so even the
   ;; first turn already runs under the definition's mode
-  (when-let* ((want (aob-session-ref s :want-mode)))
-    (aob-session-put s :want-mode nil)
-    (aob-acp--want-mode s want))
-  ;; likewise before the flush: the wire is ordered, so the first turn
-  ;; already runs on the model the task was assigned
+  ;; before the flush: the wire is ordered, so the first turn already runs
+  ;; on the model the task was assigned
   (when-let* ((want (aob-session-ref s :want-model)))
     (aob-session-put s :want-model nil)
     (aob-acp--want-model s want))
+  ;; after the model: pi's setModel resets the thinking level the mode sets
+  (when-let* ((want (aob-session-ref s :want-mode)))
+    (aob-session-put s :want-mode nil)
+    (aob-acp--want-mode s want))
   ;; and the rest of what the preset asked for — reasoning effort and
   ;; the like — in the same ordered window, so the first turn runs under
   ;; all of it and not only the parts that had a path of their own
