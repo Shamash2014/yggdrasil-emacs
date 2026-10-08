@@ -418,6 +418,7 @@ its task says it ended, or something saw it end."
     ('tool (pcase (plist-get ev :shell-end)
              ('failed 'failed)
              ((pred identity) 'done)
+             ((guard (aob-event-stopped-p ev)) nil)
              (_ (if (aob-trace-shell-live-p ev)
                     'running
                   (pcase (plist-get ev :status)
@@ -712,6 +713,7 @@ line."
   (pcase (plist-get ev :status)
     ("queued" (propertize "⋯ queued" 'face 'shadow))
     ("cancelled" (propertize "⊘ cancelled" 'face 'shadow))
+    ((guard (aob-event-stopped-p ev)) (propertize "⊘ stopped" 'face 'shadow))
     ((guard (and aob-trace-status-gutter (display-graphic-p))) "")
     ("pending" (propertize "⋯" 'face 'shadow))
     ("in_progress" (propertize "⟳" 'face 'shadow))
@@ -2525,13 +2527,13 @@ them, grouped and in order, or in their own trace."
 (defun aob-subagents--name (s) (aob--buffer-name "subs" s))
 
 (defun aob-subagents--status (ev)
-  "Running, done, cancelled or failed, as the subagent call EV last
+  "Running, stopped, done, cancelled or failed, as the subagent call EV last
 reported; a subagent that lost its agent says disconnected."
   (pcase (plist-get ev :status)
     ("failed" (if (equal (plist-get ev :ended) "disconnected") "disconnected" "failed"))
     ("cancelled" "cancelled")
     ((or "completed" "success") "done")
-    (_ "running")))
+    (_ (if (aob-event-stopped-p ev) "stopped" "running"))))
 
 (defun aob-subagents--secs (ev)
   "Seconds the subagent call EV has run, or nil when it cannot be told."
@@ -2551,7 +2553,7 @@ TAIL is its model and tokens."
                          'face (pcase status
                                  ((or "failed" "disconnected") 'error)
                                  ("running" 'warning)
-                                 ("cancelled" 'shadow)
+                                 ((or "cancelled" "stopped") 'shadow)
                                  (_ 'success)))
              (propertize (format "%7s" (if secs (aob-duration-short secs) "·"))
                          'face 'shadow)

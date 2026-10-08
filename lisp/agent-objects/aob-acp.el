@@ -707,6 +707,7 @@ one, and failing that the newest line that is not noise."
             (when-let* ((ev (aob-acp--decision-event s d)))
               (plist-put ev :line nil)))
           (setf (aob-session-decisions s) nil)
+          (aob-session-settle-subagents s t)
           (aob-set-state s 'dead)
           (push s died)
           (aob-event s 'error :title "process exited" :text tail)
@@ -1703,6 +1704,8 @@ column of the word bash."
           (plist-put ev :subagent-type role))
         (aob-acp--terminal-note ev u)
         (aob-acp--background-note s ev u)
+        (when (and (plist-get ev :ended) (aob-acp--child-live-p (plist-get u :status)))
+          (aob-event-revive s ev))
         (when-let* ((st (aob-acp--diff-stat (plist-get ev :content))))
           (plist-put ev :stat st))
         (when (and (member (plist-get ev :status) '("completed" "failed"))
@@ -2126,6 +2129,7 @@ can't parse: the reference survives, and the demotion is said."
                ;; the flag first: the idle transition runs hooks (workflow
                ;; advance) that must see this turn failed
                (aob-session-put s :turn-error t)
+               (aob-session-settle-subagents s)
                (aob-set-state s 'idle)
                (if (aob-acp--auth-error-p err)
                    (aob-acp--auth-offer s err nil)
@@ -2141,6 +2145,7 @@ can't parse: the reference survives, and the demotion is said."
                (aob-usage-note-turn s usage)
                (when (fboundp 'ygg-usage-note) (ygg-usage-note s usage)))
              (aob-session-put s :stop-warning warning)
+             (aob-session-settle-subagents s)
              (unless (equal (plist-get res :stopReason) "cancelled")
                (aob-acp--background-running s))
              (aob-event s 'stop :reason (plist-get res :stopReason)
@@ -5131,6 +5136,7 @@ holds no turn, question or connection for a session no one reads."
                            (aob-session-nevents s) (length kept))))))
              (lambda (s res)
                (aob-session-put s :restored-by (car verb))
+               (aob-session-settle-subagents s t)
                ;; a second time only where the first found nothing
                (unless (eq (car verb) 'load)
                  (aob-acp--seed-history s e))

@@ -336,6 +336,72 @@ what the trace already rolls up, read back as a list."
                                    (plist-get e :children))))
               (reverse (aob-session-events s))))
 
+(declare-function aob-subagent--native-sync "aob-subagent" (kid ev))
+(declare-function aob-subagent-announced-end "aob-subagent" (kid state &optional why))
+
+(defun aob-event-stopped-p (ev)
+  "Whether tool call EV was left unfinished by the turn or agent that ran it."
+  (and (equal (plist-get ev :ended) "stopped")
+       (member (plist-get ev :status) '(nil "pending" "in_progress"))
+       t))
+
+(defun aob-event-revive (s ev)
+  "Let tool call EV of S run again after it was settled as stopped."
+  (when (equal (plist-get ev :ended) "stopped")
+    (plist-put ev :ended nil)
+    (plist-put ev :done-ts nil)
+    (plist-put ev :line nil)
+    (when-let* ((pid (plist-get ev :parent))
+                (parent (seq-find (lambda (e) (equal (plist-get e :tool-id) pid))
+                                  (aob-session-events s))))
+      (plist-put parent :child-live (1+ (or (plist-get parent :child-live) 0)))
+      (plist-put parent :line nil))
+    (when-let* ((kid (aob-session-native-child s ev))
+                ((fboundp 'aob-subagent--native-sync)))
+      (aob-subagent--native-sync kid ev))
+    (aob--dirty s)))
+
+(defun aob-session--settle-call (s ev)
+  "Mark tool call EV of S stopped, and its unfinished steps with it."
+  (plist-put ev :ended "stopped")
+  (unless (plist-get ev :done-ts)
+    (plist-put ev :done-ts (float-time)))
+  (plist-put ev :line nil)
+  (plist-put ev :child-live 0)
+  (when-let* ((tid (plist-get ev :tool-id)))
+    (dolist (c (aob-session-events s))
+      (when (and (equal (plist-get c :parent) tid)
+                 (member (plist-get c :status) '("pending" "in_progress"))
+                 (not (plist-get c :ended)))
+        (plist-put c :ended "stopped")
+        (plist-put c :line nil)))))
+
+(defun aob-session-settle-subagents (s &optional gone)
+  "Mark S's subagent calls that can no longer be running as stopped.
+A turn that ended, or an agent that died, never sends their last update.
+A call whose announced subagent is still working, or that the agent ran
+in the background, outlives the turn; GONE says the agent itself is gone."
+  (dolist (ev (aob-session-subagents s))
+    (let ((kid (aob-session-native-child s ev)))
+      (when (and gone kid (aob-session-ref kid :announced)
+                 (fboundp 'aob-subagent-announced-end)
+                 (memq (aob-session-state kid) '(working blocked starting)))
+        (aob-subagent-announced-end kid 'done "cancelled"))
+      (when (and (member (plist-get ev :status) '(nil "pending" "in_progress"))
+                 (not (plist-get ev :ended))
+                 (or gone
+                     (and (not (plist-get ev :stand-in))
+                          (not (let ((raw (plist-get ev :raw)))
+                                 (and (listp raw)
+                                      (eq t (plist-get raw :run_in_background)))))
+                          (not (and kid (aob-session-ref kid :announced)
+                                    (memq (aob-session-state kid)
+                                          '(working blocked starting)))))))
+        (aob-session--settle-call s ev)
+        (when (and kid (fboundp 'aob-subagent--native-sync))
+          (aob-subagent--native-sync kid ev))
+        (aob--dirty s)))))
+
 (defun aob-session-blurb (s)
   "S's current-activity line, built on demand."
   (let ((x (aob-session-summary s)))

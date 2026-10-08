@@ -102,6 +102,7 @@ SENDING is non-nil while the turn that made the call is still going."
   (let ((status (plist-get ev :status))
         (raw (plist-get ev :raw)))
     (cond ((equal status "failed") 'failed)
+          ((aob-event-stopped-p ev) 'done)
           ((or (member status '(nil "pending" "in_progress"))
                (> (or (plist-get ev :child-live) 0) 0)
                ;; codex's spawn completes once the thread exists
