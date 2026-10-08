@@ -562,6 +562,108 @@ a current_model_update names another model."
     (let ((err (should-error (aob-acp-model s) :type 'user-error)))
       (should (string-match-p "npm ERR! network" (cadr err))))))
 
+(defconst aob-tests--backend-info
+  '("litellm/claude-opus-5-5"
+    (:value "litellm/claude-opus-5-5") (:value "anthropic/claude-opus-5-5")
+    (:value "litellm/opus-5-5") (:value "openai/gpt-6"))
+  "A pi-acp model list where one model has two providers.")
+
+(defmacro aob-tests--with-backend (info sent &rest body)
+  "Run BODY in an idle connected session whose model info is INFO, pushing set values on SENT."
+  (declare (indent 2))
+  `(aob-tests--with-session s
+     (aob-set-state s 'idle)
+     (cl-letf (((symbol-function 'aob-session-conn) (lambda (_) t))
+               ((symbol-function 'aob-acp--model-info) (lambda (_) ,info))
+               ((symbol-function 'aob-acp--set-model)
+                (lambda (_s id) (push id ,sent))))
+       ,@body)))
+
+(ert-deftest aob-backend-choices-match-model-part-only ()
+  (should (equal (aob-acp--backend-choices aob-tests--backend-info)
+                 '(("anthropic" . "anthropic/claude-opus-5-5"))))
+  (should-not (aob-acp--backend-choices '("opus" (:value "opus"))))
+  (should-not (aob-acp--backend-choices '(nil))))
+
+(ert-deftest aob-backend-single-candidate-switches-straight ()
+  (let (sent)
+    (aob-tests--with-backend aob-tests--backend-info sent
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (&rest _) (error "should not prompt"))))
+        (aob-acp-backend s))
+      (should (equal sent '("anthropic/claude-opus-5-5"))))))
+
+(ert-deftest aob-backend-multiple-candidates-prompt ()
+  (let (sent asked)
+    (aob-tests--with-backend
+        '("litellm/m" (:value "litellm/m") (:value "anthropic/m") (:value "bedrock/m"))
+        sent
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p coll &rest _) (setq asked coll) "bedrock")))
+        (aob-acp-backend s))
+      (should (equal asked '("anthropic" "bedrock")))
+      (should (equal sent '("bedrock/m"))))))
+
+(ert-deftest aob-backend-no-candidate-errors ()
+  (let (sent)
+    (aob-tests--with-backend '("litellm/m" (:value "litellm/m")) sent
+      (let ((err (should-error (aob-acp-backend s) :type 'user-error)))
+        (should (string-match-p "no other backend for litellm/m" (cadr err))))
+      (should-not sent))))
+
+(ert-deftest aob-backend-id-without-slash-errors ()
+  (let (sent)
+    (aob-tests--with-backend '("opus" (:value "opus") (:value "a/opus")) sent
+      (let ((err (should-error (aob-acp-backend s) :type 'user-error)))
+        (should (string-match-p "names no backend" (cadr err))))
+      (should-not sent))))
+
+(ert-deftest aob-backend-waits-for-handshake ()
+  (aob-tests--with-session s
+    (should (eq (aob-session-state s) 'starting))
+    (let (sent (info nil))
+      (cl-letf* (((symbol-function 'run-at-time)
+                  (lambda (_ _ fn &rest args) (apply fn args)))
+                 ((symbol-function 'aob-acp--model-info) (lambda (_) info))
+                 ((symbol-function 'aob-acp--set-model)
+                  (lambda (_s id) (push id sent))))
+        (aob-acp-backend s)
+        (should-not sent)
+        (setq info aob-tests--backend-info)
+        (aob-set-state s 'idle)
+        (should (equal sent '("anthropic/claude-opus-5-5")))))))
+
+(ert-deftest aob-wait-reruns-the-guards-when-conn-is-gone ()
+  (aob-tests--with-session s
+    (let (sent timers)
+      (cl-letf* (((symbol-function 'run-at-time)
+                  (lambda (_ _ fn &rest args) (push (cons fn args) timers)))
+                 ((symbol-function 'aob-acp--model-info)
+                  (lambda (_) aob-tests--backend-info))
+                 ((symbol-function 'aob-acp--set-model)
+                  (lambda (_s id) (push id sent))))
+        (aob-acp-backend s)
+        (aob-set-state s 'idle)
+        (should (= (length timers) 1))
+        (setf (aob-session-conn s) nil)
+        (let ((err (should-error
+                    (let ((tm (car timers))) (apply (car tm) (cdr tm)))
+                    :type 'user-error)))
+          (should (string-match-p "not running" (cadr err))))
+        (should-not sent)))))
+
+(ert-deftest aob-backend-on-an-asleep-session-says-so ()
+  (let ((s (aob-create-session :id "acp:test:asleep-b" :backend 'acp
+                               :name "asleep" :project "/tmp/proj/"
+                               :dir "/tmp/proj/" :state 'done)))
+    (unwind-protect
+        (progn
+          (aob-session-put s :asleep (list :acp-id "sess-asleep" :agent "claude"))
+          (let ((err (should-error (aob-acp-backend s) :type 'user-error)))
+            (should (string-match-p "asleep" (cadr err)))
+            (should-not (string-match-p "not running" (cadr err)))))
+      (aob-remove-session s))))
+
 (ert-deftest aob-image-capability-gate ()
   ;; image blocks only go to agents that declared image support; others
   ;; get the paths inline so the reference is never silently dropped

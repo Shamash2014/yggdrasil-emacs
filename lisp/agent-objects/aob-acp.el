@@ -1221,12 +1221,9 @@ model S is actually on; a name the agent resolved itself is no miss."
                   (mapcar #'car cands) nil t)))
     (aob-acp--set-model s (cdr (assoc choice cands)))))
 
-(defun aob-acp-model (s)
-  "Check and switch S's model — the picker names the current one.
-A session without a stored list heals itself first: ACP has no options
-getter, but a no-op mode set makes the adapter return the full
-configOptions in its response."
-  (interactive (list (aob-target)))
+(defun aob-acp--when-ready (s fn &optional asleep)
+  "Run FN on S once it can answer; ASLEEP, else FN, takes it asleep.
+A session still opening is waited on, then FN runs again."
   (let ((state (aob-session-state s)))
     (cond
      ((memq state '(failed dead))
@@ -1234,26 +1231,78 @@ configOptions in its response."
                   (aob-session-name s) state
                   (or (aob-session-ref s :fail-reason) "no reason recorded")))
      ((and (aob-session-ref s :asleep) (not (aob-session-conn s)))
-      (aob-acp--model-asleep s))
+      (funcall (or asleep fn) s))
      ;; mid-handshake nothing is ingested yet, and a spawn with a first
      ;; turn is already working then — wait for the open, by what arrived
      ;; rather than by the state's name
      ((and (memq state '(starting working blocked))
            (not (and (aob-session-conn s) (aob-session-ref s :opened))))
-      (message "aob: %s is still opening — the model picker will follow"
+      (message "aob: %s is still opening — the picker will follow"
                (aob-session-name s))
-      (letrec ((fn (lambda (s2 _old new)
-                     (when (eq s2 s)
-                       (cond
-                        ((memq new '(failed dead))
-                         (remove-hook 'aob-state-change-hook fn))
-                        ((or (eq new 'idle) (aob-session-ref s :opened))
-                         (remove-hook 'aob-state-change-hook fn)
-                         (run-at-time 0 nil #'aob-acp-model s)))))))
-        (add-hook 'aob-state-change-hook fn)))
+      (letrec ((hook (lambda (s2 _old new)
+                       (when (eq s2 s)
+                         (cond
+                          ((memq new '(failed dead))
+                           (remove-hook 'aob-state-change-hook hook))
+                          ((or (eq new 'idle) (aob-session-ref s :opened))
+                           (remove-hook 'aob-state-change-hook hook)
+                           (run-at-time 0 nil #'aob-acp--when-ready s fn asleep)))))))
+        (add-hook 'aob-state-change-hook hook)))
      ((not (aob-session-conn s))
       (user-error "aob: %s is not running" (aob-session-name s)))
-     (t (aob-acp--model-1 s)))))
+     (t (funcall fn s)))))
+
+(defun aob-acp-model (s)
+  "Check and switch S's model — the picker names the current one.
+A session without a stored list heals itself first: ACP has no options
+getter, but a no-op mode set makes the adapter return the full
+configOptions in its response."
+  (interactive (list (aob-target)))
+  (aob-acp--when-ready s #'aob-acp--model-1 #'aob-acp--model-asleep))
+
+(defun aob-acp--backend-choices (info)
+  "Other (PROVIDER . VALUE) pairs in INFO offering the current model.
+Ids read provider/model, split at the first slash."
+  (let* ((cur (car info))
+         (at (and (stringp cur) (string-search "/" cur)))
+         (model (and at (substring cur (1+ at))))
+         (provider (and at (substring cur 0 at))))
+    (when model
+      (delq nil
+            (mapcar (lambda (v)
+                      (let* ((id (plist-get v :value))
+                             (i (and (stringp id) (string-search "/" id))))
+                        (when (and i (equal (substring id (1+ i)) model)
+                                   (not (equal (substring id 0 i) provider)))
+                          (cons (substring id 0 i) id))))
+                    (cdr info))))))
+
+(defun aob-acp--backend-asleep (s)
+  (user-error "aob: %s is asleep — wake it to switch backend"
+              (aob-session-name s)))
+
+(defun aob-acp-backend (s)
+  "Switch S to another provider serving the same model."
+  (interactive (list (aob-target)))
+  (aob-acp--when-ready s #'aob-acp--backend-1 #'aob-acp--backend-asleep))
+
+(defun aob-acp--backend-1 (s)
+  (let ((info (aob-acp--model-info s)))
+    (if (not (and (stringp (car info)) (string-search "/" (car info))))
+        (user-error "aob: %s model %s names no backend"
+                    (aob-session-name s) (or (car info) "?"))
+      (let ((cands (aob-acp--backend-choices info)))
+        (pcase (length cands)
+          (0 (user-error "aob: %s has no other backend for %s"
+                         (aob-session-name s) (car info)))
+          (1 (aob-acp--set-model s (cdar cands)))
+          (_ (aob-acp--set-model
+              s (cdr (assoc (completing-read
+                             (format "Backend (now %s): "
+                                     (substring (car info) 0
+                                                (string-search "/" (car info))))
+                             (mapcar #'car cands) nil t)
+                            cands)))))))))
 
 (defun aob-acp--model-1 (s)
   (let ((info (aob-acp--model-info s)))
