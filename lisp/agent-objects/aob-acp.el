@@ -1741,7 +1741,8 @@ redrawing the parent's line."
                    (1+ (or (plist-get parent :child-live) 0)))
         (setq moved t))
       (when (and old (aob-acp--child-live-p old)
-                 (not (aob-acp--child-live-p new)))
+                 (not (aob-acp--child-live-p new))
+                 (not (equal (plist-get ev :ended) "stopped")))
         (plist-put parent :child-live
                    (max 0 (1- (or (plist-get parent :child-live) 0))))
         (setq moved t))

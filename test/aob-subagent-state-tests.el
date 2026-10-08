@@ -210,6 +210,33 @@
       (aob-sub-state-tests--tool-update s "T1" "pending")
       (should (eq (aob-session-state kid) 'working)))))
 
+(ert-deftest aob-sub-state-revived-child-keeps-count-when-sibling-ends ()
+  (aob-sub-state-tests--wired s
+    (aob-sub-state-tests--call s "T1" "in_progress")
+    (aob-sub-state-tests--call s "A" "in_progress" "T1")
+    (aob-sub-state-tests--call s "B" "in_progress" "T1")
+    (let ((ev (aob-sub-state-tests--ev s "T1")))
+      (aob-session-settle-subagents s)
+      (should (= 0 (plist-get ev :child-live)))
+      (aob-sub-state-tests--tool-update s "A" "in_progress")
+      (aob-sub-state-tests--tool-update s "A" "in_progress")
+      (should (= 1 (plist-get ev :child-live)))
+      (aob-sub-state-tests--tool-update s "B" "completed")
+      (should (= 1 (plist-get ev :child-live)))
+      (aob-sub-state-tests--tool-update s "A" "completed")
+      (should (= 0 (plist-get ev :child-live))))))
+
+(ert-deftest aob-sub-state-revived-child-revives-parent ()
+  (aob-sub-state-tests--wired s
+    (aob-sub-state-tests--call s "T1" "in_progress")
+    (aob-sub-state-tests--call s "A" "in_progress" "T1")
+    (let ((ev (aob-sub-state-tests--ev s "T1")))
+      (aob-session-settle-subagents s)
+      (should (equal (aob-subagents--status ev) "stopped"))
+      (aob-sub-state-tests--tool-update s "A" "in_progress")
+      (should (equal (aob-subagents--status ev) "running"))
+      (should (= 1 (plist-get ev :child-live))))))
+
 (ert-deftest aob-sub-state-stopped-task-children-do-not-run ()
   (aob-sub-state-tests--wired s
     (aob-sub-state-tests--call s "T1" "in_progress")
