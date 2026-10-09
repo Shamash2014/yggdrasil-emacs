@@ -140,53 +140,71 @@
 (declare-function aob-acp-new "aob-acp")
 (declare-function aob-acp-config "aob-acp")
 (declare-function aob-acp-mcp "aob-acp")
-(declare-function aob-deliver-to "aob-deliver")
 (declare-function aob-acp-worker-effort "aob-acp" (s level))
+(autoload 'ygg-projects-toggle-pin "ygg-projects" nil t)
+
+(defun ygg-aob--localleader-group (mode key label bindings)
+  "Bind KEY in MODE's localleader as a prefix named LABEL over BINDINGS.
+BINDINGS is a list of (KEY COMMAND LABEL)."
+  (let ((map (make-sparse-keymap)))
+    (pcase-dolist (`(,k ,def ,doc) bindings)
+      (define-key map (kbd k) (cons doc def)))
+    (yggdrasil-localleader-def mode key map label)))
+
 ;; how an agent answers is a property of the one in front of you, so it
 ;; is set from its own buffer: the localleader already knows which
 ;; session that is, where the global leader has to ask
 (dolist (mode '(aob-trace-mode aob-plan-mode))
   (yggdrasil-localleader-def mode "S" #'aob-cancel "stop turn (twice: drop queue)")
-  (yggdrasil-localleader-def mode "x" #'aob-acp-command "command")
-  (yggdrasil-localleader-def mode "z" #'aob-acp-compact "compact context")
-  (yggdrasil-localleader-def mode "Z" #'aob-acp-clear "clear context")
-  (yggdrasil-localleader-def mode "N" #'aob-acp-new "new session here")
+  (yggdrasil-localleader-def mode "x" #'aob-acp-command "agent slash command")
   (yggdrasil-localleader-def mode "d" #'aob-todo "todo list")
-  (yggdrasil-localleader-def mode "a" #'ygg-aob-activity "activity → quickfix")
-  (yggdrasil-localleader-def mode "y" #'aob-resolve "answer the decision")
-  (yggdrasil-localleader-def mode "n" #'aob-rename-session "rename")
   (yggdrasil-localleader-def mode "f" #'aob-dired "files (dired)")
-  (yggdrasil-localleader-def mode "m" #'aob-acp-set-mode "mode")
-  (yggdrasil-localleader-def mode "M" #'aob-acp-cycle-mode "next mode")
-  (yggdrasil-localleader-def mode "l" #'aob-acp-model "model")
-  (yggdrasil-localleader-def mode "L" #'aob-acp-backend "same model, other backend")
-  (yggdrasil-localleader-def mode "E" #'aob-acp-config "effort / options")
-  (yggdrasil-localleader-def mode "c" #'aob-acp-mcp "mcp servers")
-  (yggdrasil-localleader-def mode "g" #'aob-acp-goal "goal")
-  (yggdrasil-localleader-def mode "r" #'aob-transcript-wake "wake it (resume acp)")
-  (yggdrasil-localleader-def mode "t" #'ygg-aob-subagents "subagents → quickfix")
-  (yggdrasil-localleader-def mode "F" #'aob-acp-add-folder "add a folder"))
-(dolist (mode '(aob-plan-mode))
-  (yggdrasil-localleader-def mode "p" #'aob-compose "compose")
-  (yggdrasil-localleader-def mode "k" #'aob-kill-session "kill session")
-  (yggdrasil-localleader-def mode "w" #'aob-deliver-to "answer goes…"))
+  (yggdrasil-localleader-def mode "n" #'aob-rename-session "rename")
+  (yggdrasil-localleader-def mode "P" #'ygg-projects-toggle-pin "pin session")
+  (ygg-aob--localleader-group
+   mode "m" "settings"
+   '(("m" aob-acp-set-mode "mode")
+     ("n" aob-acp-cycle-mode "next mode")
+     ("l" aob-acp-model "model")
+     ("L" aob-acp-backend "other backend")
+     ("e" aob-acp-config "effort / options")
+     ("w" aob-acp-worker-effort "worker effort")
+     ("c" aob-acp-mcp "mcp servers")
+     ("g" aob-acp-goal "goal")
+     ("r" aob-transcript-wake "wake (resume acp)")
+     ("f" aob-acp-add-folder "add a folder")))
+  (ygg-aob--localleader-group
+   mode "z" "context"
+   '(("z" aob-acp-compact "compact context")
+     ("Z" aob-acp-clear "clear context")
+     ("n" aob-acp-new "new session here")))
+  (ygg-aob--localleader-group
+   mode "i" "info"
+   '(("a" ygg-aob-activity "activity → quickfix")
+     ("t" ygg-aob-subagents "subagents → quickfix"))))
 
 ;; a queued message is still yours until it goes: change it or take it
 ;; back, from the line it is drawn on
-(yggdrasil-localleader-def 'aob-trace-mode "e" #'aob-trace-queue-edit "queued: rewrite")
-(yggdrasil-localleader-def 'aob-trace-mode "X" #'aob-trace-queue-drop "queued: drop")
-(yggdrasil-localleader-def 'aob-trace-mode "s" #'aob-trace-queue-steer "queued: say it now (idle: send held)")
-(yggdrasil-localleader-def 'aob-trace-mode "RET" #'aob-trace-queue-send-now "queued: send now (stops the turn)")
-(yggdrasil-localleader-def 'aob-trace-mode "K" #'aob-trace-queue-earlier "queued: move earlier")
-(yggdrasil-localleader-def 'aob-trace-mode "J" #'aob-trace-queue-later "queued: move later")
-(yggdrasil-localleader-def 'aob-trace-mode "u" #'aob-trace-usage "usage: time, tokens, cost")
 (yggdrasil-localleader-def 'aob-trace-mode "A" #'aob-answer "answer its questions")
-(yggdrasil-localleader-def 'aob-trace-mode "H" #'aob-handoff "hand off to a fresh session")
-(yggdrasil-localleader-def 'aob-trace-mode "b" #'ygg-aob-browser "preview in a browser pane")
-(autoload 'ygg-projects-toggle-pin "ygg-projects" nil t)
-(dolist (mode '(aob-trace-mode aob-plan-mode))
-  (yggdrasil-localleader-def mode "P" #'ygg-projects-toggle-pin "pin session")
-  (yggdrasil-localleader-def mode "W" #'aob-acp-worker-effort "worker effort"))
+(ygg-aob--localleader-group
+ 'aob-trace-mode "q" "queued"
+ '(("e" aob-trace-queue-edit "rewrite")
+   ("d" aob-trace-queue-drop "drop")
+   ("s" aob-trace-queue-steer "say it now (idle: send held)")
+   ("RET" aob-trace-queue-send-now "send now (stops the turn)")
+   ("k" aob-trace-queue-earlier "move earlier")
+   ("j" aob-trace-queue-later "move later")))
+(ygg-aob--localleader-group
+ 'aob-trace-mode "z" "context"
+ '(("z" aob-acp-compact "compact context")
+   ("Z" aob-acp-clear "clear context")
+   ("n" aob-acp-new "new session here")
+   ("h" aob-handoff "hand off to a fresh session")))
+(ygg-aob--localleader-group
+ 'aob-trace-mode "i" "info"
+ '(("a" ygg-aob-activity "activity → quickfix")
+   ("t" ygg-aob-subagents "subagents → quickfix")
+   ("u" aob-trace-usage "usage: time, tokens, cost")))
 
 (declare-function ygg-ex--cmd-write "yggdrasil-ex" (range bang args))
 (declare-function aob-trace-send "aob-trace")
@@ -306,7 +324,7 @@ the servers it is handed are decided."
 (yggdrasil-localleader-def 'aob-compose-mode "p" #'ygg-preset-edit "edit a preset")
 (setq aob-compose-panel-hint "\\ m modes")
 
-;; \ a on an agent → its file activity as a quickfix.  Built from ACP tool
+;; \ i a on an agent → its file activity as a quickfix.  Built from ACP tool
 ;; `:locations' (the universal field every adapter populates), so it works
 ;; for claude, codex, and hermes alike — where claude-only subagent
 ;; nesting could not — and inherits clickable rows, ]l/[l nav, wgrep, and
@@ -352,7 +370,7 @@ actions keep their tool title.  The short path stays the clickable target."
                                  default-directory)))
       (ygg-qf--collect (nreverse lines) t))))
 
-;; \ t on an agent → its subagents as a quickfix, one row each; a row opens
+;; \ i t on an agent → its subagents as a quickfix, one row each; a row opens
 ;; the subagent's own trace.  The list follows the session's tick for as
 ;; long as nothing else has replaced it, so a status never goes stale.  When
 ;; the session goes the list stays as a last snapshot: its rows say so.
@@ -2095,8 +2113,6 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "o" #'ygg-aob-pick :label "go to"
   "r" #'ygg-aob-resolve-next :label "resolve"
   "q" #'aob-kill-session :label "kill")
-
-(declare-function ygg-transient-acp "ygg-transient")
 
 (defvar ygg-leader-agent-map (make-sparse-keymap) "The a prefix: AI agents.")
 (yggdrasil-leader-def "a" ygg-leader-agent-map "agents")

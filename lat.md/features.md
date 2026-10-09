@@ -247,7 +247,7 @@ Spawning, trace buffer, subagents, modes and models, shells, todo, transcripts, 
 
 - Spawn an agent on a project with a model, resume, fork, archive, delete.
 - Trace: the conversation as operations, with a queue of prompts waiting to send.
-- Subagents: a delegation you can hold, list and open (`\ t` lists them in the quickfix, one row each, following the session; a row opens the subagent's trace), each with its model (the call's own, the subagent session's own, or inherited from its parent at spawn and marked ↑; `?` when unknown) and tokens (a native subagent's own spend, else its context as `ctx`; `—` otherwise).
+- Subagents: a delegation you can hold, list and open (`\ i t` lists them in the quickfix, one row each, following the session; a row opens the subagent's trace), each with its model (the call's own, the subagent session's own, or inherited from its parent at spawn and marked ↑; `?` when unknown) and tokens (a native subagent's own spend, else its context as `ctx`; `—` otherwise).
 - Session modes, model, goal and worker effort per session.
 - Running shell commands across agents, with a way to stop one.
 - Todo list kept by you and the agent; transcripts of ended conversations.
@@ -267,8 +267,8 @@ Agents live under SPC a; the trace buffer has its own keys and localleader.
 - `SPC a v` — conversations of the open project (`ygg-conversations`)
 - `SPC p z` — pick a zone or agent (`ygg-space-pick`)
 - `\ d` — todo items of the session in the quickfix; an empty list offers to add the first (`aob-todo`)
-- `\ l` — model of the session (`aob-acp-model`)
-- `\ m` — mode of the session (`ygg-compose-transient`)
+- `\ m l` — model of the session (`aob-acp-model`)
+- `\ m m` — mode of the session (`aob-acp-set-mode`)
 - `\ S` — cancel the running turn (`aob-cancel`)
 
 ### Driving it
@@ -276,7 +276,7 @@ Agents live under SPC a; the trace buffer has its own keys and localleader.
 Results below are read from docstrings and key labels, not driven live (unverified).
 
 1. `SPC a c c` asks for agent, project and model and spawns the session with a first prompt; its trace opens in a space.
-2. In the trace, `a`, `i` or `o` opens a compose buffer (in the plan list `\ p` does); `c` steers the turn already running (`aob-steer`).
+2. In the trace, `a`, `i` or `o` opens a compose buffer; `c` steers the turn already running (`aob-steer`).
 3. `RET` on a pending question or decision answers it (`aob-trace-answer`).
 4. `C` in normal or visual state comments on the line or selection in a box under it (`aob-trace-comment`); `ZZ` holds the comment for the next message, `C-RET` holds it and sends every held comment, `ZQ` cancels. `C` on a held comment's card or its marked words opens the same box on its words; saving it empty drops the comment.
 5. `SPC a c o` flashes labels over the agents in this space and jumps to the chosen one.
@@ -345,7 +345,7 @@ Context, delivery and scheduling hang under SPC a c; per-trace actions use the l
 - `SPC a e` — say where the next answer goes (`aob-deliver-to`)
 - `SPC a c W` — ask, answer goes elsewhere (`aob-ask-to`)
 - `\ A` — answer the last reply's questions (`aob-answer`)
-- `\ H` — hand off to a fresh session (`aob-handoff`)
+- `\ z h` — hand off to a fresh session (`aob-handoff`)
 
 ### Driving it
 
@@ -354,7 +354,7 @@ Results below are read from docstrings, not driven live (unverified).
 1. Select code, `SPC a c x` adds it to the agent's context; `SPC a c X` lists what the agent holds in the quickfix.
 2. `SPC a c s` takes a prompt and a moment or repeat and sends it to the session then.
 3. `\ A` in a trace opens the questions of the last reply in the compose box.
-4. `\ H` writes the next task for a fresh session that takes over from this one.
+4. `\ z h` writes the next task for a fresh session that takes over from this one.
 
 ### Gotchas
 
@@ -466,13 +466,13 @@ The sidecar starts on its own for agents; the controls are commands.
 - `M-x aob-mcp-host-start` — start the headless Emacs that serves MCP (`aob-mcp-host-start`)
 - `M-x aob-acp-mcp-refresh` — ask every MCP server again (`aob-acp-mcp-refresh`)
 - `M-x aob-acp-mcp-restart` — reload this conversation into a process that gets the servers (`aob-acp-mcp-restart`)
-- `\ c` — MCP servers this session can reach (`aob-acp-mcp`)
+- `\ m c` — MCP servers this session can reach (`aob-acp-mcp`)
 
 ### Driving it
 
 Results below are read from docstrings, not driven live (unverified).
 
-1. `\ c` in a trace lists every MCP server the session can reach and whether it was given.
+1. `\ m c` in a trace lists every MCP server the session can reach and whether it was given.
 2. After changing servers, `M-x aob-acp-mcp-refresh` asks each again.
 3. If a session never got a server, `M-x aob-acp-mcp-restart` reloads the conversation into a new process.
 

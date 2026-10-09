@@ -2481,9 +2481,9 @@ them, grouped and in order, or in their own trace."
     (if (equal (car aob-trace--footer) key)
         (cdr aob-trace--footer)
       (let ((line (propertize
-                   (format "» %d %s · %s · \\ J/K reorder · \\ X drop"
+                   (format "» %d %s · %s · \\ q k/j reorder · \\ q d drop"
                            n (if held "held" "queued")
-                           (cond (held "\\ s sends now")
+                           (cond (held "\\ q s sends now")
                                  ((> n 1) "sent as one when this turn ends")
                                  (t "sent when this turn ends")))
                    'font-lock-face 'aob-trace-done)))
@@ -2630,7 +2630,7 @@ An entry is (TEXT ATTACHMENTS EVENT), as the session keeps it."
     (cond ((null starts) (user-error "aob: nothing queued"))
           ((null to) (user-error "aob: no queued message %s" (if (> dir 0) "after this" "before this")))
           (t (goto-char to)
-             (message "%d queued · \\ e rewrite · \\ J/K reorder · \\ X drop · \\ s say it now" (length starts))))))
+             (message "%d queued · \\ q e rewrite · \\ q k/j reorder · \\ q d drop · \\ q s say it now" (length starts))))))
 
 (defun aob-trace-queued-next ()
   "Go to the next message waiting to be sent."
@@ -3684,7 +3684,7 @@ the model behind it is named quietly beside it."
   "S's header: name, model, login, state, clock, cost, context and todo.
 All but the name are grey.
 A subagent's names the agent it works for instead of cost and context.
-The full account is \\ u; the header carries only what is looked at."
+The full account is \\ i u; the header carries only what is looked at."
   (let* ((grey (lambda (str) (propertize (string-replace "%" "%%" str) 'face 'shadow)))
          (model (aob-trace--model s))
          (mode (aob-session-ref s :mode-id))

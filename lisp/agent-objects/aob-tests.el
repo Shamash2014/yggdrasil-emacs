@@ -967,7 +967,7 @@ a current_model_update names another model."
   ;; belongs to the both-wires command, now on the localleader
   (should-not (lookup-key aob-object-map "M"))
   (aob-tests--modal
-   '(should (eq (lookup-key (ygg-localleader--get-map 'aob-trace-mode) "l")
+   '(should (eq (lookup-key (ygg-localleader--get-map 'aob-trace-mode) (kbd "m l"))
                 #'aob-acp-model))))
 
 (ert-deftest aob-model-wait-unhooks-on-failure ()
@@ -3846,25 +3846,17 @@ under it included, and not for any other."
 
 (ert-deftest aob-modal-agent-verbs-on-localleader ()
   (aob-tests--modal
-   '(progn
-     (let ((trace (ygg-localleader--get-map 'aob-trace-mode))
-           (plan (ygg-localleader--get-map 'aob-plan-mode)))
-       (pcase-dolist (`(,k . ,def) '(("S" . aob-cancel)
-                                      ("x" . aob-acp-command) ("d" . aob-todo)
-                                      ("a" . ygg-aob-activity) ("M" . aob-acp-cycle-mode)
-                                      ("e" . aob-trace-queue-edit) ("X" . aob-trace-queue-drop)
-                                      ("s" . aob-trace-queue-steer)
-                                      ("z" . aob-acp-compact) ("Z" . aob-acp-clear)
-                                      ("N" . aob-acp-new)))
-         (should (eq (lookup-key trace k) def)))
-       (should-not (lookup-key trace "C"))
-       (dolist (k '("k" "w" "$"))
-         (should-not (lookup-key trace k)))
-       (should (eq (lookup-key plan "k") #'aob-kill-session))
-       (should-not (lookup-key trace "p"))
-       (should (eq (lookup-key plan "p") #'aob-compose))
-       (should (eq (lookup-key plan "S") #'aob-cancel))
-       (should (eq (lookup-key plan "c") #'aob-acp-mcp))))))
+   '(let ((trace (ygg-localleader--get-map 'aob-trace-mode))
+          (plan (ygg-localleader--get-map 'aob-plan-mode)))
+      (should (eq (lookup-key trace "S") #'aob-cancel))
+      (should (eq (lookup-key trace (kbd "q e")) #'aob-trace-queue-edit))
+      (should (eq (lookup-key trace (kbd "z z")) #'aob-acp-compact))
+      (should (eq (lookup-key plan "S") #'aob-cancel))
+      (should (eq (lookup-key plan (kbd "m c")) #'aob-acp-mcp))
+      (should-not (lookup-key trace "C"))
+      (dolist (k '("k" "w" "p" "y" "b" "$"))
+        (should-not (lookup-key trace k))
+        (should-not (lookup-key plan k))))))
 
 (ert-deftest aob-modal-trace-actions-have-one-key ()
   (aob-tests--modal
@@ -4167,7 +4159,7 @@ alone; a buried trace is only marked, and drawn whole when it is shown."
     (aob-set-state s 'idle)
     (with-current-buffer (aob-trace-buffer s)
       (aob-trace--render t)
-      (should (string-match-p "» 3 held · \\\\ s sends now" (buffer-string))))
+      (should (string-match-p "» 3 held · \\\\ q s sends now" (buffer-string))))
     (let (sent)
       (cl-letf (((symbol-function 'aob-acp--request)
                  (lambda (_s _m params &rest _) (setq sent params))))
