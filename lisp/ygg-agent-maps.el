@@ -304,17 +304,18 @@ FORCE starts the run even while another call's own processes are pending."
                (ygg-agent-maps--tool "ice-feature-summary")
                '(summary))))
 
-(defun ygg-agent-maps--block (root &optional pointer-only sent)
+(defun ygg-agent-maps--block (root &optional pointer-only sent nowait)
   "(TEXT PARTS MORE) for ROOT, or nil; waits briefly on maps in flight.
 PARTS are the maps TEXT carries, never those in SENT; MORE says some are
-still to come. POINTER-ONLY keeps just the lat pointer line."
+still to come. POINTER-ONLY keeps just the lat pointer line. NOWAIT skips
+the wait and keeps a block that has only the pointer."
   (let* ((root (ygg-agent-maps--root root))
          (entry (ygg-agent-maps--entry root))
          (names (ygg-agent-maps--names root)))
     (if pointer-only
         (when-let* ((line (ygg-agent-maps--pointer names root)))
           (list (concat "<project-maps>\n" line "</project-maps>") nil nil))
-      (ygg-agent-maps--wait entry)
+      (unless nowait (ygg-agent-maps--wait entry))
       (let* ((map (and (not (memq 'map sent)) (plist-get entry :map)))
              (summary (and (not (memq 'summary sent))
                            (plist-get entry :summary)
@@ -325,7 +326,7 @@ still to come. POINTER-ONLY keeps just the lat pointer line."
              (more (and (> (plist-get entry :pending) 0)
                         (cl-set-difference (ygg-agent-maps--expected root)
                                            (append sent parts)))))
-        (when (or parts (and pointer (not more)))
+        (when (if nowait (or parts pointer) (or parts (and pointer (not more))))
           (list (concat
                  "<project-maps>\n"
                  (and map (format "<repo-map>\n%s\n</repo-map>\n" map))
@@ -652,6 +653,49 @@ Refused while an agent session is live in ROOT unless FORCE."
         (unless s (user-error "Could not start %s" aob-acp-default-agent))
         (when (aob-session-p s) (aob-session-put s :feature-map t))
         s))))
+
+(declare-function ygg-aob--draft-target "layer-aob")
+(defvar aob-compose--dir)
+(defvar aob-capf-mention-functions)
+(defvar aob-compose-before-send-functions)
+
+(defun ygg-agent-maps--mention-root (&optional dir)
+  (let ((dir (if-let* ((s (and (fboundp 'ygg-aob--draft-target) (ygg-aob--draft-target))))
+                 (or (aob-session-dir s) (aob-session-project s))
+               (or dir (bound-and-true-p aob-compose--dir) default-directory))))
+    (when (and (stringp dir) (not (file-remote-p dir)))
+      (ygg-agent-maps--root dir))))
+
+(defun ygg-agent-maps--mention (dir)
+  "maps, for the popup an at opens, when the project has any map to carry."
+  (when-let* (((bound-and-true-p ygg-agent-maps-enabled))
+              (root (ygg-agent-maps--mention-root dir))
+              (kinds (delq nil
+                           (list (and (or (plist-get (gethash root ygg-agent-maps--cache) :map)
+                                          (file-exists-p (expand-file-name "lat.md/repo-map.md" root)))
+                                      "repo map")
+                                 (and (file-exists-p (expand-file-name "lat.md/features.md" root))
+                                      "features")
+                                 (and (file-exists-p (expand-file-name ".repowise/wiki.db" root))
+                                      "repowise")))))
+    (list (cons "maps" (concat "  " (string-join kinds " · "))))))
+
+(defun ygg-agent-maps--expand (text)
+  "TEXT with the project's map block carried after it when it says @maps."
+  (let ((s (and (fboundp 'ygg-aob--draft-target) (ygg-aob--draft-target))))
+    (or (when-let* (((string-match-p "\\(?:\\`\\|[^[:alnum:]_]\\)@maps\\(?:[^[:alnum:]_-]\\|\\'\\)" text))
+                    ((not (string-search "<project-maps>" text)))
+                    ((not (and s (aob-session-ref s :maps-pending))))
+                    (root (ygg-agent-maps--mention-root))
+                    (result (ygg-agent-maps--block root nil nil t)))
+          (when s
+            (aob-session-put s :maps-sent (append (cadr result) (aob-session-ref s :maps-sent))))
+          (concat text "\n\n" (car result)))
+        text)))
+
+(with-eval-after-load 'aob
+  (add-hook 'aob-capf-mention-functions #'ygg-agent-maps--mention)
+  (add-hook 'aob-compose-before-send-functions #'ygg-agent-maps--expand -50))
 
 (with-eval-after-load 'aob-acp
   (add-hook 'aob-acp-before-first-prompt-functions #'ygg-agent-maps-on-ready)
