@@ -324,5 +324,136 @@
                (lambda (&rest _) (error "tramp handler called"))))
       (should (equal (ygg-mark-position ?R) (cons remote 3))))))
 
+(defconst ygg-test--ts-dir
+  (expand-file-name "../tree-sitter" (file-name-directory (or load-file-name buffer-file-name))))
+
+(defmacro ygg-test-with-mode (mode lang code &rest body)
+  (declare (indent 3))
+  `(progn
+     (setq treesit-extra-load-path (list ygg-test--ts-dir))
+     (skip-unless (treesit-language-available-p ,lang))
+     (with-temp-buffer
+       (insert ,code)
+       (,mode)
+       (goto-char (point-min))
+       ,@body)))
+
+(defun ygg-test--hs-count ()
+  (length (seq-filter (lambda (o) (overlay-get o 'hs))
+                      (overlays-in (point-min) (point-max)))))
+
+(ert-deftest ygg-motions-fold-treesit-python ()
+  (ygg-test-with-mode python-ts-mode 'python ygg-test--py-code
+    (ygg-fold-close-recursive)
+    (should (= 3 (ygg-test--hs-count)))
+    (ygg-fold-open-recursive)
+    (should (= 0 (ygg-test--hs-count)))
+    (ygg-fold-toggle-recursive)
+    (should (= 3 (ygg-test--hs-count)))
+    (ygg-fold-toggle-recursive)
+    (should (= 0 (ygg-test--hs-count)))
+    (ygg-fold-next)
+    (should (looking-at "    if x"))
+    (ygg-fold-prev)
+    (should (looking-at "def f"))))
+
+(ert-deftest ygg-motions-fold-treesit-typescript-rust ()
+  (ygg-test-with-mode typescript-ts-mode 'typescript
+      "function f() {\n  if (x) {\n    y();\n  }\n}\n"
+    (ygg-fold-close-recursive)
+    (should (= 2 (ygg-test--hs-count)))
+    (ygg-fold-open-recursive)
+    (should (= 0 (ygg-test--hs-count)))
+    (ygg-fold-next)
+    (should (looking-at "  if"))
+    (ygg-fold-prev)
+    (should (looking-at "function")))
+  (ygg-test-with-mode rust-ts-mode 'rust
+      "fn f() {\n    if x {\n        y();\n    }\n}\n"
+    (ygg-fold-toggle-recursive)
+    (should (= 2 (ygg-test--hs-count)))
+    (ygg-fold-open-recursive)
+    (should (= 0 (ygg-test--hs-count)))))
+
+(ert-deftest ygg-motions-fold-c-mode-brace-on-line ()
+  (with-temp-buffer
+    (insert "int f() {\n  if (x) {\n    y();\n  }\n}\n")
+    (c-mode)
+    (goto-char (point-min))
+    (ygg-fold-close-recursive)
+    (should (= 2 (ygg-test--hs-count)))
+    (should (invisible-p (save-excursion (forward-line 2) (point))))
+    (ygg-fold-open-recursive)
+    (should (= 0 (ygg-test--hs-count)))
+    (ygg-fold-next)
+    (should (looking-at "  if"))))
+
+(ert-deftest ygg-motions-fold-close-recursive-twice-no-duplicates ()
+  (ygg-test-with-mode typescript-ts-mode 'typescript
+      "function f() {\n  if (x) {\n    y();\n  }\n}\n"
+    (ygg-fold-close-recursive)
+    (ygg-fold-close-recursive)
+    (should (= 2 (ygg-test--hs-count)))))
+
+(ert-deftest ygg-motions-fold-next-fast-on-large-fold-less-buffer ()
+  (let ((code (concat (mapconcat (lambda (i) (format "const v%d = %d;" i i))
+                                 (number-sequence 1 10000) "\n")
+                      "\nfunction f() {\n  y();\n}\n")))
+    (ygg-test-with-mode typescript-ts-mode 'typescript code
+      (let ((start (float-time)))
+        (ygg-fold-next)
+        (should (looking-at "function f"))
+        (should (< (- (float-time) start) 1.0)))
+      (let ((start (float-time)))
+        (goto-char (point-max))
+        (ygg-fold-prev)
+        (should (looking-at "function f"))
+        (should (< (- (float-time) start) 1.0))))))
+
+(ert-deftest ygg-motions-fold-recursive-close-keeps-inner-closed ()
+  (with-temp-buffer
+    (insert "int f() {\n  if (x) {\n    y();\n  }\n}\n")
+    (c-mode)
+    (goto-char (point-min))
+    (ygg-fold-close-recursive)
+    (ygg-fold-open)
+    (should-not (invisible-p (save-excursion (forward-line 1) (point))))
+    (should (invisible-p (save-excursion (forward-line 2) (point))))))
+
+(ert-deftest ygg-motions-fold-next-leaves-no-selection-span ()
+  (ygg-test-with-code
+    (ygg-fold-next)
+    (should-not (use-region-p))
+    (let ((sel (ygg-selection-effective-bounds)))
+      (should (<= (- (nth 1 sel) (nth 0 sel)) 1)))))
+
+(defconst ygg-test--fold-walk-code
+  '((python-ts-mode python "def a():\n    if x:\n        for i in y:\n            pass\n    return 1\n\nclass B:\n    def m(self):\n        while 1:\n            pass\n")
+    (typescript-ts-mode typescript "function f() {\n  if (x) {\n    for (;;) {\n      y();\n    }\n  }\n}\nclass C {\n  m() {\n    z();\n  }\n}\n")
+    (rust-ts-mode rust "fn f() {\n    if x {\n        loop {\n            y();\n        }\n    }\n}\nimpl C {\n    fn m() {\n        z();\n    }\n}\n")
+    (go-ts-mode go "package p\n\nfunc f() {\n\tif x {\n\t\tfor {\n\t\t\ty()\n\t\t}\n\t}\n}\n\nfunc g() {\n\tz()\n}\n")))
+
+(defun ygg-test--fold-stops (step)
+  (let (acc)
+    (condition-case nil
+        (while t (funcall step) (push (point) acc))
+      (user-error nil))
+    (nreverse acc)))
+
+(ert-deftest ygg-motions-fold-prev-matches-next-treesit ()
+  (setq treesit-extra-load-path (list ygg-test--ts-dir))
+  (dolist (spec ygg-test--fold-walk-code)
+    (pcase-let ((`(,mode ,lang ,code) spec))
+      (when (treesit-language-available-p lang)
+        (with-temp-buffer
+          (insert "\n" code)
+          (funcall mode)
+          (goto-char (point-min))
+          (let ((fwd (ygg-test--fold-stops #'ygg-fold-next)))
+            (goto-char (point-max))
+            (let ((bwd (ygg-test--fold-stops #'ygg-fold-prev)))
+              (should (> (length fwd) 2))
+              (should (equal bwd (reverse fwd))))))))))
+
 (provide 'ygg-motions-tests)
 ;;; ygg-motions-tests.el ends here

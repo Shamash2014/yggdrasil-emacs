@@ -689,9 +689,20 @@ in a normal buffer just widen."
 (declare-function ygg-fold-open "yggdrasil-verbs")
 (declare-function ygg-fold-close-all "yggdrasil-verbs")
 (declare-function ygg-fold-open-all "yggdrasil-verbs")
-(defvar hs-forward-sexp-function)
 (defvar hs-minor-mode)
-(defvar hs-block-start-regexp)
+(defvar hs-allow-nesting)
+(defvar hs-find-block-beginning-function)
+(declare-function hs-get-first-block-on-line "hideshow")
+(declare-function hs-block-positions "hideshow")
+(declare-function hs-hide-block-at-point "hideshow")
+(declare-function hs-hideable-block-p "hideshow")
+(declare-function treesit-hs-find-next-block "treesit")
+(declare-function treesit-navigate-thing "treesit")
+(declare-function treesit-search-forward "treesit")
+(declare-function treesit-node-at "treesit")
+(declare-function treesit-thing-at "treesit")
+(defvar hs-find-next-block-function)
+(defvar hs-treesit-things)
 
 (defun ygg-fold--outline-p ()
   (bound-and-true-p outline-minor-mode))
@@ -701,15 +712,9 @@ in a normal buffer just widen."
   (unless hs-minor-mode (hs-minor-mode 1)))
 
 (defun ygg-fold--hs-block-start-p ()
-  "Non-nil, leaving point on the opener, when the line starts a block.
-Hideshow regexps may anchor at the line start or at the opener."
-  (let ((origin (point)))
-    (beginning-of-line)
-    (if (or (looking-at hs-block-start-regexp)
-            (progn (skip-chars-forward " \t") (looking-at hs-block-start-regexp)))
-        (progn (skip-chars-forward " \t") t)
-      (goto-char origin)
-      nil)))
+  "Non-nil, leaving point on the line's first block opener, when one starts here."
+  (let ((pos (save-excursion (beginning-of-line) (hs-get-first-block-on-line))))
+    (when pos (goto-char pos) t)))
 
 (defun ygg-fold--manual-p (ov)
   (overlay-get ov 'ygg-fold))
@@ -773,20 +778,105 @@ Hideshow regexps may anchor at the line start or at the opener."
       (if hidden
           (cons (line-beginning-position) (overlay-end hidden))
         (beginning-of-line)
-        (when (or (ygg-fold--hs-block-start-p) (hs-find-block-beginning))
-          (let ((start (point)))
-            (funcall hs-forward-sexp-function 1)
-            (cons start (point))))))))
+        (when (or (ygg-fold--hs-block-start-p)
+                  (funcall hs-find-block-beginning-function))
+          (when-let* ((end (cadr (hs-block-positions))))
+            (cons (point) end)))))))
+
+(defun ygg-fold--hs-valid-start-p (pos)
+  (save-excursion
+    (goto-char pos)
+    (and (not (nth 8 (syntax-ppss))) (hs-hideable-block-p))))
+
+(defun ygg-fold--hs-treesit-p ()
+  (eq hs-find-next-block-function #'treesit-hs-find-next-block))
+
+(defun ygg-fold--ts-candidate-p (node)
+  (save-excursion
+    (goto-char (treesit-node-start node))
+    (and (< (pos-eol) (treesit-node-end node))
+         (treesit-node-match-p node hs-treesit-things))))
+
+(defun ygg-fold--ts-scan-back (from test)
+  (let ((node (treesit-node-at (max (point-min) (1- from))))
+        (last from))
+    (lambda ()
+      (let (found)
+        (while (and (not found) node)
+          (let ((n node))
+            (setq node (treesit-search-forward node #'ygg-fold--ts-candidate-p t))
+            (when (ygg-fold--ts-candidate-p n)
+              (let ((p (treesit-node-start n)))
+                (when (and (< p last) (funcall test p) (ygg-fold--hs-valid-start-p p))
+                  (setq found p last p))))))
+        found))))
+
+(defun ygg-fold--ts-scan (from backward test)
+  "Closure yielding successive valid block openers from FROM, forward or BACKWARD."
+  (if backward
+      (ygg-fold--ts-scan-back from test)
+    (ygg-fold--ts-scan-fwd from test)))
+
+(defun ygg-fold--ts-scan-fwd (from test)
+  (let ((pos (max (point-min) (1- from)))
+        (head (and (<= from (point-min))
+                   (when-let* ((th (treesit-thing-at from #'ygg-fold--ts-candidate-p)))
+                     (and (= (treesit-node-start th) from) from)))))
+    (lambda ()
+      (let (found next)
+        (while (and (not found)
+                    (setq next (or (prog1 head (setq head nil))
+                                   (treesit-navigate-thing pos 1 'beg #'ygg-fold--ts-candidate-p)))
+                    (funcall test next))
+          (setq pos (1+ next))
+          (when (ygg-fold--hs-valid-start-p next) (setq found next)))
+        found))))
+
+(defun ygg-fold--hs-starts (beg end &optional first)
+  "Hideable block openers between BEG and END in order; just one when FIRST."
+  (save-excursion
+    (if (ygg-fold--hs-treesit-p)
+        (let ((next (ygg-fold--ts-scan beg nil (lambda (s) (and (>= s beg) (<= s end)))))
+              acc s)
+          (while (and (not (and first acc)) (setq s (funcall next))) (push s acc))
+          (nreverse acc))
+      (goto-char beg)
+      (let (acc)
+        (while (and (not (and first acc))
+                    (funcall hs-find-next-block-function hs-block-start-regexp end nil))
+          (let ((s (match-beginning 0)))
+            (when (ygg-fold--hs-valid-start-p s) (push s acc))))
+        (nreverse acc)))))
+
+(defun ygg-fold--hs-closed-at-p (pos)
+  (save-excursion
+    (goto-char pos)
+    (seq-some (lambda (o) (and (overlay-get o 'hs) (>= (overlay-start o) pos)))
+              (overlays-in pos (1+ (line-end-position))))))
 
 (defun ygg-fold--hs-each-block (beg end fn)
   (save-excursion
-    (goto-char end)
-    (while (> (point) beg)
-      (beginning-of-line)
-      (when (and (>= (point) beg) (ygg-fold--hs-block-start-p)) (funcall fn))
-      (forward-line -1))
-    (goto-char beg)
-    (when (ygg-fold--hs-block-start-p) (funcall fn))))
+    (dolist (s (nreverse (ygg-fold--hs-starts beg end)))
+      (goto-char s)
+      (funcall fn))))
+
+(defun ygg-fold--hs-next-start (dir)
+  "Line start of the nearest hideable block opener in direction DIR."
+  (save-excursion
+    (let ((limit (if (> dir 0) (line-beginning-position 2) (line-beginning-position)))
+          s)
+      (cond
+       ((ygg-fold--hs-treesit-p)
+        (setq s (funcall (ygg-fold--ts-scan limit (< dir 0)
+                                            (if (> dir 0)
+                                                (lambda (p) (>= p limit))
+                                              (lambda (p) (< p limit)))))))
+       ((> dir 0) (setq s (car (ygg-fold--hs-starts limit (point-max) t))))
+       (t (goto-char limit)
+          (while (and (not s) (re-search-backward hs-block-start-regexp nil t))
+            (when (ygg-fold--hs-valid-start-p (match-beginning 0))
+              (setq s (match-beginning 0))))))
+      (when s (goto-char s) (line-beginning-position)))))
 
 (defun ygg-fold--hidden-p ()
   (let ((ov (ygg-fold--manual-here)))
@@ -801,7 +891,11 @@ Hideshow regexps may anchor at the line start or at the opener."
      ((ygg-fold--outline-p) (outline-hide-subtree))
      (t (ygg-fold--hs-on)
         (when-let* ((b (ygg-fold--hs-bounds)))
-          (ygg-fold--hs-each-block (car b) (cdr b) #'hs-hide-block))))))
+          (let ((hs-allow-nesting t))
+            (ygg-fold--hs-each-block (car b) (cdr b)
+                                     (lambda ()
+                                       (unless (ygg-fold--hs-closed-at-p (point))
+                                         (save-excursion (hs-hide-block-at-point)))))))))))
 
 (defun ygg-fold-open-recursive ()
   "Open the fold at point and every fold nested in it (z O)."
@@ -853,11 +947,7 @@ Hideshow regexps may anchor at the line start or at the opener."
                         (and (if (> dir 0) (outline-next-heading) (outline-previous-heading))
                              (point))
                       (ygg-fold--hs-on)
-                      (let (found)
-                        (while (and (not found) (zerop (forward-line dir)))
-                          (when (ygg-fold--hs-block-start-p)
-                            (setq found (line-beginning-position))))
-                        found))))
+                      (ygg-fold--hs-next-start dir))))
          (all (seq-filter (lambda (p) (if (> dir 0)
                                           (> p (line-end-position))
                                         (< p (line-beginning-position))))
@@ -869,14 +959,14 @@ Hideshow regexps may anchor at the line start or at the opener."
   (interactive)
   (let ((pos (or (ygg-fold--next-start 1) (user-error "No next fold"))))
     (ygg--jump-push)
-    (goto-char pos)))
+    (ygg-each-selection-update (ygg--motion (lambda () (goto-char pos))))))
 
 (defun ygg-fold-prev ()
   "Go to the start of the previous fold ([ z)."
   (interactive)
   (let ((pos (or (ygg-fold--next-start -1) (user-error "No previous fold"))))
     (ygg--jump-push)
-    (goto-char pos)))
+    (ygg-each-selection-update (ygg--motion (lambda () (goto-char pos))))))
 
 (yggdrasil-define-keys 'normal
   "z A" #'ygg-fold-toggle-recursive :label "fold toggle (recursive)"

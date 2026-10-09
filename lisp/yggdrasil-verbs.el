@@ -1492,6 +1492,8 @@ A yank register (list of texts) plays as vim does: its text as keys."
 (declare-function outline-hide-body "outline")
 (declare-function outline-show-all "outline")
 
+(defvar hs-allow-nesting)
+
 (defun ygg-fold--call (block section)
   "Fold with SECTION where the buffer is headings, with BLOCK where it is code.
 Hideshow reads syntax to find a block, and a document made of headings
@@ -1500,7 +1502,8 @@ on and then does nothing with it."
   (if (bound-and-true-p outline-minor-mode)
       (funcall section)
     (unless (bound-and-true-p hs-minor-mode) (hs-minor-mode 1))
-    (funcall block)))
+    (let ((hs-allow-nesting t))
+      (funcall block))))
 
 (declare-function ygg-fold--manual-here "yggdrasil-motions")
 (declare-function ygg-fold--manual-in "yggdrasil-motions")
