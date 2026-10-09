@@ -7,6 +7,7 @@
 (require 'magit)
 (require 'ygg-git-compare)
 (require 'ygg-forge-config)
+(defvar ygg-project-dirs)
 (require 'ygg-git-review-requests)
 
 (defmacro ygg-forge-config-tests--with-project (logins &rest body)
@@ -24,6 +25,7 @@
                    process-environment)))
      (unwind-protect
          (progn
+           (make-directory (expand-file-name ".git" root) t)
            (pcase-dolist (`(,kind ,file ,text) ,logins)
              (let ((dir (expand-file-name (concat name "/" kind) conf)))
                (make-directory dir t)
@@ -218,7 +220,145 @@
           (let ((ygg-agent-conf-root nil) (default-directory repo))
             (should-error (ygg-project-config-open) :type 'user-error))
           (let ((ygg-agent-conf-root base) (default-directory base))
-            (should-error (ygg-project-config-open) :type 'user-error)))
+            (cl-letf (((symbol-function 'ygg-project-roots) (lambda (&rest _) nil)))
+              (should-error (ygg-project-config-open) :type 'user-error))))
+      (delete-directory base t))))
+
+(ert-deftest ygg-forge-config-root-reads-the-sidebar-line ()
+  (with-temp-buffer
+    (insert (propertize "row\n" 'ygg-project "/tmp/ygg-side/"))
+    (goto-char (point-min))
+    (let ((default-directory "/"))
+      (cl-letf (((symbol-function 'project-current) (lambda (&rest _) (error "no"))))
+        (should (equal "/tmp/ygg-side/" (ygg-forge-config--project-root)))))))
+
+(ert-deftest ygg-forge-config-root-falls-back-to-known-roots ()
+  (let* ((base (file-name-as-directory (make-temp-file "ygg-cfg-roots-" t)))
+         (outer (file-name-as-directory (expand-file-name "a" base)))
+         (inner (file-name-as-directory (expand-file-name "a/b" base)))
+         (extra (file-name-as-directory (expand-file-name "extra" base)))
+         (other (file-name-as-directory (expand-file-name "other" base))))
+    (unwind-protect
+        (progn
+          (dolist (d (list outer inner extra other)) (make-directory d t))
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'ygg-project-roots) (lambda (&rest _) (list outer inner)))
+                    ((symbol-function 'completing-read) (lambda (&rest _) (error "prompted"))))
+            (let ((default-directory (expand-file-name "sub/" inner))
+                  (ygg-project-dirs (list (cons other (list extra)))))
+              (make-directory default-directory t)
+              (should (equal inner (ygg-forge-config--project-root)))
+              (let ((default-directory extra))
+                (should (equal other (ygg-forge-config--project-root)))))))
+      (delete-directory base t))))
+
+(ert-deftest ygg-forge-config-root-finds-a-worktree-git-file ()
+  (let* ((base (file-name-as-directory (make-temp-file "ygg-cfg-wt-" t)))
+         (tree (file-name-as-directory (expand-file-name "tree" base)))
+         (deep (file-name-as-directory (expand-file-name "src" tree))))
+    (unwind-protect
+        (progn
+          (make-directory deep t)
+          (with-temp-file (expand-file-name ".git" tree) (insert "gitdir: /nowhere\n"))
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'ygg-project-roots) (lambda (&rest _) nil))
+                    ((symbol-function 'completing-read) (lambda (&rest _) (error "prompted"))))
+            (let ((default-directory deep))
+              (should (equal tree (ygg-forge-config--project-root))))))
+      (delete-directory base t))))
+
+(ert-deftest ygg-forge-config-root-prompts-only-as-a-last-resort ()
+  (let ((base (file-name-as-directory (make-temp-file "ygg-cfg-none-" t)))
+        asked)
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'ygg-project-roots) (lambda (&rest _) '("/tmp/ygg-pick/")))
+                  ((symbol-function 'completing-read)
+                   (lambda (_p coll _pred req &rest _)
+                     (setq asked (list coll req))
+                     "/tmp/ygg-pick/")))
+          (let ((default-directory base) (ygg-project-dirs nil))
+            (should (equal "/tmp/ygg-pick/" (ygg-forge-config--project-root)))
+            (should (equal '(("/tmp/ygg-pick/") t) asked))))
+      (delete-directory base t))))
+
+(ert-deftest ygg-forge-config-root-without-projects-is-a-user-error ()
+  (let ((base (file-name-as-directory (make-temp-file "ygg-cfg-empty-" t))))
+    (unwind-protect
+        (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                  ((symbol-function 'ygg-project-roots) (lambda (&rest _) nil)))
+          (let ((default-directory base) (ygg-project-dirs nil))
+            (should-error (ygg-forge-config--project-root) :type 'user-error)))
+      (delete-directory base t))))
+
+(ert-deftest ygg-forge-config-root-owning-project-beats-folder-repo ()
+  (let* ((base (file-name-as-directory (make-temp-file "ygg-cfg-own-" t)))
+         (owner (file-name-as-directory (expand-file-name "owner" base)))
+         (folder (file-name-as-directory (expand-file-name "folder" base))))
+    (unwind-protect
+        (progn
+          (dolist (d (list owner folder)) (make-directory d t))
+          (ygg-forge-config-tests--git folder "init" "-q")
+          (cl-letf (((symbol-function 'project-current)
+                     (lambda (&rest _) (cons 'transient folder)))
+                    ((symbol-function 'project-root) (lambda (_) folder))
+                    ((symbol-function 'ygg-project-roots) (lambda (&rest _) (list owner))))
+            (let ((default-directory folder)
+                  (ygg-project-dirs (list (cons owner (list folder)))))
+              (should (equal owner (ygg-forge-config--project-root))))))
+      (delete-directory base t))))
+
+(ert-deftest ygg-forge-config-root-resolves-symlinks-and-keeps-sibling-guard ()
+  (let* ((base (file-name-as-directory (make-temp-file "ygg-cfg-link-" t)))
+         (proj (file-name-as-directory (expand-file-name "proj" base)))
+         (proj2 (file-name-as-directory (expand-file-name "proj2" base)))
+         (link (expand-file-name "link" base)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "sub" proj) t)
+          (make-directory proj2 t)
+          (make-symbolic-link (expand-file-name "sub" proj) link)
+          (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                    ((symbol-function 'ygg-project-roots) (lambda (&rest _) (list proj)))
+                    ((symbol-function 'completing-read) (lambda (&rest _) (error "prompted"))))
+            (let ((ygg-project-dirs nil))
+              (let ((default-directory (file-name-as-directory link)))
+                (should (equal proj (ygg-forge-config--project-root))))
+              (let ((default-directory proj2))
+                (should-error (ygg-forge-config--project-root))))))
+      (delete-directory base t))))
+
+(ert-deftest ygg-forge-config-containing-skips-remote-roots-without-tramp ()
+  (let* ((base (file-name-as-directory (make-temp-file "ygg-cfg-rem-" t)))
+         (local (file-name-as-directory (expand-file-name "proj" base)))
+         (remote "/ssh:nobody@host.invalid:/srv/proj/"))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "sub" local) t)
+          (cl-letf (((symbol-function 'tramp-file-name-handler)
+                     (lambda (&rest _) (error "tramp touched"))))
+            (should (equal (cons 'l local)
+                           (ygg-forge-config--containing
+                            (expand-file-name "sub" local)
+                            (list (cons 'r remote) (cons 'l local)))))
+            (should-not (ygg-forge-config--containing
+                         "/ssh:nobody@host.invalid:/srv/proj/x"
+                         (list (cons 'l local))))))
+      (delete-directory base t))))
+
+(ert-deftest ygg-forge-config-containing-symlinked-root-keeps-sibling-guard ()
+  (let* ((base (file-name-as-directory (make-temp-file "ygg-cfg-sl-" t)))
+         (proj (expand-file-name "proj" base))
+         (proj2 (expand-file-name "proj2" base))
+         (link (expand-file-name "link" base)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "sub" proj) t)
+          (make-directory proj2 t)
+          (make-symbolic-link proj link)
+          (let ((cands (list (cons 'r link))))
+            (should (ygg-forge-config--containing (expand-file-name "sub" proj) cands))
+            (should-not (ygg-forge-config--containing proj2 cands))))
       (delete-directory base t))))
 
 (provide 'ygg-forge-config-tests)

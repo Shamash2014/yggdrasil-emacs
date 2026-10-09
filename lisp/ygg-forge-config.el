@@ -6,6 +6,8 @@
 
 (declare-function project-current "project")
 (declare-function project-root "project")
+(declare-function ygg-project-roots "ygg-project-scan")
+(defvar ygg-project-dirs)
 (declare-function ghostel-exec "ghostel" (buffer program &optional args identity))
 (declare-function ygg--term-split-window "layer-terminal")
 (declare-function ygg-call-with-buffer-env "layer-terminal" (thunk &optional extra-env))
@@ -83,13 +85,45 @@ worker that has never authenticated."
              (kill-buffer buffer)
              (user-error "Forge login terminal failed: %s" (error-message-string err))))))
 
+(defun ygg-forge-config--containing (dir candidates)
+  "The longest of CANDIDATES, as (ROOT . PATH), that holds DIR."
+  (let ((dir (file-name-as-directory (expand-file-name dir)))
+        (best-len 0) best)
+    (unless (file-remote-p dir)
+      (setq dir (file-name-as-directory (file-truename dir)))
+      (dolist (c candidates)
+        (let ((path (file-name-as-directory (expand-file-name (cdr c)))))
+          (unless (file-remote-p path)
+            (let ((real (file-name-as-directory (file-truename path))))
+              (when (and (string-prefix-p real dir) (> (length real) best-len))
+                (setq best-len (length real)
+                      best (cons (car c) path))))))))
+    best))
+
+(defun ygg-forge-config--project-root ()
+  "The project root for the buffer at hand, never prompting when one can be found."
+  (expand-file-name
+   (or (get-text-property (line-beginning-position) 'ygg-project)
+       (let ((roots (and (fboundp 'ygg-project-roots) (ygg-project-roots))))
+         (car (ygg-forge-config--containing
+               default-directory
+               (append (mapcar (lambda (r) (cons r r)) roots)
+                       (mapcan (lambda (cell)
+                                 (mapcar (lambda (d) (cons (car cell) d)) (cdr cell)))
+                               (bound-and-true-p ygg-project-dirs))))))
+       (ignore-errors
+         (when-let* ((pr (project-current nil))) (project-root pr)))
+       (locate-dominating-file default-directory ".git")
+       (let ((roots (and (fboundp 'ygg-project-roots) (ygg-project-roots))))
+         (if roots
+             (completing-read "Project: " roots nil t)
+           (user-error "No projects known"))))))
+
 ;;;###autoload
 (defun ygg-project-forge-login ()
   "Log gh or glab in for this project alone, typing the token in a terminal."
   (interactive)
-  (let* ((root (expand-file-name
-                (or (when-let* ((pr (project-current nil))) (project-root pr))
-                    default-directory)))
+  (let* ((root (ygg-forge-config--project-root))
          (kind (completing-read "Forge CLI: " (mapcar #'car ygg-forge-config-kinds) nil t))
          (host (when (equal kind "glab")
                  (completing-read "GitLab host: "
@@ -113,9 +147,7 @@ worker that has never authenticated."
 (defun ygg-project-config-open ()
   "Open this project's agent config folder in dired, making it if absent."
   (interactive)
-  (let* ((root (expand-file-name
-                (or (when-let* ((pr (project-current nil))) (project-root pr))
-                    (user-error "Not in a project"))))
+  (let* ((root (ygg-forge-config--project-root))
          (own (or (ygg-forge-config-dir "gh" root)
                   (user-error "No agent config root, or a remote project")))
          (dir (file-name-directory own)))
