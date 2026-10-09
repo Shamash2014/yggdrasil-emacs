@@ -215,6 +215,29 @@ hunks its file and lines overlap.  Nil when the diff has none."
 (defvar ygg-git-compare-tour--pending (make-hash-table :test #'equal)
   "The base each tour file was last asked for, by file.")
 
+(defvar ygg-git-compare-tour--sessions (make-hash-table :test #'equal)
+  "The id of the session last asked for each tour file, by file.")
+
+(declare-function aob-session-id "aob" (s))
+(declare-function aob-session-get "aob" (id))
+
+(declare-function aob-session-state "aob" (s))
+
+(defun ygg-git-compare-tour--session-state ()
+  (when-let* ((branch (ygg-git-compare--b-branch))
+              (id (gethash (ygg-git-compare-tour--path branch default-directory)
+                           ygg-git-compare-tour--sessions))
+              (session (aob-session-get id)))
+    (aob-session-state session)))
+
+(defun ygg-git-compare-tour--generating-p ()
+  "Whether a live agent is ordering this branch's tour."
+  (memq (ygg-git-compare-tour--session-state) '(starting working blocked)))
+
+(defun ygg-git-compare-tour--finished-p ()
+  "Whether the agent asked for this branch's tour went idle without delivering one."
+  (eq (ygg-git-compare-tour--session-state) 'idle))
+
 (defun ygg-git-compare-tour--install (steps &optional replace)
   "Make STEPS this compare's tour, found again in its diff, and keep them.
 The file is written only when there are steps and it is this compare's to
@@ -231,13 +254,12 @@ write: its base is this compare's, or none yet, or REPLACE says the tour is new.
      file (plist-get ygg-git-compare--a :diff) (plist-get ygg-git-compare--b :diff) steps)))
 
 (defun ygg-git-compare-tour--ensure ()
-  "Read this branch's tour for this range once."
+  "Read this branch's tour for this range once, whatever base it was made for."
   (unless (equal ygg-git-compare-tour--loaded (ygg-git-compare-tour--key))
     (let* ((branch (ygg-git-compare--b-branch))
            (kept (and branch (ygg-git-compare-tour--read
                               (ygg-git-compare-tour--path branch default-directory)))))
-      (if (and (plist-get kept :steps)
-               (ygg-git-compare-tour--base-p (plist-get kept :base)))
+      (if (plist-get kept :steps)
           (ygg-git-compare-tour--install (plist-get kept :steps))
         (setq ygg-git-compare-tour--steps nil
               ygg-git-compare-tour--loaded (ygg-git-compare-tour--key))))))
@@ -256,8 +278,8 @@ write: its base is this compare's, or none yet, or REPLACE says the tour is new.
 (add-hook 'ygg-git-compare-redraw-hook #'ygg-git-compare-tour--reanchor)
 
 ;;;###autoload
-(defun ygg-git-compare-tour-receive (dir branch steps author)
-  "Keep STEPS, AUTHOR's tour of BRANCH in DIR's repository, shown in the compare
+(defun ygg-git-compare-tour-receive (dir branch steps _author)
+  "Keep STEPS, an agent's tour of BRANCH in DIR's repository, shown in the compare
 of BRANCH.  Answer (COUNT . STALE), the steps and those naming hunks the diff
 lacks."
   (let* ((default-directory (file-name-as-directory (expand-file-name dir)))
@@ -271,9 +293,12 @@ lacks."
                         steps))
          installed stale)
     (remhash path ygg-git-compare-tour--pending)
+    (remhash path ygg-git-compare-tour--sessions)
     (dolist (buffer (buffer-list))
       (when (equal (buffer-local-value 'ygg-git-compare--store buffer) (cons file key))
         (with-current-buffer buffer
+          (setq ygg-git-compare--tour-ready t)
+          (ygg-git-compare--header)
           (ygg-git-compare-tour-leave)
           (if (or (null base) (equal base (plist-get ygg-git-compare--a :diff)))
               (progn (ygg-git-compare-tour--install steps t)
@@ -285,8 +310,7 @@ lacks."
                   ygg-git-compare-tour--loaded nil)))))
     (unless installed
       (ygg-git-compare-tour--write path base nil steps))
-    (message "%d tour step%s from %s on %s — t to walk them"
-             (length steps) (if (= (length steps) 1) "" "s") author branch)
+    (message "tour ready — t to walk")
     (cons (length steps) (or stale 0))))
 
 ;;; Walking
@@ -296,7 +320,10 @@ lacks."
     (concat (format "step %d/%d — %s" n (length steps) (plist-get step :title))
             (when-let* ((risk (plist-get step :risk))) (format "  risk: %s" risk))
             (when-let* ((check (plist-get step :check))) (format "  check: %s" check))
-            (when (plist-get step :stale) "  stale: t asks for a new tour"))))
+            (when (plist-get step :stale)
+              (let ((n (length (plist-get step :hunks))))
+                (format "  stale: %d hunk%s moved to the last step; W asks for a new tour"
+                        n (if (= n 1) "" "s")))))))
 
 (defun ygg-git-compare-tour--files ()
   (seq-filter (lambda (s) (eq (oref s type) 'file)) (oref magit-root-section children)))
@@ -411,22 +438,55 @@ lacks."
 
 ;;;###autoload
 (defun ygg-git-compare-tour ()
-  "Walk the branch's tour from its first step, or ask an agent to order one.
-Asks when there is no tour, a step went stale or the tour is already
-being walked."
+  "Walk the branch's kept tour from its first step, from whatever base it was
+made for and stale steps included; ask an agent for one only when there is none."
   (interactive)
   (with-current-buffer (ygg-git-compare--list)
-    (let ((branch (ygg-git-compare-tour--branch)))
-      (ygg-git-compare-tour--ensure)
-      (if (and ygg-git-compare-tour--steps
-               (not ygg-git-compare-tour--index)
-               (not (seq-some (lambda (s) (plist-get s :stale)) ygg-git-compare-tour--steps)))
-          (ygg-git-compare-tour-goto 1)
-        (puthash (ygg-git-compare-tour--path branch default-directory)
-                 (plist-get ygg-git-compare--a :diff) ygg-git-compare-tour--pending)
-        (ygg-git-compare-explain--ask
-         "tour" (format ygg-git-compare-tour-instructions
-                        (ygg-git-compare-agent-path ygg-git-compare--root) branch))))))
+    (ygg-git-compare-tour--branch)
+    (ygg-git-compare-tour--ensure)
+    (cond (ygg-git-compare-tour--steps
+           (setq ygg-git-compare--tour-ready nil)
+           (ygg-git-compare-tour-goto 1))
+          ((ygg-git-compare-tour--generating-p)
+           (message "tour: generating… w opens its trace"))
+          (t (ygg-git-compare-tour--request)))))
+
+;;;###autoload
+(defun ygg-git-compare-tour-refresh ()
+  "Ask an agent for a new tour of the branch, replacing the kept one.
+It works in the background; w opens its trace."
+  (interactive)
+  (with-current-buffer (ygg-git-compare--list)
+    (ygg-git-compare-tour--branch)
+    (when (ygg-git-compare-tour--generating-p)
+      (user-error "A tour is already being generated; w shows it"))
+    (ygg-git-compare-tour--request)))
+
+(defun ygg-git-compare-tour--request ()
+  (let* ((branch (ygg-git-compare-tour--branch))
+         (path (ygg-git-compare-tour--path branch default-directory))
+         (session (ygg-git-compare-explain--ask
+                   "tour" (format ygg-git-compare-tour-instructions
+                                  (ygg-git-compare-agent-path ygg-git-compare--root) branch)
+                   t)))
+    (puthash path (plist-get ygg-git-compare--a :diff) ygg-git-compare-tour--pending)
+    (when session
+      (puthash path (aob-session-id session) ygg-git-compare-tour--sessions))
+    (ygg-git-compare--header)
+    (message "tour: generating… w opens its trace")))
+
+;;;###autoload
+(defun ygg-git-compare-tour-trace ()
+  "Open the trace of the agent asked for this branch's tour, beside the compare."
+  (interactive)
+  (with-current-buffer (ygg-git-compare--list)
+    (require 'aob)
+    (let ((session (when-let* ((id (gethash (ygg-git-compare-tour--path
+                                             (ygg-git-compare-tour--branch) default-directory)
+                                            ygg-git-compare-tour--sessions)))
+                     (aob-session-get id))))
+      (ygg-git-compare-show-trace
+       (or session (user-error "No tour agent for this branch; t or W asks for one"))))))
 
 (provide 'ygg-git-compare-tour)
 ;;; ygg-git-compare-tour.el ends here

@@ -22,6 +22,8 @@
 (defvar aob-prompt-typed)
 (defvar aob-compose--dir)
 (defvar aob-compose-spawn-function)
+(defvar aob-acp-show-trace)
+(declare-function ygg-git-compare-tour--generating-p "ygg-git-compare-tour" ())
 (defvar ygg-aob--draft-tree)
 (declare-function aob-live-sessions "aob")
 (declare-function aob-session-name "aob")
@@ -29,6 +31,7 @@
 (declare-function aob-session-cwd "aob")
 (declare-function aob-prompt "aob")
 (declare-function aob-trace "aob-trace")
+(declare-function aob-trace-buffer "aob-trace" (s))
 (declare-function aob-acp-spawn "aob-acp")
 (declare-function ygg-aob--expand-presets "layer-aob" (text))
 
@@ -86,6 +89,9 @@ left out of a review."
   "This compare's review comments as kept, newest first.")
 (defvar-local ygg-git-compare--list-buffer nil
   "In the right pane, the diff of every file it belongs to.")
+(defvar-local ygg-git-compare--tour-ready nil
+  "Whether a received tour waits to be walked.")
+
 (defvar-local ygg-git-compare--tour-status nil
   "The guided-review step shown in the header, or nil off the tour.")
 (defvar ygg-git-compare-redraw-hook nil
@@ -1103,6 +1109,13 @@ Nothing is selected and no window layout is remembered for magit's q."
                                  (plist-get ygg-git-compare--a :note)
                                  (plist-get ygg-git-compare--b :note))))
              (concat "  " note))
+           (cond ((and (fboundp 'ygg-git-compare-tour--generating-p)
+                      (ygg-git-compare-tour--generating-p))
+                 "  tour: generating…")
+                ((and (fboundp 'ygg-git-compare-tour--finished-p)
+                      (ygg-git-compare-tour--finished-p))
+                 "  tour: agent finished without a tour — W asks again, w shows it")
+                 (ygg-git-compare--tour-ready "  tour ready — t to walk"))
            (when ygg-git-compare--tour-status
              (concat "  " ygg-git-compare--tour-status)))))
 
@@ -1443,7 +1456,8 @@ Only the preset is expanded, never a name TEXT happens to mention."
                                                ygg-git-compare-review-preset)
                                        preset))
       (user-error "No %s preset here" ygg-git-compare-review-preset))
-    (or (let ((aob-prompt-typed t))
+    (or (let ((aob-prompt-typed t)
+              (aob-acp-show-trace nil))
           (funcall aob-compose-spawn-function
                    (concat at " " text (substring preset (length at)))))
         (user-error "Could not start a review session"))))
@@ -1462,13 +1476,23 @@ started in ROOT when new; answer its session."
             ('nil (user-error "No reviewer picked"))
             ('review (ygg-git-compare--spawn-review root text))
             (`(new . ,agent)
-             (let ((aob-acp-start-dir root))
+             (let ((aob-acp-start-dir root)
+                   (aob-acp-show-trace nil))
                (or (aob-acp-spawn agent) (user-error "Could not start %s" agent))))
             (_ choice))))
     (unless (eq choice 'review)
       (let ((aob-prompt-typed t))
         (aob-prompt session text)))
     session))
+
+(defun ygg-git-compare-show-trace (session)
+  "Show SESSION's trace in a side window, leaving the compare's windows as they are."
+  (require 'aob-trace nil t)
+  (when (fboundp 'aob-trace-buffer)
+    (when-let* ((window (display-buffer-in-side-window
+                         (aob-trace-buffer session)
+                         '((side . right) (slot . 0) (window-width . 0.4)))))
+      (select-window window))))
 
 (defun ygg-git-compare-review ()
   "Send the review comments held for an agent and the compared range to one."
@@ -1481,7 +1505,7 @@ started in ROOT when new; answer its session."
                                                       (ygg-git-compare-review-prompt))))
       (when sent
         (ygg-git-compare-comments-drop (mapcar (lambda (c) (plist-get c :id)) sent)))
-      (aob-trace session))))
+      (ygg-git-compare-show-trace session))))
 
 ;;; Posting to the pull request
 
@@ -1849,6 +1873,8 @@ when that is known, and a compare that is not its range says why instead."
 (autoload 'ygg-git-compare-tour-next "ygg-git-compare-tour" nil t)
 (autoload 'ygg-git-compare-tour-previous "ygg-git-compare-tour" nil t)
 (autoload 'ygg-git-compare-tour-leave "ygg-git-compare-tour" nil t)
+(autoload 'ygg-git-compare-tour-refresh "ygg-git-compare-tour" nil t)
+(autoload 'ygg-git-compare-tour-trace "ygg-git-compare-tour" nil t)
 (autoload 'ygg-git-compare-tour-receive "ygg-git-compare-tour")
 (autoload 'ygg-git-compare-interdiff "ygg-git-compare-interdiff" nil t)
 (autoload 'ygg-git-compare-export-markdown "ygg-git-compare-submit" nil t)
@@ -2036,6 +2062,8 @@ around past the end."
   "I" #'ygg-git-compare-interdiff
   "t" #'ygg-git-compare-tour
   "T" #'ygg-git-compare-tour-leave
+  "W" #'ygg-git-compare-tour-refresh
+  "w" #'ygg-git-compare-tour-trace
   "e" #'ygg-git-compare-visit-b
   "'" #'ygg-git-compare-visit-b
   ";" #'ygg-git-compare-dispatch
@@ -2056,7 +2084,8 @@ around past the end."
 ] c and [ c go to the next and previous hunk, ] f and [ f (or } and {)
 to the next and previous file, ] u and [ u to the next and previous
 unreviewed hunk, and
-] t and [ t walk a tour an agent ordered, \\[ygg-git-compare-tour] asks for one and T leaves it.
+] t and [ t walk a tour an agent ordered, \\[ygg-git-compare-tour] walks the kept one (asking for one if none), W asks for a new one,
+w opens its agent's trace and T leaves it.
 ] m and [ m (or \\[ygg-git-compare-comment-next] and \\[ygg-git-compare-comment-previous]) to the next and previous comment.
 On a pull request, Conversation and Checks come before the diff; on a check,
 RET and o open its log and y copies its address.

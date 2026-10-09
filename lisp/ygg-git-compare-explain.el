@@ -4,7 +4,7 @@
 ;; From inside a compare: open side B's own file where a diff line puts
 ;; it, so the language server answers about the code itself; or start an
 ;; agent session on the compared range to explain the change and draw the
-;; calls it touches, its trace shown in the compare's right pane.  The
+;; calls it touches, its trace shown beside the compare.  The
 ;; session is an ordinary one, listed, resumable and killed like any
 ;; other; leaving the compare leaves it running.
 
@@ -19,7 +19,6 @@
 (defvar aob-acp-default-agent)
 (declare-function aob-acp-spawn "aob-acp" (agent &optional intent atts name tree))
 (declare-function aob-acp-preset "aob-acp" (name))
-(declare-function aob-trace-buffer "aob-trace" (s))
 
 (defcustom ygg-git-compare-explain-preset nil
   "The preset a session asked about a compare runs under.
@@ -144,9 +143,9 @@ change no file, commit, branch or ref.\n"))))
                   preset))
     preset))
 
-(defun ygg-git-compare-explain--ask (verb instructions)
+(defun ygg-git-compare-explain--ask (verb instructions &optional quiet)
   "Start a session asked INSTRUCTIONS about this compare's range, named VERB A…B.
-Its trace takes the right pane; the session outlives the compare."
+Its trace opens beside the compare unless QUIET; the session outlives the compare."
   (require 'aob)
   (require 'aob-acp)
   (require 'aob-trace nil t)
@@ -160,19 +159,13 @@ Its trace takes the right pane; the session outlives the compare."
                         (buffer-local-value 'ygg-git-compare--b list))))
          (prompt (concat (ygg-git-compare-explain-context list) "\n" instructions))
          (session (or (aob-acp-spawn (ygg-git-compare-explain--preset) prompt nil name)
-                      (user-error "Could not start %s" name)))
-         (window (buffer-local-value 'ygg-git-compare--file-window list)))
-    (when (fboundp 'aob-trace-buffer)
-      (with-current-buffer list (setq ygg-git-compare--shown nil))
-      (if (window-live-p window)
-          (progn (select-window window)
-                 (switch-to-buffer (aob-trace-buffer session) nil t))
-        (pop-to-buffer (aob-trace-buffer session))))
+                      (user-error "Could not start %s" name))))
+    (unless quiet (ygg-git-compare-show-trace session))
     session))
 
 ;;;###autoload
 (defun ygg-git-compare-explain ()
-  "Ask a new agent session to explain the compared change, trace on the right.
+  "Ask a new agent session to explain the compared change, trace beside the compare.
 What and why, requirements, the design and the calls it touches as
 diagrams, the implementation in reading order with file:line links, then
 what it could not check; see `ygg-git-compare-explain-instructions'."

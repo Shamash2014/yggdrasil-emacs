@@ -15,13 +15,12 @@
 (require 'magit)
 (require 'transient)
 (require 'ygg-git-compare)
+(require 'ygg-git-compare-comments)
 
 (defvar transient--original-buffer)
 (declare-function ygg-git-compare-comments-list "ygg-git-compare-comments"
                   (&optional include-pending))
 (declare-function ygg-git-compare-comments-drop "ygg-git-compare-comments" (ids))
-(declare-function ygg-git-compare--forge-p "ygg-git-compare-comments" (comment))
-(declare-function aob-trace "aob-trace")
 
 (defcustom ygg-git-compare-export-intro
   "I reviewed your code and have the following comments. Please address them."
@@ -703,7 +702,7 @@ out findings less urgent than it."
                (if (= (length comments) 1) "" "s")
                (let ((pending (ygg-git-compare-submit--pending-note)))
                  (if (string-empty-p pending) "" (concat "; " pending))))
-      (aob-trace session))))
+      (ygg-git-compare-show-trace session))))
 
 ;;; Menu
 

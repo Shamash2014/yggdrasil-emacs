@@ -657,7 +657,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
                        (car (all-completions "here" table))))
                     ((symbol-function 'aob-prompt)
                      (lambda (s text &rest _) (push (list s text aob-prompt-typed) sent)))
-                    ((symbol-function 'aob-trace) (lambda (s) (push s shown))))
+                    ((symbol-function 'ygg-git-compare-show-trace) (lambda (s) (push s shown))))
             (ygg-git-compare-review))
           (should-not ygg-git-compare--comments))
         (should (equal (car offered) "new: review plan (preset review)"))
@@ -715,14 +715,14 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
           (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "new: claude"))
                     ((symbol-function 'aob-acp-spawn)
                      (lambda (agent &rest _)
-                       (push (list agent aob-acp-start-dir) spawned)
+                       (push (list agent aob-acp-start-dir aob-acp-show-trace) spawned)
                        (aob-create-session :id "fresh" :backend 'acp :name "fresh"
                                            :project aob-acp-start-dir :state 'starting)))
                     ((symbol-function 'aob-prompt)
                      (lambda (s text &rest _) (push (list s text) sent)))
-                    ((symbol-function 'aob-trace) #'ignore))
-            (ygg-git-compare-review)))
-        (should (equal spawned (list (list "claude" root))))
+                    ((symbol-function 'ygg-git-compare-show-trace) #'ignore))
+            (let ((aob-acp-show-trace t)) (ygg-git-compare-review))))
+        (should (equal spawned (list (list "claude" root nil))))
         (should (equal (aob-session-name (car (car sent))) "fresh"))
         (should-not (string-search "<review-comments>" (nth 1 (car sent))))))))
 
@@ -745,7 +745,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
              spawned prompted
              (aob-compose-spawn-function
               (lambda (text &rest _)
-                (push (list text aob-compose--dir aob-prompt-typed) spawned)
+                (push (list text aob-compose--dir aob-prompt-typed aob-acp-show-trace) spawned)
                 (aob-create-session :id "planner" :backend 'acp :name "planner"
                                     :project aob-compose--dir :state 'starting))))
         (ygg-git-compare-tests--with-compare root
@@ -762,11 +762,12 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
                                               (ygg-preset-body p)))))))
                     ((symbol-function 'aob-prompt)
                      (lambda (&rest args) (push args prompted)))
-                    ((symbol-function 'aob-trace) #'ignore))
-            (ygg-git-compare-review))
+                    ((symbol-function 'ygg-git-compare-show-trace) #'ignore))
+            (let ((aob-acp-show-trace t)) (ygg-git-compare-review)))
           (should-not ygg-git-compare--comments))
         (should (= (length spawned) 1))
-        (pcase-let ((`(,text ,dir ,typed) (car spawned)))
+        (pcase-let ((`(,text ,dir ,typed ,traced) (car spawned)))
+          (should-not traced)
           (should (string-prefix-p "@review " text))
           (should (string-search "<preset name=\"review\">" text))
           (should-not (string-search "<preset name=\"build\">" text))

@@ -1145,6 +1145,8 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
     ("I" "interdiff since last review" ygg-git-compare-interdiff)
     ("x" "explain the change" ygg-git-compare-explain)
     ("t" "guided review tour" ygg-git-compare-tour)
+    ("W" "new tour (replaces the kept one)" ygg-git-compare-tour-refresh)
+    ("w" "tour agent's trace" ygg-git-compare-tour-trace)
     ("b" "switch base" ygg-git-compare-switch-base)
     ("~" "swap sides" ygg-git-compare-swap)
     ("." "A...B or A..B" ygg-git-compare-toggle-dots)
