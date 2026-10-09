@@ -10,6 +10,8 @@
 (declare-function aob-session-backend "aob")
 (declare-function project-root "project")
 (declare-function aob-live-sessions "aob")
+(declare-function aob-session-p "aob")
+(declare-function aob-session-state "aob")
 (declare-function aob-acp-spawn "aob-acp")
 (declare-function aob-acp-preset "aob-acp")
 (defvar aob-acp-default-agent)
@@ -126,12 +128,15 @@ none started."
     (let ((proc (apply #'ygg-agent-maps--run
                  root argv
                  (lambda (status out)
-                   (unwind-protect (funcall done status out)
-                     (ygg-agent-maps--bump entry -1)
-                     (when-let* ((_ (zerop (plist-get entry :pending)))
-                                 (idle (plist-get entry :on-idle)))
-                       (plist-put entry :on-idle nil)
-                       (funcall idle))))
+                   (let (completed)
+                     (unwind-protect (prog1 (funcall done status out)
+                                       (setq completed t))
+                       (unless completed (plist-put entry :generating nil))
+                       (ygg-agent-maps--bump entry -1)
+                       (when-let* ((_ (zerop (plist-get entry :pending)))
+                                   (idle (plist-get entry :on-idle)))
+                         (plist-put entry :on-idle nil)
+                         (funcall idle)))))
                  (and merge-err '(t)))))
       (when (processp proc)
         (plist-put entry :procs (cons proc (plist-get entry :procs))))
@@ -559,59 +564,71 @@ Runs only when repowise is configured not to rewrite CLAUDE.md."
                                (kill-process proc)))))))))
     (funcall next)))
 
-(defun ygg-agent-maps--start-feature-agent (root)
-  (if-let* ((live (ygg-agent-maps--live-sessions-in root)))
-      (message "Feature map session skipped: %d live agent session%s in %s"
-               (length live) (if (cdr live) "s" "")
-               (abbreviate-file-name (directory-file-name root)))
-    (ygg-agent-maps-features root)))
-
 ;;;###autoload
 (defun ygg-agent-maps-generate (&optional root)
   "Regenerate ROOT's repo map now and start the feature map agent session.
 The repo map is rebuilt in the background even when not stale; without the
 latgen git filter the full map is not written, and the filter is offered
-first.  Only after that is settled does the feature agent start.  Refused
-while an agent session is live in ROOT.  The feature summary follows
+first.  Only after that is settled does the feature agent start.  Runs
+even while an agent session is live in ROOT.  The feature summary follows
 features.md the next time the maps refresh."
   (interactive)
   (let ((root (ygg-agent-maps--root (or root (ygg-agent-maps--default-root)))))
     (when (file-remote-p root) (user-error "Maps are not generated over TRAMP"))
-    (when-let* ((live (ygg-agent-maps--live-sessions-in root)))
-      (user-error "Agent %s is running in %s; maps not updated"
-                  (mapconcat (lambda (s) (format "%s" (aob-session-name s))) live ", ")
-                  (abbreviate-file-name (directory-file-name root))))
-    (unless (zerop (plist-get (ygg-agent-maps--entry root) :pending))
-      (user-error "Maps are already generating for %s" root))
-    (ygg-agent-maps--repowise-update
-     root
-     (lambda ()
-       (let ((script (expand-file-name "ice-latgen-filter" ygg-agent-maps-tools-dir))
-             (lat (file-directory-p (expand-file-name "lat.md" root))))
-         (ygg-agent-maps--filter-ok
-          root
-          (lambda (ok)
-            (let ((proceed (lambda (ok &optional why)
-                             (ygg-agent-maps--regenerate root ok why)
-                             (ygg-agent-maps--start-feature-agent root))))
-              (if (or ok (not lat) (not (file-executable-p script)))
-                  (funcall proceed ok)
-                (ygg-agent-maps--offer-install root script proceed))))))))))
+    (let ((entry (ygg-agent-maps--entry root)))
+      (when (or (plist-get entry :generating)
+                (not (zerop (plist-get entry :pending))))
+        (user-error "Maps are already generating for %s" root))
+      (plist-put entry :generating t)
+      (let (handed-off)
+        (unwind-protect
+            (progn
+              (ygg-agent-maps--repowise-update
+               root
+               (lambda ()
+                 (let ((script (expand-file-name "ice-latgen-filter" ygg-agent-maps-tools-dir))
+                       (lat (file-directory-p (expand-file-name "lat.md" root))))
+                   (ygg-agent-maps--filter-ok
+                    root
+                    (lambda (ok)
+                      (let ((proceed
+                             (lambda (ok &optional why)
+                               (ygg-agent-maps--regenerate root ok why)
+                               (unwind-protect (ygg-agent-maps--generate-features root)
+                                 (plist-put entry :generating nil)))))
+                        (if (or ok (not lat) (not (file-executable-p script)))
+                            (funcall proceed ok)
+                          (ygg-agent-maps--offer-install root script proceed))))))))
+              (setq handed-off t))
+          (unless handed-off (plist-put entry :generating nil)))))))
+
+(defun ygg-agent-maps--feature-agent-in (root)
+  (seq-find (lambda (s)
+              (and (aob-session-ref s :feature-map)
+                   (memq (aob-session-state s) '(working blocked starting))))
+            (ygg-agent-maps--live-sessions-in root)))
+
+(defun ygg-agent-maps--generate-features (root)
+  (if (ygg-agent-maps--feature-agent-in root)
+      (message "aob: feature map agent already running in %s; repo map updated"
+               (abbreviate-file-name (directory-file-name root)))
+    (ygg-agent-maps-features root t)))
 
 (defun ygg-agent-maps--in-root-preset (agent)
   (let ((spec (copy-sequence (aob-acp-preset agent))))
     (cons agent (cl-loop for (k v) on spec by #'cddr
                          unless (eq k :worktree) append (list k v)))))
 
-(defun ygg-agent-maps-features (&optional root)
+(defun ygg-agent-maps-features (&optional root force)
   "Start an agent session that writes or refreshes ROOT's lat.md/features.md.
 Uses create-verification-skill when the file is missing, else
 maintain-verification-skill.  Works in ROOT itself, never a new worktree.
-Refused while an agent session is live in ROOT."
+Refused while an agent session is live in ROOT unless FORCE."
   (interactive)
   (let ((root (ygg-agent-maps--root (or root (ygg-agent-maps--default-root)))))
     (when (file-remote-p root) (user-error "Maps are not generated over TRAMP"))
-    (when-let* ((live (ygg-agent-maps--live-sessions-in root)))
+    (when-let* ((_ (not force))
+                (live (ygg-agent-maps--live-sessions-in root)))
       (user-error "Feature map skipped in %s: %d live agent session%s there"
                   (abbreviate-file-name (directory-file-name root))
                   (length live) (if (cdr live) "s" "")))
@@ -626,8 +643,10 @@ Refused while an agent session is live in ROOT."
            (prompt (format "Use the %s skill to %s lat.md/features.md from source. If that skill is not available, %s lat.md/features.md from source yourself, following the format of %s. Then verify each feature's keys and commands exist in the source, and correct any that do not."
                            skill verb verb
                            (if exists "the existing file" "the other notes in lat.md and lat.md/lat.md"))))
-      (or (aob-acp-spawn aob-acp-default-agent prompt nil "feature map")
-          (user-error "Could not start %s" aob-acp-default-agent)))))
+      (let ((s (aob-acp-spawn aob-acp-default-agent prompt nil "feature map")))
+        (unless s (user-error "Could not start %s" aob-acp-default-agent))
+        (when (aob-session-p s) (aob-session-put s :feature-map t))
+        s))))
 
 (with-eval-after-load 'aob-acp
   (add-hook 'aob-acp-before-first-prompt-functions #'ygg-agent-maps-on-ready)
