@@ -361,5 +361,86 @@
             (should-not (ygg-forge-config--containing proj2 cands))))
       (delete-directory base t))))
 
+;;; config folders
+
+(defmacro ygg-forge-config-tests--with-homes (&rest body)
+  (declare (indent 0))
+  `(ygg-forge-config-tests--with-project nil
+     (let* ((real (file-name-as-directory (make-temp-file "ygg-forge-real-" t)))
+            (ygg-agent--config-homes
+             (mapcar (lambda (cell)
+                       (let ((spec (copy-sequence (cdr cell))))
+                         (plist-put spec :home (expand-file-name (car cell) real))
+                         (cons (car cell) spec)))
+                     ygg-agent--config-homes))
+            (ygg-agent--config-dirs (make-hash-table :test #'equal)))
+       (unwind-protect (progn ,@body)
+         (delete-directory real t)))))
+
+(ert-deftest ygg-forge-config-init-makes-every-kind ()
+  (ygg-forge-config-tests--with-homes
+    (let ((made (ygg-project-config-init root)))
+      (should (= 5 (length made)))
+      (dolist (kind '("claude" "codex" "pi" "gh" "glab"))
+        (should (file-directory-p (expand-file-name (concat name "/" kind) conf)))))))
+
+(ert-deftest ygg-forge-config-init-skips-a-kind-with-a-marker ()
+  (ygg-forge-config-tests--with-homes
+    (with-temp-file (expand-file-name ".codex-home" root) (insert "elsewhere\n"))
+    (ygg-project-config-init root)
+    (should-not (file-exists-p (expand-file-name (concat name "/codex") conf)))
+    (should (file-directory-p (expand-file-name (concat name "/claude") conf)))))
+
+(ert-deftest ygg-forge-config-init-leaves-remote-projects-alone ()
+  (ygg-forge-config-tests--with-homes
+    (should-not (ygg-project-config-init "/ssh:nobody@host.invalid:/srv/proj/"))
+    (should-not (directory-files conf nil directory-files-no-dot-files-regexp))))
+
+(ert-deftest ygg-forge-config-init-is-idempotent ()
+  (ygg-forge-config-tests--with-homes
+    (let ((first (ygg-project-config-init root)))
+      (should (equal first (ygg-project-config-init root))))))
+
+(ert-deftest ygg-forge-config-init-runs-no-keychain-process ()
+  (ygg-forge-config-tests--with-homes
+    (let (programs)
+      (cl-letf (((symbol-function 'ygg-agent--repo-home) (lambda (project) project))
+                ((symbol-function 'ygg-agent--keychain-read)
+                 (lambda (&rest _) (push "keychain-read" programs) nil))
+                ((symbol-function 'call-process)
+                 (lambda (program &rest _) (push program programs) 0))
+                ((symbol-function 'process-file)
+                 (lambda (program &rest _) (push program programs) 0))
+                ((symbol-function 'process-lines)
+                 (lambda (program &rest _) (push program programs) nil))
+                ((symbol-function 'make-process)
+                 (lambda (&rest args) (push (plist-get args :command) programs) nil)))
+        (ygg-project-config-init root))
+      (should-not programs))))
+
+(ert-deftest ygg-forge-config-init-keeps-home-selection-and-env ()
+  (ygg-forge-config-tests--with-homes
+    (let* ((spec (cdr (assoc "claude" ygg-agent--config-homes)))
+           (own (ygg-agent--own-home "claude" root))
+           (home (plist-get spec :home))
+           (before (cl-letf (((symbol-function 'ygg-agent--logged-in-p)
+                              (lambda (_k dir &optional _c) (equal dir home))))
+                     (ygg-agent--authenticated-home "claude" spec (list own)))))
+      (ygg-project-config-init root)
+      (should (file-directory-p own))
+      (should (equal before
+                     (cl-letf (((symbol-function 'ygg-agent--logged-in-p)
+                                (lambda (_k dir &optional _c) (equal dir home))))
+                       (ygg-agent--authenticated-home "claude" spec (list own)))))
+      (should (equal (expand-file-name home) before))
+      (should-not (ygg-forge-config-env root)))))
+
+(ert-deftest ygg-forge-config-import-has-a-config-folders-step ()
+  (require 'ygg-project-scan)
+  (let (steps)
+    (cl-letf (((symbol-function 'ygg-project-import--run) (lambda (_root s _cb) (setq steps s))))
+      (ygg-project-import "/tmp/cart/"))
+    (should (assoc "config folders" steps))))
+
 (provide 'ygg-forge-config-tests)
 ;;; ygg-forge-config-tests.el ends here

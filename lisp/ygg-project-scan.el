@@ -322,6 +322,10 @@ Nothing here blocks."
                               (boundp 'aob-acp-default-agent))
                      (ygg-agent--config-env aob-acp-default-agent
                                             aob-acp-default-agent root))))
+           (cons "config folders"
+                 (lambda ()
+                   (when (fboundp 'ygg-project-config-init)
+                     (ygg-project-config-init root))))
            (cons "layout"
                  (lambda ()
                    (when (fboundp 'ygg-project-workspaces)

@@ -144,6 +144,34 @@ worker that has never authenticated."
 (declare-function dired "dired")
 
 ;;;###autoload
+(defun ygg-project-config-init (project)
+  "Make PROJECT's own config folder for every agent kind and forge CLI.
+A kind whose marker file names a home is left to that home.  Returns the
+folders made or ensured; nothing here signals."
+  (interactive (list (ygg-forge-config--project-root)))
+  (when (and ygg-agent-conf-root project (not (file-remote-p project)))
+    (let* ((repo (ignore-errors (ygg-forge-config--repo project)))
+           (made nil))
+      (when repo
+        (pcase-dolist (`(,kind . ,spec) ygg-agent--config-homes)
+          (let ((marker (plist-get spec :marker)))
+            (unless (or (ignore-errors (ygg-agent--read-marker (expand-file-name marker project)))
+                        (ignore-errors (ygg-agent--read-marker (expand-file-name marker repo))))
+              (condition-case nil
+                  (let ((dir (ygg-agent--own-home kind repo)))
+                    (ygg-agent--bootstrap-share spec dir t)
+                    (push dir made))
+                (error nil)))))
+        (pcase-dolist (`(,kind . ,_) ygg-forge-config-kinds)
+          (condition-case nil
+              (let ((dir (ygg-forge-config-dir kind project)))
+                (make-directory dir t)
+                (push dir made))
+            (error nil))))
+      (clrhash ygg-agent--config-dirs)
+      (nreverse made))))
+
+;;;###autoload
 (defun ygg-project-config-open ()
   "Open this project's agent config folder in dired, making it if absent."
   (interactive)
@@ -152,6 +180,7 @@ worker that has never authenticated."
                   (user-error "No agent config root, or a remote project")))
          (dir (file-name-directory own)))
     (make-directory dir t)
+    (ygg-project-config-init root)
     (dired dir)))
 
 (provide 'ygg-forge-config)

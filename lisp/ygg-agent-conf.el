@@ -721,7 +721,7 @@ and a session that runs is worth more than a home nothing writes to."
       (let ((home (expand-file-name (plist-get spec :home))))
         (if (ygg-agent--logged-in-p kind home cached) home (car homes)))))
 
-(defun ygg-agent--bootstrap-share (spec dir)
+(defun ygg-agent--bootstrap-share (spec dir &optional no-auth)
   (make-directory dir t)
   (let ((home (expand-file-name (plist-get spec :home))))
     (dolist (sub (plist-get spec :share))
@@ -731,7 +731,7 @@ and a session that runs is worth more than a home nothing writes to."
           (ignore-errors (make-symbolic-link src link))))))
   (ygg-agent--seed-settings spec dir)
   (ygg-agent--adopt-plugin-mcp spec dir)
-  (ygg-agent--share-mcp-auth dir))
+  (unless no-auth (ygg-agent--share-mcp-auth dir)))
 
 (defun ygg-agent--dangling-shares (spec)
   "Entries in SPEC's real shared directories that point nowhere.
