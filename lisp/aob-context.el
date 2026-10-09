@@ -8,6 +8,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'seq)
 (require 'subr-x)
 (require 'aob)
@@ -75,67 +76,98 @@
             (null aob-context--items)
             (y-or-n-p (format "Drop all %d context entries? " (length aob-context--items))))
     (setq aob-context--items nil)
-    (when-let* ((buf (get-buffer "*aob-context*")))
-      (with-current-buffer buf (aob-context--render)))
     (message "aob context: empty")))
 
-(defun aob-context--render ()
-  (let ((inhibit-read-only t))
-    (aob--redraw-keeping-lines
-     (lambda ()
-       (erase-buffer)
-       (insert (format "Context — %d entries, %d chars\n\n"
-                       (length aob-context--items) (aob-context-size)))
-       (if (null aob-context--items)
-           (insert "  nothing yet: add a region with SPC a c x\n")
-         (dolist (item (reverse aob-context--items))
-           (insert (propertize (concat "  " (aob-context--label item))
-                               'font-lock-face 'aob-context-path
-                               'aob-context item)
-                   (propertize (format "  %d chars\n" (length (plist-get item :text)))
-                               'font-lock-face 'shadow))))))))
+;; SPC a c X → the entries as a quickfix, oldest first; a row is the entry's
+;; :id, given when first listed so it survives drops.  The list follows the
+;; variable, so adding, dropping and clearing from anywhere never leave it stale.
+(declare-function ygg-qf-define-kind "layer-quickfix")
+(declare-function ygg-qf-show-kind "layer-quickfix")
+(declare-function ygg-qf-kind-refresh "layer-quickfix")
+(declare-function ygg-qf-kind-target-id "layer-quickfix")
 
-(defun aob-context-drop ()
-  "Drop the entry under point."
-  (interactive)
-  (if-let* ((item (get-text-property (line-beginning-position) 'aob-context)))
-      (progn (setq aob-context--items (delq item aob-context--items))
-             (aob-context--render))
-    (user-error "aob context: nothing on this line")))
+(defvar aob-context--next-id 0)
 
-(defun aob-context-visit ()
-  "Open the file of the entry under point."
-  (interactive)
-  (if-let* ((item (get-text-property (line-beginning-position) 'aob-context))
-            (file (plist-get item :file))
-            ((file-exists-p file)))
-      (progn (find-file-other-window file)
-             (when-let* ((line (plist-get item :beg)))
-               (goto-char (point-min))
-               (forward-line (1- line))))
-    (user-error "aob context: no file here")))
+(defun aob-context--id (item)
+  (or (plist-get item :id)
+      (let ((id (cl-incf aob-context--next-id)))
+        (plist-put item :id id)
+        id)))
 
-(defvar aob-context-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "d") #'aob-context-drop)
-    (define-key map (kbd "RET") #'aob-context-visit)
-    (define-key map (kbd "g r") #'aob-context-list)
-    (define-key map (kbd "D") #'aob-context-clear)
-    map)
-  "Keymap of the context list.")
+(defun aob-context--ids ()
+  "Every entry as (ID . ITEM), oldest first."
+  (mapcar (lambda (item) (cons (aob-context--id item) item))
+          (reverse aob-context--items)))
 
-(define-derived-mode aob-context-mode special-mode "aob-context"
-  "What the agent will be given to read.")
+(defun aob-context--find (id)
+  (or (cdr (assq id (aob-context--ids)))
+      (user-error "aob context: that entry is gone")))
+
+(defun aob-context--collect ()
+  (mapcar (lambda (e)
+            (let ((item (cdr e)))
+              (list (car e)
+                    (propertize (aob-context--label item)
+                                'font-lock-face 'aob-context-path)
+                    (format "%s, %d chars" (if (plist-get item :beg) "region" "file")
+                            (length (plist-get item :text))))))
+          (aob-context--ids)))
+
+(defun aob-context-drop (&optional id)
+  "Drop the context entry ID, by default the one on this row."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (let ((item (aob-context--find (or id (user-error "aob context: no entry here")))))
+    (setq aob-context--items (delq item aob-context--items))))
+
+(defun aob-context-visit (&optional id)
+  "Open the file of the context entry ID, by default the one on this row."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (let* ((item (aob-context--find (or id (user-error "aob context: no entry here"))))
+         (file (plist-get item :file)))
+    (unless (and file (file-exists-p file)) (user-error "aob context: no file here"))
+    (find-file-other-window file)
+    (when-let* ((line (plist-get item :beg)))
+      (goto-char (point-min))
+      (forward-line (1- line)))))
+
+(defvar aob-context-row-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m "o" #'aob-context-visit)
+    (define-key m "d" #'aob-context-drop)
+    m)
+  "What embark offers on a context row of the quickfix.")
+
+(defvar embark-general-map)
+
+(with-eval-after-load 'embark
+  (set-keymap-parent aob-context-row-map embark-general-map))
+
+(defun aob-context--follow (buf token watch)
+  (unless (ygg-qf-kind-refresh buf token)
+    (remove-variable-watcher 'aob-context--items watch)))
+
+(defun aob-context--arm (buf token)
+  (letrec ((watch (lambda (&rest _)
+                    (run-at-time 0 nil #'aob-context--follow buf token watch))))
+    (add-variable-watcher 'aob-context--items watch)
+    (lambda () (remove-variable-watcher 'aob-context--items watch))))
+
+(with-eval-after-load 'layer-quickfix
+  (ygg-qf-define-kind 'context
+                      :collect #'aob-context--collect
+                      :action #'aob-context-visit
+                      :map 'aob-context-row-map
+                      :arm #'aob-context--arm
+                      :drop #'aob-context-drop))
 
 ;;;###autoload
 (defun aob-context-list ()
-  "Show what the context holds."
+  "Collect the context entries into the quickfix; a row opens its file."
   (interactive)
-  (let ((buf (get-buffer-create "*aob-context*")))
-    (with-current-buffer buf
-      (unless (derived-mode-p 'aob-context-mode) (aob-context-mode))
-      (aob-context--render))
-    (pop-to-buffer buf)))
+  (unless aob-context--items
+    (user-error "aob context: nothing yet: add a region with SPC a c x"))
+  (require 'layer-quickfix)
+  (ygg-qf-show-kind 'context))
 
 (defun aob-context--block (item)
   (format "<context %s>\n%s\n</context>"

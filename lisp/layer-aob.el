@@ -82,8 +82,6 @@
 (pcase-dolist (`(,mode . ,map)
                `((aob-trace-mode . ,aob-trace-mode-map)
                  (aob-plan-mode . ,aob-plan-mode-map)
-                 (aob-todo-mode . ,aob-todo-mode-map)
-                 (aob-context-mode . ,aob-context-mode-map)
                  (aob-acp-mcp-mode . ,aob-acp-mcp-mode-map)))
   (yggdrasil-define-mode-keys mode '(normal visual) map))
 
@@ -108,9 +106,9 @@
     m)
   "The only special-mode keys agent buffers keep; the rest is yggdrasil's.")
 
-(dolist (map (list aob-trace-mode-map aob-plan-mode-map aob-todo-mode-map))
+(dolist (map (list aob-trace-mode-map aob-plan-mode-map))
   (set-keymap-parent map (make-composed-keymap aob-object-map ygg-aob--special-keep)))
-(dolist (map (list aob-context-mode-map aob-acp-mcp-mode-map))
+(dolist (map (list aob-acp-mcp-mode-map))
   (set-keymap-parent map ygg-aob--special-keep))
 
 (defun ygg-aob--modalize ()
@@ -123,8 +121,7 @@
   (use-local-map ygg-aob--trace-local-map))
 
 (add-hook 'aob-trace-mode-hook #'ygg-aob--modalize-trace)
-(dolist (hook '(aob-plan-mode-hook aob-todo-mode-hook
-                aob-context-mode-hook aob-acp-mcp-mode-hook))
+(dolist (hook '(aob-plan-mode-hook aob-acp-mcp-mode-hook))
   (add-hook hook #'ygg-aob--modalize))
 
 ;; agent mode/model under the localleader — moved off m/M so those keys stay
@@ -1918,62 +1915,13 @@ needs no key."
             (user-error "no agent on %c" ch)))))))
 
 (defun ygg-aob-resolve-next ()
-  "Answer the first pending Decision of any session.
-A worker holding one is stopped where it stands, so the oldest waits least."
+  "Answer the one pending Decision, or list them all when there are several."
   (interactive)
   (if-let* ((s (aob-session-awaiting-answer)))
-      (aob-resolve s)
+      (if (cdr (ygg-aob--decisions-collect))
+          (ygg-aob-decisions)
+        (aob-resolve s))
     (user-error "no pending decisions")))
-
-;;; Resolution queue → *quickfix*, live while it is open.  Decision
-;;; lines carry their own RET (resolve) and vanish as they are answered;
-;;; the user's grep results in the same buffer are never touched.
-
-(defvar ygg-aob--qf-line-map
-  (let ((m (make-sparse-keymap)))
-    (define-key m (kbd "RET") #'ygg-aob-qf-resolve)
-    m))
-
-(defun ygg-aob-qf-resolve ()
-  "Resolve the decision on this quickfix line."
-  (interactive)
-  (when-let* ((id (get-text-property (point) 'aob-decision))
-              (s (aob-session-get id)))
-    (aob-resolve s)))
-
-(defun ygg-aob--qf-refresh (&rest _)
-  (when-let* (((fboundp 'ygg-qf-buffer))
-              (buf (ygg-qf-buffer))
-              ((get-buffer-window buf t))
-              ((not (ygg-qf-kind-list-p buf))))
-    (with-current-buffer buf
-      (let ((inhibit-read-only t))
-        (save-excursion
-          (goto-char (point-min))
-          (while (not (eobp))
-            (if (get-text-property (point) 'aob-decision)
-                (delete-region (point) (min (point-max)
-                                            (1+ (line-end-position))))
-              (forward-line 1)))
-          (goto-char (point-min))
-          (unless (bobp) (goto-char (point-min)))
-          (when (> (point-max) (point-min)) (forward-line 1))
-          (dolist (s (aob-sessions))
-            (dolist (d (aob-session-decisions s))
-              (insert (propertize
-                       (format "■ %s — %s%s"
-                               (aob-session-name s)
-                               (plist-get d :title)
-                               (if-let* ((det (plist-get d :detail)))
-                                   (format "  [%s]" det)
-                                 ""))
-                       'aob-decision (aob-session-id s)
-                       'face 'error
-                       'keymap ygg-aob--qf-line-map)
-                      "\n"))))))))
-
-(add-hook 'aob-state-change-hook #'ygg-aob--qf-refresh)
-(add-hook 'aob-session-removed-hook #'ygg-aob--qf-refresh)
 
 (defun ygg-aob--attention-refresh (&rest _)
   (when (fboundp 'ygg-space-tree--queue) (ygg-space-tree--queue)))
@@ -2439,6 +2387,7 @@ message from compose is one."
 
 (add-hook 'aob-compose-before-send-functions #'ygg-aob--comments-compose)
 (require 'aob-diag-push)
+(require 'aob-decisions-qf)
 (require 'aob-bang)
 
 (defun ygg-aob--todo-note-say (args)

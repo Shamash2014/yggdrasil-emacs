@@ -1022,11 +1022,12 @@ keeps writing into the trace it was already writing into."
                    (not (eq (aob-session-state s) 'dead))))
             (aob-sessions)))
 
-(defun aob-resolve (s)
-  "Answer S's pending Decision — a permission, or an agent's question."
+(defun aob-resolve (s &optional decision)
+  "Answer S's pending DECISION, default the first — a permission, or an agent's question."
   (interactive (list (aob-target)))
-  (let ((d (car (aob-session-decisions s))))
-    (unless d (user-error "aob: %s has no pending decision" (aob-session-name s)))
+  (let ((d (or decision (car (aob-session-decisions s)))))
+    (unless (and d (memq d (aob-session-decisions s)))
+      (user-error "aob: %s has no pending decision" (aob-session-name s)))
     (if (eq (plist-get d :kind) 'elicitation)
         (aob--resolve-question s d)
       ;; least-commitment option first, so a reflexive RET grants once,

@@ -5,133 +5,95 @@
 (require 'aob)
 (require 'ygg-todo nil t)
 
-(defvar aob-todo-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map (make-composed-keymap aob-object-map special-mode-map))
-    (define-key map (kbd "o") #'aob-todo-add)
-    (define-key map (kbd "a") #'aob-todo-add)
-    (define-key map (kbd "c") #'aob-todo-edit)
-    (define-key map (kbd "x") #'aob-todo-toggle-done)
-    (define-key map (kbd "d d") #'aob-todo-remove-item)
-    (define-key map (kbd "RET") #'aob-todo-open-at-line)
-    (define-key map (kbd "C") #'aob-todo-comment)
-    (define-key map (kbd "g r") #'aob-todo-refresh)
-    (define-key map (kbd "q") #'quit-window)
-    map))
-
-(define-derived-mode aob-todo-mode special-mode "aob-todo"
-  "Session's todo list, editable by you and the agent."
-  (setq truncate-lines nil)
-  (visual-line-mode 1))
-
-(defvar-local aob-todo--session-id nil)
-(defvar-local aob-todo--file nil)
-(defvar-local aob-todo--tick 0)
+(declare-function ygg-qf-define-kind "layer-quickfix")
+(declare-function ygg-qf-show-kind "layer-quickfix")
+(declare-function ygg-qf-kind-refresh "layer-quickfix")
+(declare-function ygg-qf-kind-target-id "layer-quickfix")
+(declare-function aob-trace-comment-on "aob-trace")
+(defvar ygg-qf--kind)
+(defvar aob--views)
+(defvar ygg-todo-by)
 
 (defun aob-todo--glyph (done)
   "Return glyph for a todo item: [ ] if not done, [x] if done."
   (if done "[x]" "[ ]"))
 
-(defun aob-todo--render (&optional force)
-  "Render the current session's todo list, under the step its agent is on."
-  (when-let* ((s (aob-session-get aob-todo--session-id)))
-    (let* ((file (and (fboundp 'ygg-todo-session-file)
-                      (ygg-todo-session-file s)))
-           (tick (concat (or file "") (number-to-string (or (aob-session-ref s :plan-tick) 0)))))
-      (unless (and (not force) (equal aob-todo--tick tick))
-        (setq aob-todo--tick tick)
-        (let ((inhibit-read-only t)
-              (todo-data (and file (fboundp 'ygg-todo-read) (ygg-todo-read file))))
-          (setq aob-todo--file file)
-          (setq header-line-format
-                (if todo-data
-                    (let* ((items (plist-get todo-data :items))
-                           (done (seq-filter (lambda (it) (plist-get it :done)) items))
-                           (total (length items)))
-                      (format " %s · todo %d/%d · %s"
-                              (aob-session-name s)
-                              (length done)
-                              total
-                              (file-name-nondirectory file)))
-                  (format " %s · no list yet (o adds the first item)" (aob-session-name s))))
-          (let ((keep (plist-get (get-text-property (line-beginning-position) 'aob-todo-item) :id)))
-          (aob--redraw-keeping-lines
-           (lambda ()
-             (erase-buffer)
-             (when-let* ((now (seq-find (lambda (e) (equal (plist-get e :status) "in_progress"))
-                                        (plist-get (aob-session-ref s :plan-ev) :entries))))
-               (insert (propertize (format "◐ now: %s\n" (plist-get now :content))
-                                   'font-lock-face 'shadow)))
-             (when todo-data
-               (let* ((items (plist-get todo-data :items))
-                      (sections (plist-get todo-data :sections))
-                      (items-by-section (make-hash-table :test 'equal)))
-                 (dolist (item items)
-                   (let* ((section (plist-get item :section))
-                          (key (or section "")))
-                     (puthash key (append (gethash key items-by-section) (list item)) items-by-section)))
-                 (let ((sections-ordered (cons "" (or sections nil))))
-                   (dolist (section sections-ordered)
-                     (when-let* ((section-items (gethash section items-by-section)))
-                       (when (not (equal section ""))
-                         (insert (propertize (format "%s\n" section) 'font-lock-face 'bold)))
-                       (dolist (item section-items)
-                         (let ((id (plist-get item :id))
-                               (text (plist-get item :text))
-                               (done (plist-get item :done)))
-                           (let ((item-line (format "  %s %s %s\n"
-                                                    (aob-todo--glyph done)
-                                                    id
-                                                    text)))
-                             (if done
-                                 (insert (propertize item-line 'font-lock-face 'shadow))
-                               (insert item-line))
-                             (let* ((line-start (line-beginning-position 0))
-                                    (line-end (line-end-position 0)))
-                               (put-text-property line-start line-end 'aob-todo-item item)
-                               (put-text-property line-start line-end 'aob-todo-file file))))))))))))
-          (when-let* ((keep)
-                      (item (seq-find (lambda (it) (equal (plist-get it :id) keep))
-                                      (and todo-data (plist-get todo-data :items))))
-                      (pos (text-property-any (point-min) (point-max) 'aob-todo-item item)))
-            (goto-char pos))
-          (set-buffer-modified-p nil)))))))
+(defun aob-todo--file (s)
+  (and (fboundp 'ygg-todo-session-file) (ygg-todo-session-file s)))
 
-(defun aob-todo-buffer (s)
-  "Get or create the todo buffer for session S."
-  (let ((buf (get-buffer-create (aob--buffer-name "todo" s))))
-    (with-current-buffer buf
-      (unless (derived-mode-p 'aob-todo-mode)
-        (aob-todo-mode))
-      (setq aob-todo--session-id (aob-session-id s)
-            aob-buffer-session-id (aob-session-id s))
-      (aob-register-view buf #'aob-todo--render)
-      (aob-todo--render t))
-    buf))
+(defun aob-todo--data (s)
+  (when-let* ((file (aob-todo--file s)))
+    (ygg-todo-read file)))
 
-;;;###autoload
-(defun aob-todo (s)
-  "Open the todo list view for session S."
-  (interactive (list (aob-target)))
-  (pop-to-buffer (aob-todo-buffer s)))
+(defun aob-todo--now (s)
+  (seq-find (lambda (e) (equal (plist-get e :status) "in_progress"))
+            (plist-get (aob-session-ref s :plan-ev) :entries)))
 
-(defun aob-todo-refresh ()
-  "Refresh the todo view."
-  (interactive)
-  (aob-todo--render t))
+(defun aob-todo--collect (s)
+  (let ((sid (aob-session-id s))
+        (items (plist-get (aob-todo--data s) :items))
+        (sections (plist-get (aob-todo--data s) :sections))
+        rows)
+    (when-let* ((now (and items (aob-todo--now s))))
+      (push (list (cons sid :now)
+                  (propertize (format "◐ now: %s" (plist-get now :content)) 'face 'shadow)
+                  (aob-session-name s))
+            rows))
+    (dolist (section (delete-dups (cons "" sections)))
+      (dolist (item (seq-filter (lambda (it) (equal (or (plist-get it :section) "") section))
+                                items))
+        (let ((text (format "%s %s %s" (aob-todo--glyph (plist-get item :done))
+                            (plist-get item :id) (plist-get item :text))))
+          (push (list (cons sid (plist-get item :id))
+                      (if (plist-get item :done) (propertize text 'face 'shadow) text)
+                      section)
+                rows))))
+    (nreverse rows)))
 
-(defun aob-todo--get-item-at-point ()
-  "Get the todo item plist at point, or signal an error."
-  (let ((item (get-text-property (line-beginning-position) 'aob-todo-item)))
-    (unless item
-      (user-error "Not a todo item"))
-    item))
+(defun aob-todo--live-p (s)
+  (eq s (aob-session-get (aob-session-id s))))
 
-(defun aob-todo-add ()
-  "Add a new todo item."
-  (interactive)
-  (let* ((s (aob-session-get aob-todo--session-id))
-         (file (or aob-todo--file
+(defun aob-todo--session (id)
+  (or (and id (aob-session-get (car id)))
+      (and (boundp 'ygg-qf--kind) (car (plist-get ygg-qf--kind :args)))
+      (aob-target)))
+
+(defun aob-todo--item (id)
+  "The (SESSION FILE ITEM) the row ID stands for."
+  (let* ((s (or (and id (aob-session-get (car id))) (user-error "aob: that session is gone")))
+         (file (or (aob-todo--file s) (user-error "No todo file")))
+         (item (and (not (eq (cdr id) :now))
+                    (seq-find (lambda (it) (equal (plist-get it :id) (cdr id)))
+                              (plist-get (ygg-todo-read file) :items)))))
+    (list s file (or item (user-error "Not a todo item")))))
+
+(defun aob-todo--visit (file line)
+  (find-file-other-window file)
+  (goto-char (point-min))
+  (when line
+    (forward-line (1- line))))
+
+(defun aob-todo--open-now (sid)
+  (let* ((s (or (aob-session-get sid) (user-error "aob: that session is gone")))
+         (file (or (aob-todo--file s) (user-error "No todo file")))
+         (content (plist-get (aob-todo--now s) :content))
+         (item (seq-find (lambda (it) (equal (plist-get it :text) content))
+                         (plist-get (ygg-todo-read file) :items))))
+    (aob-todo--visit file (plist-get item :line))))
+
+(defun aob-todo-open-at-line (&optional id)
+  "Open the todo file at the line of the item ID, by default the one on this row."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (if (and id (eq (cdr id) :now))
+      (aob-todo--open-now (car id))
+    (pcase-let ((`(,_ ,file ,item) (aob-todo--item id)))
+      (aob-todo--visit file (plist-get item :line)))))
+
+(defun aob-todo-add (&optional id)
+  "Add a todo item, in the section of the item ID when there is one."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (let* ((s (aob-todo--session id))
+         (file (or (aob-todo--file s)
                    (and (fboundp 'ygg-todo-create)
                         (fboundp 'ygg-todo-session-dir)
                         (fboundp 'ygg-todo-session-bind)
@@ -139,104 +101,106 @@
                                                      (aob-session-name s)
                                                      (aob-session-name s) nil)))
                           (ygg-todo-session-bind s path)
-                          path)))))
-    (unless file
-      (user-error "No todo file and cannot create one"))
-    (when (fboundp 'ygg-todo-add)
-      (let* ((text (read-string "Todo: "))
-             (item-at-point (get-text-property (line-beginning-position) 'aob-todo-item))
-             (section (and item-at-point (plist-get item-at-point :section))))
-        (let ((ygg-todo-by 'user))
-          (ygg-todo-add file text section))
-        (message "Added todo item")))
-    (aob-todo--render t)))
+                          path))
+                   (user-error "No todo file and cannot create one")))
+         (section (and id (not (eq (cdr id) :now))
+                       (plist-get (nth 2 (aob-todo--item id)) :section)))
+         (text (read-string "Todo: ")))
+    (let ((ygg-todo-by 'user))
+      (ygg-todo-add file text section))
+    (message "Added todo item")))
 
-(defun aob-todo-edit ()
-  "Edit the todo item at point."
-  (interactive)
-  (let* ((item (aob-todo--get-item-at-point))
-         (file aob-todo--file)
-         (id (plist-get item :id))
-         (text (plist-get item :text))
-         (new-text (read-string "Edit: " text)))
-    (unless file
-      (user-error "No todo file"))
-    (when (fboundp 'ygg-todo-rewrite)
-      (let ((ygg-todo-by 'user))
-        (ygg-todo-rewrite file id new-text text))
-      (message "Updated todo item"))
-    (aob-todo--render t)))
+(defun aob-todo-edit (&optional id)
+  "Edit the text of the item ID, by default the one on this row."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (pcase-let* ((`(,_ ,file ,item) (aob-todo--item id))
+               (text (plist-get item :text))
+               (new-text (read-string "Edit: " text)))
+    (let ((ygg-todo-by 'user))
+      (ygg-todo-rewrite file (plist-get item :id) new-text text))
+    (message "Updated todo item")))
 
-(defun aob-todo-toggle-done ()
-  "Toggle done status of the item at point."
-  (interactive)
-  (let* ((item (aob-todo--get-item-at-point))
-         (file aob-todo--file)
-         (id (plist-get item :id))
-         (done (plist-get item :done))
-         (text (plist-get item :text)))
-    (unless file
-      (user-error "No todo file"))
-    (when (fboundp 'ygg-todo-set-done)
-      (let ((ygg-todo-by 'user))
-        (ygg-todo-set-done file id (not done) text))
-      (message "Toggled todo item"))
-    (aob-todo--render t)))
+(defun aob-todo-toggle-done (&optional id)
+  "Toggle done on the item ID, by default the one on this row."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (pcase-let ((`(,_ ,file ,item) (aob-todo--item id)))
+    (let ((ygg-todo-by 'user))
+      (ygg-todo-set-done file (plist-get item :id) (not (plist-get item :done))
+                         (plist-get item :text)))
+    (message "Toggled todo item")))
 
-(defun aob-todo-remove-item ()
-  "Remove the item at point."
-  (interactive)
-  (let* ((item (aob-todo--get-item-at-point))
-         (file aob-todo--file)
-         (id (plist-get item :id))
-         (text (plist-get item :text)))
-    (unless file
-      (user-error "No todo file"))
+(defun aob-todo-remove-item (&optional id)
+  "Remove the item ID, by default the one on this row, once asked."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (pcase-let ((`(,_ ,file ,item) (aob-todo--item id)))
     (unless (y-or-n-p "Delete this item? ")
       (user-error "Cancelled"))
-    (when (fboundp 'ygg-todo-remove)
-      (let ((ygg-todo-by 'user))
-        (ygg-todo-remove file id text))
-      (message "Removed todo item"))
-    (aob-todo--render t)))
+    (let ((ygg-todo-by 'user))
+      (ygg-todo-remove file (plist-get item :id) (plist-get item :text)))
+    (message "Removed todo item")))
 
-(defun aob-todo-open-at-line ()
-  "Open the todo file at the current item's line."
-  (interactive)
-  (let* ((item (aob-todo--get-item-at-point))
-         (file aob-todo--file)
-         (line (plist-get item :line)))
-    (unless file
-      (user-error "No todo file"))
-    (find-file-other-window file)
-    (when line
-      (goto-char (point-min))
-      (forward-line (1- line)))))
-
-(defun aob-todo-comment ()
-  "Open comment box for the item at point."
-  (interactive)
-  (let* ((item (aob-todo--get-item-at-point))
-         (file aob-todo--file)
-         (line (plist-get item :line))
-         (text (plist-get item :text))
-         (s (aob-session-get aob-todo--session-id)))
+(defun aob-todo-comment (&optional id)
+  "Open a comment box for the item ID, by default the one on this row."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (pcase-let ((`(,s ,file ,item) (aob-todo--item id)))
     (unless (fboundp 'aob-trace-comment-on)
       (user-error "Comments need aob-trace"))
     (aob-trace-comment-on s (format "%s:%d %s"
-                                     (file-name-nondirectory file)
-                                     (or line 0)
-                                     text))))
+                                    (file-name-nondirectory file)
+                                    (or (plist-get item :line) 0)
+                                    (plist-get item :text)))))
 
-(defun aob-todo--on-file-changed (file _what _item)
-  "Re-render all live todo buffers for FILE."
-  (dolist (buf (buffer-list))
-    (with-current-buffer buf
-      (when (and (derived-mode-p 'aob-todo-mode)
-                 (equal aob-todo--file file))
-        (aob-todo--render t)))))
+(defvar aob-todo-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m "o" #'aob-todo-open-at-line)
+    (define-key m "a" #'aob-todo-add)
+    (define-key m "c" #'aob-todo-edit)
+    (define-key m "x" #'aob-todo-toggle-done)
+    (define-key m "d" #'aob-todo-remove-item)
+    (define-key m "C" #'aob-todo-comment)
+    m)
+  "What embark offers on a todo row of the quickfix.")
 
-(add-hook 'ygg-todo-changed-functions #'aob-todo--on-file-changed)
+(defun aob-todo--same-file-p (a b)
+  (and a b (equal (file-truename a) (file-truename b))))
+
+(defun aob-todo--arm (buf token s)
+  (letrec ((render (lambda ()
+                     (unless (ygg-qf-kind-refresh buf token)
+                       (funcall disarm))))
+           (on-change (lambda (file &rest _)
+                        (when (aob-todo--same-file-p file (aob-todo--file s))
+                          (ignore-errors (funcall render)))))
+           (disarm (lambda ()
+                     (remove-hook 'ygg-todo-changed-functions on-change)
+                     (when (eq (alist-get buf aob--views nil nil #'eq) render)
+                       (setq aob--views (assq-delete-all buf aob--views))))))
+    (aob-register-view buf render)
+    (add-hook 'ygg-todo-changed-functions on-change)
+    disarm))
+
+(with-eval-after-load 'layer-quickfix
+  (ygg-qf-define-kind 'todo
+                      :collect #'aob-todo--collect
+                      :action #'aob-todo-open-at-line
+                      :map 'aob-todo-map
+                      :arm #'aob-todo--arm
+                      :live-p #'aob-todo--live-p
+                      :drop #'aob-todo-remove-item
+                      :glyph "☐"))
+
+;;;###autoload
+(defun aob-todo (s)
+  "Collect the todo list of session S into the quickfix; a row opens the file."
+  (interactive (list (aob-target)))
+  (unless (plist-get (aob-todo--data s) :items)
+    (unless (y-or-n-p (format "%s has no todo items; add the first? " (aob-session-name s)))
+      (user-error "aob: %s has no todo items" (aob-session-name s)))
+    (aob-todo-add (cons (aob-session-id s) :now)))
+  (require 'layer-quickfix)
+  (let ((default-directory (or (aob-session-dir s) (aob-session-project s)
+                               default-directory)))
+    (ygg-qf-show-kind 'todo s)))
 
 (provide 'aob-todo-view)
 ;;; aob-todo-view.el ends here

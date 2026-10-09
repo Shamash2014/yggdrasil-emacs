@@ -261,12 +261,12 @@ Agents live under SPC a; the trace buffer has its own keys and localleader.
 - `SPC a c C` — talk to an existing agent (`ygg-aob-talk-existing`)
 - `SPC a c o` — go to an agent in this space (`ygg-aob-pick`)
 - `SPC a c R` — resume a stored session in a folder (`ygg-aob-resume-pick`)
-- `SPC a c r` — answer the first pending decision (`ygg-aob-resolve-next`)
+- `SPC a c r` — answer the one pending decision, or list several in the quickfix (`ygg-aob-resolve-next`, `ygg-aob-decisions`; a row answers it, `o` opens its trace)
 - `SPC a c p` — running commands of all agents (`aob-shells`)
 - `SPC a c q` — kill the session (`aob-kill-session`)
 - `SPC a v` — conversations of the open project (`ygg-conversations`)
 - `SPC p z` — pick a zone or agent (`ygg-space-pick`)
-- `\ d` — todo list of the session, in a trace buffer (`aob-todo`)
+- `\ d` — todo items of the session in the quickfix; an empty list offers to add the first (`aob-todo`)
 - `\ l` — model of the session (`aob-acp-model`)
 - `\ m` — mode of the session (`ygg-compose-transient`)
 - `\ S` — cancel the running turn (`aob-cancel`)
@@ -339,7 +339,7 @@ Answers, btw, bang lines, context, deliver, schedule, handoff, diag push.
 Context, delivery and scheduling hang under SPC a c; per-trace actions use the localleader.
 
 - `SPC a c x` — add region or file to the context (`aob-context-add`)
-- `SPC a c X` — list the context (`aob-context-list`)
+- `SPC a c X` — list the context in the quickfix (`aob-context-list`); RET opens, `d` drops
 - `SPC a c s` — schedule a prompt (`aob-schedule`)
 - `SPC a c S` — list schedules (`aob-schedule-list`)
 - `SPC a e` — say where the next answer goes (`aob-deliver-to`)
@@ -351,7 +351,7 @@ Context, delivery and scheduling hang under SPC a c; per-trace actions use the l
 
 Results below are read from docstrings, not driven live (unverified).
 
-1. Select code, `SPC a c x` adds it to the agent's context; `SPC a c X` shows what the agent holds.
+1. Select code, `SPC a c x` adds it to the agent's context; `SPC a c X` lists what the agent holds in the quickfix.
 2. `SPC a c s` takes a prompt and a moment or repeat and sends it to the session then.
 3. `\ A` in a trace opens the questions of the last reply in the compose box.
 4. `\ H` writes the next task for a fresh session that takes over from this one.

@@ -2179,29 +2179,6 @@ is bound to a function returning the session's list file."
       (should (equal '(("Read the code" . t)) (aob-tests--list-items (funcall file))))
       (should (string-match-p "removed: Write the fix" (ygg-todo-session-note s))))))
 
-(declare-function aob-todo-buffer "aob-todo-view" (s))
-
-(ert-deftest aob-todo-view-shows-the-step-in-hand-over-the-list ()
-  "The list view draws tasks.md, with the plan's current step as one muted
-line above it and no second copy of the plan."
-  (require 'aob-todo-view)
-  (aob-tests--with-list s file
-    (aob-tests--feed s (aob-tests--plan-json '(((content . "Read the code") (status . "completed"))
-                                               ((content . "Write the fix") (status . "in_progress"))
-                                               ((content . "Ship it") (status . "pending")))))
-    (should (funcall file))
-    (unwind-protect
-        (with-current-buffer (aob-todo-buffer s)
-          (goto-char (point-min))
-          (should (looking-at "◐ now: Write the fix\n"))
-          (should (eq 'shadow (get-text-property (point) 'font-lock-face)))
-          (should (= 2 (how-many "Write the fix" (point-min) (point-max))))
-          (should (= 1 (how-many "Ship it" (point-min) (point-max))))
-          (should (string-match-p "\\[x\\] [0-9.]+ Read the code" (buffer-string)))
-          (should (string-match-p "\\[ \\] [0-9.]+ Ship it" (buffer-string)))
-          (should-not (string-match-p "agent plan" (buffer-string))))
-      (kill-buffer (aob-todo-buffer s)))))
-
 (defconst aob-tests--openspec-tasks
   "## 1. Parser\n\n- [x] 1.1 Read the format\n- [ ] 1.2 Parse numbered items\n\n## 2. Tests\n\n- [ ] 2.1 Cover the spec\n"
   "An OpenSpec change's tasks.md.")
@@ -3917,29 +3894,9 @@ under it included, and not for any other."
        (ygg-normal-state)
        (should-not (eq (key-binding "ZZ") #'aob-trace-send))))))
 
-(ert-deftest aob-modal-todo-keys-in-normal-state ()
-  (aob-tests--modal
-   '(progn
-     (with-temp-buffer
-       (aob-todo-mode)
-       (should ygg--normal-p)
-       (pcase-dolist (`(,k . ,def) '(("o" . aob-todo-add) ("a" . aob-todo-add)
-                                      ("c" . aob-todo-edit) ("x" . aob-todo-toggle-done)
-                                      ("dd" . aob-todo-remove-item) ("gr" . aob-todo-refresh)
-                                      ("C" . aob-todo-comment) ("\r" . aob-todo-open-at-line)
-                                      ("q" . quit-window) ("j" . ygg-j) ("k" . ygg-k)
-                                      ("gg" . ygg-goto-first) ("G" . ygg-goto-last-line)))
-         (should (eq (key-binding k) def)))
-       (should-not (eq (key-binding " ") #'scroll-up-command))))))
-
 (ert-deftest aob-modal-lists-refresh-on-g-r ()
   (aob-tests--modal
    '(progn
-     (with-temp-buffer
-       (aob-context-mode)
-       (should (eq (key-binding "gr") #'aob-context-list))
-       (should (eq (key-binding "gg") #'ygg-goto-first))
-       (should (eq (key-binding "d") #'aob-context-drop)))
      (with-temp-buffer
        (aob-acp-mcp-mode)
        (should (eq (key-binding "gr") #'aob-acp-mcp-refresh))
@@ -3954,19 +3911,6 @@ under it included, and not for any other."
          (aob-trace--add-comment s 1 "quoted" "a comment")
          (should-not ygg--state)
          (should-not ygg--normal-p))))))
-
-(ert-deftest aob-context-drop-keeps-the-line ()
-  (let ((aob-context--items (list (list :file "/c" :text "c")
-                                  (list :file "/b" :text "b")
-                                  (list :file "/a" :text "a"))))
-    (with-temp-buffer
-      (aob-context--render)
-      (goto-char (point-min))
-      (forward-line 3)
-      (should (equal (plist-get (get-text-property (point) 'aob-context) :file) "/b"))
-      (aob-context-drop)
-      (should (= (line-number-at-pos) 4))
-      (should (equal (plist-get (get-text-property (point) 'aob-context) :file) "/c")))))
 
 (ert-deftest aob-plan-render-keeps-the-line ()
   (aob-tests--with-session s
@@ -8739,12 +8683,8 @@ The same call replayed by a load is history, not a command running."
                              #'string<)
                        '("cargo test" "make watch")))
         (should (seq-set-equal-p (mapcar #'car live) (list a b) #'eq)))
-      (with-temp-buffer
-        (aob-shells-mode)
-        (aob-shells--entries)
-        (should (equal (sort (mapcar (lambda (e) (aref (cadr e) 4)) tabulated-list-entries)
-                             #'string<)
-                       '("cargo test" "make watch")))))))
+      (should (equal (sort (mapcar #'cadr (aob-shells--rows)) #'string<)
+                     '("cargo test" "make watch"))))))
 
 (ert-deftest aob-shells-stop-asks-the-agent-to-stop-its-task ()
   "A command the agent reports as a task is stopped by the agent, with

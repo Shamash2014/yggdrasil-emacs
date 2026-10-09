@@ -11,11 +11,14 @@
 
 (require 'seq)
 (require 'subr-x)
-(require 'tabulated-list)
 (require 'aob)
 (require 'aob-acp)
 
 (declare-function org-read-date "org")
+(declare-function ygg-qf-define-kind "layer-quickfix")
+(declare-function ygg-qf-show-kind "layer-quickfix")
+(declare-function ygg-qf-kind-refresh "layer-quickfix")
+(declare-function ygg-qf-kind-target-id "layer-quickfix")
 
 (defcustom aob-schedule-file (locate-user-emacs-file "var/aob-schedules.eld")
   "File the schedules are kept in between sessions of Emacs."
@@ -31,8 +34,6 @@ is the float time it is due.")
 
 (defvar aob-schedule-changed-hook nil
   "Run after any schedule is made, changed, sent or dropped.")
-
-(defconst aob-schedule--buffer "*aob-schedules*")
 
 (defconst aob-schedule--weekdays
   '(("sun" . 0) ("mon" . 1) ("tue" . 2) ("wed" . 3)
@@ -148,10 +149,6 @@ would otherwise write an empty list over every schedule in it."
   "Keep the file, the timer and the list in step with the schedules."
   (aob-schedule--save)
   (aob-schedule--arm)
-  (when-let* ((buf (get-buffer aob-schedule--buffer)))
-    (with-current-buffer buf
-      (aob-schedule--entries)
-      (tabulated-list-print t)))
   (run-hooks 'aob-schedule-changed-hook))
 
 ;;;###autoload
@@ -289,24 +286,51 @@ mon,thu 09:00."
     (format "new %s in %s" (plist-get target :agent)
             (file-name-nondirectory (directory-file-name (plist-get target :project))))))
 
-(defun aob-schedule--entries ()
-  (setq tabulated-list-entries
-        (mapcar (lambda (s)
-                  (list (plist-get s :id)
-                        (vector (format-time-string "%F %R" (plist-get s :next))
-                                (or (plist-get s :when) "once")
-                                (aob-schedule--target-label (plist-get s :target))
-                                (cond ((plist-get s :paused) "paused")
-                                      ((plist-get s :error)
-                                       (propertize "failed" 'help-echo (plist-get s :error)))
-                                      (t ""))
-                                (replace-regexp-in-string "\n" " " (plist-get s :prompt)))))
-                aob-schedule--list)))
+(defun aob-schedule--by-id (id)
+  (seq-find (lambda (s) (equal (plist-get s :id) id)) aob-schedule--list))
 
 (defun aob-schedule--at-point ()
-  (or (seq-find (lambda (s) (equal (plist-get s :id) (tabulated-list-get-id)))
-                aob-schedule--list)
+  (or (aob-schedule--by-id (ygg-qf-kind-target-id))
       (user-error "aob: no schedule here")))
+
+(defun aob-schedule--collect ()
+  (mapcar (lambda (s)
+            (list (plist-get s :id)
+                  (format "%s · %s · %s"
+                          (aob-schedule--target-label (plist-get s :target))
+                          (or (plist-get s :when) "once")
+                          (plist-get s :prompt))
+                  (string-join
+                   (delq nil (list (format-time-string "%F %R" (plist-get s :next))
+                                   (cond ((plist-get s :paused) "paused")
+                                         ((plist-get s :error)
+                                          (propertize "failed" 'help-echo
+                                                      (plist-get s :error))))))
+                   " · ")))
+          (sort (copy-sequence aob-schedule--list)
+                (lambda (a b) (< (plist-get a :next) (plist-get b :next))))))
+
+(defun aob-schedule--describe (id)
+  (if-let* ((s (aob-schedule--by-id id)))
+      (message "%s: %s, next %s%s"
+               (aob-schedule--target-label (plist-get s :target))
+               (or (plist-get s :when) "once")
+               (format-time-string "%F %R" (plist-get s :next))
+               (if (plist-get s :paused) ", paused" ""))
+    (user-error "aob: that schedule is gone")))
+
+(defun aob-schedule--drop (id)
+  (aob-schedule-delete (or (aob-schedule--by-id id)
+                           (user-error "aob: that schedule is gone"))))
+
+(defun aob-schedule--follow (buf token)
+  (letrec ((render (lambda ()
+                     (unless (ygg-qf-kind-refresh buf token)
+                       (funcall disarm))))
+           (disarm (lambda ()
+                     (remove-hook 'aob-schedule-changed-hook render))))
+    (add-hook 'aob-schedule-changed-hook render)
+    disarm))
 
 (defun aob-schedule-add ()
   "Schedule a prompt for a session, or for a new one of an agent."
@@ -343,38 +367,38 @@ mon,thu 09:00."
   (aob-schedule--changed))
 
 (defun aob-schedule-delete (sched)
-  "Drop SCHED for good."
+  "Drop SCHED for good, once asked to be sure."
   (interactive (list (aob-schedule--at-point)))
   (when (yes-or-no-p (format "Delete the schedule for %s? "
                              (aob-schedule--target-label (plist-get sched :target))))
     (setq aob-schedule--list (delq sched aob-schedule--list))
     (aob-schedule--changed)))
 
-(defvar-keymap aob-schedule-list-mode-map
-  :parent tabulated-list-mode-map
-  "a" #'aob-schedule-add
-  "e" #'aob-schedule-edit
-  "p" #'aob-schedule-toggle-pause
-  "r" #'aob-schedule-run-now
-  "d" #'aob-schedule-delete)
+(defvar aob-schedule-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m "e" #'aob-schedule-edit)
+    (define-key m "p" #'aob-schedule-toggle-pause)
+    (define-key m "r" #'aob-schedule-run-now)
+    (define-key m "d" #'aob-schedule-delete)
+    (define-key m "a" #'aob-schedule-add)
+    m)
+  "What embark offers on a schedule row of the quickfix.")
 
-(define-derived-mode aob-schedule-list-mode tabulated-list-mode "Schedules"
-  "Every scheduled prompt, soonest first."
-  (setq tabulated-list-format [("Next" 16 t) ("Repeat" 20 t) ("Target" 24 t)
-                               ("State" 7 t) ("Prompt" 0 nil)])
-  (setq tabulated-list-sort-key '("Next"))
-  (add-hook 'tabulated-list-revert-hook #'aob-schedule--entries nil t)
-  (tabulated-list-init-header))
+(with-eval-after-load 'layer-quickfix
+  (ygg-qf-define-kind 'schedules
+                      :collect #'aob-schedule--collect
+                      :action #'aob-schedule--describe
+                      :map 'aob-schedule-map
+                      :arm #'aob-schedule--follow
+                      :drop #'aob-schedule--drop))
 
 ;;;###autoload
 (defun aob-schedule-list ()
-  "Show every scheduled prompt: a add, e edit, p pause, r run now, d delete."
+  "Collect every scheduled prompt into the quickfix; a row describes its schedule."
   (interactive)
-  (with-current-buffer (get-buffer-create aob-schedule--buffer)
-    (aob-schedule-list-mode)
-    (aob-schedule--entries)
-    (tabulated-list-print)
-    (pop-to-buffer (current-buffer))))
+  (unless aob-schedule--list (user-error "aob: nothing is scheduled"))
+  (require 'layer-quickfix)
+  (ygg-qf-show-kind 'schedules))
 
 (provide 'aob-schedule)
 ;;; aob-schedule.el ends here

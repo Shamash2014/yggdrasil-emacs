@@ -9,15 +9,16 @@
 
 (require 'seq)
 (require 'subr-x)
-(require 'tabulated-list)
 (require 'aob)
 (require 'aob-acp)
 (require 'aob-trace)
 
-(defconst aob-shells--buffer "*aob shells*")
-
-(defvar-local aob-shells--pairs nil
-  "Each listed command's event seq to (SESSION . EVENT); a row's id is the seq.")
+(declare-function ygg-qf-define-kind "layer-quickfix")
+(declare-function ygg-qf-show-kind "layer-quickfix")
+(declare-function ygg-qf-kind-refresh "layer-quickfix")
+(declare-function ygg-qf-kind-at-point "layer-quickfix")
+(declare-function ygg-qf-kind-target-id "layer-quickfix")
+(defvar aob--views)
 
 (defun aob-shells--process-table ()
   "Every local process as a list of (PID PPID ARGS START)."
@@ -112,56 +113,52 @@ whose process was seen and is no longer there has ended."
                (aob-acp-shell-end s ev 'gone)
                nil))))))
 
-(defun aob-shells--last-line (ev)
-  "The last line EV's command printed, read from its output file when it has one."
-  (let* ((file (plist-get ev :output-file))
-         (text (if (and file (not (file-remote-p file)) (file-readable-p file))
-                   (with-temp-buffer
-                     (let ((size (file-attribute-size (file-attributes file))))
-                       (insert-file-contents file nil (max 0 (- size 4096)) size))
-                     (buffer-string))
-                 (string-join (aob-trace--shell-output ev) "\n"))))
-    (or (car (last (split-string text "\n" t "[ \t\r]+"))) "")))
+(defvar aob-shells--cheap nil
+  "Non-nil while rows are built without scanning the process table.")
 
-(defun aob-shells--entries ()
-  (let ((table (aob-shells--process-table))
+(defun aob-shells--rows ()
+  (let ((table (unless aob-shells--cheap (aob-shells--process-table)))
         (rows nil))
-    (setq aob-shells--pairs (make-hash-table))
     (dolist (pair (aob-shells--live))
-      (let* ((s (car pair)) (ev (cdr pair))
-             (pid (aob-shells--settle s ev table)))
+      (let* ((s (car pair)) (ev (cdr pair)))
+        (unless aob-shells--cheap (aob-shells--settle s ev table))
         (when (aob-trace-shell-live-p ev)
-          (puthash (plist-get ev :seq) pair aob-shells--pairs)
-          (push (list (plist-get ev :seq)
-                      (vector (aob-session-name s)
-                              (if (plist-get ev :background) "background" "running")
-                              (or (aob-trace--shell-elapsed ev) "")
-                              (if pid (number-to-string pid) "")
-                              (car (split-string (aob-trace--shell-command ev) "\n"))
-                              (abbreviate-file-name
-                               (or (plist-get ev :cwd) (aob-session-dir s)
-                                   (aob-session-project s) ""))
-                              (aob-shells--last-line ev)))
+          (push (list (cons (aob-session-id s) (plist-get ev :seq))
+                      (car (split-string (aob-trace--shell-command ev) "\n"))
+                      (string-join
+                       (delq nil (list (aob-session-name s)
+                                       (aob-trace--shell-elapsed ev)
+                                       (if (plist-get ev :background)
+                                           "background" "running")))
+                       " · "))
                 rows))))
-    (setq tabulated-list-entries (nreverse rows))))
+    (nreverse rows)))
 
-(defun aob-shells--at-point ()
-  (or (and aob-shells--pairs (gethash (tabulated-list-get-id) aob-shells--pairs))
-      (user-error "aob: no command here")))
+(defun aob-shells--pair (target)
+  "The (SESSION . EVENT) TARGET stands for: a pair already, or a row id."
+  (cond ((null target) (user-error "aob: no command here"))
+        ((stringp (car target))
+         (or (seq-find (lambda (pair)
+                         (and (equal (aob-session-id (car pair)) (car target))
+                              (eql (plist-get (cdr pair) :seq) (cdr target))))
+                       (aob-shells--live))
+             (user-error "aob: that command is gone")))
+        (t target)))
 
-(defun aob-shells-visit (pair)
-  "Show the trace row of the command in PAIR, a session and its event."
-  (interactive (list (aob-shells--at-point)))
-  (pop-to-buffer (aob-trace-buffer (car pair)))
-  (if-let* ((at (aob-trace--event-bounds (plist-get (cdr pair) :seq))))
-      (goto-char (car at))
-    (message "aob: that command is not drawn in the trace")))
+(defun aob-shells-visit (target)
+  "Show the trace row of the command TARGET, a row id or a session and its event."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (let ((pair (aob-shells--pair target)))
+    (pop-to-buffer (aob-trace-buffer (car pair)))
+    (if-let* ((at (aob-trace--event-bounds (plist-get (cdr pair) :seq))))
+        (goto-char (car at))
+      (message "aob: that command is not drawn in the trace"))))
 
-(defun aob-shells-output (pair)
-  "Show all the command in PAIR has printed.
+(defun aob-shells-output (target)
+  "Show all the command TARGET has printed.
 Its output file, followed as it grows, when it has one."
-  (interactive (list (aob-shells--at-point)))
-  (let* ((ev (cdr pair))
+  (interactive (list (ygg-qf-kind-target-id)))
+  (let* ((ev (cdr (aob-shells--pair target)))
          (file (plist-get ev :output-file)))
     (if (and file (file-readable-p file))
         (with-current-buffer (find-file-noselect file)
@@ -192,11 +189,11 @@ other commands are left running."
         (message "aob: ended %s" (mapconcat #'number-to-string pids " "))
         pids))))
 
-(defun aob-shells-stop (pair)
-  "Stop the command in PAIR: by its agent when it can, else by ending its process.
+(defun aob-shells-stop (target)
+  "Stop the command TARGET: by its agent when it can, else by ending its process.
 An agent that says it did not stop it leaves the next stop to end the process."
-  (interactive (list (aob-shells--at-point)))
-  (let ((s (car pair)) (ev (cdr pair)))
+  (interactive (list (ygg-qf-kind-target-id)))
+  (let* ((pair (aob-shells--pair target)) (s (car pair)) (ev (cdr pair)))
     (if (and (aob-acp-task-stoppable-p s ev) (not (plist-get ev :stop-refused)))
         (aob-acp-stop-task
          s ev (lambda (stopped err)
@@ -204,50 +201,71 @@ An agent that says it did not stop it leaves the next stop to end the process."
                     (message "aob: the agent stopped it")
                   (plist-put ev :stop-refused t)
                   (message "aob: the agent did not stop it%s; stop again to end its process"
-                           (if err (format " (%s)" (plist-get err :message)) "")))
-                (aob-shells--redraw)))
-      (aob-shells-kill s ev))
-    (aob-shells--redraw)))
+                           (if err (format " (%s)" (plist-get err :message)) "")))))
+      (aob-shells-kill s ev))))
 
-(defun aob-shells--redraw ()
-  (when-let* ((buf (get-buffer aob-shells--buffer)))
-    (with-current-buffer buf
-      (aob-shells--entries)
-      (tabulated-list-print t))))
+(defvar aob-shells-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m "v" #'aob-shells-visit)
+    (define-key m "o" #'aob-shells-output)
+    (define-key m "x" #'aob-shells-stop)
+    m)
+  "What embark offers on a running-command row of the quickfix.")
 
-(defvar-keymap aob-shells-mode-map
-  :parent tabulated-list-mode-map
-  "RET" #'aob-shells-visit
-  "o" #'aob-shells-output
-  "x" #'aob-shells-stop)
+(defvar aob-shells--timers nil
+  "Alist of (BUFFER . TIMER) for the lists whose running rows count seconds.")
 
-(define-derived-mode aob-shells-mode tabulated-list-mode "Shells"
-  "Every command an agent has running, in any session."
-  (setq tabulated-list-format [("Session" 18 t) ("State" 10 t) ("Time" 8 nil)
-                               ("Pid" 7 nil) ("Command" 40 nil) ("Cwd" 24 t)
-                               ("Output" 0 nil)])
-  (add-hook 'tabulated-list-revert-hook #'aob-shells--entries nil t)
-  (tabulated-list-init-header))
+(defun aob-shells--live-p ()
+  (and (aob-shells--live) t))
+
+(defun aob-shells--stop-timer (buf)
+  (when-let* ((timer (alist-get buf aob-shells--timers nil nil #'eq)))
+    (cancel-timer timer))
+  (setq aob-shells--timers (assq-delete-all buf aob-shells--timers)))
+
+(defun aob-shells--arm (buf token)
+  (letrec ((follow (lambda (cheap)
+                     (let ((aob-shells--cheap cheap))
+                       (unless (and (ygg-qf-kind-refresh buf token)
+                                    (aob-shells--live-p))
+                         (funcall disarm)))))
+           (render (lambda () (funcall follow t)))
+           (disarm (lambda ()
+                     (aob-shells--stop-timer buf)
+                     (when (eq (alist-get buf aob--views nil nil #'eq) render)
+                       (setq aob--views (assq-delete-all buf aob--views))))))
+    (aob-register-view buf render)
+    (aob-shells--stop-timer buf)
+    (push (cons buf (run-with-timer 1 1 (lambda ()
+                                          (when (get-buffer-window buf t)
+                                            (funcall follow nil)))))
+          aob-shells--timers)
+    disarm))
+
+(with-eval-after-load 'layer-quickfix
+  (ygg-qf-define-kind 'shells
+                      :collect #'aob-shells--rows
+                      :action #'aob-shells-visit
+                      :map 'aob-shells-map
+                      :arm #'aob-shells--arm))
 
 ;;;###autoload
 (defun aob-shells ()
-  "List every command the agents have running.
+  "Collect every command the agents have running into the quickfix.
 RET shows its trace row, o its output, and x stops it.
 From a trace, point lands on the command at point."
   (interactive)
   (let ((seq (and (derived-mode-p 'aob-trace-mode)
                   (get-text-property (line-beginning-position) 'aob-event))))
-    (with-current-buffer (get-buffer-create aob-shells--buffer)
-      (aob-shells-mode)
-      (aob-shells--entries)
-      (tabulated-list-print)
-      (when seq
+    (require 'layer-quickfix)
+    (ygg-qf-show-kind 'shells)
+    (when seq
+      (with-selected-window (selected-window)
         (goto-char (point-min))
         (while (and (not (eobp))
-                    (not (eql seq (tabulated-list-get-id))))
+                    (not (eql seq (cddr (ygg-qf-kind-at-point)))))
           (forward-line 1))
-        (when (eobp) (goto-char (point-min))))
-      (pop-to-buffer (current-buffer)))))
+        (when (eobp) (goto-char (point-min)))))))
 
 (provide 'aob-shells)
 ;;; aob-shells.el ends here

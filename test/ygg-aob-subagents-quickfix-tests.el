@@ -498,15 +498,5 @@
       (should (equal dropped '(1)))
       (should (= 1 (with-current-buffer (ygg-qf-buffer) (ygg-qf--count-rows)))))))
 
-(ert-deftest ygg-aob-qf-decision-refresh-leaves-a-kind-list-alone ()
-  (ygg-aob-subs-tests--with s
-    (ygg-aob-subs-tests--two s)
-    (ygg-aob-subagents s)
-    (set-window-buffer (selected-window) (ygg-qf-buffer))
-    (let ((before (ygg-aob-subs-tests--text)))
-      (aob-session-put s :decisions nil)
-      (ygg-aob--qf-refresh)
-      (should (equal before (ygg-aob-subs-tests--text))))))
-
 (provide 'ygg-aob-subagents-quickfix-tests)
 ;;; ygg-aob-subagents-quickfix-tests.el ends here
