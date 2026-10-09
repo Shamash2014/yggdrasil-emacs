@@ -345,17 +345,19 @@ When GLOBAL-P, every match; otherwise only the first match per line."
 
 (defun ygg-ex--search-regexp (pattern)
   "Elisp regexp for PATTERN; an empty one is vim's last search pattern."
-  (if (string-empty-p pattern)
-      (or ygg--last-search (user-error "yggdrasil: no previous regular expression"))
-    (ygg-regexp pattern)))
+  (cond
+   ((consp pattern) (cdr pattern))
+   ((string-empty-p pattern)
+    (or ygg--last-search (user-error "yggdrasil: no previous regular expression")))
+   (t (ygg-regexp pattern))))
 
 (defun ygg-ex--substitute (range pattern rep flags)
   (let ((re (ygg-ex--search-regexp pattern))
         (global-p (and (cl-find ?g flags) t))
         (case-fold-search (and (cl-find ?i flags) t)))
     (setq ygg-ex--last-substitute
-          (list (if (and (string-empty-p pattern) ygg-ex--last-substitute)
-                    (car ygg-ex--last-substitute)
+          (list (if (stringp pattern)
+                    (if (string-empty-p pattern) (cons 'elisp re) pattern)
                   pattern)
                 rep flags)
           ygg--last-search re)
@@ -399,8 +401,8 @@ When GLOBAL-P, every match; otherwise only the first match per line."
 (defun ygg-ex-repeat-substitute-all ()
   "vim g&: repeat the last :s with the same flags on every line."
   (interactive)
-  (pcase-let ((`(,re ,rep ,flags) (ygg-ex--last-substitute-or-error)))
-    (ygg-ex--substitute (cons 1 (ygg-ex--last-line)) re rep flags)))
+  (pcase-let ((`(,_ ,rep ,flags) (ygg-ex--last-substitute-or-error)))
+    (ygg-ex--substitute (cons 1 (ygg-ex--last-line)) "" rep flags)))
 
 ;;; Global
 

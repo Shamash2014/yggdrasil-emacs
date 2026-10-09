@@ -479,7 +479,7 @@
   (ygg-ex-test-with "aa\naa\n"
     (ygg-ex--execute "s/a/b/")
     (ygg-ex--execute "s//c/")
-    (should (equal ygg-ex--last-substitute '("a" "c" "")))
+    (should (equal ygg-ex--last-substitute '((elisp . "a") "c" "")))
     (ygg-ex--execute "&")
     (should (equal (buffer-string) "bc\nbc\n"))))
 
@@ -492,3 +492,12 @@
 (ert-deftest ygg-ex-test-bare-quote-address-is-user-error ()
   (ygg-ex-test-with "1\n2\n"
     (should-error (ygg-ex--parse-range "1,'") :type 'user-error)))
+
+(ert-deftest ygg-ex-test-empty-pattern-substitute-saves-search-pattern ()
+  (ygg-ex-test-with "foo\nfoo baz\n"
+    (ygg-ex--execute "1s/foo/bar/")
+    (setq ygg--last-search (ygg-regexp "baz"))
+    (ygg-ex--execute "1s//qux/")
+    (should (equal ygg-ex--last-substitute '((elisp . "baz") "qux" "")))
+    (ygg-ex--execute "2&")
+    (should (equal (buffer-string) "bar\nfoo qux\n"))))
