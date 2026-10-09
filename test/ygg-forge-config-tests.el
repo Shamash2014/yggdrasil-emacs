@@ -177,5 +177,49 @@
               (should (member "gl.project.example" offered))))
         (delete-directory elsewhere t)))))
 
+(defun ygg-forge-config-tests--git (dir &rest args)
+  (let ((default-directory dir))
+    (apply #'call-process "git" nil nil nil args)))
+
+(ert-deftest ygg-project-config-open-visits-the-main-project-folder ()
+  (let* ((conf (file-name-as-directory (make-temp-file "ygg-cfg-conf-" t)))
+         (base (file-name-as-directory (make-temp-file "ygg-cfg-base-" t)))
+         (repo (file-name-as-directory (expand-file-name "myrepo" base)))
+         (tree (file-name-as-directory (expand-file-name "mytree" base)))
+         (ygg-agent-conf-root conf)
+         (ygg-forge-config--repos (make-hash-table :test #'equal))
+         (want (file-name-as-directory (expand-file-name "myrepo" conf)))
+         seen)
+    (unwind-protect
+        (progn
+          (make-directory repo t)
+          (ygg-forge-config-tests--git repo "init" "-q")
+          (ygg-forge-config-tests--git repo "-c" "user.name=t" "-c" "user.email=t@t"
+                                       "commit" "-q" "--allow-empty" "-m" "x")
+          (ygg-forge-config-tests--git repo "worktree" "add" "-q" "-b" "wt" tree)
+          (cl-letf (((symbol-function 'dired) (lambda (d &rest _) (setq seen d))))
+            (dolist (start (list repo tree))
+              (setq seen nil)
+              (let ((default-directory start))
+                (ygg-project-config-open))
+              (should (equal want (file-name-as-directory seen)))
+              (should (file-directory-p want)))))
+      (delete-directory conf t)
+      (delete-directory base t))))
+
+(ert-deftest ygg-project-config-open-needs-a-root-and-a-project ()
+  (let ((base (file-name-as-directory (make-temp-file "ygg-cfg-base-" t)))
+        (repo nil))
+    (unwind-protect
+        (cl-letf (((symbol-function 'dired) (lambda (&rest _) (error "no dired"))))
+          (setq repo (file-name-as-directory (expand-file-name "r" base)))
+          (make-directory repo t)
+          (ygg-forge-config-tests--git repo "init" "-q")
+          (let ((ygg-agent-conf-root nil) (default-directory repo))
+            (should-error (ygg-project-config-open) :type 'user-error))
+          (let ((ygg-agent-conf-root base) (default-directory base))
+            (should-error (ygg-project-config-open) :type 'user-error)))
+      (delete-directory base t))))
+
 (provide 'ygg-forge-config-tests)
 ;;; ygg-forge-config-tests.el ends here

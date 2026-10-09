@@ -418,6 +418,7 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
   "a" #'ygg-project-add :label "remember a project"
   "T" #'ygg-project-setup :label "install the project's toolchain"
   "L" #'ygg-project-forge-login :label "log gh / glab in for this project"
+  "C" #'ygg-project-config-open :label "project config folder"
   "D" #'ygg-project-remove :label "forget a project")
 
 (yggdrasil-leader-def "p" ygg-leader-workspace-map "zones")

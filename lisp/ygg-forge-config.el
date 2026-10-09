@@ -107,5 +107,20 @@ worker that has never authenticated."
     (ygg-forge-config--run-terminal
      root argv (list (format "%s=%s" var (directory-file-name dir))))))
 
+(declare-function dired "dired")
+
+;;;###autoload
+(defun ygg-project-config-open ()
+  "Open this project's agent config folder in dired, making it if absent."
+  (interactive)
+  (let* ((root (expand-file-name
+                (or (when-let* ((pr (project-current nil))) (project-root pr))
+                    (user-error "Not in a project"))))
+         (own (or (ygg-forge-config-dir "gh" root)
+                  (user-error "No agent config root, or a remote project")))
+         (dir (file-name-directory own)))
+    (make-directory dir t)
+    (dired dir)))
+
 (provide 'ygg-forge-config)
 ;;; ygg-forge-config.el ends here
