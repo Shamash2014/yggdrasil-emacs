@@ -276,15 +276,16 @@ The walk is a source of suggestions for the import, and nothing else."
 ;;;###autoload
 (defcustom ygg-project-import-extras nil
   "Extras an import runs without being picked: skills installs and
-refreshes the config's skills for every agent, ice wires the project for
+refreshes the config's skills for every agent, gh and glab open a login
+terminal for the project unless it has one, ice wires the project for
 ICE or refreshes its wiring."
-  :type '(set (const "skills") (const "ice")) :group 'ygg)
+  :type '(set (const "skills") (const "gh") (const "glab") (const "ice")) :group 'ygg)
 
-(defconst ygg-project-import--extra-names '("skills" "ice"))
+(defconst ygg-project-import--extra-names '("skills" "gh" "glab" "ice"))
 
 (defun ygg-project-import--read-extras ()
   (let ((picked (completing-read-multiple
-                 "Extras (skills, ice; RET for none): "
+                 "Extras (skills, gh, glab, ice; RET for none): "
                  ygg-project-import--extra-names nil t
                  (and ygg-project-import-extras
                       (string-join ygg-project-import-extras ",")))))
@@ -295,7 +296,8 @@ ICE or refreshes its wiring."
   "Take ROOT in: its project skills, the config its agents answer under,
 what it is laid out as and what it can run.  EXTRAS, picked when called
 interactively, add the config's skills for every agent (skills) and ICE
-wiring (ice).  CALLBACK is called with ROOT when the last of it settles.
+wiring (ice), a gh or glab login terminal (gh, glab).  CALLBACK is
+called with ROOT when the last of it settles.
 Nothing here blocks."
   (interactive (list (completing-read "Import project: "
                                       (mapcar #'abbreviate-file-name
@@ -348,6 +350,13 @@ Nothing here blocks."
                        (lambda ()
                          (when (fboundp 'ygg-agent-skills-ensure)
                            (ygg-agent-skills-ensure))))))
+      (mapcan (lambda (kind)
+                (when (member kind extras)
+                  (list (cons (concat kind " login")
+                              (lambda ()
+                                (when (fboundp 'ygg-forge-config-import-step)
+                                  (ygg-forge-config-import-step root kind)))))))
+              '("gh" "glab"))
       (and (member "ice" extras)
            (list (cons "ice"
                        (lambda ()

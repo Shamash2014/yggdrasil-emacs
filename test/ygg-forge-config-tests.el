@@ -442,5 +442,52 @@
       (ygg-project-import "/tmp/cart/"))
     (should (assoc "config folders" steps))))
 
+(defun ygg-forge-config-tests--import-calls (extras forge-repo)
+  (let (steps calls)
+    (cl-letf (((symbol-function 'ygg-project-import--run) (lambda (_r s _cb) (setq steps s)))
+              ((symbol-function 'ygg-forge-config--run-terminal)
+               (lambda (r argv env)
+                 (push (list r argv (mapcar (lambda (e) (car (split-string e "="))) env)) calls)))
+              ((symbol-function 'ygg-git-compare--forge-repo) (lambda (&rest _) forge-repo)))
+      (ygg-project-import default-directory nil extras)
+      (dolist (step steps) (funcall (cdr step))))
+    (list (mapcar #'car steps) (nreverse calls))))
+
+(ert-deftest ygg-forge-config-import-gh-runs-login-with-config-dir-name ()
+  (require 'ygg-project-scan)
+  (ygg-forge-config-tests--with-project nil
+    (let ((calls (cadr (ygg-forge-config-tests--import-calls '("gh") nil))))
+      (should (equal 1 (length calls)))
+      (should (equal '("gh" "auth" "login") (nth 1 (car calls))))
+      (should (equal '("GH_CONFIG_DIR") (nth 2 (car calls)))))))
+
+(ert-deftest ygg-forge-config-import-glab-takes-host-from-gitlab-remote ()
+  (require 'ygg-project-scan)
+  (ygg-forge-config-tests--with-project nil
+    (let ((calls (cadr (ygg-forge-config-tests--import-calls
+                        '("glab") '(gitlab "gl.example.test" "a/b")))))
+      (should (equal '("glab" "auth" "login" "--hostname" "gl.example.test")
+                     (nth 1 (car calls))))
+      (should (equal '("GLAB_CONFIG_DIR") (nth 2 (car calls)))))
+    (let ((calls (cadr (ygg-forge-config-tests--import-calls
+                        '("glab") '(github "github.com" "a/b")))))
+      (should (equal '("glab" "auth" "login") (nth 1 (car calls)))))))
+
+(ert-deftest ygg-forge-config-import-skips-existing-login-and-unpicked ()
+  (require 'ygg-project-scan)
+  (ygg-forge-config-tests--with-project '(("gh" "hosts.yml" "git.example:\n"))
+    (should-not (cadr (ygg-forge-config-tests--import-calls '("gh") nil)))
+    (should-not (cadr (ygg-forge-config-tests--import-calls nil nil)))
+    (should-not (cadr (ygg-forge-config-tests--import-calls '("skills") nil)))))
+
+(ert-deftest ygg-forge-config-import-keeps-ice-last ()
+  (require 'ygg-project-scan)
+  (ygg-forge-config-tests--with-project nil
+    (let* ((res (ygg-forge-config-tests--import-calls '("ice" "glab" "gh") nil))
+           (names (car res)))
+      (should (equal "ice" (car (last names))))
+      (should (equal 2 (length (cadr res))))
+      (should (equal '("gh login" "glab login") (seq-intersection names '("gh login" "glab login")))))))
+
 (provide 'ygg-forge-config-tests)
 ;;; ygg-forge-config-tests.el ends here

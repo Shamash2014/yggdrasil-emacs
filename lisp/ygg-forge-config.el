@@ -68,7 +68,7 @@ worker that has never authenticated."
   (unless (require 'ghostel nil t)
     (user-error "ghostel is not installed"))
   (let* ((default-directory root)
-         (buffer (generate-new-buffer (format "*forge-login: %s*"
+         (buffer (generate-new-buffer (format "*forge-login: %s %s*" (car argv)
                                               (file-name-nondirectory
                                                (directory-file-name root)))))
          window)
@@ -119,6 +119,31 @@ worker that has never authenticated."
              (completing-read "Project: " roots nil t)
            (user-error "No projects known"))))))
 
+(defun ygg-forge-config-login (root kind &optional host)
+  "Open a terminal in ROOT that logs KIND in under ROOT's own config dir.
+HOST, when non-empty, is passed as --hostname."
+  (let* ((dir (or (ygg-forge-config-dir kind root)
+                  (user-error "No agent config root, or a remote project")))
+         (var (plist-get (cdr (assoc kind ygg-forge-config-kinds)) :var))
+         (argv (append (list kind "auth" "login")
+                       (when (and host (not (string-empty-p host)))
+                         (list "--hostname" host)))))
+    (make-directory dir t)
+    (ygg-forge-config--run-terminal
+     root argv (list (format "%s=%s" var (directory-file-name dir))))))
+
+(defun ygg-forge-config-import-step (root kind)
+  "Log KIND in for ROOT unless it already has a login; nil when it does not apply."
+  (when (and ygg-agent-conf-root
+             (not (file-remote-p root))
+             (not (ygg-forge-config-login-file kind root)))
+    (ygg-forge-config-login
+     root kind
+     (when (and (equal kind "glab") (fboundp 'ygg-git-compare--forge-repo))
+       (let* ((default-directory root)
+              (repo (ignore-errors (ygg-git-compare--forge-repo))))
+         (and (eq (car-safe repo) 'gitlab) (cadr repo)))))))
+
 ;;;###autoload
 (defun ygg-project-forge-login ()
   "Log gh or glab in for this project alone, typing the token in a terminal."
@@ -130,16 +155,8 @@ worker that has never authenticated."
                                   (when (fboundp 'ygg-git-compare--glab-hosts)
                                     (let ((default-directory root))
                                       (delete-dups (mapcar #'car (ygg-git-compare--glab-hosts)))))
-                                  nil nil)))
-         (dir (or (ygg-forge-config-dir kind root)
-                  (user-error "No agent config root, or a remote project")))
-         (var (plist-get (cdr (assoc kind ygg-forge-config-kinds)) :var))
-         (argv (append (list kind "auth" "login")
-                       (when (and host (not (string-empty-p host)))
-                         (list "--hostname" host)))))
-    (make-directory dir t)
-    (ygg-forge-config--run-terminal
-     root argv (list (format "%s=%s" var (directory-file-name dir))))))
+                                  nil nil))))
+    (ygg-forge-config-login root kind host)))
 
 (declare-function dired "dired")
 
