@@ -3,9 +3,10 @@ import { execFileSync } from "node:child_process";
 import { closeSync, existsSync, openSync, readFileSync, readSync, realpathSync } from "node:fs";
 import { basename, dirname, extname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { compare, listFiles, maskSource } from "./ice-core.mjs";
+import { compare, git, listFiles, maskSource } from "./ice-core.mjs";
+import { readRepowise } from "./ice-repowise.mjs";
 
-const HELP = `usage: ice-feature-facts [--root DIR] [--file PATH] [--keys PREFIX] [--triggers PREFIX] [--clusters]
+const HELP = `usage: ice-feature-facts [--root DIR] [--file PATH] [--keys PREFIX] [--triggers PREFIX] [--clusters] [--no-repowise]
 
 Prints JSON facts for the feature map of any git repository:
   files     per file: rank, tests, entry points (sources and shebang scripts)
@@ -59,7 +60,12 @@ Unknown ecosystems still get files, ranks, tests and clusters. Every entry is
 
 --file PATH keeps one file. --keys PREFIX prints "trigger<TAB>name<TAB>label"
 lines for key triggers starting with PREFIX. --triggers PREFIX does the same
-for any kind. --clusters prints only the clusters.`;
+for any kind. --clusters prints only the clusters.
+
+When .repowise/wiki.db exists it is read (never written) and each file gains
+repowise {commits_90d, hotspot, health, dead_code, co_change}, the top level
+gains repowise {indexed_commit, head, stale}, and co-change pairs join the
+reference edges that cluster files. --no-repowise ignores it.`;
 
 process.stdout.on("error", (error) => process.exit(error.code === "EPIPE" ? 0 : 1));
 
@@ -69,7 +75,7 @@ function fail(message) {
 }
 
 function parseArgs(argv) {
-  const opts = { root: null, file: null, keys: null, triggers: null, clusters: false };
+  const opts = { root: null, file: null, keys: null, triggers: null, clusters: false, repowise: true };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const value = () => (i + 1 < argv.length ? argv[++i] : fail(`${arg} needs a value`));
@@ -78,6 +84,7 @@ function parseArgs(argv) {
     else if (arg === "--keys") opts.keys = value();
     else if (arg === "--triggers") opts.triggers = value();
     else if (arg === "--clusters") opts.clusters = true;
+    else if (arg === "--no-repowise") opts.repowise = false;
     else if (arg === "-h" || arg === "--help") {
       process.stdout.write(`${HELP}\n`);
       process.exit(0);
@@ -96,10 +103,10 @@ function resolveRoot(root) {
   }
 }
 
-function repoMap(root) {
+function repoMap(root, repowise) {
   const script = join(dirname(fileURLToPath(import.meta.url)), "ice-repo-map");
   try {
-    return JSON.parse(execFileSync(script, ["--root", root, "--json"], { encoding: "utf8", maxBuffer: 1 << 28 })).files;
+    return JSON.parse(execFileSync(script, ["--root", root, "--json", ...(repowise ? [] : ["--no-repowise"])], { encoding: "utf8", maxBuffer: 1 << 28 })).files;
   } catch (error) {
     process.stderr.write(`ice-feature-facts: ranks unavailable: ${String(error.stderr || error.message).trim().split("\n")[0]}\n`);
     return [];
@@ -1285,6 +1292,28 @@ function referenceEdges(repo, rank, sources) {
   return edges;
 }
 
+const CO_CHANGE_MIN = 0.2;
+
+function coChangeEdges(edges, data, inside) {
+  for (const [file, info] of data.files) {
+    if (!inside.has(file)) continue;
+    for (const { path, weight } of info.co_change) {
+      if (weight < CO_CHANGE_MIN || !inside.has(path) || path === file) continue;
+      const key = compare(file, path) < 0 ? `${file}\0${path}` : `${path}\0${file}`;
+      edges.set(key, (edges.get(key) ?? 0) + weight);
+    }
+  }
+}
+
+function repowiseFacts(root, data) {
+  let head = null;
+  try {
+    head = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
+  } catch {}
+  const known = data.indexed_commit && head;
+  return { indexed_commit: data.indexed_commit, head, stale: known ? !(head.startsWith(data.indexed_commit) || data.indexed_commit.startsWith(head)) : null };
+}
+
 function segments(path) {
   return basename(path).replace(/\.[^.]+$/, "").split(/[-_.]/).filter(Boolean);
 }
@@ -1509,7 +1538,8 @@ function main() {
   const opts = parseArgs(process.argv.slice(2));
   const root = resolveRoot(opts.root);
   const repo = makeRepo(root);
-  const mapFiles = repoMap(root);
+  const data = opts.repowise ? readRepowise(root) : null;
+  const mapFiles = repoMap(root, opts.repowise);
   const rank = new Map(mapFiles.map((f) => [f.path, f]));
   const tests = repo.files.filter(isTest);
   const sources = repo.files.filter((file) => !isTest(file) && (SOURCE_EXT.has(extname(file)) || rank.has(file) || isScript(root, file)));
@@ -1533,9 +1563,16 @@ function main() {
     perFile[file] = { rank: rank.has(file) ? Number(rank.get(file).rank.toFixed(6)) : 0, defs: rank.get(file)?.defs.length ?? 0, tests: testMap.get(file) ?? [], required_by_tests: (requiredMap.get(file) ?? []).filter((t) => !(testMap.get(file) ?? []).includes(t)), entries: [] };
   }
   for (const e of entries) if (perFile[e.file]) perFile[e.file].entries.push(e);
+  if (data) {
+    for (const file of sources) {
+      const info = data.files.get(file);
+      if (info) perFile[file].repowise = { commits_90d: info.commits_90d, hotspot: info.hotspot, health: info.health, dead_code: info.dead_code, co_change: info.co_change };
+    }
+  }
 
   const clusterable = sources.filter((file) => SOURCE_EXT.has(extname(file)) && !/(^|\/)(node_modules|vendor|dist|build)\//.test(file));
   const edges = referenceEdges(repo, rank, clusterable);
+  if (data) coChangeEdges(edges, data, new Set(clusterable));
   const clusters = clusterRepo(repo, clusterable, edges, perFile)
     .map(({ name, files }) => {
       const members = files.sort((a, b) => (rank.get(b)?.rank ?? 0) - (rank.get(a)?.rank ?? 0) || compare(a, b));
@@ -1574,7 +1611,7 @@ function main() {
     return;
   }
   const files = opts.file ? Object.fromEntries(Object.entries(perFile).filter(([file]) => file === opts.file)) : perFile;
-  process.stdout.write(`${JSON.stringify({ root, ecosystems, notation, skipped: repo.skipped, test_files: tests.length, tests: tests.filter((file) => SOURCE_EXT.has(extname(file)) || isScript(root, file)).sort(compare), files, clusters, triggers }, null, 2)}\n`);
+  process.stdout.write(`${JSON.stringify({ root, ecosystems, notation, skipped: repo.skipped, test_files: tests.length, tests: tests.filter((file) => SOURCE_EXT.has(extname(file)) || isScript(root, file)).sort(compare), files, clusters, triggers, ...(data ? { repowise: repowiseFacts(root, data) } : {}) }, null, 2)}\n`);
 }
 
 main();

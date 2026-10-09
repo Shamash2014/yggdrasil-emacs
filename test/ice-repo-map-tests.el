@@ -836,4 +836,69 @@
             (should (equal "" (ice-repo-map-tests--slurp err))))
         (delete-file err)))))
 
+(defconst ice-repo-map-tests--wiki-script
+  "const { DatabaseSync } = require('node:sqlite');
+const [path, tables, rows] = [process.argv[1], JSON.parse(process.argv[2]), JSON.parse(process.argv[3])];
+const db = new DatabaseSync(path);
+const repos = JSON.parse(process.argv[4] || '[]');
+if (repos.length) { db.exec('CREATE TABLE repositories (id TEXT, local_path TEXT)'); for (const [id, p] of repos) db.prepare('INSERT INTO repositories VALUES (?,?)').run(id, p); }
+if (tables.includes('git_metadata')) db.exec('CREATE TABLE git_metadata (file_path TEXT, commit_count_90d INT, commit_count_total INT)');
+if (tables.includes('health_file_metrics')) db.exec('CREATE TABLE health_file_metrics (file_path TEXT, score REAL)');
+if (tables.includes('dead_code_findings')) db.exec('CREATE TABLE dead_code_findings (file_path TEXT, kind TEXT)');
+if (tables.includes('git_metadata')) for (const [f, n] of rows) db.prepare('INSERT INTO git_metadata VALUES (?,?,?)').run(f, n, n);
+db.close();")
+
+(defun ice-repo-map-tests--write-wiki (root rows &optional tables repositories)
+  (let ((dir (expand-file-name ".repowise" root)))
+    (make-directory dir t)
+    (should (= 0 (call-process "timeout" nil nil nil "60" "node" "-e" ice-repo-map-tests--wiki-script
+                               (expand-file-name "wiki.db" dir)
+                               (json-serialize (vconcat (or tables '("git_metadata" "health_file_metrics" "dead_code_findings"))))
+                               (json-serialize (vconcat (mapcar #'vconcat rows)))
+                               (json-serialize (vconcat (mapcar #'vconcat repositories))))))))
+
+(defun ice-repo-map-tests--rank-of (root path &rest args)
+  (alist-get 'rank (ice-repo-map-tests--file (apply #'ice-repo-map-tests--json root args) path)))
+
+(ert-deftest ice-repo-map-repowise-lifts-recently-changed-file ()
+  (ice-repo-map-tests--with-repo root nil
+    (let ((plain (ice-repo-map-tests--rank-of root "lisp/leaf.el")))
+      (ice-repo-map-tests--write-wiki root '(("lisp/leaf.el" 90) ("lisp/core.el" 1)))
+      (should (> (ice-repo-map-tests--rank-of root "lisp/leaf.el") plain))
+      (should (= plain (ice-repo-map-tests--rank-of root "lisp/leaf.el" "--no-repowise"))))))
+
+(ert-deftest ice-repo-map-repowise-leaves-focused-ranking-alone ()
+  (ice-repo-map-tests--with-repo root nil
+    (let ((plain (ice-repo-map-tests--run root "--json" "--focus" "lisp/alpha.el")))
+      (ice-repo-map-tests--write-wiki root '(("lisp/leaf.el" 90) ("lisp/core.el" 1)))
+      (should (equal plain (ice-repo-map-tests--run root "--json" "--focus" "lisp/alpha.el"))))))
+
+(ert-deftest ice-repo-map-repowise-lifts-across-ecosystems ()
+  (ice-repo-map-tests--with-repo root nil
+    (let ((plain (ice-repo-map-tests--rank-of root "tools/thing.py")))
+      (ice-repo-map-tests--write-wiki root '(("tools/thing.py" 60)))
+      (should (> (ice-repo-map-tests--rank-of root "tools/thing.py") plain)))))
+
+(ert-deftest ice-repo-map-repowise-ignores-db-from-another-repo ()
+  (ice-repo-map-tests--with-repo root nil
+    (let ((plain (ice-repo-map-tests--run root "--json")))
+      (ice-repo-map-tests--write-wiki root '(("lisp/leaf.el" 90)) nil '(("r1" "/nonexistent/other/repo")))
+      (should (equal plain (ice-repo-map-tests--run root "--json")))
+      (delete-file (expand-file-name ".repowise/wiki.db" root))
+      (ice-repo-map-tests--write-wiki root '(("lisp/leaf.el" 90)) nil `(("r1" ,(directory-file-name root))))
+      (should-not (equal plain (ice-repo-map-tests--run root "--json"))))))
+
+(ert-deftest ice-repo-map-repowise-without-usable-db-matches-no-db ()
+  (ice-repo-map-tests--with-repo root nil
+    (let ((plain (ice-repo-map-tests--run root "--json"))
+          (text (ice-repo-map-tests--run root)))
+      (ice-repo-map-tests--write-wiki root '(("lisp/leaf.el" 90)) '("health_file_metrics"))
+      (should (equal plain (ice-repo-map-tests--run root "--json")))
+      (should (equal text (ice-repo-map-tests--run root)))
+      (delete-file (expand-file-name ".repowise/wiki.db" root))
+      (with-temp-file (expand-file-name ".repowise/wiki.db" root)
+        (insert "this is not a sqlite database, just garbage bytes\n"))
+      (should (equal plain (ice-repo-map-tests--run root "--json")))
+      (should (equal text (ice-repo-map-tests--run root))))))
+
 ;;; ice-repo-map-tests.el ends here

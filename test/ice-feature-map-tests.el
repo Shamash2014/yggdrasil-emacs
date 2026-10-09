@@ -904,5 +904,160 @@
             (should-not (string-match-p "page.test" out))))
       (delete-directory root t))))
 
+(defconst ice-feature-map-tests--wiki-script
+  "const { DatabaseSync } = require('node:sqlite');
+const [path, tables, rows] = [process.argv[1], JSON.parse(process.argv[2]), JSON.parse(process.argv[3])];
+const db = new DatabaseSync(path);
+const repos = JSON.parse(process.argv[4] || '[]');
+if (repos.length) { db.exec('CREATE TABLE repositories (id TEXT, local_path TEXT, head_commit TEXT)'); for (const [id, p, h] of repos) db.prepare('INSERT INTO repositories VALUES (?,?,?)').run(id, p, h); }
+if (tables.includes('git_metadata')) db.exec('CREATE TABLE git_metadata (file_path TEXT, commit_count_90d INT, commit_count_total INT, is_hotspot INT, co_change_partners_json TEXT)');
+if (tables.includes('health_file_metrics')) db.exec('CREATE TABLE health_file_metrics (file_path TEXT, score REAL)');
+if (tables.includes('dead_code_findings')) db.exec('CREATE TABLE dead_code_findings (file_path TEXT, kind TEXT)');
+if (tables.includes('git_metadata')) for (const [f, n, hot, co] of rows) db.prepare('INSERT INTO git_metadata VALUES (?,?,?,?,?)').run(f, n, n, hot, co);
+if (tables.includes('health_file_metrics')) db.prepare('INSERT INTO health_file_metrics VALUES (?,?)').run('alpha/one.py', 7.5);
+if (tables.includes('dead_code_findings')) db.prepare('INSERT INTO dead_code_findings VALUES (?,?)').run('alpha/one.py', 'unused_function');
+db.close();")
+
+(defconst ice-feature-map-tests--wiki-rows
+  `(("alpha/one.py" 40 1 ,(json-serialize [(:file_path "beta/two.py" :frequency 0.8)]))
+    ("beta/two.py" 1 0 :null)))
+
+(defconst ice-feature-map-tests--wiki-fixture
+  '(("alpha/one.py" . "def one():\n    return 1\n")
+    ("beta/two.py" . "def two():\n    return 2\n")
+    ("gamma/three.el" . ";;; three.el --- t -*- lexical-binding: t; -*-\n(defun three-x () 1)\n")))
+
+(defun ice-feature-map-tests--wiki-repo (&optional tables state repositories no-commit)
+  (let ((root (file-name-as-directory (file-truename (make-temp-file "ice-feature-wiki" t)))))
+    (pcase-dolist (`(,path . ,text) ice-feature-map-tests--wiki-fixture)
+      (let ((file (expand-file-name path root)))
+        (make-directory (file-name-directory file) t)
+        (with-temp-file file (insert text))))
+    (let ((default-directory root))
+      (call-process "git" nil nil nil "init" "-q")
+      (unless no-commit
+        (call-process "git" nil nil nil "add" "-A")
+        (call-process "git" nil nil nil "-c" "user.name=t" "-c" "user.email=t@t" "-c" "commit.gpgsign=false" "commit" "-q" "-m" "init")))
+    (when tables
+      (make-directory (expand-file-name ".repowise" root) t)
+      (should (= 0 (call-process "timeout" nil nil nil "60" "node" "-e" ice-feature-map-tests--wiki-script
+                                 (expand-file-name ".repowise/wiki.db" root)
+                                 (json-serialize (vconcat tables))
+                                 (json-serialize (vconcat (mapcar #'vconcat ice-feature-map-tests--wiki-rows)) :null-object :null)
+                                 (json-serialize (vconcat (mapcar (lambda (row) (vconcat (mapcar (lambda (v) (if (eq v 'root) (directory-file-name root) v)) row))) repositories))))))
+      (when state
+        (with-temp-file (expand-file-name ".repowise/state.json" root) (insert state))))
+    root))
+
+(defun ice-feature-map-tests--masked (root &rest args)
+  (let ((text (replace-regexp-in-string (regexp-quote root) "ROOT/" (apply #'ice-feature-map-tests--run "--root" root args))))
+    (replace-regexp-in-string (regexp-quote (file-name-nondirectory (directory-file-name root))) "NAME" text)))
+
+(defun ice-feature-map-tests--cluster-of (facts file)
+  (cl-find-if (lambda (c) (member file (gethash "files" c))) (gethash "clusters" facts)))
+
+(defconst ice-feature-map-tests--wiki-tables '("git_metadata" "health_file_metrics" "dead_code_findings"))
+
+(ert-deftest ice-feature-map-repowise-fields-and-co-change-cluster ()
+  (let* ((root (ice-feature-map-tests--wiki-repo ice-feature-map-tests--wiki-tables "{\"last_sync_commit\":\"abc123\"}"))
+         (plain-root (ice-feature-map-tests--wiki-repo)))
+    (unwind-protect
+        (let ((facts (ice-feature-map-tests--facts-for root))
+              (plain (ice-feature-map-tests--facts-for plain-root)))
+          (should-not (equal (ice-feature-map-tests--cluster-of plain "alpha/one.py")
+                             (ice-feature-map-tests--cluster-of plain "beta/two.py")))
+          (should (equal (gethash "files" (ice-feature-map-tests--cluster-of facts "alpha/one.py"))
+                         (gethash "files" (ice-feature-map-tests--cluster-of facts "beta/two.py"))))
+          (should-not (member "gamma/three.el" (gethash "files" (ice-feature-map-tests--cluster-of facts "alpha/one.py"))))
+          (let ((info (gethash "repowise" (gethash "alpha/one.py" (gethash "files" facts)))))
+            (should (= 40 (gethash "commits_90d" info)))
+            (should (eq t (gethash "hotspot" info)))
+            (should (= 7.5 (gethash "health" info)))
+            (should (equal '("unused_function") (gethash "dead_code" info)))
+            (should (equal "beta/two.py" (gethash "path" (car (gethash "co_change" info))))))
+          (let ((top (gethash "repowise" facts)))
+            (should (equal "abc123" (gethash "indexed_commit" top)))
+            (should (eq t (gethash "stale" top))))
+          (let ((head (string-trim (let ((default-directory root)) (shell-command-to-string "git rev-parse HEAD")))))
+            (with-temp-file (expand-file-name ".repowise/state.json" root)
+              (insert (format "{\"last_sync_commit\":\"%s\"}" head)))
+            (let ((top (gethash "repowise" (ice-feature-map-tests--facts-for root))))
+              (should (equal head (gethash "head" top)))
+              (should (eq :false (gethash "stale" top)))))
+          (should-not (gethash "repowise" plain))
+          (should-not (gethash "repowise" (gethash "alpha/one.py" (gethash "files" plain))))
+          (should (equal (ice-feature-map-tests--masked root "--no-repowise")
+                         (ice-feature-map-tests--masked plain-root))))
+      (delete-directory root t)
+      (delete-directory plain-root t))))
+
+(defun ice-feature-map-tests--head (root)
+  (string-trim (let ((default-directory root)) (shell-command-to-string "git rev-parse HEAD"))))
+
+(ert-deftest ice-feature-map-repowise-unknown-indexed-commit-is-not-stale ()
+  (let ((root (ice-feature-map-tests--wiki-repo ice-feature-map-tests--wiki-tables)))
+    (unwind-protect
+        (let ((top (gethash "repowise" (ice-feature-map-tests--facts-for root))))
+          (should (eq :null (gethash "indexed_commit" top)))
+          (should (eq :null (gethash "stale" top))))
+      (delete-directory root t))))
+
+(ert-deftest ice-feature-map-repowise-abbreviated-sha-matches-head ()
+  (let ((root (ice-feature-map-tests--wiki-repo ice-feature-map-tests--wiki-tables)))
+    (unwind-protect
+        (let ((head (ice-feature-map-tests--head root)))
+          (with-temp-file (expand-file-name ".repowise/state.json" root)
+            (insert (format "{\"last_sync_commit\":\"%s\"}" (substring head 0 7))))
+          (should (eq :false (gethash "stale" (gethash "repowise" (ice-feature-map-tests--facts-for root))))))
+      (delete-directory root t))))
+
+(ert-deftest ice-feature-map-repowise-falls-back-to-repositories-head-commit ()
+  (let ((root (ice-feature-map-tests--wiki-repo ice-feature-map-tests--wiki-tables nil '(("r1" root "pending")))))
+    (unwind-protect
+        (let ((top (gethash "repowise" (ice-feature-map-tests--facts-for root))))
+          (should (equal "pending" (gethash "indexed_commit" top)))
+          (should (eq t (gethash "stale" top))))
+      (delete-directory root t))))
+
+(ert-deftest ice-feature-map-repowise-ignores-db-from-another-repo ()
+  (let ((foreign (ice-feature-map-tests--wiki-repo ice-feature-map-tests--wiki-tables nil '(("r1" "/nonexistent/other/repo" "abc"))))
+        (empty-path (ice-feature-map-tests--wiki-repo ice-feature-map-tests--wiki-tables nil '(("r1" "" "")))))
+    (unwind-protect
+        (progn
+          (should-not (gethash "repowise" (ice-feature-map-tests--facts-for foreign)))
+          (should-not (gethash "repowise" (gethash "alpha/one.py" (gethash "files" (ice-feature-map-tests--facts-for foreign)))))
+          (should (gethash "repowise" (ice-feature-map-tests--facts-for empty-path))))
+      (delete-directory foreign t)
+      (delete-directory empty-path t))))
+
+(ert-deftest ice-feature-map-repowise-no-commit-repo-keeps-stderr-empty ()
+  (let ((root (ice-feature-map-tests--wiki-repo ice-feature-map-tests--wiki-tables nil nil t))
+        (err (make-temp-file "ice-feature-err")))
+    (unwind-protect
+        (progn
+          (should (eq 0 (call-process ice-feature-map-tests--facts nil nil nil "--root" root)))
+          (call-process "bash" nil nil nil "-c" (format "%s --root %s >/dev/null 2>%s"
+                                                         (shell-quote-argument ice-feature-map-tests--facts)
+                                                         (shell-quote-argument root) (shell-quote-argument err)))
+          (should (zerop (file-attribute-size (file-attributes err)))))
+      (delete-file err)
+      (delete-directory root t))))
+
+(ert-deftest ice-feature-map-repowise-without-usable-db-matches-no-db ()
+  (let ((plain-root (ice-feature-map-tests--wiki-repo))
+        (partial (ice-feature-map-tests--wiki-repo '("health_file_metrics")))
+        (garbage (ice-feature-map-tests--wiki-repo)))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name ".repowise" garbage) t)
+          (with-temp-file (expand-file-name ".repowise/wiki.db" garbage)
+            (insert "not a sqlite database, only garbage\n"))
+          (let ((want (ice-feature-map-tests--masked plain-root)))
+            (dolist (root (list partial garbage))
+              (should (equal want (ice-feature-map-tests--masked root))))))
+      (delete-directory plain-root t)
+      (delete-directory partial t)
+      (delete-directory garbage t))))
+
 (provide 'ice-feature-map-tests)
 ;;; ice-feature-map-tests.el ends here
