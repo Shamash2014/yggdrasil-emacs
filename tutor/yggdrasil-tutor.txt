@@ -118,7 +118,7 @@
      C-h C-j C-k C-l   move between windows (works everywhere, even terminals)
      SPC w             window menu (splits, resize, close)
      SPC o t           bottom terminal — in it, only  jk  escapes to normal
-     g t  /  g T       next / previous tab
+     g t  /  g T       next / previous space
      SPC z             tree workspaces (saved with the session, buffers revive)
 
    ** Try  SPC o t  to pop a terminal, run a command, then  jk  and  SPC o t

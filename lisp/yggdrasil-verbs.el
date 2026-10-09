@@ -815,6 +815,14 @@ COUNT inserts the typed text that many times."
    (ygg--collect-insert-points (lambda (beg _end _dir) (ygg--line-first-non-blank beg)))
    count))
 
+(defun ygg-insert-column-0 (&optional count)
+  "Enter insert at column 0 of each selection's line (vim gI).
+COUNT inserts the typed text that many times."
+  (interactive "p")
+  (ygg-enter-insert-at
+   (ygg--collect-insert-points (lambda (beg _end _dir) (save-excursion (goto-char beg) (line-beginning-position))))
+   count))
+
 (defun ygg-insert-eol (&optional count)
   "Enter insert at the end of each selection's line.
 COUNT inserts the typed text that many times."
@@ -1393,6 +1401,7 @@ is preserved."
   (ygg-rotate-text (- (or count 1))))
 
 (yggdrasil-define-keys 'ygg-goto-map
+  "I" #'ygg-insert-column-0 :label "insert at column 0"
   "C-a" #'ygg-number-increment-sequential :label "sequential increment"
   "C-x" #'ygg-number-decrement-sequential :label "sequential decrement"
   "q" #'ygg-reflow :label "reflow"

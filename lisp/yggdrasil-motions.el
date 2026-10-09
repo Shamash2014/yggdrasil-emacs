@@ -479,6 +479,25 @@ backtick) the exact stored position. Special marks: '' (last jump),
   (ygg--jump-push)
   (call-interactively #'xref-find-definitions))
 
+(declare-function ffap-file-exists-string "ffap" (file))
+
+(defun ygg--refuse-remote (name)
+  (when (and name (file-remote-p name) (not (file-remote-p default-directory)))
+    (user-error "Remote path refused: %s" name)))
+
+(defun ygg--project-base ()
+  (when-let* ((pr (project-current nil)))
+    (project-root pr)))
+
+(defun ygg--existing-file (name)
+  (ygg--refuse-remote name)
+  (or (let ((f (expand-file-name name)))
+        (and (file-exists-p f) f))
+      (when-let* ((root (ygg--project-base)))
+        (let ((f (expand-file-name name root)))
+          (and (file-exists-p f) f)))
+      (ffap-file-exists-string name)))
+
 (defun ygg-goto-file ()
   "Open the file path in the selection, or under point (vim/helix gf)."
   (interactive)
@@ -486,16 +505,63 @@ backtick) the exact stored position. Special marks: '' (last jump),
   (let* ((sel (pcase-let ((`(,beg ,end ,_) (ygg-selection-effective-bounds)))
                 (when (> (- end beg) 1)
                   (string-trim (buffer-substring-no-properties beg end)))))
-         (name (or (and sel (not (string-empty-p sel)) sel)
-                   (ffap-guesser)
-                   (thing-at-point 'filename t)))
-         (target (and name (ffap-file-at-point))))
-    (cond
-     ((and target (file-exists-p target)) (ygg--jump-push) (find-file target))
-     ((and name (file-exists-p (expand-file-name name)))
-      (ygg--jump-push) (find-file (expand-file-name name)))
-     (name (ygg--jump-push) (ffap name))
-     (t (user-error "No file path at point")))))
+         (raw (or (and sel (not (string-empty-p sel)) sel)
+                  (thing-at-point 'filename t))))
+    (ygg--refuse-remote raw)
+    (let* ((name (or (and sel (not (string-empty-p sel)) sel)
+                     (ffap-guesser)
+                     raw))
+           (_ (ygg--refuse-remote name))
+           (target (and name (ffap-file-at-point))))
+      (cond
+       ((and target (file-exists-p target)) (ygg--jump-push) (find-file target))
+       ((and name (ygg--existing-file name))
+        (ygg--jump-push) (find-file (ygg--existing-file name)))
+       (name (ygg--jump-push) (ffap name))
+       (t (user-error "No file path at point"))))))
+
+(defconst ygg--file-line-re
+  (rx bos (group (+? nonl))
+      (or (seq ":" (group (+ digit)) (? ":" (group (+ digit))))
+          (seq "(" (group (+ digit)) (? "," (group (+ digit))) ")"))
+      (* (any ",:.;")) eos))
+
+(defun ygg--file-line-parse (text)
+  "Return (FILE LINE COL) from TEXT like foo.el:12:3, foo.el(12), or foo.el."
+  (if (string-match ygg--file-line-re text)
+      (list (match-string 1 text)
+            (string-to-number (or (match-string 2 text) (match-string 4 text)))
+            (let ((c (or (match-string 3 text) (match-string 5 text))))
+              (and c (string-to-number c))))
+    (list (string-trim-right text "[,:.;]+") nil nil)))
+
+(defun ygg--file-line-text ()
+  (or (pcase-let ((`(,beg ,end ,_) (ygg-selection-effective-bounds)))
+        (when (> (- end beg) 1)
+          (string-trim (buffer-substring-no-properties beg end))))
+      (save-excursion
+        (let* ((chars "^ \t\n\"'<>")
+               (beg (progn (skip-chars-backward chars) (point)))
+               (end (progn (skip-chars-forward chars) (point)))
+               (text (buffer-substring-no-properties beg end)))
+          (if (and (string-match-p "\\`[^:(]+\\'" text)
+                   (looking-at "[\"']?,?[ \t]+\\(?:line[ \t]+\\)?\\([0-9]+\\)"))
+              (concat text ":" (match-string 1))
+            text)))))
+
+(defun ygg-goto-file-line ()
+  "Open the file under point at the line after it (vim gF)."
+  (interactive)
+  (require 'ffap)
+  (pcase-let* ((`(,name ,line ,col) (ygg--file-line-parse (ygg--file-line-text)))
+               (file (and (not (string-empty-p name)) (ygg--existing-file name))))
+    (unless file (user-error "No file path at point"))
+    (ygg--jump-push)
+    (find-file file)
+    (when line
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (when col (move-to-column (max 0 (1- col)))))))
 
 (defun ygg-goto-next-buffer () (interactive) (next-buffer))
 (defun ygg-goto-prev-buffer () (interactive) (previous-buffer))
@@ -860,6 +926,39 @@ in a normal buffer just widen."
       (goto-char s)
       (funcall fn))))
 
+(defun ygg-fold--lisp-openers (from to first)
+  "Parens opened and still open at the end of their line between FROM and TO.
+One incremental parse, not a syntax check per candidate; FIRST stops at one."
+  (save-excursion
+    (let ((st (syntax-ppss from)) (pos from) acc)
+      (while (and (< pos to) (not (and first acc)))
+        (let ((start pos)
+              (next (min to (save-excursion (goto-char pos) (line-beginning-position 2)))))
+          (setq st (parse-partial-sexp start next nil nil st) pos next)
+          (dolist (p (nth 9 st))
+            (when (and (>= p start)
+                       (save-excursion (goto-char p) (looking-at hs-block-start-regexp)))
+              (push p acc)))
+          (when (and (nth 3 st) (>= (nth 8 st) start)
+                     (save-excursion (goto-char (nth 8 st)) (looking-at hs-block-start-regexp)))
+            (push (nth 8 st) acc))))
+      (nreverse acc))))
+
+(defun ygg-fold--lisp-next-start (dir limit)
+  (if (> dir 0)
+      (let ((from limit) s)
+        (while (and (not s) (< from (point-max)))
+          (let ((cands (ygg-fold--lisp-openers from (point-max) t)))
+            (if (null cands)
+                (setq from (point-max))
+              (if (ygg-fold--hs-valid-start-p (car cands))
+                  (setq s (car cands))
+                (setq from (save-excursion (goto-char (car cands)) (line-beginning-position 2)))))))
+        s)
+    (let* ((open (car (last (nth 9 (syntax-ppss limit)))))
+           (cands (nreverse (ygg-fold--lisp-openers (or open (point-min)) limit nil))))
+      (seq-find #'ygg-fold--hs-valid-start-p cands))))
+
 (defun ygg-fold--hs-next-start (dir)
   "Line start of the nearest hideable block opener in direction DIR."
   (save-excursion
@@ -871,6 +970,7 @@ in a normal buffer just widen."
                                             (if (> dir 0)
                                                 (lambda (p) (>= p limit))
                                               (lambda (p) (< p limit)))))))
+       ((derived-mode-p 'lisp-data-mode) (setq s (ygg-fold--lisp-next-start dir limit)))
        ((> dir 0) (setq s (car (ygg-fold--hs-starts limit (point-max) t))))
        (t (goto-char limit)
           (while (and (not s) (re-search-backward hs-block-start-regexp nil t))
@@ -1475,9 +1575,12 @@ in a normal buffer just widen."
   ";" #'ygg-change-list-older :label "older change"
   "," #'ygg-change-list-newer :label "newer change"
   "w" #'ygg-easymotion-word-forward :label "hint word →"
-  "b" #'ygg-easymotion-word-backward :label "hint word ←"
+  "o" #'ygg-easymotion-word-backward :label "hint word ←"
   "W" #'ygg-easymotion-WORD-forward :label "hint WORD →"
-  "B" #'ygg-easymotion-WORD-backward :label "hint WORD ←"
+  "O" #'ygg-easymotion-WORD-backward :label "hint WORD ←"
+  "H" #'ygg-H :label "window top"
+  "b" #'ygg-L :label "window bottom"
+  "F" #'ygg-goto-file-line :label "file:line under cursor"
   "j" #'ygg-easymotion-line-down :label "hint line ↓"
   "k" #'ygg-easymotion-line-up :label "hint line ↑")
 

@@ -326,6 +326,11 @@ mode change drops them, so a mode hook is the place to call this."
   (goto-char ygg--last-insert)
   (ygg-insert-state))
 
+(defun ygg-insert-backspace ()
+  "Delete the char before point exactly as DEL does here (helix C-h)."
+  (interactive)
+  (call-interactively (or (key-binding (kbd "DEL")) #'delete-backward-char)))
+
 (defun ygg-insert-one-command ()
   "Run one normal-state command, then come back to insert (vim C-o)."
   (interactive)
@@ -469,6 +474,7 @@ Example: (yggdrasil-key \\='normal \"x\" #\\='my-command)")
   "j" #'ygg--jk-escape
   "C-o" #'ygg-insert-one-command :label "one normal cmd"
   "C-r" #'ygg-insert-register :label "insert register"
+  "C-h" #'ygg-insert-backspace :label "delete char back"
   "C-w" #'ygg-insert-kill-word :label "delete word back"
   "C-u" #'ygg-insert-kill-to-bol :label "delete to line start"
   "<home>" #'beginning-of-line
@@ -476,7 +482,7 @@ Example: (yggdrasil-key \\='normal \"x\" #\\='my-command)")
 
 ;; g i stays LSP find-implementation (nvim habit, layer-lsp)
 (yggdrasil-define-keys 'ygg-goto-map
-  "I" #'ygg-goto-last-insert :label "last insert")
+  "^" #'ygg-goto-last-insert :label "last insert")
 
 (yggdrasil-define-keys 'normal
   "v" #'ygg-toggle-visual :label "visual"

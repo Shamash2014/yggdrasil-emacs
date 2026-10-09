@@ -604,9 +604,6 @@
         (should (string-prefix-p "def test_it" (treesit-node-text fn t))))
       (should (equal (treesit-node-type (ygg-match--combobulate-node 'type)) "class_definition")))))
 
-(provide 'ygg-match-tests)
-;;; ygg-match-tests.el ends here
-
 (ert-deftest ygg-match--surround-pair-tag-key-is-x-and-angle ()
   (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "div")))
     (should (equal (ygg-match--surround-pair ?<) (cons "<div>" "</div>"))))
@@ -615,3 +612,6 @@
     (insert "List<Int> x")
     (goto-char 7)
     (should (equal (ygg-match--surround-bounds ?<) '(5 6 9 10)))))
+
+(provide 'ygg-match-tests)
+;;; ygg-match-tests.el ends here
