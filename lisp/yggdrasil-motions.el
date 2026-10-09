@@ -356,21 +356,24 @@ CHAR -> marker for non-file buffers (traces, scratch, …).")
       (setq ygg--mark-last-yank-beg (copy-marker beg)
             ygg--mark-last-yank-end (copy-marker end)))))
 
+(defun ygg-mark-set-char (ch)
+  "Set mark CH at point."
+  (cond
+   ((and (>= ch ?a) (<= ch ?z))
+    (unless ygg--marks-local (setq ygg--marks-local (make-hash-table :test 'eql)))
+    (puthash ch (point-marker) ygg--marks-local))
+   ((and (>= ch ?A) (<= ch ?Z))
+    ;; file buffers store (FILE . POS) so the mark survives kill/reopen;
+    ;; non-file buffers (traces, scratch) store a live marker instead
+    (let ((val (if buffer-file-name (cons buffer-file-name (point)) (point-marker)))
+          (cell (assq ch ygg--marks-global)))
+      (if cell (setcdr cell val)
+        (push (cons ch val) ygg--marks-global))))
+   (t (user-error "Invalid mark: %c" ch))))
+
 (defun ygg-mark-set ()
   (interactive)
-  (let ((ch (read-char)))
-    (cond
-     ((and (>= ch ?a) (<= ch ?z))
-      (unless ygg--marks-local (setq ygg--marks-local (make-hash-table :test 'eql)))
-      (puthash ch (point-marker) ygg--marks-local))
-     ((and (>= ch ?A) (<= ch ?Z))
-      ;; file buffers store (FILE . POS) so the mark survives kill/reopen;
-      ;; non-file buffers (traces, scratch) store a live marker instead
-      (let ((val (if buffer-file-name (cons buffer-file-name (point)) (point-marker)))
-            (cell (assq ch ygg--marks-global)))
-        (if cell (setcdr cell val)
-          (push (cons ch val) ygg--marks-global))))
-     (t (user-error "Invalid mark: %c" ch)))))
+  (ygg-mark-set-char (read-char)))
 
 (defvar ygg--marks-global-saved nil
   "The file-backed global marks, as savehist stores them.")
@@ -390,61 +393,62 @@ CHAR -> marker for non-file buffers (traces, scratch, …).")
   (add-hook 'savehist-save-hook #'ygg--marks-global-stash)
   (add-hook 'savehist-mode-hook #'ygg--marks-global-restore))
 
+(defun ygg--mark-file-target (file)
+  "Open buffer visiting FILE, else FILE; never contacts a remote host."
+  (or (if (find-file-name-handler file 'file-exists-p)
+          (seq-find (lambda (b) (equal (buffer-local-value 'buffer-file-name b) file))
+                    (buffer-list))
+        (find-buffer-visiting file))
+      file))
+
+(defun ygg-mark-position (ch)
+  "Where mark CH points, as (BUFFER-OR-FILE . POS); `user-error' when unset.
+Pure: no jump, window or selection work.  BUFFER-OR-FILE is a live buffer, or
+a file name for a global mark whose file is not open."
+  (cl-flet ((marker-pos (m)
+              (if (and (markerp m) (marker-buffer m))
+                  (cons (marker-buffer m) (marker-position m))
+                (user-error "Mark %c not set" ch))))
+    (cond
+     ((memq ch '(?' ?`))
+      (marker-pos ygg--mark-last-jump-pos))
+     ((eq ch ?.)
+      (unless ygg--change-list (user-error "Change list empty"))
+      (cons (current-buffer) (car ygg--change-list)))
+     ((eq ch ?^) (marker-pos ygg--last-insert))
+     ((eq ch ?\[) (marker-pos ygg--mark-last-yank-beg))
+     ((eq ch ?\]) (marker-pos ygg--mark-last-yank-end))
+     ((and (>= ch ?a) (<= ch ?z))
+      (marker-pos (and ygg--marks-local (gethash ch ygg--marks-local))))
+     ((and (>= ch ?A) (<= ch ?Z))
+      (let ((entry (cdr (assq ch ygg--marks-global))))
+        (cond
+         ((null entry) (user-error "Mark %c not set" ch))
+         ((markerp entry)
+          (if (marker-buffer entry) (marker-pos entry)
+            (user-error "Mark %c: buffer is gone" ch)))
+         (t (cons (ygg--mark-file-target (car entry)) (cdr entry))))))
+     (t (user-error "Invalid mark: %c" ch)))))
+
+(defun ygg-mark-goto (ch &optional linewise)
+  "Jump to mark CH, recording the jump; LINEWISE lands on the first non-blank."
+  (when (and linewise (eq ch ?')) (user-error "'' is already linewise"))
+  (pcase-let ((`(,target . ,pos) (ygg-mark-position ch)))
+    (ygg--jump-push)
+    (if (stringp target) (find-file target)
+      (unless (eq target (current-buffer)) (switch-to-buffer target)))
+    (ygg-each-selection-update
+     (ygg--motion (lambda ()
+                    (goto-char (min (max pos (point-min)) (point-max)))
+                    (when (or linewise (eq ch ?')) (back-to-indentation)))))))
+
 (defun ygg-mark-jump (&optional linewise)
   "Jump to the mark named by the next key.
 LINEWISE (vim `') lands on the line's first non-blank; without it (vim
 backtick) the exact stored position. Special marks: '' (last jump),
 '. (last change), '^ (last insert exit), '[ (yank start), '] (yank end)."
   (interactive)
-  (let ((ch (read-char)))
-    (cond
-     ((eq ch ?')
-      (if linewise (user-error "'' is already linewise")
-        (unless ygg--mark-last-jump-pos (user-error "No previous jump"))
-        (ygg--jump-push)
-        (ygg--jump-to ygg--mark-last-jump-pos t)))
-     ((eq ch ?`)
-      (unless ygg--mark-last-jump-pos (user-error "No previous jump"))
-      (ygg--jump-push)
-      (ygg--jump-to ygg--mark-last-jump-pos linewise))
-     ((eq ch ?.)
-      (unless ygg--change-list (user-error "Change list empty"))
-      (let ((pos (car ygg--change-list)))
-        (ygg--jump-push)
-        (ygg-each-selection-update
-         (ygg--motion (lambda ()
-                        (goto-char (min (max pos (point-min)) (point-max)))
-                        (when linewise (back-to-indentation)))))))
-     ((eq ch ?^)
-      (unless ygg--last-insert (user-error "Last insert position not set"))
-      (ygg--jump-push)
-      (ygg--jump-to ygg--last-insert linewise))
-     ((eq ch ?\[)
-      (unless ygg--mark-last-yank-beg (user-error "Mark '[ not set"))
-      (ygg--jump-push)
-      (ygg--jump-to ygg--mark-last-yank-beg linewise))
-     ((eq ch ?\])
-      (unless ygg--mark-last-yank-end (user-error "Mark '] not set"))
-      (ygg--jump-push)
-      (ygg--jump-to ygg--mark-last-yank-end linewise))
-     ((and (>= ch ?a) (<= ch ?z))
-      (let ((m (and ygg--marks-local (gethash ch ygg--marks-local))))
-        (unless (and m (marker-buffer m)) (user-error "Mark %c not set" ch))
-        (ygg--jump-push)
-        (ygg--jump-to m linewise)))
-     ((and (>= ch ?A) (<= ch ?Z))
-      (let ((entry (cdr (assq ch ygg--marks-global))))
-        (unless entry (user-error "Mark %c not set" ch))
-        (ygg--jump-push)
-        (if (markerp entry)
-            (if (marker-buffer entry) (ygg--jump-to entry linewise)
-              (user-error "Mark %c: buffer is gone" ch))
-          (find-file (car entry))
-          (ygg-each-selection-update
-           (ygg--motion (lambda ()
-                          (goto-char (min (max (cdr entry) (point-min)) (point-max)))
-                          (when linewise (back-to-indentation))))))))
-     (t (user-error "Invalid mark: %c" ch)))))
+  (ygg-mark-goto (read-char) linewise))
 
 (defun ygg-mark-jump-line ()
   "Jump to a mark's line, first non-blank (vim `')."

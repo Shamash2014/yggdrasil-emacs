@@ -301,5 +301,28 @@
   (should (eq (lookup-key ygg-number-sequential-repeat-map (kbd "C-x"))
               #'ygg-number-decrement-sequential)))
 
+(ert-deftest ygg-mark-position-resolves-without-side-effects ()
+  (ygg-with-temp-buffer "one\ntwo\n"
+    (let ((ygg--marks-global (list (cons ?B (cons "/nonexistent/f.txt" 4))
+                                   (cons ?C (point-marker))))
+          (before (buffer-list)))
+      (goto-char 5)
+      (ygg-mark-set-char ?a)
+      (should (equal (ygg-mark-position ?a) (cons (current-buffer) 5)))
+      (should (equal (ygg-mark-position ?B) (cons "/nonexistent/f.txt" 4)))
+      (should (eq (car (ygg-mark-position ?C)) (current-buffer)))
+      (should-error (ygg-mark-position ?z) :type 'user-error)
+      (should-error (ygg-mark-position ?A) :type 'user-error)
+      (should (equal (buffer-list) before)))))
+
+(ert-deftest ygg-mark-position-remote-never-contacts-host ()
+  (require 'tramp)
+  (let* ((remote "/ssh:nonexistent.invalid:/x")
+         (tramp-connection-timeout 2)
+         (ygg--marks-global (list (cons ?R (cons remote 3)))))
+    (cl-letf (((symbol-function 'tramp-file-name-handler)
+               (lambda (&rest _) (error "tramp handler called"))))
+      (should (equal (ygg-mark-position ?R) (cons remote 3))))))
+
 (provide 'ygg-motions-tests)
 ;;; ygg-motions-tests.el ends here

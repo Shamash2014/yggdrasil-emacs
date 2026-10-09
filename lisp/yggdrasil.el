@@ -16,6 +16,8 @@
   "Dispatch the m match prefix." t)
 (autoload 'ygg-ex "yggdrasil-ex"
   "Read and execute an ex command." t)
+(autoload 'ygg-ex-repeat-substitute-all "yggdrasil-ex"
+  "Repeat the last :s with the same flags on every line." t)
 (autoload 'ygg-rect-enter "yggdrasil-rect"
   "Enter visual-block (rectangle) editing." t)
 
@@ -23,6 +25,9 @@
   "m" #'ygg-match-prefix :label "match"
   ":" #'ygg-ex :label "ex"
   "C-v" #'ygg-rect-enter :label "visual block")
+
+(yggdrasil-define-keys 'ygg-goto-map
+  "&" #'ygg-ex-repeat-substitute-all :label "repeat last :s everywhere")
 
 (dolist (cmd '(ygg-treesit-expand ygg-treesit-shrink ygg-treesit-prev-sibling
                ygg-treesit-next-sibling ygg-treesit-select-children

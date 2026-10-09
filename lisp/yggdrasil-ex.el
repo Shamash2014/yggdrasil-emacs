@@ -15,6 +15,9 @@
 
 ;;; History
 
+(defvar ygg-ex--replay-history nil
+  "History sink for `.' replays, keeping them out of `ygg-ex-history'.")
+
 (defvar ygg-ex-history nil
   "History list for ex commands.")
 
@@ -26,13 +29,19 @@
 (defvar-local ygg--marks-local nil
   "Hash table CHAR -> marker, for a-z buffer-local marks (from motions).")
 
+(declare-function ygg-mark-position "yggdrasil-motions")
+(declare-function ygg-mark-goto "yggdrasil-motions")
+(declare-function ygg-mark-set-char "yggdrasil-motions")
+(defvar ygg--last-search)
+(defvar ygg--marks-global)
+
 (defun ygg-ex--mark-line (char)
-  "Line number of mark CHAR, or nil if unset."
-  (cond
-   ((and (>= char ?a) (<= char ?z))
-    (when-let* ((m (and ygg--marks-local (gethash char ygg--marks-local))))
-      (and (marker-buffer m) (line-number-at-pos (marker-position m)))))
-   (t nil)))
+  "Line of mark CHAR in this buffer; `user-error' if unset or elsewhere."
+  (pcase-let ((`(,target . ,pos) (ygg-mark-position char)))
+    (unless (or (eq target (current-buffer))
+                (and (stringp target) (equal target buffer-file-name)))
+      (user-error "yggdrasil: mark %c is in another buffer" char))
+    (line-number-at-pos (min (max pos (point-min)) (point-max)))))
 
 (defun ygg-ex--search-line (re-string forward)
   "Line number of first match of RE-STRING, or nil if no match.
@@ -129,6 +138,7 @@ Return a line number, or nil when no address starts there."
               (pcase-let ((`(,vb ,_ve ,_) ygg--last-visual))
                 (setq base (line-number-at-pos vb))))
              (t
+              (unless mc (user-error "yggdrasil: mark name missing after '"))
               (setq base (ygg-ex--mark-line mc))
               (unless base
                 (user-error "yggdrasil: mark %c not set" mc))))
@@ -201,6 +211,9 @@ STRING carries no range; REST is the unconsumed tail of STRING."
 
 ;;; Live preview for :s
 
+(defvar ygg-ex--last-substitute nil
+  "The last :s as (PATTERN REPLACEMENT FLAGS), pattern before `ygg-regexp'.")
+
 (defvar ygg-ex--preview-overlays nil
   "List of overlays created for :s preview.")
 
@@ -230,7 +243,7 @@ Errors are caught and silent."
                     (error nil)))
                 (if parts
                     (pcase-let ((`(,re ,rep ,flags) parts))
-                      (let ((re (ygg-regexp re))
+                      (let ((re (ygg-ex--search-regexp re))
                             (case-fold-search (and (cl-find ?i flags) t))
                             (global-p (and (cl-find ?g flags) t))
                             (data nil))
@@ -330,29 +343,64 @@ When GLOBAL-P, every match; otherwise only the first match per line."
         (query-replace-regexp re rep nil beg end))
     (query-replace-regexp re rep)))
 
+(defun ygg-ex--search-regexp (pattern)
+  "Elisp regexp for PATTERN; an empty one is vim's last search pattern."
+  (if (string-empty-p pattern)
+      (or ygg--last-search (user-error "yggdrasil: no previous regular expression"))
+    (ygg-regexp pattern)))
+
+(defun ygg-ex--substitute (range pattern rep flags)
+  (let ((re (ygg-ex--search-regexp pattern))
+        (global-p (and (cl-find ?g flags) t))
+        (case-fold-search (and (cl-find ?i flags) t)))
+    (setq ygg-ex--last-substitute
+          (list (if (and (string-empty-p pattern) ygg-ex--last-substitute)
+                    (car ygg-ex--last-substitute)
+                  pattern)
+                rep flags)
+          ygg--last-search re)
+    (if (cl-find ?c flags)
+        (ygg-ex--substitute-query range re rep)
+      (ygg-with-verb
+        (cond
+         (range
+          (pcase-let ((`(,beg ,end) (ygg-ex--line-range-bounds range)))
+            (ygg-ex--substitute-region beg end re rep global-p)))
+         ((> (ygg-selections-count) 1)
+          (ygg-do-selections
+           (lambda (b e _dir) (ygg-ex--substitute-region b e re rep global-p))))
+         (t
+          (pcase-let ((`(,sb ,se ,_) (ygg-selection-bounds)))
+            (if (/= sb se)
+                (ygg-ex--substitute-region sb se re rep global-p)
+              (ygg-ex--substitute-region (line-beginning-position)
+                                         (line-end-position) re rep global-p)))))))))
+
+(defun ygg-ex--last-substitute-or-error ()
+  (or ygg-ex--last-substitute
+      (user-error "yggdrasil: no previous substitute")))
+
 (defun ygg-ex--cmd-substitute (range _bang args)
-  (when (string-empty-p args)
-    (user-error "yggdrasil: substitute needs a pattern"))
-  (pcase-let ((`(,re ,rep ,flags) (ygg-ex--split-delimited args)))
-    (setq re (ygg-regexp re))
-    (let ((global-p (and (cl-find ?g flags) t))
-          (case-fold-search (and (cl-find ?i flags) t)))
-      (if (cl-find ?c flags)
-          (ygg-ex--substitute-query range re rep)
-        (ygg-with-verb
-          (cond
-           (range
-            (pcase-let ((`(,beg ,end) (ygg-ex--line-range-bounds range)))
-              (ygg-ex--substitute-region beg end re rep global-p)))
-           ((> (ygg-selections-count) 1)
-            (ygg-do-selections
-             (lambda (b e _dir) (ygg-ex--substitute-region b e re rep global-p))))
-           (t
-            (pcase-let ((`(,sb ,se ,_) (ygg-selection-bounds)))
-              (if (/= sb se)
-                  (ygg-ex--substitute-region sb se re rep global-p)
-                (ygg-ex--substitute-region (line-beginning-position)
-                                           (line-end-position) re rep global-p))))))))))
+  (if (string-empty-p args)
+      (pcase-let ((`(,re ,rep ,_) (ygg-ex--last-substitute-or-error)))
+        (ygg-ex--substitute range re rep ""))
+    (pcase-let ((`(,re ,rep ,flags) (ygg-ex--split-delimited args)))
+      (ygg-ex--substitute range re rep flags))))
+
+(defun ygg-ex--cmd-repeat-substitute (range args)
+  "vim :& — repeat the last :s over RANGE; a leading & in ARGS keeps its flags."
+  (pcase-let ((`(,re ,rep ,old-flags) (ygg-ex--last-substitute-or-error)))
+    (ygg-ex--substitute range re rep
+                        (if (string-prefix-p "&" args)
+                            (concat old-flags (substring args 1))
+                          args))))
+
+;;;###autoload
+(defun ygg-ex-repeat-substitute-all ()
+  "vim g&: repeat the last :s with the same flags on every line."
+  (interactive)
+  (pcase-let ((`(,re ,rep ,flags) (ygg-ex--last-substitute-or-error)))
+    (ygg-ex--substitute (cons 1 (ygg-ex--last-line)) re rep flags)))
 
 ;;; Global
 
@@ -399,7 +447,8 @@ with the matched line as its implicit range."
   (when (string-empty-p args)
     (user-error "yggdrasil: global needs a pattern"))
   (pcase-let ((`(,re ,action) (ygg-ex--parse-global args)))
-    (setq re (ygg-regexp re))
+    (setq re (ygg-ex--search-regexp re)
+          ygg--last-search re)
     (let* ((r (or range (cons 1 (ygg-ex--last-line))))
            (markers (ygg-ex--global-lines r re bang)))
       (cond
@@ -768,6 +817,130 @@ Return (BEG . END) of the inserted block."
       (ygg-ex--goto-line end)
       (ygg-set-selection (point) (point)))))
 
+;;; Marks and registers — listed in the quickfix as kinds
+
+(declare-function ygg-qf-define-kind "layer-quickfix")
+(declare-function ygg-qf-show-kind "layer-quickfix")
+(declare-function ygg-paste-after "yggdrasil-verbs")
+(declare-function ygg--register-preview-line "yggdrasil-verbs")
+(defvar ygg--registers)
+(defvar ygg--pending-register)
+(defvar ygg--replaying)
+(defvar ygg--repeat-verb-pending)
+
+(defun ygg-ex--cmd-mark (range char)
+  "vim :k — set mark CHAR at the last line of RANGE, or the current line."
+  (save-excursion
+    (ygg-ex--goto-line (cdr (ygg-ex--range-lines range)))
+    (ygg-mark-set-char char)))
+
+(defun ygg-ex--line-at (pos)
+  "Line number and trimmed text of the line holding POS in the current buffer."
+  (save-excursion
+    (goto-char (min (max pos (point-min)) (point-max)))
+    (list (line-number-at-pos)
+          (truncate-string-to-width
+           (string-trim (buffer-substring-no-properties
+                         (line-beginning-position) (line-end-position)))
+           80 nil nil "…"))))
+
+(defconst ygg-ex--mark-file-slice-cap 8000000
+  "Largest file prefix read to show the text of a mark in an unopened file.")
+
+(defun ygg-ex--file-line-at (file pos)
+  "Line and text at char POS of local FILE, reading only a bounded prefix."
+  (let ((end (+ (* 4 pos) 1000)))
+    (if (or (not (file-readable-p file)) (> end ygg-ex--mark-file-slice-cap))
+        (list 0 "")
+      (with-temp-buffer
+        (insert-file-contents file nil 0 end)
+        (ygg-ex--line-at pos)))))
+
+(defun ygg-ex--mark-row (buf char)
+  "A marks row (ID TEXT NOTE) for CHAR as seen from BUF, or nil when it is unset."
+  (when-let* ((hit (with-current-buffer buf
+                     (condition-case nil (ygg-mark-position char)
+                       (error nil)))))
+    (pcase-let* ((`(,target . ,pos) hit)
+                 (`(,line ,text)
+                  (cond
+                   ((bufferp target) (with-current-buffer target (ygg-ex--line-at pos)))
+                   ((find-file-name-handler target 'file-exists-p) (list 0 ""))
+                   (t (or (ignore-errors (ygg-ex--file-line-at target pos))
+                          (list 0 ""))))))
+      (list (cons buf char)
+            (format "%c  %5d  %s" char line text)
+            (if (bufferp target) (buffer-name target)
+              (car (last (split-string target "/"))))))))
+
+(defun ygg-ex--marks-collect (buf)
+  (with-current-buffer buf
+    (let ((chars (append (and ygg--marks-local
+                              (sort (hash-table-keys ygg--marks-local) #'<))
+                         (sort (mapcar #'car ygg--marks-global) #'<)
+                         (string-to-list "'.^[]"))))
+      (delq nil (mapcar (lambda (c) (ygg-ex--mark-row buf c)) chars)))))
+
+(defun ygg-ex--in-origin-window (buf)
+  "Select a window showing BUF, other than the quickfix list when need be."
+  (if-let* ((win (get-buffer-window buf)))
+      (select-window win)
+    (switch-to-buffer-other-window buf)))
+
+(defun ygg-ex--marks-open (id)
+  (ygg-ex--in-origin-window (car id))
+  (ygg-mark-goto (cdr id)))
+
+(defun ygg-ex--registers-collect (buf)
+  (let (rows)
+    (maphash (lambda (reg val)
+               (when val
+                 (push (list (cons buf reg)
+                             (format "%c  %s" reg (ygg--register-preview-line val))
+                             nil)
+                       rows)))
+             ygg--registers)
+    (setq rows (sort rows (lambda (a b) (< (cdar a) (cdar b)))))
+    (if-let* ((kill (car kill-ring)))
+        (cons (list (cons buf ?\") (format "\"  %s" (ygg--register-preview-line (list kill))) nil)
+              rows)
+      rows)))
+
+(defun ygg-ex--registers-open (id)
+  (ygg-ex--in-origin-window (car id))
+  (let* ((reg (and (/= (cdr id) ?\") (cdr id)))
+         (ygg--pending-register reg))
+    (ygg-paste-after 1)
+    (when ygg--repeat-verb-pending
+      (setq ygg--repeat-verb-pending
+            (vconcat (and reg (vector ?\" reg)) [?p])))))
+
+(with-eval-after-load 'layer-quickfix
+  (ygg-qf-define-kind 'marks :collect #'ygg-ex--marks-collect
+                      :action #'ygg-ex--marks-open :glyph "'")
+  (ygg-qf-define-kind 'registers :collect #'ygg-ex--registers-collect
+                      :action #'ygg-ex--registers-open :glyph "\""))
+
+(defun ygg-ex--origin-buffer ()
+  "The current buffer, or the one before it when this is a quickfix list."
+  (if (derived-mode-p 'grep-mode)
+      (or (car (seq-find (lambda (e)
+                           (and (buffer-live-p (car e))
+                                (not (provided-mode-derived-p
+                                      (buffer-local-value 'major-mode (car e))
+                                      'grep-mode))))
+                         (window-prev-buffers)))
+          (other-buffer (current-buffer) t))
+    (current-buffer)))
+
+(defun ygg-ex--cmd-marks (_range _bang _args)
+  (require 'layer-quickfix)
+  (ygg-qf-show-kind 'marks (ygg-ex--origin-buffer)))
+
+(defun ygg-ex--cmd-registers (_range _bang _args)
+  (require 'layer-quickfix)
+  (ygg-qf-show-kind 'registers (ygg-ex--origin-buffer)))
+
 ;;; Command table + resolution
 
 (defvar ygg-ex--commands
@@ -807,7 +980,9 @@ Return (BEG . END) of the inserted block."
     ("tabclose"   . ygg-ex--cmd-tabclose)
     ("tabonly"    . ygg-ex--cmd-tabonly)
     ("tabnext"    . ygg-ex--cmd-tabnext)
-    ("tabprevious" . ygg-ex--cmd-tabprev))
+    ("tabprevious" . ygg-ex--cmd-tabprev)
+    ("marks"      . ygg-ex--cmd-marks)
+    ("registers"  . ygg-ex--cmd-registers))
   "Alist of full ex command name to handler symbol.
 Handlers take (RANGE BANG ARGS).")
 
@@ -846,7 +1021,9 @@ Handlers take (RANGE BANG ARGS).")
     ("tabc" . "tabclose")
     ("tabo" . "tabonly")
     ("tabn" . "tabnext")
-    ("tabp" . "tabprevious"))
+    ("tabp" . "tabprevious")
+    ("di" . "registers")
+    ("display" . "registers"))
   "Explicit abbreviations that resolve before unique-prefix matching.")
 
 (defun ygg-ex--resolve (word)
@@ -1265,6 +1442,10 @@ error: the built-in wins, so the alias could never be reached."
      ((string-prefix-p "!" rest)
       (ygg-ex--shell-float (string-trim (substring rest 1))))
      ((string-empty-p rest) (when range (ygg-ex--goto-line (cdr range))))
+     ((string-prefix-p "&" rest)
+      (ygg-ex--cmd-repeat-substitute range (string-trim (substring rest 1))))
+     ((string-match "\\`k[ \t]*\\([a-zA-Z]\\)[ \t]*\\'" rest)
+      (ygg-ex--cmd-mark range (aref (match-string 1 rest) 0)))
      ((string-match "\\`\\([<>]+\\)[ \t]*\\([^z-a]*\\)\\'" rest)
       (ygg-ex--cmd-shift range (match-string 1 rest) (match-string 2 rest)))
      (t (ygg-ex--dispatch range rest)))))
@@ -1273,6 +1454,18 @@ error: the built-in wins, so the alias could never be reached."
   "Parse and run the ex command line INPUT."
   (pcase-let ((`(,range . ,rest) (ygg-ex--parse-range input)))
     (ygg-ex--run range rest)))
+
+(defun ygg-ex--execute-journaled (input)
+  "Run INPUT, and let `.' replay it as a whole ex line rather than as `:' alone."
+  (let ((origin (current-buffer))
+        (ok nil))
+    (unwind-protect
+        (prog1 (ygg-ex--execute input) (setq ok t))
+      (when (and (buffer-live-p origin) (not ygg--replaying))
+        (with-current-buffer origin
+          (when ygg--repeat-verb-pending
+            (setq ygg--repeat-verb-pending
+                  (and ok (vconcat ":" input [return])))))))))
 
 ;;; Leader commands — `:' is the other way into everything the leader can
 ;;; reach, since a command you can only get to by chord is one you cannot
@@ -1419,7 +1612,7 @@ untouched."
          (minibuffer-local-completion-map ygg-ex--minibuffer-map)
          (buf (current-buffer)))
     (unwind-protect
-        (ygg-ex--execute
+        (ygg-ex--execute-journaled
          (minibuffer-with-setup-hook
              (lambda ()
                (add-hook 'post-command-hook
@@ -1428,7 +1621,7 @@ untouched."
                             buf (minibuffer-contents-no-properties)))
                          nil t))
            (completing-read ":" #'ygg-ex--completion-table nil nil nil
-                            'ygg-ex-history)))
+                            (if ygg--replaying 'ygg-ex--replay-history 'ygg-ex-history))))
       (ygg-ex--preview-clear))))
 
 (provide 'yggdrasil-ex)
