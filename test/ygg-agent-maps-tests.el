@@ -634,6 +634,223 @@
          (should (cl-some (lambda (m) (string-match-p (regexp-quote (cdr case)) m))
                           messages)))))))
 
+(defconst ygg-agent-maps-tests--claude-md-off
+  "provider: gemini\neditor_files:\n  claude_md: false\nhooks:\n  x: true\n")
+
+(defmacro ygg-agent-maps-tests--with-repowise (exit repowise-dir &rest body)
+  "Run BODY with a fake repowise exiting EXIT; REPOWISE-DIR non-nil adds .repowise; a string is its config.yaml."
+  (declare (indent 2))
+  `(ygg-agent-maps-tests--with '("features.md")
+     (ygg-agent-maps-tests--stubbed
+      (let* ((bin (file-name-as-directory (make-temp-file "ygg-maps-bin-" t)))
+             (rec (expand-file-name "rec" bin))
+             (exec-path (list bin))
+             (order nil))
+        (when ,repowise-dir
+          (make-directory (expand-file-name ".repowise" root))
+          (when (stringp ,repowise-dir)
+            (with-temp-file (expand-file-name ".repowise/config.yaml" root)
+              (insert ,repowise-dir))))
+        (when ,exit
+          (with-temp-file (expand-file-name "repowise" bin)
+            (insert (format "#!/bin/sh\n{ echo \"ARGV $*\"; env | grep -E '^(DO_NOT_TRACK|REPOWISE_TELEMETRY_DISABLED)='; env | cut -d= -f1 | grep -E '^((ANTHROPIC|OPENAI|GEMINI|OPENROUTER|LITELLM|DEEPSEEK)_API_KEY|REPOWISE_(DB_URL|DATABASE_URL|REASONING))$' | sed 's/^/LEAK /'; } > %s\nexit %d\n" rec ,exit)))
+          (set-file-modes (expand-file-name "repowise" bin) #o755))
+        (unwind-protect
+            (cl-letf (((symbol-function 'ygg-agent-maps--run)
+                       (lambda (dir argv done &optional merge)
+                         (if (equal (file-name-nondirectory (car argv)) "repowise")
+                             (let ((default-directory dir))
+                               (push 'update order)
+                               (funcall done (apply #'call-process (car argv) nil nil nil
+                                                    (cdr argv))
+                                        ""))
+                           (when (equal (file-name-nondirectory (car argv)) "ice-repo-map")
+                             (push 'generate order))
+                           (ygg-agent-maps-tests--runner dir argv done merge))))
+                      ((symbol-function 'aob-acp-spawn) (lambda (&rest _) 'session))
+                      ((symbol-function 'message) #'ignore))
+              (let ((process-environment
+                     (append '("ANTHROPIC_API_KEY=secret" "OPENAI_API_KEY=secret"
+                               "GEMINI_API_KEY=secret" "OPENROUTER_API_KEY=secret"
+                               "LITELLM_API_KEY=secret" "DEEPSEEK_API_KEY=secret"
+                               "REPOWISE_DB_URL=x" "REPOWISE_DATABASE_URL=x"
+                               "REPOWISE_REASONING=x"
+                               "DO_NOT_TRACK=0")
+                             process-environment)))
+                ,@body))
+          (delete-directory bin t))))))
+
+(ert-deftest ygg-agent-maps-generate-updates-repowise-first-without-keys ()
+  (ygg-agent-maps-tests--with-repowise 0 ygg-agent-maps-tests--claude-md-off
+    (ygg-agent-maps-generate root)
+    (should (equal '(update generate) (seq-uniq (reverse order))))
+    (let ((text (with-temp-buffer (insert-file-contents rec) (buffer-string))))
+      (should (string-match-p "^ARGV update --index-only --no-agents$" text))
+      (should (string-match-p "^DO_NOT_TRACK=1$" text))
+      (should (string-match-p "^REPOWISE_TELEMETRY_DISABLED=1$" text))
+      (should-not (string-match-p "^LEAK " text)))))
+
+(ert-deftest ygg-agent-maps-generate-runs-after-a-failed-repowise-update ()
+  (ygg-agent-maps-tests--with-repowise 1 ygg-agent-maps-tests--claude-md-off
+    (let (shown)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (fmt &rest args) (push (apply #'format fmt args) shown))))
+        (ygg-agent-maps-generate root))
+      (should (equal '(update generate) (seq-uniq (reverse order))))
+      (should (member "aob: repowise update failed (exit 1)" shown)))))
+
+(ert-deftest ygg-agent-maps-generate-skips-repowise-without-index-dir ()
+  (ygg-agent-maps-tests--with-repowise 0 nil
+    (ygg-agent-maps-generate root)
+    (should (equal '(generate) (seq-uniq (reverse order))))
+    (should-not (file-exists-p rec))))
+
+(ert-deftest ygg-agent-maps-generate-skips-repowise-update-unless-claude-md-is-off ()
+  (dolist (config (list t
+                        "provider: gemini\n"
+                        "editor_files:\n  agents_md: false\n"
+                        "editor_files:\n  claude_md: true\n"
+                        "editor_files:\n  claude_md: false_ish\n"
+                        "editor_files:\n  agents_md: true\nclaude_md: false\n"
+                        "hooks:\n  claude_md: false\n"))
+    (ygg-agent-maps-tests--with-repowise 0 config
+      (let (shown)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (push (apply #'format fmt args) shown))))
+          (ygg-agent-maps-generate root))
+        (should (equal '(generate) (seq-uniq (reverse order))))
+        (should-not (file-exists-p rec))
+        (should (cl-some (lambda (m) (string-match-p "repowise update skipped.*claude_md: false" m))
+                         shown))))))
+
+(ert-deftest ygg-agent-maps-generate-updates-repowise-for-each-claude-md-off-layout ()
+  (dolist (config '("editor_files:\n  claude_md: false\n"
+                    "editor_files:\n  agents_md: true\n  claude_md: false  # no\n"
+                    "editor_files: {claude_md: false}\n"
+                    "editor_files: {agents_md: true, claude_md: false}\n"
+                    "editor_files:\n    claude_md: False\nhooks: {}\n"))
+    (ygg-agent-maps-tests--with-repowise 0 config
+      (ygg-agent-maps-generate root)
+      (should (equal '(update generate) (seq-uniq (reverse order)))))))
+
+(ert-deftest ygg-agent-maps-generate-skips-repowise-when-not-installed ()
+  (ygg-agent-maps-tests--with-repowise nil t
+    (ygg-agent-maps-generate root)
+    (should (equal '(generate) (seq-uniq (reverse order))))))
+
+(ert-deftest ygg-agent-maps-generate-skips-repowise-when-turned-off ()
+  (ygg-agent-maps-tests--with-repowise 0 ygg-agent-maps-tests--claude-md-off
+    (let ((ygg-agent-maps-repowise-update nil))
+      (ygg-agent-maps-generate root))
+    (should-not (file-exists-p rec))))
+
+(ert-deftest ygg-agent-maps-generate-refuses-a-second-run-during-repowise-update ()
+  (ygg-agent-maps-tests--with-repowise 0 ygg-agent-maps-tests--claude-md-off
+    (let (held)
+      (cl-letf (((symbol-function 'ygg-agent-maps--run)
+                 (lambda (_dir _argv done &optional _merge) (setq held done))))
+        (ygg-agent-maps-generate root)
+        (should held)
+        (should-error (ygg-agent-maps-generate root) :type 'user-error)))))
+
+;; Real make-process/sentinel path: only the fake repowise on exec-path is stubbed in.
+(defconst ygg-agent-maps-tests--real-run (symbol-function 'ygg-agent-maps--run))
+
+(defmacro ygg-agent-maps-tests--with-real-repowise (script &rest body)
+  (declare (indent 1))
+  `(ygg-agent-maps-tests--with '("features.md")
+     (let ((ygg-agent-maps-tests--spawned nil))
+      (let* ((bin (file-name-as-directory (make-temp-file "ygg-maps-real-" t)))
+             (exec-path (list bin))
+             (order nil)
+             (shown nil))
+        (make-directory (expand-file-name ".repowise" root))
+        (with-temp-file (expand-file-name ".repowise/config.yaml" root)
+          (insert ygg-agent-maps-tests--claude-md-off))
+        (with-temp-file (expand-file-name "repowise" bin)
+          (insert "#!/bin/sh\n" ,script "\n"))
+        (set-file-modes (expand-file-name "repowise" bin) #o755)
+        (unwind-protect
+            (cl-letf (((symbol-function 'ygg-agent-maps--run)
+                       (lambda (dir argv done &optional merge)
+                         (if (equal (file-name-nondirectory (car argv)) "repowise")
+                             (progn (push 'update order)
+                                    (funcall ygg-agent-maps-tests--real-run dir argv done merge))
+                           (when (equal (file-name-nondirectory (car argv)) "ice-repo-map")
+                             (push 'generate order))
+                           (ygg-agent-maps-tests--runner dir argv done merge))))
+                      ((symbol-function 'aob-acp-spawn) (lambda (&rest _) 'session))
+                      ((symbol-function 'message)
+                       (lambda (fmt &rest args) (push (apply #'format fmt args) shown))))
+              ,@body)
+          (dolist (p (process-list))
+            (when (and (process-live-p p) (process-command p)
+                       (equal (file-name-nondirectory (car (process-command p))) "repowise"))
+              (kill-process p)))
+          (delete-directory bin t))))))
+
+(defun ygg-agent-maps-tests--await (pred)
+  (let ((deadline (+ (float-time) 15)))
+    (while (and (not (funcall pred)) (< (float-time) deadline))
+      (accept-process-output nil 0.05))
+    (should (funcall pred))))
+
+(ert-deftest ygg-agent-maps-real-repowise-success-then-generates ()
+  (ygg-agent-maps-tests--with-real-repowise "exit 0"
+    (ygg-agent-maps-generate root)
+    (ygg-agent-maps-tests--await (lambda () (memq 'generate order)))
+    (should (equal '(update generate) (seq-uniq (reverse order))))
+    (should-not (cl-some (lambda (m) (string-match-p "repowise update" m)) shown))))
+
+(ert-deftest ygg-agent-maps-real-repowise-success-leaves-no-timer ()
+  (ygg-agent-maps-tests--with-real-repowise "exit 0"
+    (let ((before (copy-sequence timer-list)))
+      (ygg-agent-maps-generate root)
+      (ygg-agent-maps-tests--await (lambda () (memq 'generate order)))
+      (should-not (cl-set-difference timer-list before)))))
+
+(ert-deftest ygg-agent-maps-real-repowise-start-failure-generates-without-timer ()
+  (ygg-agent-maps-tests--with-real-repowise "exit 0"
+    (let ((before (copy-sequence timer-list))
+          (ygg-agent-maps-repowise-update-timeout 1)
+          (real-make-process (symbol-function 'make-process))
+          (killed nil))
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest args)
+                   (if (equal (file-name-nondirectory (car (plist-get args :command)))
+                              "repowise")
+                       (error "cannot start")
+                     (apply real-make-process args))))
+                ((symbol-function 'kill-process)
+                 (lambda (&rest _) (setq killed t))))
+        (ygg-agent-maps-generate root)
+        (should (memq 'generate order))
+        (should-not (cl-set-difference timer-list before))
+        (sleep-for 1.5)
+        (should-not killed)
+        (should (member "aob: repowise update failed (exit -1)" shown))))))
+
+(ert-deftest ygg-agent-maps-real-repowise-failure-still-generates ()
+  (ygg-agent-maps-tests--with-real-repowise "exit 3"
+    (ygg-agent-maps-generate root)
+    (ygg-agent-maps-tests--await (lambda () (memq 'generate order)))
+    (should (equal '(update generate) (seq-uniq (reverse order))))
+    (should (member "aob: repowise update failed (exit 3)" shown))))
+
+(ert-deftest ygg-agent-maps-real-repowise-hang-is-killed-and-generates ()
+  (ygg-agent-maps-tests--with-real-repowise "exec sleep 30"
+    (let ((ygg-agent-maps-repowise-update-timeout 1))
+      (ygg-agent-maps-generate root)
+      (ygg-agent-maps-tests--await (lambda () (memq 'generate order)))
+      (should (equal '(update generate) (seq-uniq (reverse order))))
+      (should (cl-some (lambda (m) (string-match-p "aob: repowise update timed out" m)) shown))
+      (ygg-agent-maps-tests--await
+       (lambda () (zerop (plist-get (ygg-agent-maps--entry root) :pending))))
+      (let ((once (cl-count 'generate order)))
+        (ygg-agent-maps-generate root)
+        (ygg-agent-maps-tests--await (lambda () (= 2 (cl-count 'update order))))
+        (ygg-agent-maps-tests--await (lambda () (= (* 2 once) (cl-count 'generate order))))))))
+
 (ert-deftest ygg-agent-maps-features-works-in-the-root-never-a-worktree ()
   (ygg-agent-maps-tests--with '("features.md")
     (let (seen)

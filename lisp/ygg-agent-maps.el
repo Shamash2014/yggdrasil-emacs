@@ -56,6 +56,10 @@
   "Program the ICE tools need on PATH, or nil when they need none."
   :type '(choice (const nil) string))
 
+(defcustom ygg-agent-maps-repowise-update t
+  "Whether generating maps first refreshes an existing repowise index."
+  :type 'boolean)
+
 (defcustom ygg-agent-maps-tools-dir
   (expand-file-name
    "etc/ice/"
@@ -130,7 +134,8 @@ none started."
                        (funcall idle))))
                  (and merge-err '(t)))))
       (when (processp proc)
-        (plist-put entry :procs (cons proc (plist-get entry :procs)))))))
+        (plist-put entry :procs (cons proc (plist-get entry :procs))))
+      proc)))
 
 (defconst ygg-agent-maps--stat-cap 200
   "Most dirty paths whose modification time is read per refresh.")
@@ -473,6 +478,82 @@ PROCEED gets whether the filter is in place and, if not, why."
          (ygg-agent-maps--install root script proceed))
         (t (funcall proceed nil)))))))
 
+(defconst ygg-agent-maps--repowise-unset-env
+  '("ANTHROPIC_API_KEY" "OPENAI_API_KEY" "OPENROUTER_API_KEY" "GEMINI_API_KEY"
+    "GOOGLE_API_KEY" "DEEPSEEK_API_KEY" "KIMI_API_KEY" "EDENAI_API_KEY"
+    "LITELLM_API_KEY" "REPOWISE_API_KEY"
+    "ANTHROPIC_BASE_URL" "OPENAI_BASE_URL" "GEMINI_BASE_URL" "DEEPSEEK_BASE_URL"
+    "KIMI_BASE_URL" "EDENAI_BASE_URL" "OLLAMA_BASE_URL" "LITELLM_BASE_URL"
+    "LITELLM_API_BASE"
+    "REPOWISE_PROVIDER" "REPOWISE_MODEL" "REPOWISE_DOC_MODEL" "REPOWISE_EMBEDDER"
+    "REPOWISE_EMBEDDING_MODEL" "REPOWISE_EMBEDDING_DIMS"
+    "REPOWISE_EMBEDDING_DECLARED_DIMS" "OLLAMA_EMBEDDING_MODEL"
+    "OLLAMA_EMBEDDING_DIMS" "REPOWISE_DB_URL" "REPOWISE_DATABASE_URL"
+    "REPOWISE_REASONING"))
+
+(defcustom ygg-agent-maps-repowise-update-timeout 120
+  "Seconds the repowise index refresh may run before it is killed."
+  :type 'natnum)
+
+(defun ygg-agent-maps--repowise-claude-md-off-p (root)
+  "Non-nil when ROOT's .repowise/config.yaml sets editor_files.claude_md to false."
+  (let ((file (expand-file-name ".repowise/config.yaml" root))
+        (case-fold-search nil))
+    (and (file-readable-p file)
+         (with-temp-buffer
+           (insert-file-contents file)
+           (goto-char (point-min))
+           (and (re-search-forward "^editor_files:[ \t]*" nil t)
+                (if (looking-at "{")
+                    (re-search-forward "[{,][ \t]*claude_md:[ \t]*[Ff]alse[ \t]*[,}]"
+                                       (line-end-position) t)
+                  (let ((end (save-excursion
+                               (forward-line)
+                               (if (re-search-forward "^[^ \t\n#]" nil t)
+                                   (match-beginning 0)
+                                 (point-max)))))
+                    (forward-line)
+                    (re-search-forward "^[ \t]+claude_md:[ \t]*[Ff]alse[ \t]*\\(?:#.*\\)?$"
+                                       end t))))))))
+
+(defun ygg-agent-maps--repowise-update (root next)
+  "Refresh ROOT's repowise index without a model, then call NEXT either way.
+Runs only when repowise is configured not to rewrite CLAUDE.md."
+  (if-let* ((_ ygg-agent-maps-repowise-update)
+            (_ (file-directory-p (expand-file-name ".repowise" root)))
+            (bin (executable-find "repowise")))
+      (if (not (ygg-agent-maps--repowise-claude-md-off-p root))
+          (progn
+            (message "aob: repowise update skipped — set editor_files.claude_md: false in .repowise/config.yaml (it would rewrite CLAUDE.md)")
+            (funcall next))
+        (let ((process-environment
+               (append '("DO_NOT_TRACK=1" "REPOWISE_TELEMETRY_DISABLED=1")
+                       (cl-remove-if
+                        (lambda (e)
+                          (member (car (split-string e "=")) ygg-agent-maps--repowise-unset-env))
+                        process-environment))))
+          (let (timer timed-out finished proc)
+            (setq proc
+             (ygg-agent-maps--spawn
+             root (list bin "update" "--index-only" "--no-agents")
+             (lambda (status _out)
+               (setq finished t)
+               (when timer (cancel-timer timer))
+               (cond (timed-out
+                      (message "aob: repowise update timed out after %ds"
+                               ygg-agent-maps-repowise-update-timeout))
+                     ((not (eql status 0))
+                      (message "aob: repowise update failed (exit %s)" status)))
+               (funcall next))))
+            (when (and (processp proc) (not finished) (process-live-p proc))
+              (setq timer (run-at-time
+                           ygg-agent-maps-repowise-update-timeout nil
+                           (lambda ()
+                             (when (process-live-p proc)
+                               (setq timed-out t)
+                               (kill-process proc)))))))))
+    (funcall next)))
+
 (defun ygg-agent-maps--start-feature-agent (root)
   (if-let* ((live (ygg-agent-maps--live-sessions-in root)))
       (message "Feature map session skipped: %d live agent session%s in %s"
@@ -493,17 +574,20 @@ next time the maps refresh."
     (when (file-remote-p root) (user-error "Maps are not generated over TRAMP"))
     (unless (zerop (plist-get (ygg-agent-maps--entry root) :pending))
       (user-error "Maps are already generating for %s" root))
-    (let ((script (expand-file-name "ice-latgen-filter" ygg-agent-maps-tools-dir))
-          (lat (file-directory-p (expand-file-name "lat.md" root))))
-      (ygg-agent-maps--filter-ok
-       root
-       (lambda (ok)
-         (let ((proceed (lambda (ok &optional why)
-                          (ygg-agent-maps--regenerate root ok why)
-                          (ygg-agent-maps--start-feature-agent root))))
-           (if (or ok (not lat) (not (file-executable-p script)))
-               (funcall proceed ok)
-             (ygg-agent-maps--offer-install root script proceed))))))))
+    (ygg-agent-maps--repowise-update
+     root
+     (lambda ()
+       (let ((script (expand-file-name "ice-latgen-filter" ygg-agent-maps-tools-dir))
+             (lat (file-directory-p (expand-file-name "lat.md" root))))
+         (ygg-agent-maps--filter-ok
+          root
+          (lambda (ok)
+            (let ((proceed (lambda (ok &optional why)
+                             (ygg-agent-maps--regenerate root ok why)
+                             (ygg-agent-maps--start-feature-agent root))))
+              (if (or ok (not lat) (not (file-executable-p script)))
+                  (funcall proceed ok)
+                (ygg-agent-maps--offer-install root script proceed))))))))))
 
 (defun ygg-agent-maps--in-root-preset (agent)
   (let ((spec (copy-sequence (aob-acp-preset agent))))
