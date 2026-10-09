@@ -241,5 +241,12 @@
     (should (= released 1))
     (should-not ygg-dap-java--unclaimed)))
 
+(ert-deftest ygg-dap-java-test-request-keeps-non-ascii-names-as-text ()
+  (let ((request (ygg-dap-java-test-request
+                  (plist-put (copy-sequence (ygg-dap-java-tests--method "adds()")) :projectName "démo→"))))
+    (should (multibyte-string-p request))
+    (should (equal (plist-get (json-parse-string request :object-type 'plist) :projectName) "démo→"))
+    (should (json-serialize (vector request)))))
+
 (provide 'dap-java-tests)
 ;;; dap-java-tests.el ends here

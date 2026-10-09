@@ -119,12 +119,14 @@
 (defun ygg-dap-java-test-request (item)
   "The junit.argument request that runs ITEM."
   (let ((class (eql (ygg-dap-java--number item :testLevel) 5)))
-    (json-serialize
-     (list :projectName (plist-get item :projectName)
-           :testLevel (ygg-dap-java--number item :testLevel)
-           :testKind (ygg-dap-java--number item :testKind)
-           :testNames (vector (plist-get item (if class :fullName :jdtHandler)))
-           :testHandles []))))
+    (decode-coding-string
+     (json-serialize
+      (list :projectName (plist-get item :projectName)
+            :testLevel (ygg-dap-java--number item :testLevel)
+            :testKind (ygg-dap-java--number item :testKind)
+            :testNames (vector (plist-get item (if class :fullName :jdtHandler)))
+            :testHandles []))
+     'utf-8)))
 
 (defun ygg-dap-java-test-with-port (args port)
   "The runner's ARGS reporting to PORT; the plugin's own port is a placeholder."

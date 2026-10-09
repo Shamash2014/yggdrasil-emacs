@@ -530,5 +530,18 @@ Feature changes a.txt at lines 5, 20 and 35 and b.txt at line 2."
           (ygg-git-compare-tour--keyed)
           (should (= before built)))))))
 
+(ert-deftest ygg-git-compare-tour-non-ascii-text-round-trips-without-a-prompt ()
+  (let* ((dir (make-temp-file "ygg-git-compare-tour-" t))
+         (file (expand-file-name "t/feature.tour.json" dir))
+         (steps (list (list :title "core — api" :check "agree → ship" :risk "high"
+                            :hunks (list (list :file "a.txt" :start 1 :end 2 :side "new" :key "k"))))))
+    (unwind-protect
+        (progn
+          (ygg-git-compare-tour--write file "base" "head" steps)
+          (let ((kept (ygg-git-compare-tour--read file)))
+            (should (equal (plist-get (car (plist-get kept :steps)) :title) "core — api"))
+            (should (equal (plist-get (car (plist-get kept :steps)) :check) "agree → ship"))))
+      (delete-directory dir t))))
+
 (provide 'ygg-git-compare-tour-tests)
 ;;; ygg-git-compare-tour-tests.el ends here

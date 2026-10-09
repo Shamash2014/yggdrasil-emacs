@@ -77,7 +77,8 @@ Its two directives are the repository and the branch review_tour is called with.
   (when (file-readable-p file)
     (ignore-errors
       (with-temp-buffer
-        (insert-file-contents file)
+        (let ((coding-system-for-read 'utf-8))
+          (insert-file-contents file))
         (json-parse-buffer :object-type 'plist :array-type 'list
                            :null-object nil :false-object nil)))))
 
@@ -96,13 +97,16 @@ Its two directives are the repository and the branch review_tour is called with.
 
 (defun ygg-git-compare-tour--write (file base head steps)
   (make-directory (file-name-directory file) t)
-  (with-temp-file file
-    (insert (json-serialize
-             (append (and base (list :base base))
-                     (and head (list :head head))
-                     (list :steps (vconcat (mapcar #'ygg-git-compare-tour--plain steps))))
-             :null-object nil :false-object nil)
-            "\n")))
+  (let ((coding-system-for-write 'utf-8-unix))
+    (with-temp-file file
+      (insert (decode-coding-string
+               (json-serialize
+                (append (and base (list :base base))
+                        (and head (list :head head))
+                        (list :steps (vconcat (mapcar #'ygg-git-compare-tour--plain steps))))
+                :null-object nil :false-object nil)
+               'utf-8)
+              "\n"))))
 
 ;;; Hunks of the diff
 
