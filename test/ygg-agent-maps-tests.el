@@ -579,16 +579,20 @@
      (should (string-match-p "create-verification-skill"
                              (cadr (car ygg-agent-maps-tests--spawned)))))))
 
-(ert-deftest ygg-agent-maps-generate-live-session-skips-agent-only ()
+(ert-deftest ygg-agent-maps-generate-refuses-while-an-agent-is-live ()
   (ygg-agent-maps-tests--with '("features.md")
     (ygg-agent-maps-tests--stubbed
      (let* ((s (ygg-agent-maps-tests--session root))
-            (before (ygg-agent-maps-tests--calls-of "ice-repo-map")))
-       (ygg-agent-maps-generate root)
+            (before ygg-agent-maps-tests--calls))
+       (cl-letf (((symbol-function 'ygg-agent-maps--spawn)
+                  (lambda (&rest _) (ert-fail "spawned")))
+                 ((symbol-function 'make-process)
+                  (lambda (&rest _) (ert-fail "make-process"))))
+         (let ((err (should-error (ygg-agent-maps-generate root) :type 'user-error)))
+           (should (string-match-p "maps" (cadr err)))
+           (should (string-match-p "running in" (cadr err)))))
        (should-not ygg-agent-maps-tests--spawned)
-       (should (= (1+ before) (ygg-agent-maps-tests--calls-of "ice-repo-map")))
-       (should (cl-some (lambda (m) (string-match-p "skipped: 1 live" m)) messages))
-       (should-error (ygg-agent-maps-features root) :type 'user-error)
+       (should (equal before ygg-agent-maps-tests--calls))
        (aob-remove-session s)))))
 
 (ert-deftest ygg-agent-maps-generate-asks-before-the-feature-agent-starts ()

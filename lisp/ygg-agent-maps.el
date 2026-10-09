@@ -571,12 +571,16 @@ Runs only when repowise is configured not to rewrite CLAUDE.md."
   "Regenerate ROOT's repo map now and start the feature map agent session.
 The repo map is rebuilt in the background even when not stale; without the
 latgen git filter the full map is not written, and the filter is offered
-first.  Only after that is settled does the feature agent start, unless
-another agent is live in ROOT.  The feature summary follows features.md the
-next time the maps refresh."
+first.  Only after that is settled does the feature agent start.  Refused
+while an agent session is live in ROOT.  The feature summary follows
+features.md the next time the maps refresh."
   (interactive)
   (let ((root (ygg-agent-maps--root (or root (ygg-agent-maps--default-root)))))
     (when (file-remote-p root) (user-error "Maps are not generated over TRAMP"))
+    (when-let* ((live (ygg-agent-maps--live-sessions-in root)))
+      (user-error "Agent %s is running in %s; maps not updated"
+                  (mapconcat (lambda (s) (format "%s" (aob-session-name s))) live ", ")
+                  (abbreviate-file-name (directory-file-name root))))
     (unless (zerop (plist-get (ygg-agent-maps--entry root) :pending))
       (user-error "Maps are already generating for %s" root))
     (ygg-agent-maps--repowise-update
