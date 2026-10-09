@@ -523,7 +523,7 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
           (should (string-search "10m 00s" text)))
         (should (string-search "CI ✓ 1 · ✗ 1 · ● 1" (ygg-git-compare-pr-info-tests--header)))
         (ygg-git-compare-pr-info-tests--goto-row "integration")
-        (call-interactively (key-binding (kbd "RET")))
+        (call-interactively (key-binding (kbd "o")))
         (should (equal ygg-git-compare-pr-info-tests--browsed "https://gitlab.com/o/r/-/jobs/2")))
       (should (= (ygg-git-compare-pr-info-tests--calls "pipelines/99/jobs") 1))
       (should (= (length (seq-filter (lambda (line) (string-suffix-p "merge_requests/12" line))

@@ -606,11 +606,22 @@ of its diff; nothing for any other compare."
 
 ;;; Acting on a check
 
+(autoload 'ygg-git-compare-job-show "ygg-git-compare-job")
+
 (defun ygg-git-compare--check-at-point ()
   (or (magit-section-value-if 'ygg-git-compare-check)
       (user-error "No check here")))
 
 (defun ygg-git-compare-check-open ()
+  "Open the job of the check at point in Emacs beside the compare, or its page
+in the browser when it is no job."
+  (interactive)
+  (let ((check (ygg-git-compare--check-at-point)))
+    (or (when-let* ((pr (ygg-git-compare--remote-pr)))
+          (ygg-git-compare-job-show pr check))
+        (ygg-git-compare-check-browse))))
+
+(defun ygg-git-compare-check-browse ()
   "Open the log of the check at point in the browser."
   (interactive)
   (browse-url (or (plist-get (ygg-git-compare--check-at-point) :url)
@@ -627,7 +638,7 @@ of its diff; nothing for any other compare."
 (defvar-keymap magit-ygg-git-compare-check-section-map
   "RET" #'ygg-git-compare-check-open
   "<return>" #'ygg-git-compare-check-open
-  "o" #'ygg-git-compare-check-open
+  "o" #'ygg-git-compare-check-browse
   "y" #'ygg-git-compare-check-copy)
 
 (provide 'ygg-git-compare-pr-info)
