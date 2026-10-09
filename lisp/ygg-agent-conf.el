@@ -258,6 +258,38 @@ is started by hand."
      (or (ygg-agent--json-mcp (format "~/.%s/settings.json" agent) project)
          (ygg-agent--json-mcp (format "~/.%s.json" agent) project)))))
 
+(defcustom ygg-agent-project-tool-mcp '(repowise)
+  "Project tools whose MCP server every session in a project that has one gets.
+lat is handed over by aob itself, so only repowise is listed here."
+  :type '(set (const repowise)) :group 'yggdrasil)
+
+(declare-function aob-acp-project-mcp-servers "aob-acp" (project))
+
+(defun ygg-agent--mcp-declared-p (name command taken)
+  (seq-find (lambda (e) (or (equal (plist-get e :name) name)
+                            (equal (file-name-nondirectory (or (plist-get e :command) ""))
+                                   command)))
+            taken))
+
+;;;###autoload
+(defun ygg-agent-project-tool-mcp-servers (project &optional taken)
+  "The MCP servers PROJECT\='s own tooling serves, in wire shape.
+Only the ones its index exists for and whose binary is installed, and none
+that TAKEN or the project\='s MCP file already declares."
+  (when (and project (not (file-remote-p project)))
+    (let ((taken (append taken
+                         (and (fboundp 'aob-acp-project-mcp-servers)
+                              (ignore-errors (aob-acp-project-mcp-servers project)))))
+          (root (directory-file-name (expand-file-name project))))
+      (when-let* (((memq 'repowise ygg-agent-project-tool-mcp))
+                  ((file-exists-p (expand-file-name ".repowise/wiki.db" root)))
+                  ((not (ygg-agent--mcp-declared-p "repowise" "repowise" taken)))
+                  (bin (executable-find "repowise")))
+        (list (list :name "repowise" :command (expand-file-name bin)
+                    :args (vector "mcp" root "--transport" "stdio")
+                    :env (list (list :name "DO_NOT_TRACK" :value "1")
+                               (list :name "REPOWISE_TELEMETRY_DISABLED" :value "1"))))))))
+
 (defcustom ygg-agent-instructions
   "## This editor (aob)
 
