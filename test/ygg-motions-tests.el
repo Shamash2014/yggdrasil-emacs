@@ -3,6 +3,7 @@
 (require 'ert)
 (require 'yggdrasil-motions)
 (require 'yggdrasil-selection)
+(require 'yggdrasil-verbs)
 
 ;;; Test helper: with temporary buffer
 
@@ -113,6 +114,192 @@
     (should (not isearch-lazy-highlight-last-string))))
 
 ;;; Run tests
+
+;;; Folds
+
+(defconst ygg-test--code
+  "(defun a ()\n  (let ((x 1))\n    (foo x)\n    (bar x)))\n(defun b ()\n  1)\n")
+
+(defmacro ygg-test-with-code (&rest body)
+  (declare (indent 0))
+  `(with-temp-buffer
+     (emacs-lisp-mode)
+     (insert ygg-test--code)
+     (goto-char (point-min))
+     ,@body))
+
+(ert-deftest ygg-motions-fold-close-open-recursive-hideshow ()
+  (ygg-test-with-code
+    (ygg-fold-close-recursive)
+    (should (invisible-p (line-end-position)))
+    (goto-char (point-min))
+    (forward-line 1)
+    (should (invisible-p (point)))
+    (goto-char (point-min))
+    (ygg-fold-open-recursive)
+    (should-not (seq-some (lambda (o) (overlay-get o 'hs))
+                          (overlays-in (point-min) (point-max))))))
+
+(ert-deftest ygg-motions-fold-toggle-recursive-hideshow ()
+  (ygg-test-with-code
+    (ygg-fold-toggle-recursive)
+    (should (invisible-p (line-end-position)))
+    (ygg-fold-toggle-recursive)
+    (should-not (invisible-p (line-end-position)))))
+
+(ert-deftest ygg-motions-fold-reveal-and-reset ()
+  (ygg-test-with-code
+    (hs-minor-mode 1)
+    (hs-hide-all)
+    (goto-char (point-min))
+    (forward-line 2)
+    (should (invisible-p (point)))
+    (ygg-fold-reveal)
+    (should-not (invisible-p (point)))
+    (ygg-fold-reset)
+    (should-not (invisible-p (point)))
+    (should (invisible-p (save-excursion (goto-char (point-min)) (forward-line 4)
+                                         (line-end-position))))))
+
+(ert-deftest ygg-motions-fold-recursive-outline ()
+  (with-temp-buffer
+    (outline-mode)
+    (outline-minor-mode 1)
+    (insert "* A\nbody a\n** B\nbody b\n* C\nbody c\n")
+    (goto-char (point-min))
+    (ygg-fold-close-recursive)
+    (should (invisible-p (save-excursion (goto-char (point-min)) (line-end-position))))
+    (ygg-fold-open-recursive)
+    (should-not (invisible-p (save-excursion (goto-char (point-min)) (line-end-position))))
+    (should-not (invisible-p (save-excursion (search-forward "body b") (point))))))
+
+(ert-deftest ygg-motions-fold-reveal-outline ()
+  (with-temp-buffer
+    (outline-mode)
+    (outline-minor-mode 1)
+    (insert "* A\nbody a\n** B\nbody b\n* C\n")
+    (outline-hide-sublevels 1)
+    (goto-char (point-min))
+    (search-forward "body")
+    (search-forward "body")
+    (should (invisible-p (point)))
+    (ygg-fold-reveal)
+    (should-not (invisible-p (point)))))
+
+(ert-deftest ygg-motions-fold-manual-create-toggle-delete ()
+  (with-temp-buffer
+    (insert "one\ntwo\nthree\nfour\n")
+    (goto-char 1)
+    (set-mark 1)
+    (goto-char (+ 1 (length "one\ntwo\nthre")))
+    (setq mark-active t)
+    (ygg-fold-create)
+    (should (= (point) 1))
+    (should (invisible-p (line-end-position)))
+    (ygg-fold-open)
+    (should-not (invisible-p (line-end-position)))
+    (ygg-fold-toggle)
+    (should (invisible-p (line-end-position)))
+    (ygg-fold-open-all)
+    (should-not (invisible-p (line-end-position)))
+    (ygg-fold-close-all)
+    (should (invisible-p (line-end-position)))
+    (ygg-fold-delete)
+    (should-not (invisible-p (line-end-position)))
+    (should-error (ygg-fold-delete) :type 'user-error)))
+
+(ert-deftest ygg-motions-fold-manual-delete-all-and-single-line ()
+  (with-temp-buffer
+    (insert "a\nb\nc\nd\ne\nf\n")
+    (dolist (r '((1 . 4) (7 . 10)))
+      (goto-char (cdr r))
+      (set-mark (car r))
+      (setq mark-active t)
+      (ygg-fold-create))
+    (should (= 2 (length (ygg-fold--manual-in (point-min) (point-max)))))
+    (ygg-fold-delete-all)
+    (should-not (ygg-fold--manual-in (point-min) (point-max)))
+    (goto-char 1)
+    (set-mark 1)
+    (setq mark-active t)
+    (should-error (ygg-fold-create) :type 'user-error)))
+
+(ert-deftest ygg-motions-fold-next-prev ()
+  (ygg-test-with-code
+    (ygg-fold-next)
+    (should (looking-at "[ \t]*(let"))
+    (ygg-fold-prev)
+    (should (looking-at "(defun a"))
+    (should-error (ygg-fold-prev) :type 'user-error)))
+
+(defconst ygg-test--py-code
+  "def f(x):\n    if x:\n        for i in x:\n            print(i)\n    return 1\n")
+
+(defmacro ygg-test-with-python (&rest body)
+  (declare (indent 0))
+  `(with-temp-buffer
+     (python-mode)
+     (insert ygg-test--py-code)
+     (goto-char (point-min))
+     ,@body))
+
+(ert-deftest ygg-motions-fold-next-python-nested ()
+  (ygg-test-with-python
+    (ygg-fold-next)
+    (should (looking-at "    if x"))
+    (ygg-fold-next)
+    (should (looking-at "        for i"))
+    (ygg-fold-prev)
+    (should (looking-at "    if x"))))
+
+(ert-deftest ygg-motions-fold-close-open-recursive-python ()
+  (ygg-test-with-python
+    (ygg-fold-close-recursive)
+    (should (seq-some (lambda (o) (overlay-get o 'hs)) (overlays-in (point-min) (point-max))))
+    (goto-char (point-min))
+    (forward-line 2)
+    (should (invisible-p (line-end-position)))
+    (goto-char (point-min))
+    (ygg-fold-open-recursive)
+    (should-not (seq-some (lambda (o) (overlay-get o 'hs))
+                          (overlays-in (point-min) (point-max))))))
+
+(ert-deftest ygg-motions-fold-create-evaporates ()
+  (with-temp-buffer
+    (insert "one\ntwo\nthree\n")
+    (set-mark 1)
+    (goto-char 10)
+    (setq mark-active t)
+    (ygg-fold-create)
+    (let ((ov (car (ygg-fold--manual-in (point-min) (point-max)))))
+      (delete-region (overlay-start ov) (overlay-end ov))
+      (should-not (overlay-buffer ov)))))
+
+(ert-deftest ygg-motions-fold-keys-bound ()
+  (dolist (k '("z A" "z C" "z O" "z v" "z x" "z f" "z d" "z E" "] z" "[ z"))
+    (should (commandp (lookup-key ygg-normal-map (kbd k))))))
+
+;;; Repeat maps
+
+(ert-deftest ygg-motions-repeat-maps-wired ()
+  (pcase-dolist (`(,cmd ,map ,keys)
+                 '((ygg-change-list-older ygg-change-list-repeat-map (";" ","))
+                   (ygg-change-list-newer ygg-change-list-repeat-map (";" ","))
+                   (ygg-number-increment ygg-number-repeat-map ("C-a" "C-x"))
+                   (ygg-number-decrement ygg-number-repeat-map ("C-a" "C-x"))
+                   (ygg-number-increment-sequential ygg-number-sequential-repeat-map ("C-a" "C-x"))
+                   (ygg-number-decrement-sequential ygg-number-sequential-repeat-map ("C-a" "C-x"))))
+    (should (eq (get cmd 'repeat-map) map))
+    (dolist (k keys)
+      (should (commandp (lookup-key (symbol-value map) (kbd k)))))
+    (should (eq (lookup-key (symbol-value map) (kbd "x")) nil))))
+
+(ert-deftest ygg-motions-repeat-map-keys-map-to-owners ()
+  (should (eq (lookup-key ygg-change-list-repeat-map ";") #'ygg-change-list-older))
+  (should (eq (lookup-key ygg-change-list-repeat-map ",") #'ygg-change-list-newer))
+  (should (eq (lookup-key ygg-number-repeat-map (kbd "C-a")) #'ygg-number-increment))
+  (should (eq (lookup-key ygg-number-sequential-repeat-map (kbd "C-x"))
+              #'ygg-number-decrement-sequential)))
 
 (provide 'ygg-motions-tests)
 ;;; ygg-motions-tests.el ends here

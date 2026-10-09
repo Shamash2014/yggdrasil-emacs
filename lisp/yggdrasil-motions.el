@@ -20,6 +20,10 @@
 
 (declare-function ygg-downcase "yggdrasil-verbs")
 (declare-function ygg-upcase "yggdrasil-verbs")
+(declare-function ygg-number-increment "yggdrasil-verbs")
+(declare-function ygg-number-decrement "yggdrasil-verbs")
+(declare-function ygg-number-increment-sequential "yggdrasil-verbs")
+(declare-function ygg-number-decrement-sequential "yggdrasil-verbs")
 (declare-function avy-jump "avy")
 (declare-function avy-goto-line-below "avy")
 (declare-function avy-goto-line-above "avy")
@@ -634,6 +638,253 @@ in a normal buffer just widen."
   (put cmd 'repeat-map 'ygg-view-repeat-map))
 
 (unless (or noninteractive repeat-mode) (repeat-mode 1))
+
+(defvar ygg-change-list-repeat-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map ";" #'ygg-change-list-older)
+    (define-key map "," #'ygg-change-list-newer)
+    map)
+  "Sticky change list: ; older, , newer after g ; or g ,.")
+
+(defvar ygg-number-repeat-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-a") #'ygg-number-increment)
+    (define-key map (kbd "C-x") #'ygg-number-decrement)
+    map)
+  "Sticky C-a / C-x.")
+
+(defvar ygg-number-sequential-repeat-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "C-a") #'ygg-number-increment-sequential)
+    (define-key map (kbd "C-x") #'ygg-number-decrement-sequential)
+    map)
+  "Sticky g C-a / g C-x.")
+
+(dolist (spec '((ygg-change-list-older . ygg-change-list-repeat-map)
+                (ygg-change-list-newer . ygg-change-list-repeat-map)
+                (ygg-number-increment . ygg-number-repeat-map)
+                (ygg-number-decrement . ygg-number-repeat-map)
+                (ygg-number-increment-sequential . ygg-number-sequential-repeat-map)
+                (ygg-number-decrement-sequential . ygg-number-sequential-repeat-map)))
+  (put (car spec) 'repeat-map (cdr spec)))
+
+;;; Folds beyond hideshow/outline: recursion, reveal, manual zf folds
+
+(declare-function hs-hide-block "hideshow")
+(declare-function hs-find-block-beginning "hideshow")
+(declare-function outline-hide-subtree "outline")
+(declare-function outline-show-subtree "outline")
+(declare-function outline-show-entry "outline")
+(declare-function outline-show-children "outline")
+(declare-function outline-back-to-heading "outline")
+(declare-function outline-up-heading "outline")
+(declare-function outline-next-heading "outline")
+(declare-function outline-previous-heading "outline")
+(declare-function ygg-fold-toggle "yggdrasil-verbs")
+(declare-function ygg-fold-close "yggdrasil-verbs")
+(declare-function ygg-fold-open "yggdrasil-verbs")
+(declare-function ygg-fold-close-all "yggdrasil-verbs")
+(declare-function ygg-fold-open-all "yggdrasil-verbs")
+(defvar hs-forward-sexp-function)
+(defvar hs-minor-mode)
+(defvar hs-block-start-regexp)
+
+(defun ygg-fold--outline-p ()
+  (bound-and-true-p outline-minor-mode))
+
+(defun ygg-fold--hs-on ()
+  (require 'hideshow)
+  (unless hs-minor-mode (hs-minor-mode 1)))
+
+(defun ygg-fold--hs-block-start-p ()
+  "Non-nil, leaving point on the opener, when the line starts a block.
+Hideshow regexps may anchor at the line start or at the opener."
+  (let ((origin (point)))
+    (beginning-of-line)
+    (if (or (looking-at hs-block-start-regexp)
+            (progn (skip-chars-forward " \t") (looking-at hs-block-start-regexp)))
+        (progn (skip-chars-forward " \t") t)
+      (goto-char origin)
+      nil)))
+
+(defun ygg-fold--manual-p (ov)
+  (overlay-get ov 'ygg-fold))
+
+(defun ygg-fold--manual-in (beg end)
+  (seq-filter #'ygg-fold--manual-p (overlays-in beg end)))
+
+(defun ygg-fold--manual-here ()
+  "Innermost manual fold on the current line or covering point."
+  (let ((cands (ygg-fold--manual-in (line-beginning-position)
+                                    (min (1+ (line-end-position)) (point-max)))))
+    (car (sort cands (lambda (a b)
+                       (< (- (overlay-end a) (overlay-start a))
+                          (- (overlay-end b) (overlay-start b))))))))
+
+(defun ygg-fold--manual-set (ov closed)
+  (overlay-put ov 'invisible (and closed 'ygg-fold)))
+
+(defun ygg-fold--manual-closed-p (ov)
+  (overlay-get ov 'invisible))
+
+(defun ygg-fold--manual-tree (ov)
+  (cons ov (seq-filter (lambda (o) (and (not (eq o ov))
+                                        (>= (overlay-start o) (overlay-start ov))
+                                        (<= (overlay-end o) (overlay-end ov))))
+                       (ygg-fold--manual-in (overlay-start ov) (overlay-end ov)))))
+
+(defun ygg-fold-create ()
+  "Fold the lines of the selection (z f): manual, shown as an ellipsis."
+  (interactive)
+  (pcase-let ((`(,beg ,end ,_) (ygg-selection-effective-bounds)))
+    (let ((from (save-excursion (goto-char beg) (line-end-position)))
+          (to (save-excursion (goto-char (if (> end beg) (1- end) end))
+                              (line-end-position))))
+      (when (<= to from) (user-error "A fold needs at least two lines"))
+      (deactivate-mark)
+      (add-to-invisibility-spec '(ygg-fold . t))
+      (let ((ov (make-overlay from to nil t nil)))
+        (overlay-put ov 'ygg-fold t)
+        (overlay-put ov 'evaporate t)
+        (ygg-fold--manual-set ov t)
+        (goto-char (save-excursion (goto-char from) (line-beginning-position)))))))
+
+(defun ygg-fold-delete ()
+  "Delete the manual fold at point (z d)."
+  (interactive)
+  (let ((ov (ygg-fold--manual-here)))
+    (unless ov (user-error "No manual fold here"))
+    (delete-overlay ov)))
+
+(defun ygg-fold-delete-all ()
+  "Delete every manual fold in the buffer (z E)."
+  (interactive)
+  (mapc #'delete-overlay (ygg-fold--manual-in (point-min) (point-max))))
+
+(defun ygg-fold--hs-bounds ()
+  (save-excursion
+    (end-of-line)
+    (let ((hidden (seq-find (lambda (o) (overlay-get o 'hs))
+                            (overlays-at (point)))))
+      (if hidden
+          (cons (line-beginning-position) (overlay-end hidden))
+        (beginning-of-line)
+        (when (or (ygg-fold--hs-block-start-p) (hs-find-block-beginning))
+          (let ((start (point)))
+            (funcall hs-forward-sexp-function 1)
+            (cons start (point))))))))
+
+(defun ygg-fold--hs-each-block (beg end fn)
+  (save-excursion
+    (goto-char end)
+    (while (> (point) beg)
+      (beginning-of-line)
+      (when (and (>= (point) beg) (ygg-fold--hs-block-start-p)) (funcall fn))
+      (forward-line -1))
+    (goto-char beg)
+    (when (ygg-fold--hs-block-start-p) (funcall fn))))
+
+(defun ygg-fold--hidden-p ()
+  (let ((ov (ygg-fold--manual-here)))
+    (if ov (ygg-fold--manual-closed-p ov) (invisible-p (line-end-position)))))
+
+(defun ygg-fold-close-recursive ()
+  "Close the fold at point and every fold nested in it (z C)."
+  (interactive)
+  (let ((ov (ygg-fold--manual-here)))
+    (cond
+     (ov (dolist (o (ygg-fold--manual-tree ov)) (ygg-fold--manual-set o t)))
+     ((ygg-fold--outline-p) (outline-hide-subtree))
+     (t (ygg-fold--hs-on)
+        (when-let* ((b (ygg-fold--hs-bounds)))
+          (ygg-fold--hs-each-block (car b) (cdr b) #'hs-hide-block))))))
+
+(defun ygg-fold-open-recursive ()
+  "Open the fold at point and every fold nested in it (z O)."
+  (interactive)
+  (let ((ov (ygg-fold--manual-here)))
+    (cond
+     (ov (dolist (o (ygg-fold--manual-tree ov)) (ygg-fold--manual-set o nil)))
+     ((ygg-fold--outline-p) (outline-show-subtree))
+     (t (ygg-fold--hs-on)
+        (when-let* ((b (ygg-fold--hs-bounds)))
+          (dolist (o (overlays-in (car b) (cdr b)))
+            (when (overlay-get o 'hs) (delete-overlay o))))))))
+
+(defun ygg-fold-toggle-recursive ()
+  "Toggle the fold at point and everything nested in it (z A)."
+  (interactive)
+  (if (ygg-fold--hidden-p)
+      (ygg-fold-open-recursive)
+    (ygg-fold-close-recursive)))
+
+(defun ygg-fold-reveal ()
+  "Open every fold hiding point (z v)."
+  (interactive)
+  (let ((pos (point)))
+    (dolist (o (overlays-at pos))
+      (when (and (> pos (overlay-start o)) (overlay-get o 'invisible))
+        (cond ((ygg-fold--manual-p o) (ygg-fold--manual-set o nil))
+              ((overlay-get o 'hs) (delete-overlay o)))))
+    (when (and (ygg-fold--outline-p) (invisible-p pos))
+      (outline-back-to-heading t)
+      (outline-show-entry)
+      (condition-case nil
+          (while t (outline-up-heading 1 t) (outline-show-children))
+        (error nil)))))
+
+(defun ygg-fold-reset ()
+  "Close every fold, then open the ones hiding point (z x)."
+  (interactive)
+  (ygg-fold-close-all)
+  (ygg-fold-reveal))
+
+(defun ygg-fold--next-start (dir)
+  "Start position of the nearest fold in direction DIR (1 or -1), or nil."
+  (let* ((manual (mapcar (lambda (o) (save-excursion (goto-char (overlay-start o))
+                                                     (line-beginning-position)))
+                         (ygg-fold--manual-in (point-min) (point-max))))
+         (backend (save-excursion
+                    (if (ygg-fold--outline-p)
+                        (and (if (> dir 0) (outline-next-heading) (outline-previous-heading))
+                             (point))
+                      (ygg-fold--hs-on)
+                      (let (found)
+                        (while (and (not found) (zerop (forward-line dir)))
+                          (when (ygg-fold--hs-block-start-p)
+                            (setq found (line-beginning-position))))
+                        found))))
+         (all (seq-filter (lambda (p) (if (> dir 0)
+                                          (> p (line-end-position))
+                                        (< p (line-beginning-position))))
+                          (delq nil (cons backend manual)))))
+    (and all (if (> dir 0) (apply #'min all) (apply #'max all)))))
+
+(defun ygg-fold-next ()
+  "Go to the start of the next fold (] z)."
+  (interactive)
+  (let ((pos (or (ygg-fold--next-start 1) (user-error "No next fold"))))
+    (ygg--jump-push)
+    (goto-char pos)))
+
+(defun ygg-fold-prev ()
+  "Go to the start of the previous fold ([ z)."
+  (interactive)
+  (let ((pos (or (ygg-fold--next-start -1) (user-error "No previous fold"))))
+    (ygg--jump-push)
+    (goto-char pos)))
+
+(yggdrasil-define-keys 'normal
+  "z A" #'ygg-fold-toggle-recursive :label "fold toggle (recursive)"
+  "z C" #'ygg-fold-close-recursive :label "fold close (recursive)"
+  "z O" #'ygg-fold-open-recursive :label "fold open (recursive)"
+  "z v" #'ygg-fold-reveal :label "reveal cursor"
+  "z x" #'ygg-fold-reset :label "reset folds"
+  "z f" #'ygg-fold-create :label "create fold"
+  "z d" #'ygg-fold-delete :label "delete fold"
+  "z E" #'ygg-fold-delete-all :label "delete all folds"
+  "] z" #'ygg-fold-next :label "next fold"
+  "[ z" #'ygg-fold-prev :label "prev fold")
 
 ;;; Search: / ? n N * # — n follows the search direction, N opposes it (nvim)
 

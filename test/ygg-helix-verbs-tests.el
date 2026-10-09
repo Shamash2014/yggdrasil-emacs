@@ -236,5 +236,110 @@ The buffer is shown in the selected window so keyboard macros drive it."
         (ygg-helix-test-keys "C-w s")
         (should (= (length (window-list)) (1+ count-before)))))))
 
+(ert-deftest ygg-helix-normal-c-r-is-redo ()
+  (should (eq (lookup-key ygg-normal-map (kbd "C-r")) #'ygg-redo))
+  (should (eq (lookup-key ygg-normal-map (kbd "U")) #'ygg-redo)))
+
+(ert-deftest ygg-helix-save-selection-on-v-cap-s ()
+  (should (eq (lookup-key ygg-normal-map (kbd "V S")) #'ygg-save-selection)))
+
+(ert-deftest ygg-helix-g-s-is-first-non-blank ()
+  (should-not (eq (lookup-key ygg-normal-map (kbd "g s")) #'ygg-save-selection))
+  (should (eq (lookup-key ygg-normal-map (kbd "g s"))
+              (lookup-key ygg-goto-map (kbd "s")))))
+
+(ert-deftest ygg-helix-insert-c-t-c-d-bound ()
+  (should (eq (lookup-key ygg-insert-map (kbd "C-t")) #'ygg-insert-indent))
+  (should (eq (lookup-key ygg-insert-map (kbd "C-d")) #'ygg-insert-dedent))
+  (should (eq (lookup-key ygg-insert-map (kbd "C-r")) #'ygg-insert-register)))
+
+(ert-deftest ygg-helix-insert-c-t-indents-keeping-cursor ()
+  (ygg-helix-test-buffer "    foo bar"
+    (let ((tab-width 4) (indent-tabs-mode nil) (standard-indent 4))
+      (goto-char (+ (point-min) 6))
+      (ygg-insert-indent)
+      (should (equal (buffer-string) "        foo bar"))
+      (should (= (point) (+ (point-min) 10))))))
+
+(ert-deftest ygg-helix-insert-c-d-dedents-and-clamps ()
+  (ygg-helix-test-buffer "      foo bar"
+    (let ((tab-width 4) (indent-tabs-mode nil) (standard-indent 4))
+      (goto-char (point-max))
+      (ygg-insert-dedent)
+      (should (equal (buffer-string) "    foo bar"))
+      (should (eq (point) (point-max)))
+      (ygg-insert-dedent)
+      (should (equal (buffer-string) "foo bar")))))
+
+
+(ert-deftest ygg-helix-shift-width-follows-mode ()
+  (with-temp-buffer (emacs-lisp-mode) (should (= (ygg-shift-width) 2)))
+  (with-temp-buffer (python-mode) (should (= (ygg-shift-width) 4)))
+  (with-temp-buffer (js-mode) (setq js-indent-level 2) (should (= (ygg-shift-width) 2))))
+
+(ert-deftest ygg-helix-insert-c-t-uses-mode-shift-width ()
+  (ygg-helix-test-buffer "x"
+    (emacs-lisp-mode)
+    (let ((indent-tabs-mode nil))
+      (ygg-insert-indent)
+      (should (equal (buffer-string) "  x")))))
+
+(ert-deftest ygg-helix-insert-c-t-c-d-round-to-multiple ()
+  (ygg-helix-test-buffer "   x"
+    (let ((tab-width 4) (indent-tabs-mode nil) (standard-indent 4))
+      (ygg-insert-indent)
+      (should (equal (buffer-string) "    x"))
+      (erase-buffer) (insert "       x")
+      (ygg-insert-indent)
+      (should (equal (buffer-string) "        x"))
+      (erase-buffer) (insert "       x")
+      (ygg-insert-dedent)
+      (should (equal (buffer-string) "    x"))
+      (ygg-insert-dedent)
+      (should (equal (buffer-string) "x")))))
+
+(ert-deftest ygg-helix-insert-c-t-with-tabs ()
+  (ygg-helix-test-buffer "x"
+    (let ((tab-width 4) (indent-tabs-mode t) (standard-indent 4))
+      (ygg-insert-indent)
+      (should (equal (buffer-string) "\tx")))))
+
+(ert-deftest ygg-helix-normal-indent-uses-mode-shift-width ()
+  (ygg-helix-test-buffer "x"
+    (emacs-lisp-mode)
+    (let ((indent-tabs-mode nil))
+      (ygg-indent-right 1)
+      (should (equal (buffer-string) "  x")))))
+
+(ert-deftest ygg-helix-insert-c-t-undoes-in-one-step ()
+  (ygg-helix-test-buffer "foo"
+    (let ((indent-tabs-mode nil) (standard-indent 4) (tab-width 4))
+      (undo-boundary)
+      (ygg-insert-indent)
+      (undo-boundary)
+      (ygg-undo)
+      (should (equal (buffer-string) "foo"))
+      (should (= (point) 1))
+      (ygg-undo)
+      (should (equal (buffer-string) "foo")))))
+
+(ert-deftest ygg-helix-insert-c-t-keeps-offset-inside-indentation ()
+  (ygg-helix-test-buffer "      x"
+    (let ((indent-tabs-mode nil) (standard-indent 4) (tab-width 4))
+      (goto-char 3)
+      (ygg-insert-indent)
+      (should (equal (buffer-string) "        x"))
+      (should (= (point) 5)))))
+
+(ert-deftest ygg-helix-shift-width-c-family ()
+  (with-temp-buffer (c-mode) (setq c-basic-offset 3) (should (= (ygg-shift-width) 3)))
+  (with-temp-buffer (java-mode) (setq c-basic-offset 2) (should (= (ygg-shift-width) 2)))
+  (with-temp-buffer (setq-local major-mode 'c-ts-mode)
+                    (setq-local c-ts-mode-indent-offset 3)
+                    (should (= (ygg-shift-width) 3)))
+  (with-temp-buffer (setq-local major-mode 'go-ts-mode)
+                    (setq-local go-ts-mode-indent-offset 3)
+                    (should (= (ygg-shift-width) 3))))
+
 (provide 'ygg-helix-verbs-tests)
 ;;; ygg-helix-verbs-tests.el ends here

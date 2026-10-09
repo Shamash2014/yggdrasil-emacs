@@ -616,21 +616,84 @@ Returns position of the first inserted space, or nil if no join occurred."
                               (if (bolp) (point) (line-beginning-position 2)))))
     (indent-rigidly lbeg lend amount)))
 
+(defconst ygg--shift-width-vars
+  '((lisp-data-mode . lisp-body-indent)
+    (python-base-mode . python-indent-offset)
+    (js-base-mode . js-indent-level)
+    (c-ts-mode . c-ts-mode-indent-offset)
+    (c++-ts-mode . c-ts-mode-indent-offset)
+    (java-ts-mode . java-ts-mode-indent-offset)
+    (go-ts-mode . go-ts-mode-indent-offset)
+    (json-ts-mode . json-ts-mode-indent-offset)
+    (swift-mode . swift-mode:basic-offset)
+    (dart-mode . c-basic-offset)
+    (c-mode . c-basic-offset)
+    (c++-mode . c-basic-offset)
+    (java-mode . c-basic-offset))
+  "Mode to offset variable for modes `editorconfig-indentation-alist' lacks.")
+
+(defun ygg-shift-width ()
+  "Return the indent step of the current buffer, like vim's `shiftwidth'."
+  (require 'editorconfig nil t)
+  (let* ((from-alist
+          (and (boundp 'editorconfig-indentation-alist)
+               (cl-loop for (mode . v) in editorconfig-indentation-alist
+                        when (derived-mode-p mode)
+                        return (if (consp v) (car v) v))))
+         (from-table
+          (cl-loop for (mode . v) in ygg--shift-width-vars
+                   when (derived-mode-p mode) return v))
+         (val (cl-loop for var in (list from-alist from-table)
+                       for x = (and (symbolp var) (boundp var) (symbol-value var))
+                       when (and (integerp x) (> x 0)) return x)))
+    (or val
+        (and (integerp standard-indent) (> standard-indent 0) standard-indent)
+        tab-width)))
+
 (defun ygg-indent-right (&optional n)
-  "Indent the full lines touched by each selection by count * `tab-width'."
+  "Indent the full lines touched by each selection by count * `ygg-shift-width'."
   (interactive "p")
-  (let ((amount (* (max 1 (or n 1)) tab-width)))
+  (let ((amount (* (max 1 (or n 1)) (ygg-shift-width))))
     (ygg-with-verb
       (ygg-do-selections (lambda (beg end _dir) (ygg--indent-lines beg end amount)))))
   (ygg--verb-exit))
 
 (defun ygg-indent-left (&optional n)
-  "Dedent the full lines touched by each selection by count * `tab-width'."
+  "Dedent the full lines touched by each selection by count * `ygg-shift-width'."
   (interactive "p")
-  (let ((amount (- (* (max 1 (or n 1)) tab-width))))
+  (let ((amount (- (* (max 1 (or n 1)) (ygg-shift-width)))))
     (ygg-with-verb
       (ygg-do-selections (lambda (beg end _dir) (ygg--indent-lines beg end amount)))))
   (ygg--verb-exit))
+
+;;; insert C-t / C-d — shift the current line
+
+(defun ygg--insert-shift-line (dir)
+  (let* ((sw (ygg-shift-width))
+         (cur (current-indentation))
+         (text-pos (save-excursion (back-to-indentation) (point)))
+         (offset (- (point) text-pos))
+         (target (if (> dir 0)
+                     (* sw (1+ (/ cur sw)))
+                   (max 0 (* sw (1- (/ (+ cur sw -1) sw)))))))
+    (indent-line-to target)
+    (back-to-indentation)
+    (goto-char (max (line-beginning-position)
+                    (min (line-end-position) (+ (point) offset))))))
+
+(defun ygg-insert-indent ()
+  "Indent the current line to the next `ygg-shift-width' multiple."
+  (interactive)
+  (ygg--insert-shift-line 1))
+
+(defun ygg-insert-dedent ()
+  "Dedent the current line to the previous `ygg-shift-width' multiple."
+  (interactive)
+  (ygg--insert-shift-line -1))
+
+(yggdrasil-define-keys 'insert
+  "C-t" #'ygg-insert-indent :label "indent line"
+  "C-d" #'ygg-insert-dedent :label "dedent line")
 
 ;;; ~ / ` / M-` — case
 
@@ -1034,7 +1097,6 @@ windows (sidebar, quickfix, agent trace) too."
   "C-p" #'ygg-paste-pop :label "paste-pop"
   "C-n" #'ygg-paste-undo-pop :label "paste-pop back"
   "R" #'ygg-overwrite :label "overwrite (vim R)"
-  "g s" #'ygg-save-selection :label "save selection to jumplist"
   "r" #'ygg-replace-char :label "replace char"
   "J" #'ygg-join-lines :label "join"
   ">" #'ygg-indent-right :label "indent"
@@ -1051,6 +1113,7 @@ windows (sidebar, quickfix, agent trace) too."
   "!" #'ygg-insert-command-before :label "insert command"
   "u" #'ygg-undo :label "undo"
   "U" #'ygg-redo :label "redo"
+  "C-r" #'ygg-redo :label "redo"
   "C-s" #'save-buffer :label "save"
   "C-h" #'ygg-window-left
   "C-j" #'ygg-window-down
@@ -1439,16 +1502,38 @@ on and then does nothing with it."
     (unless (bound-and-true-p hs-minor-mode) (hs-minor-mode 1))
     (funcall block)))
 
+(declare-function ygg-fold--manual-here "yggdrasil-motions")
+(declare-function ygg-fold--manual-in "yggdrasil-motions")
+(declare-function ygg-fold--manual-set "yggdrasil-motions")
+(declare-function ygg-fold--manual-closed-p "yggdrasil-motions")
+
+(defun ygg-fold--manual-all (closed)
+  (dolist (o (ygg-fold--manual-in (point-min) (point-max)))
+    (ygg-fold--manual-set o closed)))
+
 (defun ygg-fold-toggle ()
-  (interactive) (ygg-fold--call #'hs-toggle-hiding #'outline-cycle))
+  (interactive)
+  (if-let* ((ov (ygg-fold--manual-here)))
+      (ygg-fold--manual-set ov (not (ygg-fold--manual-closed-p ov)))
+    (ygg-fold--call #'hs-toggle-hiding #'outline-cycle)))
 (defun ygg-fold-close ()
-  (interactive) (ygg-fold--call #'hs-hide-block #'outline-hide-subtree))
+  (interactive)
+  (if-let* ((ov (ygg-fold--manual-here)))
+      (ygg-fold--manual-set ov t)
+    (ygg-fold--call #'hs-hide-block #'outline-hide-subtree)))
 (defun ygg-fold-open ()
-  (interactive) (ygg-fold--call #'hs-show-block #'outline-show-subtree))
+  (interactive)
+  (if-let* ((ov (ygg-fold--manual-here)))
+      (ygg-fold--manual-set ov nil)
+    (ygg-fold--call #'hs-show-block #'outline-show-subtree)))
 (defun ygg-fold-close-all ()
-  (interactive) (ygg-fold--call #'hs-hide-all #'outline-hide-body))
+  (interactive)
+  (ygg-fold--manual-all t)
+  (ygg-fold--call #'hs-hide-all #'outline-hide-body))
 (defun ygg-fold-open-all ()
-  (interactive) (ygg-fold--call #'hs-show-all #'outline-show-all))
+  (interactive)
+  (ygg-fold--manual-all nil)
+  (ygg-fold--call #'hs-show-all #'outline-show-all))
 
 (yggdrasil-define-keys 'normal
   "z a" #'ygg-fold-toggle :label "fold toggle"
@@ -1519,6 +1604,7 @@ active in normal state, which would silently scope undo to it)."
   "] SPC" #'ygg-add-newline-below :label "add line below")
 
 (yggdrasil-define-keys 'ygg-selections-map
+  "S" #'ygg-save-selection :label "save selection to jumplist"
   "J" #'ygg-join-lines-space :label "join with space selection"
   "d" #'ygg-delete-via-blackhole :label "delete (no yank)"
   "c" #'ygg-change-via-blackhole :label "change (no yank)")
