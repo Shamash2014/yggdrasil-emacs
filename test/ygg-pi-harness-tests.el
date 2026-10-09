@@ -195,9 +195,17 @@
       (should (equal (plist-get tools :args) '("a" "b")))
       (should (equal (plist-get tools :env) '((:name "K" :value "v")))))))
 
+(ert-deftest ygg-pi-session-env-adds-no-lat-by-default ()
+  (ygg-pi-tests--with
+    (make-directory (expand-file-name "lat.md" (ygg-pi-tests--proj)) t)
+    (let ((s (ygg-pi-tests--session "p1" "pi" "tok1")))
+      (should-not (seq-find (lambda (e) (equal (plist-get e :name) "lat"))
+                            (ygg-pi-tests--env-json (ygg-pi-session-env s)))))))
+
 (ert-deftest ygg-pi-session-env-adds-lat-only-where-lat-md-exists ()
   (ygg-pi-tests--with
-    (let ((s (ygg-pi-tests--session "p1" "pi" "tok1")))
+    (let ((aob-acp-lat-mcp t)
+          (s (ygg-pi-tests--session "p1" "pi" "tok1")))
       (should-not (seq-find (lambda (e) (equal (plist-get e :name) "lat"))
                             (ygg-pi-tests--env-json (ygg-pi-session-env s))))
       (make-directory (expand-file-name "lat.md" (ygg-pi-tests--proj)) t)

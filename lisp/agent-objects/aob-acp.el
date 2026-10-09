@@ -3945,12 +3945,6 @@ A listing is the thing people screenshot."
                                               (plist-get entry :name)))
                         out)
         (push (cons entry "config") out)))
-    (dolist (entry (and (fboundp 'ygg-agent-project-tool-mcp-servers)
-                        (ignore-errors (ygg-agent-project-tool-mcp-servers project))))
-      (unless (seq-find (lambda (cell) (equal (plist-get (car cell) :name)
-                                              (plist-get entry :name)))
-                        out)
-        (push (cons entry "project tools") out)))
     (dolist (entry (ignore-errors (aob-acp-project-mcp-servers project)))
       (unless (seq-find (lambda (cell) (equal (plist-get (car cell) :name)
                                               (plist-get entry :name)))
@@ -4049,6 +4043,11 @@ checkout whose agents get it, whoever opened them."
               (push entry out))))
         (nreverse out)))))
 
+(defcustom aob-acp-lat-mcp nil
+  "Non-nil also hands sessions the lat MCP server.
+Agents reach lat through its CLI."
+  :type 'boolean :group 'aob)
+
 (defconst aob-acp--lat-launcher "cd \"$1\" && PATH=\"$2:$PATH\" exec \"$3\" mcp"
   "Shell script run as sh -c with root, node directory and lat as $1 to $3.")
 
@@ -4095,8 +4094,9 @@ repository that declares a name of its own keeps it."
                                          (plist-get entry :name)))
                                 mine))
                     (aob-acp-project-mcp-servers project)))
-           (lat (aob-acp-lat-entry project mine
-                                   (aob-acp-project-mcp-servers project)))
+           (lat (and aob-acp-lat-mcp
+                    (aob-acp-lat-entry project mine
+                                       (aob-acp-project-mcp-servers project))))
            (all (seq-filter
                  (lambda (entry)
                    (aob-acp--mcp-takes-p

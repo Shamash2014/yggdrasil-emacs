@@ -120,10 +120,10 @@
         (should (string-match-p "<project-maps>" text))
         (should (string-match-p "MAP-BODY" text))
         (should (string-match-p "Feature A: lead" text))
-        (should (string-match-p "lat_search / lat_section on \\[\\[features\\]\\] and \\[\\[repo-map\\]\\]" text))
+        (should (string-match-p "`lat section|locate|refs <id>` on \\[\\[features\\]\\] and \\[\\[repo-map\\]\\]" text))
         (should (= 1 (with-temp-buffer
                        (insert text)
-                       (how-many "lat_search" (point-min) (point-max))))))
+                       (how-many "^Details:" (point-min) (point-max))))))
       (aob-remove-session s))))
 
 (ert-deftest ygg-agent-maps-second-prompt-has-no-block ()
@@ -153,7 +153,7 @@
       (ygg-agent-maps-on-ready s)
       (let ((text (ygg-agent-maps-tests--first-block s)))
         (should (string-match-p "MAP-BODY" text))
-        (should-not (string-match-p "<features>\\|lat_search" text)))
+        (should-not (string-match-p "<features>\\|`lat " text)))
       (should (zerop (ygg-agent-maps-tests--calls-of "ice-feature-summary")))
       (aob-remove-session s))))
 
@@ -230,7 +230,7 @@
     (let ((s (ygg-agent-maps-tests--session root :parent-session "p")))
       (ygg-agent-maps-on-ready s)
       (let ((text (ygg-agent-maps-tests--first-block s)))
-        (should (string-match-p "lat_search" text))
+        (should (string-match-p "`lat section" text))
         (should-not (string-match-p "MAP-BODY\\|<features>" text)))
       (should-not ygg-agent-maps-tests--calls)
       (aob-remove-session s))))
@@ -928,3 +928,52 @@
 
 (provide 'ygg-agent-maps-tests)
 ;;; ygg-agent-maps-tests.el ends here
+
+(defmacro ygg-agent-maps-tests--with-wiki-db (&rest body)
+  (declare (indent 0))
+  `(let ((root (file-name-as-directory (make-temp-file "maps-rw" t))))
+     (unwind-protect
+         (progn
+           (make-directory (expand-file-name ".repowise" root))
+           (write-region "" nil (expand-file-name ".repowise/wiki.db" root))
+           ,@body)
+       (delete-directory root t))))
+
+(ert-deftest ygg-agent-maps-pointer-lat-only ()
+  (let ((p (ygg-agent-maps--pointer '("[[features]]") "/nonexistent/")))
+    (should (string-match-p "`lat section|locate|refs <id>` on \\[\\[features\\]\\]" p))
+    (should (string-match-p "LAT_LLM_KEY" p))
+    (should-not (string-match-p "repowise" p))))
+
+(ert-deftest ygg-agent-maps-pointer-repowise-only-and-both ()
+  (ygg-agent-maps-tests--with-wiki-db
+    (let ((rw (ygg-agent-maps--pointer nil root))
+          (both (ygg-agent-maps--pointer '("[[features]]" "[[repo-map]]") root)))
+      (should (string-match-p "`repowise context <file> --include health" rw))
+      (should (string-match-p "--format json" rw))
+      (should (string-match-p "Only these: other repowise commands write files or call an LLM" rw))
+      (should-not (string-match-p "`lat " rw))
+      (should (string-match-p "`lat section" both))
+      (should (string-match-p "`repowise context" both))
+      (should (<= (/ (length both) 4.0) 120)))
+    (delete-file (expand-file-name ".repowise/wiki.db" root))
+    (should-not (ygg-agent-maps--pointer nil root))))
+
+(ert-deftest ygg-agent-maps-pointer-needs-no-repowise-binary ()
+  (ygg-agent-maps-tests--with-wiki-db
+    (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) nil)))
+      (should (string-match-p "`repowise context" (ygg-agent-maps--pointer nil root))))))
+
+(ert-deftest ygg-agent-maps-full-block-with-only-wiki-db-carries-the-pointer ()
+  (ygg-agent-maps-tests--with-wiki-db
+    (let ((ygg-agent-maps--cache (make-hash-table :test #'equal))
+          (ygg-agent-maps-tools-dir (make-temp-file "maps-no-tools" t))
+          (ygg-agent-maps-wait 0.1))
+      (let ((result (ygg-agent-maps--block root)))
+        (should (string-match-p "<project-maps>\n.*`repowise context" (car result)))
+        (should-not (cadr result))
+        (should-not (nth 2 result))))))
+
+(ert-deftest ygg-agent-maps-pointer-neither-is-nil ()
+  (should-not (ygg-agent-maps--pointer nil "/nonexistent/"))
+  (should-not (ygg-agent-maps--pointer nil nil)))

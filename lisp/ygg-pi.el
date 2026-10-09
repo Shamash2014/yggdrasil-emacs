@@ -14,6 +14,7 @@
 (declare-function aob-acp-lat-entry "aob-acp")
 (declare-function aob-acp-project-mcp-servers "aob-acp")
 (defvar aob-acp-agents)
+(defvar aob-acp-lat-mcp)
 (defvar aob-acp-project-mcp-file)
 (defvar aob-acp--mcp-dropped)
 
@@ -141,7 +142,8 @@ to the same pi server name are suffixed by the extension, not here."
          (names (append own (mapcar (lambda (e) (plist-get e :name)) mine)))
          (theirs (seq-remove (lambda (e) (member (plist-get e :name) names))
                              (aob-acp-project-mcp-servers project)))
-         (lat (and (not (member "lat" own))
+         (lat (and aob-acp-lat-mcp
+                   (not (member "lat" own))
                    (aob-acp-lat-entry dir mine theirs)))
          (aob-acp--mcp-dropped nil)
          valid)

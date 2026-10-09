@@ -40,8 +40,10 @@ Facts to remember:
 - lat.md: no .el support (no @lat scan, no symbol links), no link into an
   OpenSpec requirement, prompt hook pushes up to 5 sections each turn, no
   Emacs package, lat check usable in pre-commit today, GitHub Action unreleased.
-- Unconfirmed: whether a stdio MCP server handed to an aob session reaches
-  the model. Test live before choosing lat mcp over the lat CLI.
+- Decided: agents use lat and repowise through their CLIs, pointed at by a
+  short line in <project-maps>, not MCP servers: MCP tool schemas are resent
+  on every request (repowise about 6.5k tokens, lat about 580). The lat MCP
+  stays available behind `aob-acp-lat-mcp` (default nil); repowise has none.
 - skills/wayfinder says archived changes go to openspec/archive; OpenSpec
   uses openspec/changes/archive.
 - Locking files against the agent works fully only in Claude Code (deny
@@ -245,6 +247,7 @@ wires a project on its own.
 - Are target repos on GitHub (CODEOWNERS as the merge gate).
 - What outlives a change (lean: intent, CONTEXT.md, ADRs, lat.md, the merged
   spec; tasks, prototypes and the decision trail are thrown away).
-- lat.md wiring: MCP through aob, lat init per repo, or both.
+- lat.md wiring: lat init per repo, agents query the lat CLI (MCP only via
+  `aob-acp-lat-mcp`, see Decided above).
 - Where the flow lives: presets plus an Emacs layer, an aob workflow file,
   or a skill.

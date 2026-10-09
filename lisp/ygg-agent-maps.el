@@ -284,10 +284,14 @@ FORCE starts the run even while another call's own processes are pending."
    (and (file-readable-p (expand-file-name "lat.md/repo-map.md" root))
         '("[[repo-map]]"))))
 
-(defun ygg-agent-maps--pointer (names)
-  (and names
-       (format "Query details through the lat MCP: lat_search / lat_section on %s.\n"
-               (string-join names " and "))))
+(defun ygg-agent-maps--pointer (names &optional root)
+  (let ((lat (and names
+                  (format "Details: `lat section|locate|refs <id>` on %s; `lat search \"<q>\"` needs LAT_LLM_KEY.\n"
+                          (string-join names " and "))))
+        (repowise (and root
+                       (file-readable-p (expand-file-name ".repowise/wiki.db" root))
+                       "Code signals, add `--format json`: `repowise context <file> --include health --include callers`, `risk <rev>`, `dead-code`, `why \"<q>\" --target <file>`, `symbol <file>::<Name>`, `impacted-tests <rev>`. Only these: other repowise commands write files or call an LLM.\n")))
+    (and (or lat repowise) (concat lat repowise))))
 
 (defun ygg-agent-maps--expected (root)
   (append (and (ygg-agent-maps--tool "ice-repo-map") '(map))
@@ -303,7 +307,7 @@ still to come. POINTER-ONLY keeps just the lat pointer line."
          (entry (ygg-agent-maps--entry root))
          (names (ygg-agent-maps--names root)))
     (if pointer-only
-        (when-let* ((line (ygg-agent-maps--pointer names)))
+        (when-let* ((line (ygg-agent-maps--pointer names root)))
           (list (concat "<project-maps>\n" line "</project-maps>") nil nil))
       (ygg-agent-maps--wait entry)
       (let* ((map (and (not (memq 'map sent)) (plist-get entry :map)))
@@ -311,17 +315,18 @@ still to come. POINTER-ONLY keeps just the lat pointer line."
                            (plist-get entry :summary)
                            (string-trim (ygg-agent-maps--drop-details
                                          (plist-get entry :summary)))))
+             (pointer (ygg-agent-maps--pointer names root))
              (parts (append (and map '(map)) (and summary '(summary))))
              (more (and (> (plist-get entry :pending) 0)
                         (cl-set-difference (ygg-agent-maps--expected root)
                                            (append sent parts)))))
-        (when parts
+        (when (or parts (and pointer (not more)))
           (list (concat
                  "<project-maps>\n"
                  (and map (format "<repo-map>\n%s\n</repo-map>\n" map))
                  (and summary (format "<features>\n%s\n</features>\n" summary))
                  (and more "Maps are still generating for this project.\n")
-                 (ygg-agent-maps--pointer names)
+                 pointer
                  "</project-maps>")
                 parts
                 (and more t)))))))

@@ -1146,16 +1146,12 @@ read twice."
 ;; session/new carries and nothing else, so an agent started from here
 ;; would otherwise reach fewer tools than the same agent started by hand
 (declare-function ygg-agent-user-mcp-servers "ygg-agent-conf" (agent &optional project))
-(declare-function ygg-agent-project-tool-mcp-servers "ygg-agent-conf" (project &optional taken))
 
 (defun ygg-aob--with-user-mcp (fn agent name project &rest rest)
   "Hand the session AGENT's own configured servers, beside ours."
-  (let* ((own (bound-and-true-p aob-acp-mcp-servers))
-         (user (ignore-errors (ygg-agent-user-mcp-servers agent project)))
-         (aob-acp-mcp-servers
-          (append own user
-                  (ignore-errors
-                    (ygg-agent-project-tool-mcp-servers project (append own user))))))
+  (let ((aob-acp-mcp-servers
+         (append (bound-and-true-p aob-acp-mcp-servers)
+                 (ignore-errors (ygg-agent-user-mcp-servers agent project)))))
     (apply fn agent name project rest)))
 
 (advice-add 'aob-acp--open :around #'ygg-aob--with-user-mcp)

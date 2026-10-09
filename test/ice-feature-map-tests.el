@@ -865,7 +865,7 @@
   (dolist (budget '(300 600 1200))
     (let ((out (ice-feature-map-tests--summary "--budget" (number-to-string budget))))
       (should (<= (length out) (* 4 budget)))
-      (should (string-match-p "lat_search / lat_section on \\[\\[features\\]\\]" out)))))
+      (should (string-match-p "`lat section|locate|refs <id>` on \\[\\[features\\]\\]" out)))))
 
 (ert-deftest ice-feature-map-summary-default-budget-is-1200 ()
   (let ((out (ice-feature-map-tests--summary)))

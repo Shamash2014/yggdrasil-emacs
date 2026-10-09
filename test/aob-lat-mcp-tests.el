@@ -16,6 +16,7 @@
           (exec-path (cons bin exec-path))
           (process-environment (cons (concat "PATH=" bin path-separator (getenv "PATH"))
                                      process-environment))
+          (aob-acp-lat-mcp t)
           (aob-acp-mcp-servers nil))
      (make-directory bin t)
      (dolist (name '("lat" "node"))
@@ -28,6 +29,14 @@
 (defun aob-lat-tests--lats (root &optional init)
   (seq-filter (lambda (e) (equal (plist-get e :name) "lat"))
               (append (aob-acp--mcp-servers (or init aob-lat-tests--caps) root) nil)))
+
+(ert-deftest aob-lat-default-attaches-nothing ()
+  (should-not (default-value 'aob-acp-lat-mcp))
+  (aob-lat-tests--with root
+    (make-directory (expand-file-name "lat.md" root))
+    (should (aob-acp-lat-entry root))
+    (let ((aob-acp-lat-mcp nil))
+      (should-not (aob-lat-tests--lats root)))))
 
 (ert-deftest aob-lat-every-agent-gets-one-absolute-server-with-lat-md ()
   (aob-lat-tests--with root

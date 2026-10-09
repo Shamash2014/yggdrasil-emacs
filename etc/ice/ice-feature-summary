@@ -8,7 +8,7 @@ const HELP = `usage: ice-feature-summary [--root DIR] [--file PATH] [--budget TO
 Prints one line per feature of lat.md/features.md:
   - <Feature>: <lead> — keys: <top 3 keys> — code: <1-2 main files>
 within --budget tokens (ceil(chars/4), default 1200), then one line pointing
-at lat_search / lat_section on [[features]]. Over budget, detail is dropped
+at \`lat section|locate|refs <id>\` on [[features]]. Over budget, detail is dropped
 from every line in a fixed order (second file, keys, lead length), then the
 last features. The output is deterministic and assumes nothing about the
 language or the key notation of the repository.`;
@@ -147,7 +147,7 @@ function render(feature, step) {
   return `- ${parts.join(" — ")}`;
 }
 
-const TAIL = "Details: query lat_search / lat_section on [[features]].";
+const TAIL = "Details: `lat section|locate|refs <id>` on [[features]].";
 
 function summarize(features, budgetTokens) {
   const limit = budgetTokens * 4;
