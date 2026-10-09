@@ -770,22 +770,25 @@ Sections are read here; lat locate is asked only when that finds none."
       n)))
 
 (defun ygg-ice-context-entry (item)
-  "ITEM as an aob context entry: a section's own text, else the whole file."
+  "ITEM as an aob context entry: a Repowise entry's own text, a section's
+own text, else the whole file."
   (let ((file (plist-get item :file)))
-    (when (file-regular-p file)
-      (if (plist-get item :section)
-          (let* ((beg (plist-get item :line))
-                 (end (ygg-ice--heading-end file beg)))
-            (with-temp-buffer
-              (insert-file-contents file)
-              (goto-char (point-min))
-              (forward-line (1- beg))
-              (let ((from (point)))
-                (forward-line (1+ (- end beg)))
-                (list :file file :text (buffer-substring-no-properties from (point))
-                      :beg beg :end end))))
-        (list :file file
-              :text (with-temp-buffer (insert-file-contents file) (buffer-string)))))))
+    (if (eq (plist-get item :kind) 'repowise)
+        (list :file file :text (plist-get item :text))
+      (when (file-regular-p file)
+        (if (plist-get item :section)
+            (let* ((beg (plist-get item :line))
+                   (end (ygg-ice--heading-end file beg)))
+              (with-temp-buffer
+                (insert-file-contents file)
+                (goto-char (point-min))
+                (forward-line (1- beg))
+                (let ((from (point)))
+                  (forward-line (1+ (- end beg)))
+                  (list :file file :text (buffer-substring-no-properties from (point))
+                        :beg beg :end end))))
+          (list :file file
+                :text (with-temp-buffer (insert-file-contents file) (buffer-string))))))))
 
 (defun ygg-ice-send-context (items)
   "Add ITEMS to the agent context, the list SPC a X shows."

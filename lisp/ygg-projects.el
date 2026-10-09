@@ -19,6 +19,7 @@
 (require 'ygg-ui)
 (require 'ygg-project-commands nil t)
 (require 'ygg-git nil t)
+(require 'ygg-repowise)
 (require 'vui nil t)
 
 (declare-function ygg-term-open-in "layer-terminal" (root))
@@ -766,23 +767,26 @@ scan already learned not to do."
 (declare-function ygg-ice-changes-list "ygg-ice" ())
 (declare-function ygg-ice-send-quickfix "ygg-ice" (items))
 (declare-function ygg-ice-send-context "ygg-ice" (items))
+(declare-function ygg-agent-maps--repowise-update "ygg-agent-maps" (root next))
 
 (defun ygg-projects--scan-context ()
   "Ask for the projects' ICE docs to be read again when stat says they moved.
 The read is queued on a timer and starts no process; the cache it fills
 is all the drawing ever looks at."
-  (when (fboundp 'ygg-ice-context-scan)
-    (dolist (root (ygg-projects--roots))
-      (unless (file-remote-p root)
-        (ygg-ice-context-scan root)))))
+  (dolist (root (ygg-projects--roots))
+    (unless (file-remote-p root)
+      (when (fboundp 'ygg-ice-context-scan) (ygg-ice-context-scan root))
+      (ygg-repowise-scan root))))
 
 (defun ygg-projects--context-spec (root)
   "ROOT's Context row, or nil where it has no changes, lat.md, ADRs,
-glossary or C4 model: a row of zeros in every project says nothing."
-  (when (and (fboundp 'ygg-ice-context-present-p)
-             (not (file-remote-p root))
-             (ygg-ice-context-present-p root))
-    (let ((n (ygg-ice-context-count root)))
+glossary, C4 model or Repowise index: a row of zeros in every project
+says nothing.  Its count is the open changes, whatever the groups hold."
+  (when (and (not (file-remote-p root))
+             (or (and (fboundp 'ygg-ice-context-present-p)
+                      (ygg-ice-context-present-p root))
+                 (ygg-repowise-present-p root)))
+    (let ((n (if (fboundp 'ygg-ice-context-count) (ygg-ice-context-count root) 0)))
       (list 'context (ygg-projects--icon "nf-md-book_open_outline" "C")
             "Context" (ygg-projects--counts n n)))))
 
@@ -1417,11 +1421,82 @@ step.  What is under a folder carries that folder as its project."
                          (ygg-projects--entry-nodes d 'agents cells)))))))
           (ygg-projects--folders root)))
 
+(defconst ygg-projects--context-groups
+  '((openspec "OpenSpec" change) (lat "lat" section) (adrs "ADRs" adr)
+    (glossary "Glossary" glossary) (c4 "C4" c4))
+  "The Context row's groups as (KEY LABEL KIND), the kind of item each holds.")
+
+(defvar ygg-projects--context-flipped nil
+  "Context groups, as (ROOT . KEY), shown the other way from their default.
+OpenSpec opens by default; the other groups start folded.")
+
+(defun ygg-projects--context-group-p (entry)
+  "Non-nil when ENTRY heads a Context group."
+  (and (consp entry) (proper-list-p entry) (plist-get entry :group) t))
+
+(defun ygg-projects--context-group-open-p (root key)
+  (xor (eq key 'openspec)
+       (member (cons root key) ygg-projects--context-flipped)))
+
+(defun ygg-projects--repowise-label (root)
+  "The Repowise group's label: how long ago the index was written, and
+whether a commit has landed since."
+  (concat "Repowise " (ygg-projects--ago (ygg-repowise-indexed-at root))
+          (and (ygg-repowise-stale-p root) " stale")))
+
+(defun ygg-projects--context-groups (root)
+  "ROOT's Context entries in their groups as (KEY LABEL CELLS), the empty
+ones left out; from the caches only."
+  (let ((cells (and (fboundp 'ygg-ice-context-entries) (ygg-ice-context-entries root))))
+    (delq nil
+          (append
+           (mapcar (lambda (g)
+                     (when-let* ((mine (seq-filter
+                                        (lambda (c) (eq (plist-get (cdr c) :kind) (nth 2 g)))
+                                        cells)))
+                       (list (car g) (nth 1 g) mine)))
+                   ygg-projects--context-groups)
+           (list (and (ygg-repowise-cached-p root)
+                      (list 'repowise (ygg-projects--repowise-label root)
+                            (ygg-repowise-entries root))))))))
+
+(defun ygg-projects--context-nodes (root)
+  "ROOT's Context row: each group, and under one that is open its entries,
+set in a step."
+  (or (mapcan
+       (lambda (group)
+         (pcase-let* ((`(,key ,label ,cells) group)
+                      (open (ygg-projects--context-group-open-p root key)))
+           (cons (ygg-projects--entry-text
+                  (concat (if open "▾ " "▸ ") label) root 'context
+                  (list :ice t :group key :badge (number-to-string (length cells))
+                        :items (mapcar #'cdr cells)))
+                 (when open
+                   (let ((ygg-projects-entry-indent (+ 2 ygg-projects-entry-indent)))
+                     (mapcar (lambda (c)
+                               (ygg-projects--entry-text (car c) root 'context (cdr c)))
+                             cells))))))
+       (ygg-projects--context-groups root))
+      (list (ygg-projects--entry-text "— none —" root 'context nil))))
+
+(defun ygg-projects--toggle-context-group (entry root)
+  "Fold or unfold the Context group ENTRY heads; nil when it heads none,
+so TAB keeps its other use."
+  (when (ygg-projects--context-group-p entry)
+    (let ((cell (cons root (plist-get entry :group))))
+      (setq ygg-projects--context-flipped
+            (if (member cell ygg-projects--context-flipped)
+                (remove cell ygg-projects--context-flipped)
+              (cons cell ygg-projects--context-flipped))))
+    t))
+
 (defun ygg-projects--entry-nodes (root kind &optional cells)
   "The lines of ROOT's KIND row, out of CELLS when they are known."
-  (if (and (eq kind 'folders) (not cells))
-      (ygg-projects--folder-nodes root)
-    (ygg-projects--cell-nodes root kind cells)))
+  (cond ((and (eq kind 'folders) (not cells))
+         (ygg-projects--folder-nodes root))
+        ((and (eq kind 'context) (not cells))
+         (ygg-projects--context-nodes root))
+        (t (ygg-projects--cell-nodes root kind cells))))
 
 (defun ygg-projects--cell-nodes (root kind cells)
   (mapcan (lambda (cell)
@@ -1633,6 +1708,8 @@ never compared by value: that walks its whole history."
          (aob-session-id entry))
         ((and (consp entry) (proper-list-p entry) (plist-get entry :acp-id))
          (plist-get entry :acp-id))
+        ((ygg-projects--context-group-p entry)
+         (format "group:%s" (plist-get entry :group)))
         ((and (consp entry) (eq (car entry) 'docker))
          (plist-get (cdr entry) :name))
         ((bufferp entry) (buffer-name entry))
@@ -1938,13 +2015,31 @@ rest are pinned after them."
                           targets ", ")))))
 
 (defun ygg-projects--context-targets ()
-  "The Context entries selected, or the one on this line."
-  (if (ygg-projects--selecting-p)
-      (ygg-projects--selected-entries 'context)
-    (when-let* (((eq (get-text-property (line-beginning-position) 'ygg-row) 'context))
-                (entry (get-text-property (line-beginning-position) 'ygg-entry))
-                ((consp entry)))
-      (list entry))))
+  "The Context entries selected, or the one on this line.
+A group's header stands for every entry the group holds."
+  (delete-dups
+   (mapcan (lambda (entry)
+             (if (ygg-projects--context-group-p entry)
+                 (copy-sequence (plist-get entry :items))
+               (list entry)))
+           (if (ygg-projects--selecting-p)
+               (ygg-projects--selected-entries 'context)
+             (when-let* (((eq (get-text-property (line-beginning-position) 'ygg-row) 'context))
+                         (entry (get-text-property (line-beginning-position) 'ygg-entry))
+                         ((consp entry)))
+               (list entry))))))
+
+(defun ygg-projects--send-quickfix (items)
+  (ygg-ice-send-quickfix (ygg-repowise-rows items)))
+
+(defun ygg-projects--context-visit (entry)
+  "Open the Context ENTRY; a group's header, or a Repowise entry, lists
+its files in the quickfix instead."
+  (if (or (ygg-projects--context-group-p entry)
+          (eq (plist-get entry :kind) 'repowise))
+      (ygg-projects--send-quickfix
+       (if (ygg-projects--context-group-p entry) (plist-get entry :items) (list entry)))
+    (ygg-ice-visit-item entry)))
 
 (defun ygg-projects--send-context (send what)
   "Hand the Context entries selected, or the one here, to SEND.
@@ -1957,12 +2052,26 @@ WHAT names where they go, for when there is nothing to hand over."
 (defun ygg-projects-context-quickfix ()
   "Send the Context entries selected, or the one here, to the quickfix."
   (interactive)
-  (ygg-projects--send-context #'ygg-ice-send-quickfix "the quickfix"))
+  (ygg-projects--send-context #'ygg-projects--send-quickfix "the quickfix"))
 
 (defun ygg-projects-context-to-agent ()
   "Add the Context entries selected, or the one here, to the agent context."
   (interactive)
   (ygg-projects--send-context #'ygg-ice-send-context "the agent context"))
+
+(defun ygg-projects-repowise-update ()
+  "Refresh the Repowise index of the project on this line."
+  (interactive)
+  (let ((root (get-text-property (line-beginning-position) 'ygg-project))
+        (entry (get-text-property (line-beginning-position) 'ygg-entry)))
+    (unless (and root (consp entry)
+                 (or (eq (plist-get entry :group) 'repowise)
+                     (eq (plist-get entry :kind) 'repowise)))
+      (user-error "projects: no Repowise group here"))
+    (unless (fboundp 'ygg-agent-maps--repowise-update) (require 'ygg-agent-maps nil t))
+    (unless (fboundp 'ygg-agent-maps--repowise-update)
+      (user-error "projects: no repowise update available"))
+    (ygg-agent-maps--repowise-update root (lambda () (ygg-repowise-scan root)))))
 
 (defun ygg-projects-delete ()
   "Remove what this line stands for: a session for good, or a project.
@@ -2259,6 +2368,12 @@ going on, not the history of the project."
   (let ((root (get-text-property (line-beginning-position) 'ygg-project))
         (kind (get-text-property (line-beginning-position) 'ygg-row)))
     (cond ((null root) nil)
+          ((ygg-projects--context-group-p
+            (get-text-property (line-beginning-position) 'ygg-entry))
+           (and (ygg-projects--context-group-open-p
+                 root (plist-get (get-text-property (line-beginning-position) 'ygg-entry)
+                                 :group))
+                t))
           ((get-text-property (line-beginning-position) 'ygg-entry) nil)
           ((eq kind 'project) (equal root ygg-projects--open))
           (t (and (member (cons root kind) ygg-projects--open-row) t)))))
@@ -2266,7 +2381,9 @@ going on, not the history of the project."
 (defun ygg-projects-open-row ()
   "Open what this line stands for, or go into it when it is a thing."
   (interactive)
-  (cond ((get-text-property (line-beginning-position) 'ygg-entry)
+  (cond ((and (get-text-property (line-beginning-position) 'ygg-entry)
+              (not (ygg-projects--context-group-p
+                    (get-text-property (line-beginning-position) 'ygg-entry))))
          (ygg-projects-visit))
         ((not (ygg-projects--open-p)) (ygg-projects-toggle))))
 
@@ -2328,6 +2445,8 @@ The line keeps its place on screen; what opens, opens below it."
        (get-text-property (line-beginning-position) 'ygg-entry)))
      ((ygg-projects--toggle-folder
        (get-text-property (line-beginning-position) 'ygg-entry)))
+     ((ygg-projects--toggle-context-group
+       (get-text-property (line-beginning-position) 'ygg-entry) root))
      ;; a line under an umbrella's repository folds that repository, and
      ;; point goes back to its line, the one that stays
      ((and (get-text-property (line-beginning-position) 'ygg-entry)
@@ -2461,7 +2580,7 @@ umbrella's Folders row moves that repository."
            (if (and (consp entry) (eq (car entry) 'docker))
                (ygg-projects--docker-logs root (plist-get (cdr entry) :name))
              (pop-to-buffer entry)))
-          ('context (ygg-ice-visit-item entry)))
+          ('context (ygg-projects--context-visit entry)))
       (pcase row
       ('project (ygg-projects-open))
       ('agents
@@ -2535,6 +2654,7 @@ umbrella's Folders row moves that repository."
     (define-key map "V" #'ygg-toggle-visual)
     (define-key map "Q" #'ygg-projects-context-quickfix)
     (define-key map "c" #'ygg-projects-context-to-agent)
+    (define-key map "W" #'ygg-projects-repowise-update)
     (define-key map "q" #'ygg-projects-close)
     map)
   "The sidebar's own verbs, ahead of yggdrasil's normal state.")
@@ -2699,6 +2819,7 @@ turns while nobody is typing.  Out of sight, it only notes one is due."
 (defvar ygg-ice-context-changed-functions)
 (with-eval-after-load 'ygg-ice
   (add-hook 'ygg-ice-context-changed-functions #'ygg-projects--redraw-soon))
+(add-hook 'ygg-repowise-changed-functions #'ygg-projects--redraw-soon)
 (defvar aob-schedule-changed-hook)
 (with-eval-after-load 'aob-schedule
   (add-hook 'aob-schedule-changed-hook #'ygg-projects--redraw-soon))
