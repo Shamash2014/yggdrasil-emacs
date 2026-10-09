@@ -400,7 +400,7 @@ indentation (blank lines pass through); `ai' adds the header line above."
 (declare-function python-nav-end-of-statement "python")
 
 (defconst ygg-match--type-regexp
-  "\\`\\(?:[a-z_]*_\\)?\\(?:\\(?:class\\|struct\\|impl\\|interface\\|enum\\|trait\\|module\\|protocol\\|object\\|record\\)\\(?:_\\(?:definition\\|declaration\\|item\\|specifier\\)\\)?\\|type_\\(?:alias_\\)?\\(?:declaration\\|definition\\|item\\|statement\\)\\)\\'"
+  "\\`\\(?:[a-z_]*_\\)?\\(?:\\(?:class\\|struct\\|impl\\|interface\\|enum\\|trait\\|module\\|protocol\\|record\\)\\(?:_\\(?:definition\\|declaration\\|item\\|specifier\\)\\)?\\|object_\\(?:definition\\|declaration\\)\\|type_\\(?:alias_\\)?\\(?:declaration\\|definition\\|item\\|statement\\)\\)\\'"
   "Node types counted as a type/class definition; annotations never are.")
 
 (defconst ygg-match--function-regexp
@@ -438,12 +438,14 @@ passing over SKIP matches; a decorator wrapper counts with its definition."
 
 (defun ygg-match--ts-type-p (node)
   (let ((type (treesit-node-type (ygg-match--ts-unwrap node))))
-    (and (treesit-node-parent node)
+    (and (treesit-node-check node 'named)
+         (treesit-node-parent node)
          (not (string-suffix-p "_body" type))
          (string-match-p ygg-match--type-regexp type))))
 
 (defun ygg-match--ts-function-p (node)
-  (string-match-p ygg-match--function-regexp (treesit-node-type (ygg-match--ts-unwrap node))))
+  (and (treesit-node-check node 'named)
+       (string-match-p ygg-match--function-regexp (treesit-node-type (ygg-match--ts-unwrap node)))))
 
 (defun ygg-match--builtin-pred (kind)
   (pcase kind
@@ -703,7 +705,8 @@ the colon, else what sits between the first brace and the last."
                                (lambda (n) (seq-some (lambda (th) (ygg-match--ts-thing-p n th)) things))
                                skip)
                               (ygg-match--ts-ancestor
-                               (lambda (n) (string-match-p regexp (treesit-node-type n)))
+                               (lambda (n) (and (treesit-node-check n 'named)
+                                               (string-match-p regexp (treesit-node-type n))))
                                skip)))))
         (if (eq which 'around)
             (ygg-match--node-span node)

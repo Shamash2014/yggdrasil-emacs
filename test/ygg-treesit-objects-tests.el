@@ -188,3 +188,48 @@
     (should (equal (ygg-ts-objects-tests--text ?k 'around "first") "run(first, second)"))
     (should (equal (ygg-ts-objects-tests--text ?P 'around "a: In") "a: Int"))
     (should (equal (ygg-ts-objects-tests--text ?P 'around "b: In") "b: Int"))))
+
+(ert-deftest ygg-ts-keyword-selects-whole-ts ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript
+      "class A {\n  m() { return 1; }\n}\nfunction add(a: number) {\n  return a;\n}"
+    (should (string-prefix-p "class A {" (ygg-ts-objects-tests--text ?t 'around "clas")))
+    (should (string-prefix-p "function add" (ygg-ts-objects-tests--text ?f 'around "functio")))))
+
+(ert-deftest ygg-ts-keyword-selects-whole-go ()
+  (ygg-ts-objects-tests--in go-ts-mode go "package p\n\nfunc add(a int) int {\n\treturn a\n}\n"
+    (should (string-prefix-p "func add" (ygg-ts-objects-tests--text ?f 'around "fun")))))
+
+(ert-deftest ygg-ts-keyword-selects-whole-py ()
+  (ygg-ts-objects-tests--in python-ts-mode python "for i in xs:\n    f = lambda x: x\n"
+    (should (string-prefix-p "for i in xs" (ygg-ts-objects-tests--text ?l 'around "fo")))
+    (should (equal (ygg-ts-objects-tests--text ?f 'around "lambd") "lambda x: x"))))
+
+(ert-deftest ygg-ts-keyword-selects-whole-rust ()
+  (ygg-ts-objects-tests--in rust-ts-mode rust "struct S {\n    a: i32,\n}\n"
+    (should (string-prefix-p "struct S" (ygg-ts-objects-tests--text ?t 'around "stru")))))
+
+(ert-deftest ygg-ts-object-literal-is-not-a-type-ts ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript
+      "class A { m() { return {aa: 1}; } }"
+    (should (string-prefix-p "class A" (ygg-ts-objects-tests--text ?t 'around "{a")))))
+
+(defun ygg-ts-objects-tests--text-on (c which at)
+  (goto-char (point-min))
+  (search-forward at)
+  (goto-char (match-beginning 0))
+  (let ((b (ygg-match--textobject-bounds c which)))
+    (and b (buffer-substring-no-properties (car b) (cdr b)))))
+
+(ert-deftest ygg-ts-param-on-open-paren ()
+  (ygg-ts-objects-tests--in go-ts-mode go "package p\n\nfunc add(a int) int {\n\treturn a\n}\n"
+    (should (equal (ygg-ts-objects-tests--text-on ?P 'inside "(a int") "a int")))
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript "function add(a: number) {\n  return a;\n}"
+    (should (equal (ygg-ts-objects-tests--text-on ?P 'inside "(a: number") "a: number")))
+  (ygg-ts-objects-tests--in rust-ts-mode rust "fn add(a: i32) -> i32 {\n    a\n}\n"
+    (should (equal (ygg-ts-objects-tests--text-on ?P 'inside "(a: i32") "a: i32")))
+  (ygg-ts-objects-tests--in python-ts-mode python "def add(a, b):\n    return a\n"
+    (should (equal (ygg-ts-objects-tests--text-on ?P 'inside "(a, b") "a"))))
+
+(ert-deftest ygg-ts-string-not-selected-from-whitespace ()
+  (ygg-ts-objects-tests--in go-ts-mode go "package p\n\nfunc f() {\n\ts := \"str\"\n}\n"
+    (should-not (equal (ygg-ts-objects-tests--text-on ?S 'around " \"str") "\"str\""))))
