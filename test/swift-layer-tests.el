@@ -275,7 +275,7 @@
         (should (string-prefix-p "func fetch(" (text ?f "retr")))
         (should (string-prefix-p "struct Probe" (text ?t "retr")))
         (should (string-prefix-p "protocol Loader" (text ?t "load()")))
-        (should (equal (text ?P "retr") "retries: Int"))))))
+        (should (equal (text ?P "retr") ", retries: Int"))))))
 
 (ert-deftest swift-layer-split-arguments ()
   (let ((treesit-extra-load-path (swift-layer-test--grammar-path)))

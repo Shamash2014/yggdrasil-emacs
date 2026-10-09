@@ -299,6 +299,18 @@ preferred, else leading)."
                ((> idx 0) (cons (cdr (nth (1- idx) segs)) te))
                (t (cons tb te))))))))))
 
+(defun ygg-match--parameter-end (node)
+  "End of NODE extended over a default value that follows it as siblings."
+  (let ((next (treesit-node-next-sibling node)))
+    (cond
+     ((and next (equal (treesit-node-type next) "="))
+      (if-let* ((value (treesit-node-next-sibling next)))
+          (treesit-node-end value)
+        (treesit-node-end next)))
+     ((and next (equal (treesit-node-field-name next) "default_value"))
+      (treesit-node-end next))
+     (t (treesit-node-end node)))))
+
 (defun ygg-match--argument-treesit-bounds (which)
   "inside = the argument/parameter node; around adds one adjacent separator
 comma (trailing preferred, else leading). Matches only per-argument wrapper
@@ -310,7 +322,7 @@ so this returns nil and the comma-split fallback takes over."
                  (lambda (n) (or (ygg-match--ts-thing-p n 'argument)
                                  (string-match-p re (treesit-node-type n)))))))
       (when node
-        (ygg-match--argument-span (treesit-node-start node) (treesit-node-end node) which)))))
+        (ygg-match--argument-span (treesit-node-start node) (ygg-match--parameter-end node) which)))))
 
 (defun ygg-match--argument-span (ibeg iend which)
   (if (eq which 'inside)
@@ -345,7 +357,7 @@ so this returns nil and the comma-split fallback takes over."
                               kids)
                     (car (last (seq-filter (lambda (n) (< (treesit-node-end n) pt)) kids)))
                     (car kids))))
-      (ygg-match--argument-span (treesit-node-start kid) (treesit-node-end kid) which))))
+      (ygg-match--argument-span (treesit-node-start kid) (ygg-match--parameter-end kid) which))))
 
 (defun ygg-match--argument-bounds (which)
   (or (ygg-match--argument-children-bounds which)
@@ -671,11 +683,20 @@ the colon, else what sits between the first brace and the last."
         (cons (treesit-node-end first) (treesit-node-start last))
       (ygg-match--node-span node))))
 
+(defun ygg-match--child-of-type (node type)
+  (seq-find (lambda (n) (equal (treesit-node-type n) type))
+            (treesit-node-children node t)))
+
 (defun ygg-match--call-suffix-arguments (node)
-  (when-let* ((suffix (seq-find (lambda (n) (equal (treesit-node-type n) "call_suffix"))
-                                (treesit-node-children node t))))
-    (seq-find (lambda (n) (equal (treesit-node-type n) "value_arguments"))
-              (treesit-node-children suffix t))))
+  (when-let* ((suffix (ygg-match--child-of-type node "call_suffix")))
+    (ygg-match--child-of-type suffix "value_arguments")))
+
+(defun ygg-match--trailing-closure-body (node)
+  (when-let* ((suffix (ygg-match--child-of-type node "call_suffix"))
+              (closure (ygg-match--child-of-type suffix "lambda_literal")))
+    (if-let* ((body (ygg-match--child-of-type closure "statements")))
+        (ygg-match--node-span body)
+      (ygg-match--delimited-inner closure))))
 
 (defun ygg-match--simple-inner (node kind)
   (pcase kind
@@ -685,12 +706,18 @@ the colon, else what sits between the first brace and the last."
                  (ygg-match--delimited-inner node)
                (let ((b (ygg-match--node-span node)))
                  (if (> (- (cdr b) (car b)) 1) (cons (1+ (car b)) (1- (cdr b))) b))))
-    ('call (if-let* ((args (or (treesit-node-child-by-field-name node "arguments")
-                              (ygg-match--call-suffix-arguments node)
-                              (seq-find (lambda (n) (equal (treesit-node-type n) "token_tree"))
-                                        (treesit-node-children node t)))))
-               (ygg-match--delimited-inner args)
-             (ygg-match--node-span node)))
+    ('call (let* ((args (or (treesit-node-child-by-field-name node "arguments")
+                           (ygg-match--call-suffix-arguments node)
+                           (ygg-match--child-of-type node "arguments")
+                           (ygg-match--child-of-type node "token_tree")))
+                 (inner (and args (ygg-match--delimited-inner args)))
+                 (closure (ygg-match--trailing-closure-body node)))
+            (cond
+             ((and closure (or (null inner) (= (car inner) (cdr inner))
+                               (>= (point) (treesit-node-end args))))
+              closure)
+             (inner inner)
+             (t (ygg-match--node-span node)))))
     (_ (ygg-match--node-span node))))
 
 (defun ygg-match--simple-bounds (c which)
@@ -708,9 +735,10 @@ the colon, else what sits between the first brace and the last."
                                (lambda (n) (and (treesit-node-check n 'named)
                                                (string-match-p regexp (treesit-node-type n))))
                                skip)))))
-        (if (eq which 'around)
-            (ygg-match--node-span node)
-          (ygg-match--simple-inner node kind))))))
+        (cond
+         ((not (eq which 'around)) (ygg-match--simple-inner node kind))
+         ((eq c ?P) (ygg-match--argument-span (treesit-node-start node) (ygg-match--parameter-end node) which))
+         (t (ygg-match--node-span node)))))))
 
 ;;; Syntax-table string and comment fallback (S M) for buffers without a parser
 
@@ -880,7 +908,7 @@ level, and a selection already equal to it grows one level out."
 space an opening bracket pads with."
   (cond
    ((eq c 27) nil)
-   ((memq c '(?t ?<)) (ygg-match--read-tag))
+   ((memq c '(?x ?<)) (ygg-match--read-tag))
    ((eq c ?f) (ygg-match--read-function))
    ((assq c ygg-match--bracket-pairs)
     (pcase-let ((`(,open . ,close) (cdr (assq c ygg-match--bracket-pairs)))
@@ -892,7 +920,7 @@ space an opening bracket pads with."
   "Delimiters of the C pair around point as
 \(OUTER-BEG INNER-BEG INNER-END OUTER-END), or nil."
   (pcase c
-    (?t (let ((outer (ygg-match--tag-bounds 'around))
+    (?x (let ((outer (ygg-match--tag-bounds 'around))
               (inner (ygg-match--tag-bounds 'inside)))
           (when (and outer inner)
             (list (car outer) (car inner) (cdr inner) (cdr outer)))))

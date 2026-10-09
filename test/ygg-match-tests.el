@@ -39,9 +39,9 @@
     (should (equal pair nil))))
 
 (ert-deftest ygg-match--surround-pair-tag ()
-  "Surround pair for t reads tag."
+  "Surround pair for x reads tag."
   (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "div")))
-    (let ((pair (ygg-match--surround-pair ?t)))
+    (let ((pair (ygg-match--surround-pair ?x)))
       (should (equal pair (cons "<div>" "</div>"))))))
 
 (ert-deftest ygg-match--surround-pair-function ()
@@ -79,7 +79,7 @@
   (ygg-with-temp-buffer "word"
     (ygg-set-selection 1 5)
     (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "div")))
-      (ygg-match-surround ?t))
+      (ygg-match-surround ?x))
     (should (equal (buffer-string) "<div>word</div>"))))
 
 (ert-deftest ygg-match-surround-buffer-tag-with-attrs ()
@@ -88,7 +88,7 @@
     (ygg-set-selection 1 5)
     (cl-letf (((symbol-function 'read-string)
                (lambda (&rest _) "div class=\"x\"")))
-      (ygg-match-surround ?t))
+      (ygg-match-surround ?x))
     (should (equal (buffer-string) "<div class=\"x\">word</div>"))))
 
 (ert-deftest ygg-match-surround-buffer-function ()
@@ -255,7 +255,7 @@
     (should yggdrasil-local-mode)
     (insert "a <div class=\"x\">word</div> b")
     (ygg-set-selection 18 22)
-    (ygg-match-delete-surround ?t)
+    (ygg-match-delete-surround ?x)
     (should (equal (buffer-string) "a word b"))))
 
 (ert-deftest ygg-match-delete-surround-multi-selections ()
@@ -295,7 +295,7 @@
   (ygg-with-temp-buffer "(word)"
     (ygg-set-selection 2 6)
     (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "em")))
-      (ygg-match-replace-surround ?\) ?t))
+      (ygg-match-replace-surround ?\) ?x))
     (should (equal (buffer-string) "<em>word</em>"))))
 
 (ert-deftest ygg-match-replace-surround-tag-to-paren ()
@@ -306,7 +306,7 @@
     (should yggdrasil-local-mode)
     (insert "<em>word</em>")
     (ygg-set-selection 5 9)
-    (ygg-match-replace-surround ?t ?\))
+    (ygg-match-replace-surround ?x ?\))
     (should (equal (buffer-string) "(word)"))))
 
 (ert-deftest ygg-match-replace-surround-star-to-function ()
@@ -606,3 +606,12 @@
 
 (provide 'ygg-match-tests)
 ;;; ygg-match-tests.el ends here
+
+(ert-deftest ygg-match--surround-pair-tag-key-is-x-and-angle ()
+  (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "div")))
+    (should (equal (ygg-match--surround-pair ?<) (cons "<div>" "</div>"))))
+  (should-not (equal (ygg-match--surround-pair ?t) (cons "<div>" "</div>")))
+  (with-temp-buffer
+    (insert "List<Int> x")
+    (goto-char 7)
+    (should (equal (ygg-match--surround-bounds ?<) '(5 6 9 10)))))

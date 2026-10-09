@@ -39,7 +39,7 @@
 (ert-deftest ygg-ts-param-bounds-ts ()
   (ygg-ts-objects-tests--in typescript-ts-mode typescript "function test(a: number, b: string) {}"
     (should (equal (ygg-ts-objects-tests--text ?P 'inside "a:") "a: number"))
-    (should (equal (ygg-ts-objects-tests--text ?P 'around "a:") "a: number"))))
+    (should (equal (ygg-ts-objects-tests--text ?P 'around "a:") "a: number, "))))
 
 (ert-deftest ygg-ts-loop-bounds-ts ()
   (ygg-ts-objects-tests--in typescript-ts-mode typescript
@@ -186,8 +186,8 @@
     (should (equal (ygg-ts-objects-tests--text ?l 'inside "run") "\n    run(first, second)\n  "))
     (should (equal (ygg-ts-objects-tests--text ?k 'inside "first") "first, second"))
     (should (equal (ygg-ts-objects-tests--text ?k 'around "first") "run(first, second)"))
-    (should (equal (ygg-ts-objects-tests--text ?P 'around "a: In") "a: Int"))
-    (should (equal (ygg-ts-objects-tests--text ?P 'around "b: In") "b: Int"))))
+    (should (equal (ygg-ts-objects-tests--text ?P 'around "a: In") "a: Int, "))
+    (should (equal (ygg-ts-objects-tests--text ?P 'around "b: In") ", b: Int"))))
 
 (ert-deftest ygg-ts-keyword-selects-whole-ts ()
   (ygg-ts-objects-tests--in typescript-ts-mode typescript
@@ -233,3 +233,37 @@
 (ert-deftest ygg-ts-string-not-selected-from-whitespace ()
   (ygg-ts-objects-tests--in go-ts-mode go "package p\n\nfunc f() {\n\ts := \"str\"\n}\n"
     (should-not (equal (ygg-ts-objects-tests--text-on ?S 'around " \"str") "\"str\""))))
+
+(ert-deftest ygg-ts-elixir-call-inner-is-arguments ()
+  (ygg-ts-objects-tests--in elixir-ts-mode elixir "IO.puts(a, b)\nputs c, d\n"
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "IO.puts(a") "a, b"))
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "puts c") "c, d"))))
+
+(ert-deftest ygg-ts-swift-call-inner-trailing-closure ()
+  (add-to-list 'load-path ygg-ts-objects-tests--swift-mode-dir)
+  (skip-unless (and (treesit-ready-p 'swift t) (require 'swift-ts-mode nil t)))
+  (ygg-ts-objects-tests--in swift-ts-mode swift "c { 2 }\nf(a) { x }\n"
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "2") "2"))
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "(a") "a"))))
+
+(defun ygg-ts-objects-tests--without-param (text at)
+  (goto-char (point-min))
+  (search-forward at)
+  (let ((b (ygg-match--textobject-bounds ?P 'around)))
+    (concat (substring text 0 (1- (car b))) (substring text (1- (cdr b))))))
+
+(ert-deftest ygg-ts-swift-param-around-covers-default ()
+  (add-to-list 'load-path ygg-ts-objects-tests--swift-mode-dir)
+  (skip-unless (and (treesit-ready-p 'swift t) (require 'swift-ts-mode nil t)))
+  (let ((text "func f(a: Int = 1, b: Int = 2, c: Int = 3) {}\n"))
+    (ygg-ts-objects-tests--in swift-ts-mode swift text
+      (should (equal (ygg-ts-objects-tests--without-param text "a: In") "func f(b: Int = 2, c: Int = 3) {}\n"))
+      (should (equal (ygg-ts-objects-tests--without-param text "b: In") "func f(a: Int = 1, c: Int = 3) {}\n"))
+      (should (equal (ygg-ts-objects-tests--without-param text "c: In") "func f(a: Int = 1, b: Int = 2) {}\n")))))
+
+(ert-deftest ygg-ts-swift-call-inner-closure-with-empty-arguments ()
+  (add-to-list 'load-path ygg-ts-objects-tests--swift-mode-dir)
+  (skip-unless (and (treesit-ready-p 'swift t) (require 'swift-ts-mode nil t)))
+  (ygg-ts-objects-tests--in swift-ts-mode swift "n() { 3 }\n"
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "{ ") "3"))
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "n(") "3"))))
