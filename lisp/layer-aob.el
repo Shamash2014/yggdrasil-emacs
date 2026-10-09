@@ -5,6 +5,7 @@
 (require 'yggdrasil-leader)
 (require 'cl-lib)
 (require 'ygg-agent-conf)
+(require 'ygg-forge-config)
 (require 'ygg-pi)
 (require 'ygg-agent-maps)
 (require 'ygg-projects)
@@ -462,15 +463,7 @@ actions keep their tool title.  The short path stays the clickable target."
 ;; same env treatment as the SPC a a terminals: per-project config home
 ;; (CLAUDE_CONFIG_DIR via marker file / ~/.agents-conf) and the mise tool
 ;; env inside a login shell
-(setq aob-acp-environment-function
-      (lambda (agent project _dir &optional _isolate)
-        ;; the project's config home, the same one SPC a s and SPC a a
-        ;; hand their agents.  An isolated connection is a process of its
-        ;; own, not a login of its own: a home per worker is a worker
-        ;; that has never authenticated, which is an agent that cannot
-        ;; start
-        (when-let* ((env (ygg-agent--known-config-env agent agent project)))
-          (list env))))
+(setq aob-acp-environment-function #'ygg-agent-acp-environment)
 
 (setq aob-acp-session-env-function #'ygg-pi-session-env)
 
@@ -919,8 +912,9 @@ case.  An unset is a bare name, which Emacs passes on as removal."
      (if (file-remote-p project)
          (delete-dups (mapcar (lambda (home) (plist-get (cdr home) :var))
                               ygg-agent--config-homes))
-       (delq nil (mapcar (lambda (kind) (ygg-agent--config-env kind kind project))
-                         (mapcar #'car ygg-agent--config-homes))))
+       (append (delq nil (mapcar (lambda (kind) (ygg-agent--config-env kind kind project))
+                                 (mapcar #'car ygg-agent--config-homes)))
+               (ygg-forge-config-env project)))
      ygg-agent-session-env-vars)))
 
 (defun ygg-agent--terminal-env ()

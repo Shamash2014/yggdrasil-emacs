@@ -14,6 +14,7 @@
 (require 'seq)
 (require 'magit)
 (require 'url-util)
+(require 'ygg-forge-config)
 
 (defvar ygg-magit-diff-line-limit)
 (defvar ygg-lab-host)
@@ -184,6 +185,7 @@ it said.  Nothing it runs may ask a question."
          (process-environment
           (append (list "GIT_TERMINAL_PROMPT=0" "GH_PROMPT_DISABLED=1")
                   (and git (ygg-git-compare--ssh-environment))
+                  (ygg-forge-config-program-env program default-directory)
                   process-environment))
          (out (generate-new-buffer " *ygg-git-compare-forge*"))
          (err (generate-new-buffer " *ygg-git-compare-forge-err*"))
@@ -1531,7 +1533,8 @@ started in ROOT when new; answer its session."
 
 (defun ygg-git-compare--glab-global-config ()
   (seq-find #'file-exists-p
-            (delq nil (list (when-let* ((dir (getenv "GLAB_CONFIG_DIR")))
+            (delq nil (list (ygg-forge-config-login-file "glab" default-directory)
+                            (when-let* ((dir (getenv "GLAB_CONFIG_DIR")))
                               (expand-file-name "config.yml" dir))
                             (when-let* ((dir (getenv "XDG_CONFIG_HOME")))
                               (expand-file-name "glab-cli/config.yml" dir))
@@ -1569,7 +1572,8 @@ started in ROOT when new; answer its session."
 
 (defun ygg-git-compare--gh-hosts ()
   (when-let* ((file (seq-find #'file-readable-p
-                              (delq nil (list (when-let* ((dir (getenv "GH_CONFIG_DIR")))
+                              (delq nil (list (ygg-forge-config-login-file "gh" default-directory)
+                                              (when-let* ((dir (getenv "GH_CONFIG_DIR")))
                                                 (expand-file-name "hosts.yml" dir))
                                               (when-let* ((dir (getenv "XDG_CONFIG_HOME")))
                                                 (expand-file-name "gh/hosts.yml" dir))

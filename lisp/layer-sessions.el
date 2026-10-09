@@ -388,6 +388,7 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
 ;;; pin folder, clone layout, where am I and agent rows are read monthly:
 ;;; they answer to the colon line and to M-x instead of to a letter.
 (require 'ygg-project-scan)
+(require 'ygg-forge-config)
 
 (defvar ygg-leader-workspace-map (make-sparse-keymap) "The p prefix: zones (spaces).")
 
@@ -416,6 +417,7 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
   "F" #'ygg-project-remove-folder :label "drop a folder from this project"
   "a" #'ygg-project-add :label "remember a project"
   "T" #'ygg-project-setup :label "install the project's toolchain"
+  "L" #'ygg-project-forge-login :label "log gh / glab in for this project"
   "D" #'ygg-project-remove :label "forget a project")
 
 (yggdrasil-leader-def "p" ygg-leader-workspace-map "zones")

@@ -12,6 +12,7 @@
 (require 'subr-x)
 (require 'seq)
 (require 'iso8601)
+(require 'ygg-forge-config)
 (require 'magit)
 
 (declare-function ygg-git-compare--remote "ygg-git-compare" ())
@@ -58,6 +59,9 @@ standard output and standard error; a status of nil means it did not start."
   (let* ((default-directory (if (file-remote-p default-directory)
                                 temporary-file-directory
                               default-directory))
+         (process-environment
+          (append (ygg-forge-config-program-env (car command) default-directory)
+                  process-environment))
          (out (generate-new-buffer " *ygg-review-requests*"))
          (err (generate-new-buffer " *ygg-review-requests-err*")))
     (condition-case nil

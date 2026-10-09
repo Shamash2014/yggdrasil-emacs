@@ -1,0 +1,181 @@
+;;; ygg-forge-config-tests.el --- per-project gh and glab logins -*- lexical-binding: t; -*-
+
+;;; Code:
+
+(require 'ert)
+(require 'cl-lib)
+(require 'magit)
+(require 'ygg-git-compare)
+(require 'ygg-forge-config)
+(require 'ygg-git-review-requests)
+
+(defmacro ygg-forge-config-tests--with-project (logins &rest body)
+  "Run BODY in a fake project whose LOGINS, a list of (KIND FILE), exist."
+  (declare (indent 1))
+  `(let* ((conf (file-name-as-directory (make-temp-file "ygg-forge-conf-" t)))
+          (root (file-name-as-directory (make-temp-file "ygg-forge-proj-" t)))
+          (ygg-agent-conf-root conf)
+          (default-directory root)
+          (ygg-forge-config--repos (make-hash-table :test #'equal))
+          (name (file-name-nondirectory (directory-file-name root)))
+          (process-environment
+           (append (list "GH_CONFIG_DIR=/nonexistent-gh" "GLAB_CONFIG_DIR=/nonexistent-glab"
+                         "GITLAB_HOST" "GL_HOST" "XDG_CONFIG_HOME=/nonexistent-xdg")
+                   process-environment)))
+     (unwind-protect
+         (progn
+           (pcase-dolist (`(,kind ,file ,text) ,logins)
+             (let ((dir (expand-file-name (concat name "/" kind) conf)))
+               (make-directory dir t)
+               (with-temp-file (expand-file-name file dir) (insert text))))
+           ,@body)
+       (delete-directory conf t)
+       (delete-directory root t))))
+
+(ert-deftest ygg-forge-config-env-needs-a-login-file ()
+  (ygg-forge-config-tests--with-project '(("gh" "hosts.yml" "git.example:\n"))
+    (let ((env (ygg-forge-config-env root)))
+      (should (equal 1 (length env)))
+      (should (string-prefix-p "GH_CONFIG_DIR=" (car env)))
+      (should (string-suffix-p (concat name "/gh") (car env))))
+    (should-not (ygg-forge-config-env root "glab")))
+  (ygg-forge-config-tests--with-project nil
+    (make-directory (expand-file-name (concat name "/gh") conf) t)
+    (should-not (ygg-forge-config-env root))))
+
+(ert-deftest ygg-forge-config-env-names-only-the-forge-with-a-login ()
+  (ygg-forge-config-tests--with-project '(("glab" "config.yml" "hosts:\n"))
+    (should (seq-find (lambda (e) (string-prefix-p "GLAB_CONFIG_DIR=" e))
+                      (ygg-forge-config-env root)))
+    (should-not (seq-find (lambda (e) (string-prefix-p "GH_CONFIG_DIR=" e))
+                          (ygg-forge-config-env root)))))
+
+(ert-deftest ygg-forge-config-compare-process-sees-project-vars ()
+  (ygg-forge-config-tests--with-project '(("gh" "hosts.yml" "git.example:\n"))
+    (let (seen)
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest _) (push (getenv "GH_CONFIG_DIR") seen) (signal 'file-error nil)))
+                ((symbol-function 'make-pipe-process) (lambda (&rest _) nil)))
+        (ygg-git-compare--forge-async "gh" '("pr" "list") #'ignore)
+        (should (string-suffix-p (concat name "/gh") (car seen)))
+        (ygg-git-compare--forge-async "glab" '("api" "x") #'ignore)
+        (should (equal "/nonexistent-glab" (getenv "GLAB_CONFIG_DIR")))))))
+
+(ert-deftest ygg-forge-config-without-login-leaves-global ()
+  (ygg-forge-config-tests--with-project nil
+    (let (seen)
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest _) (push (getenv "GH_CONFIG_DIR") seen) (signal 'file-error nil)))
+                ((symbol-function 'make-pipe-process) (lambda (&rest _) nil)))
+        (ygg-git-compare--forge-async "gh" '("pr" "list") #'ignore)
+        (should (equal "/nonexistent-gh" (car seen)))))))
+
+(ert-deftest ygg-forge-config-review-requests-spawn-sees-project-vars ()
+  (ygg-forge-config-tests--with-project '(("glab" "config.yml" "hosts:\n"))
+    (let (seen)
+      (cl-letf (((symbol-function 'make-process)
+                 (lambda (&rest _) (push (getenv "GLAB_CONFIG_DIR") seen) (signal 'file-error nil))))
+        (ygg-git-review-requests--spawn '("glab" "api" "user") #'ignore)
+        (should (string-suffix-p (concat name "/glab") (car seen)))
+        (setq seen nil)
+        (ygg-git-review-requests--spawn '("git" "status") #'ignore)
+        (should (equal "/nonexistent-glab" (car seen)))))))
+
+(ert-deftest ygg-forge-config-host-readers-prefer-project-file ()
+  (ygg-forge-config-tests--with-project
+      '(("gh" "hosts.yml" "ghe.project.example:\n    user: x\n")
+        ("glab" "config.yml" "hosts:\n    gl.project.example:\n        api_host: gl.project.example\n"))
+    (should (equal '("ghe.project.example") (ygg-git-compare--gh-hosts)))
+    (should (assoc "gl.project.example" (ygg-git-compare--glab-hosts)))))
+
+(ert-deftest ygg-forge-config-login-builds-command-and-env ()
+  (ygg-forge-config-tests--with-project nil
+    (let (call)
+      (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                ((symbol-function 'completing-read)
+                 (let ((answers '("glab" "gl.example.test")))
+                   (lambda (&rest _) (pop answers))))
+                ((symbol-function 'ygg-forge-config--run-terminal)
+                 (lambda (r argv env) (setq call (list r argv env)))))
+        (ygg-project-forge-login)
+        (should (equal (expand-file-name root) (nth 0 call)))
+        (should (equal '("glab" "auth" "login" "--hostname" "gl.example.test") (nth 1 call)))
+        (should (equal (list (concat "GLAB_CONFIG_DIR="
+                                     (expand-file-name (concat name "/glab") conf)))
+                       (nth 2 call)))
+        (should (file-directory-p (expand-file-name (concat name "/glab") conf)))
+        (should-not (directory-files (expand-file-name (concat name "/glab") conf) nil "\\`[^.]"))))))
+
+(ert-deftest ygg-forge-config-login-gh-has-no-hostname ()
+  (ygg-forge-config-tests--with-project nil
+    (let (call)
+      (cl-letf (((symbol-function 'project-current) (lambda (&rest _) nil))
+                ((symbol-function 'completing-read) (lambda (&rest _) "gh"))
+                ((symbol-function 'ygg-forge-config--run-terminal)
+                 (lambda (r argv env) (setq call (list r argv env)))))
+        (ygg-project-forge-login)
+        (should (equal '("gh" "auth" "login") (nth 1 call)))
+        (should (string-prefix-p "GH_CONFIG_DIR=" (car (nth 2 call))))))))
+
+(ert-deftest ygg-forge-config-acp-environment-carries-homes-and-logins ()
+  (ygg-forge-config-tests--with-project
+      '(("gh" "hosts.yml" "git.example:\n") ("glab" "config.yml" "hosts:\n"))
+    (let ((env (ygg-agent-acp-environment "claude" root root nil)))
+      (should (seq-find (lambda (e) (string-prefix-p "CLAUDE_CONFIG_DIR=" e)) env))
+      (should (seq-find (lambda (e) (string-suffix-p (concat name "/gh") e)) env))
+      (should (seq-find (lambda (e) (string-suffix-p (concat name "/glab") e)) env))
+      (should (seq-find (lambda (e) (string-prefix-p "CODEX_HOME=" e))
+                        (ygg-agent-acp-environment "codex" root root nil)))
+      (should (seq-find (lambda (e) (string-prefix-p "PI_CODING_AGENT_DIR=" e))
+                        (ygg-agent-acp-environment "pi" root root nil))))))
+
+(ert-deftest ygg-forge-config-acp-environment-omits-absent-logins ()
+  (ygg-forge-config-tests--with-project nil
+    (let ((env (ygg-agent-acp-environment "claude" root root nil)))
+      (should-not (seq-find (lambda (e) (string-match-p "\\`GL?A?B?_?CONFIG_DIR=\\|\\`GH_CONFIG_DIR=" e))
+                            env)))))
+
+(ert-deftest ygg-forge-config-run-terminal-missing-ghostel-is-user-error ()
+  (cl-letf (((symbol-function 'require)
+             (lambda (feature &rest _) (not (eq feature 'ghostel)))))
+    (should-error (ygg-forge-config--run-terminal "/tmp/" '("gh") nil) :type 'user-error)))
+
+(ert-deftest ygg-forge-config-run-terminal-failure-cleans-up ()
+  (let (window-deleted buffer-seen)
+    (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+              ((symbol-function 'ygg--term-split-window) (lambda () 'fake-window))
+              ((symbol-function 'window-live-p) (lambda (w) (eq w 'fake-window)))
+              ((symbol-function 'frame-root-window-p) (lambda (_) nil))
+              ((symbol-function 'delete-window) (lambda (w) (setq window-deleted w)))
+              ((symbol-function 'set-window-buffer) #'ignore)
+              ((symbol-function 'select-window) #'ignore)
+              ((symbol-function 'ygg-call-with-buffer-env)
+               (lambda (thunk &optional _env) (funcall thunk)))
+              ((symbol-function 'ghostel-exec)
+               (lambda (buffer &rest _) (setq buffer-seen buffer) (error "boom"))))
+      (should-error (ygg-forge-config--run-terminal temporary-file-directory '("gh") nil)
+                    :type 'user-error)
+      (should (eq 'fake-window window-deleted))
+      (should-not (buffer-live-p buffer-seen)))))
+
+(ert-deftest ygg-forge-config-login-glab-hosts-read-in-project-root ()
+  (ygg-forge-config-tests--with-project
+      '(("glab" "config.yml" "hosts:\n    gl.project.example:\n        api_host: gl.project.example\n"))
+    (let ((elsewhere (file-name-as-directory (make-temp-file "ygg-forge-else-" t)))
+          (answers (list "glab" ""))
+          offered)
+      (unwind-protect
+          (let ((default-directory elsewhere))
+            (cl-letf (((symbol-function 'project-current) (lambda (&rest _) 'fake))
+                      ((symbol-function 'project-root) (lambda (_) root))
+                      ((symbol-function 'completing-read)
+                       (lambda (prompt coll &rest _)
+                         (when (string-prefix-p "GitLab" prompt) (setq offered coll))
+                         (pop answers)))
+                      ((symbol-function 'ygg-forge-config--run-terminal) #'ignore))
+              (ygg-project-forge-login)
+              (should (member "gl.project.example" offered))))
+        (delete-directory elsewhere t)))))
+
+(provide 'ygg-forge-config-tests)
+;;; ygg-forge-config-tests.el ends here
