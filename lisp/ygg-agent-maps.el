@@ -419,14 +419,19 @@ still to come. POINTER-ONLY keeps just the lat pointer line."
 (defun ygg-agent-maps--tokens (text)
   (ceiling (length text) 2.5))
 
-(defun ygg-agent-maps--live-sessions-in (root)
-  (let ((root (file-truename (file-name-as-directory (expand-file-name root)))))
+(defun ygg-agent-maps--live-sessions-in (root &optional by-project)
+  "Live sessions whose dir is under ROOT, or with BY-PROJECT whose project is."
+  (let* ((root (file-truename (file-name-as-directory (expand-file-name root))))
+         (inside (lambda (dir)
+                  (and dir
+                       (string-prefix-p
+                        root (file-truename
+                              (file-name-as-directory (expand-file-name dir))))))))
     (and (fboundp 'aob-live-sessions)
          (seq-filter
           (lambda (s)
-            (when-let* ((dir (ygg-agent-maps--project s)))
-              (string-prefix-p
-               root (file-truename (file-name-as-directory (expand-file-name dir))))))
+            (or (funcall inside (ygg-agent-maps--project s))
+                (and by-project (funcall inside (aob-session-project s)))))
           (aob-live-sessions)))))
 
 (defun ygg-agent-maps--report (root entry filter-ok why)
@@ -606,7 +611,7 @@ features.md the next time the maps refresh."
   (seq-find (lambda (s)
               (and (aob-session-ref s :feature-map)
                    (memq (aob-session-state s) '(working blocked starting))))
-            (ygg-agent-maps--live-sessions-in root)))
+            (ygg-agent-maps--live-sessions-in root t)))
 
 (defun ygg-agent-maps--generate-features (root)
   (if (ygg-agent-maps--feature-agent-in root)

@@ -816,6 +816,25 @@
        (should (= 1 (length ygg-agent-maps-tests--spawned)))
        (aob-remove-session other)))))
 
+(ert-deftest ygg-agent-maps-generate-counts-a-feature-agent-in-a-worktree ()
+  (ygg-agent-maps-tests--with '("features.md")
+    (ygg-agent-maps-tests--stubbed
+     (let* ((wt (make-temp-file "ygg-wt" t))
+            (elsewhere (make-temp-file "ygg-else" t))
+            (in-wt (ygg-agent-maps-tests--session root :feature-map t))
+            (foreign (ygg-agent-maps-tests--session elsewhere :feature-map t)))
+       (setf (aob-session-dir in-wt) wt)
+       (aob-set-state in-wt 'idle)
+       (aob-set-state foreign 'working)
+       (ygg-agent-maps-generate root)
+       (should (= 1 (length ygg-agent-maps-tests--spawned)))
+       (setq ygg-agent-maps-tests--spawned nil)
+       (aob-set-state in-wt 'working)
+       (ygg-agent-maps-generate root)
+       (should-not ygg-agent-maps-tests--spawned)
+       (aob-remove-session in-wt)
+       (aob-remove-session foreign)))))
+
 (ert-deftest ygg-agent-maps-generate-runs-after-a-failed-repowise-update ()
   (ygg-agent-maps-tests--with-repowise 1 ygg-agent-maps-tests--claude-md-off
     (let (shown)
