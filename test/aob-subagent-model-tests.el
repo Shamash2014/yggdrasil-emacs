@@ -94,20 +94,124 @@
     (should (string-match-p "· —\\'" (string-trim-right (aob-sub-model-tests--subs-text s))))
     (should (string-match-p "Count files.* —" (aob-sub-model-tests--trace-text s)))))
 
-(ert-deftest aob-subagent-model-ignores-agent-definition-files ()
-  (let ((dir (make-temp-file "aob-agents" t)))
+(defun aob-sub-model-tests--info (def-text raw &optional parent-live)
+  "Model info for a call with RAW input, a project agent `quick' holding DEF-TEXT."
+  (let ((dir (make-temp-file "aob-agents" t))
+        (aob-claude-agents-dirs nil))
     (unwind-protect
         (progn
           (make-directory (expand-file-name ".claude/agents" dir) t)
-          (with-temp-file (expand-file-name ".claude/agents/quick.md" dir)
-            (insert "---\nmodel: haiku\n---\n"))
+          (when def-text
+            (with-temp-file (expand-file-name ".claude/agents/quick.md" dir)
+              (insert def-text)))
           (aob-sub-model-tests--with s
             (setf (aob-session-project s) dir (aob-session-dir s) dir)
             (aob-session-put s :model-id "opus")
-            (let ((ev (aob-sub-model-tests--call
-                       s :rawInput (list :description "d" :subagent_type "quick"))))
-              (should (equal '("opus" . t) (aob-trace--sub-model-info s ev))))))
+            (when parent-live (aob-session-put s :model-live parent-live))
+            (aob-trace--sub-model-info
+             s (aob-sub-model-tests--call s :rawInput (append (list :description "d") raw)))))
       (delete-directory dir t))))
+
+(ert-deftest aob-subagent-model-uses-agent-definition ()
+  (should (equal '("haiku" . nil)
+                 (aob-sub-model-tests--info "---\nname: quick\nmodel: haiku\n---\nbody\nmodel: x\n"
+                                            (list :subagent_type "quick"))))
+  (should (equal '("haiku" . nil)
+                 (aob-sub-model-tests--info "---\nmodel: \"haiku\"\n---\n"
+                                            (list :subagent_type "quick")))))
+
+(ert-deftest aob-subagent-model-definition-inherit-or-missing-is-parent ()
+  (should (equal '("opus" . t)
+                 (aob-sub-model-tests--info "---\nmodel: inherit\n---\n"
+                                            (list :subagent_type "quick"))))
+  (should (equal '("opus" . t)
+                 (aob-sub-model-tests--info "no frontmatter\nmodel: haiku\n"
+                                            (list :subagent_type "quick"))))
+  (should (equal '("opus" . t)
+                 (aob-sub-model-tests--info nil (list :subagent_type "quick"))))
+  (should (equal '("opus" . t)
+                 (aob-sub-model-tests--info nil (list :subagent_type "../quick")))))
+
+(ert-deftest aob-subagent-model-raw-beats-definition-and-inherit-is-absent ()
+  (should (equal '("haiku" . nil)
+                 (aob-sub-model-tests--info "---\nmodel: sonnet\n---\n"
+                                            (list :model "haiku" :subagent_type "quick"))))
+  (should (equal '("opus" . t) (aob-sub-model-tests--info nil (list :model "inherit"))))
+  (should (equal '("opus" . t) (aob-sub-model-tests--info nil (list :model "")))))
+
+(ert-deftest aob-subagent-model-config-home-definition-wins ()
+  (let ((home (make-temp-file "aob-home" t))
+        (aob-claude-agents-dirs nil))
+    (unwind-protect
+        (progn
+          (make-directory (expand-file-name "agents" home) t)
+          (with-temp-file (expand-file-name "agents/quick.md" home)
+            (insert "---\nmodel: haiku\n---\n"))
+          (aob-sub-model-tests--with s
+            (let ((aob-acp-environment-function
+                   (lambda (&rest _) (list (concat "CLAUDE_CONFIG_DIR=" home)))))
+              (aob-session-put s :agent "claude")
+              (should (equal "haiku" (aob-trace--agent-type-model s "quick"))))))
+      (delete-directory home t))))
+
+(ert-deftest aob-subagent-model-captured-id-survives-parent-switch ()
+  (aob-sub-model-tests--with s
+    (aob-session-put s :model-live "claude-opus-4-8")
+    (let ((ev (aob-sub-model-tests--call s :rawInput (list :description "d"))))
+      (aob-session-put s :model-live "claude-sonnet-x")
+      (should (equal '("claude-opus-4-8" . t) (aob-trace--sub-model-info s ev))))))
+
+(ert-deftest aob-subagent-model-definition-tolerates-crlf-and-comments ()
+  (should (equal '("haiku" . nil)
+                 (aob-sub-model-tests--info "---\r\nmodel: haiku\r\n---\r\n"
+                                            (list :subagent_type "quick"))))
+  (should (equal '("haiku" . nil)
+                 (aob-sub-model-tests--info "---\nmodel: \"haiku\"  # fast\n---\n"
+                                            (list :subagent_type "quick"))))
+  (should (equal '("opus" . t)
+                 (aob-sub-model-tests--info "---\nmodel: # none\n---\n"
+                                            (list :subagent_type "quick")))))
+
+(ert-deftest aob-subagent-model-definition-skipped-for-codex ()
+  (let ((aob-acp-agents '(("codex" :command ("codex-acp")))))
+    (aob-sub-model-tests--with s
+      (aob-session-put s :agent "codex")
+      (let ((dir (make-temp-file "aob-agents" t))
+            (aob-claude-agents-dirs nil))
+        (unwind-protect
+            (progn
+              (make-directory (expand-file-name ".claude/agents" dir) t)
+              (with-temp-file (expand-file-name ".claude/agents/quick.md" dir)
+                (insert "---\nmodel: haiku\n---\n"))
+              (setf (aob-session-dir s) dir)
+              (should-not (aob-trace--agent-type-model s "quick")))
+          (delete-directory dir t))))))
+
+(ert-deftest aob-subagent-model-parent-resolved-lazily ()
+  (aob-sub-model-tests--with s
+    (aob-session-put s :model-id "default")
+    (let ((ev (aob-sub-model-tests--call s :rawInput (list :description "d"))))
+      (should (equal "default" (plist-get ev :parent-model)))
+      (should (equal '("default" . t) (aob-trace--sub-model-info s ev)))
+      (aob-session-put s :model-live "claude-opus-x")
+      (should (equal '("claude-opus-x" . t) (aob-trace--sub-model-info s ev)))
+      (aob--dirty s)
+      (should (string-match-p "claude-opus-x ↑" (aob-sub-model-tests--trace-text s))))))
+
+(ert-deftest aob-subagent-model-codex-child-keeps-its-own ()
+  (aob-sub-model-tests--with s
+    (aob-session-put s :model-live "claude-opus-x")
+    (let* ((ev (aob-sub-model-tests--task s :parent-model "opus"))
+           (kid (aob-create-session :id "acp:submodel:1/T1" :backend 'native-subagent
+                                    :name "kid" :state 'working
+                                    :refs (list :native-root (aob-session-id s)
+                                                :parent-session (aob-session-id s)))))
+      (unwind-protect
+          (progn
+            (puthash "T1" (aob-session-id kid) (aob-subagent--native-kids s))
+            (aob-session-put kid :model-id "gpt-own")
+            (should (equal '("gpt-own" . nil) (aob-trace--sub-model-info s ev))))
+        (aob-remove-session kid)))))
 
 (ert-deftest aob-subagent-parent-model-stays-as-at-spawn ()
   (aob-sub-model-tests--with s

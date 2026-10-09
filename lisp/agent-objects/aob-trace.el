@@ -721,21 +721,92 @@ line."
     ("failed" (propertize "✗" 'face 'error))
     (_ "")))
 
-(defun aob-trace--sub-model-info (s ev)
-  "S's subagent call EV's model and whether it is inherited: (NAME . INHERITED).
-Explicit in the call or on its own session, else the parent's model as
-it was when the call began."
+(defcustom aob-claude-agents-dirs '("~/.claude/agents")
+  "Directories of claude agent definitions, after the session's own.
+Only <type>.md files in them are read, for the `model:' of their frontmatter."
+  :type '(repeat directory) :group 'aob)
+
+(defvar aob-acp-environment-function)
+
+(defvar aob-trace--agent-model-cache (make-hash-table :test #'equal)
+  "Agent definition file -> (MTIME . MODEL).")
+
+(defun aob-trace--agent-file-model (file)
+  "The model FILE's frontmatter names, nil when absent or `inherit'."
+  (when-let* ((mtime (file-attribute-modification-time (file-attributes file))))
+    (let ((hit (gethash file aob-trace--agent-model-cache)))
+      (if (and hit (equal (car hit) mtime))
+          (cdr hit)
+        (let ((model
+               (with-temp-buffer
+                 (insert-file-contents file nil 0 8192)
+                 (goto-char (point-min))
+                 (when (looking-at "---[ \t\r]*$")
+                   (forward-line)
+                   (let ((end (save-excursion
+                                (and (re-search-forward "^---[ \t\r]*$" nil t)
+                                     (match-beginning 0)))))
+                     (when (and end (re-search-forward
+                                     "^model:[ \t]*\\([^#\r\n]*\\)" end t))
+                       (let ((m (string-trim (match-string 1) "[ \t\"']+" "[ \t\"']+")))
+                         (and (not (member (downcase m) '("" "inherit"))) m))))))))
+          (puthash file (cons mtime model) aob-trace--agent-model-cache)
+          model)))))
+
+(defun aob-trace--config-home (s)
+  "The claude config home S's connection was started with, or nil."
+  (when-let* ((f (and (boundp 'aob-acp-environment-function)
+                      aob-acp-environment-function))
+              (agent (aob-session-ref s :agent))
+              (project (aob-session-project s))
+              (env (let ((warning-minimum-log-level :emergency)
+                         (warning-minimum-level :emergency))
+                     (ignore-errors (funcall f agent project project nil))))
+              (var (seq-find (lambda (v) (string-prefix-p "CLAUDE_CONFIG_DIR=" v)) env)))
+    (substring var (length "CLAUDE_CONFIG_DIR="))))
+
+(defun aob-trace--agent-type-model (s type)
+  "The model agent definition TYPE sets for S, or nil."
+  (when (and (stringp type)
+             (not (and (fboundp 'aob-acp--codex-agent-p)
+                       (aob-acp--codex-agent-p (aob-session-ref s :agent))))
+             (string-match-p "\\`[A-Za-z0-9][A-Za-z0-9_.-]*\\'" type))
+    (let ((dirs (append
+                 (when-let* ((h (aob-trace--config-home s)))
+                   (list (expand-file-name "agents" h)))
+                 (when-let* ((d (or (aob-session-dir s) (aob-session-project s))))
+                   (list (expand-file-name ".claude/agents" d)))
+                 (mapcar #'expand-file-name aob-claude-agents-dirs))))
+      (seq-some (lambda (d)
+                  (let ((f (expand-file-name (concat type ".md") d)))
+                    (and (file-regular-p f) (aob-trace--agent-file-model f))))
+                dirs))))
+
+(defun aob-trace--call-model (parent ev kid)
+  "(NAME . INHERITED) for PARENT's subagent call EV, run in KID when known.
+Explicit in the call, on KID, or in the agent definition it names, else
+the parent\='s model at spawn, or its current one when that was missing
+or only a claude alias (no digit)."
   (let* ((raw (and (consp (plist-get ev :raw)) (keywordp (car (plist-get ev :raw)))
                    (plist-get ev :raw)))
-         (kid (aob-session-native-child s ev))
          (own (or (let ((m (plist-get raw :model)))
-                    (and (stringp m) (not (string-empty-p m)) m))
-                  (and kid (aob-session-model-now kid))))
-         (inherited (or (plist-get ev :parent-model)
-                        (and kid (aob-session-ref kid :parent-model)))))
+                    (and (stringp m) (not (member (downcase m) '("" "inherit"))) m))
+                  (and kid (aob-session-model-now kid))
+                  (and parent (aob-trace--agent-type-model
+                               parent (plist-get raw :subagent_type)))))
+         (captured (or (plist-get ev :parent-model)
+                       (and kid (aob-session-ref kid :parent-model))))
+         (inherited (if (and (stringp captured) (string-match-p "[0-9]" captured))
+                        captured
+                      (or (and parent (aob-session-ref parent :model-live))
+                          captured))))
     (cond (own (cons own nil))
           (inherited (cons inherited t))
           (t (cons "?" nil)))))
+
+(defun aob-trace--sub-model-info (s ev)
+  "S's subagent call EV's model and whether it is inherited: (NAME . INHERITED)."
+  (aob-trace--call-model s ev (aob-session-native-child s ev)))
 
 (defun aob-trace--sub-model (s ev)
   "S's subagent call EV's model, quiet, with a trailing arrow when inherited."
@@ -772,10 +843,13 @@ it was when the call began."
     ""))
 
 (defun aob-trace--kid-model (kid)
-  "KID's header model: its own, else its parent's at spawn marked inherited."
-  (let ((own (aob-session-model-now kid))
-        (up (aob-session-ref kid :parent-model)))
-    (propertize (cond (own own) (up (concat up " ↑")) (t "?")) 'face 'shadow)))
+  "KID's header model: its own, else its parent\='s marked inherited."
+  (let* ((parent (aob-session-get (aob-session-ref kid :parent-session)))
+         (tools (and parent (fboundp 'aob-acp--tools) (aob-acp--tools parent)))
+         (ev (or (and tools (gethash (aob-session-ref kid :native-tool-id) tools))
+                 (list :parent-model (aob-session-ref kid :parent-model))))
+         (info (aob-trace--call-model parent ev kid)))
+    (propertize (if (cdr info) (concat (car info) " ↑") (car info)) 'face 'shadow)))
 
 (defun aob-trace--rollup (ev)
   "A Task's subagent digest: how many steps, how many running, how many
