@@ -218,6 +218,16 @@ hunks its file and lines overlap.  Nil when the diff has none."
 (defvar ygg-git-compare-tour--sessions (make-hash-table :test #'equal)
   "The id of the session last asked for each tour file, by file.")
 
+(defvar ygg-git-compare-tour--ready (make-hash-table :test #'equal)
+  "Whether each tour file was delivered and not yet walked, by file; kept in memory
+so it outlives the compare buffers.")
+
+(defun ygg-git-compare-tour--ready-p ()
+  "Whether this branch's tour waits to be walked."
+  (when-let* ((branch (ygg-git-compare--b-branch)))
+    (gethash (ignore-errors (ygg-git-compare-tour--path branch default-directory))
+             ygg-git-compare-tour--ready)))
+
 (declare-function aob-session-id "aob" (s))
 (declare-function aob-session-get "aob" (id))
 
@@ -294,10 +304,10 @@ lacks."
          installed stale)
     (remhash path ygg-git-compare-tour--pending)
     (remhash path ygg-git-compare-tour--sessions)
+    (puthash path t ygg-git-compare-tour--ready)
     (dolist (buffer (buffer-list))
       (when (equal (buffer-local-value 'ygg-git-compare--store buffer) (cons file key))
         (with-current-buffer buffer
-          (setq ygg-git-compare--tour-ready t)
           (ygg-git-compare--header)
           (ygg-git-compare-tour-leave)
           (if (or (null base) (equal base (plist-get ygg-git-compare--a :diff)))
@@ -445,7 +455,9 @@ made for and stale steps included; ask an agent for one only when there is none.
     (ygg-git-compare-tour--branch)
     (ygg-git-compare-tour--ensure)
     (cond (ygg-git-compare-tour--steps
-           (setq ygg-git-compare--tour-ready nil)
+           (remhash (ygg-git-compare-tour--path (ygg-git-compare-tour--branch)
+                                                default-directory)
+                    ygg-git-compare-tour--ready)
            (ygg-git-compare-tour-goto 1))
           ((ygg-git-compare-tour--generating-p)
            (message "tour: generating… w opens its trace"))

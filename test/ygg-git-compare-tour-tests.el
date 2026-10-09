@@ -671,5 +671,23 @@ Feature changes a.txt at lines 5, 20 and 35 and b.txt at line 2."
         (should (= 2 (length spawned)))
         (should (string-match-p "tour: generating…" (format "%s" header-line-format)))))))
 
+(ert-deftest ygg-git-compare-tour-ready-survives-reopening-until-walked ()
+  (ygg-git-compare-tour-tests--with-compare root
+    (let ((default-directory root)
+          (shown (lambda () (format "%s" header-line-format))))
+      (ygg-git-compare-tour-tests--request)
+      (ygg-git-compare-tour-tests--deliver root)
+      (kill-buffer)
+      (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") '(rev . "feature"))
+        (should (string-match-p "tour ready — t to walk" (funcall shown)))
+        (ygg-git-compare-tour)
+        (should-not (string-match-p "tour ready" (funcall shown)))
+        (kill-buffer))
+      (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") '(rev . "feature"))
+        (should-not (string-match-p "tour ready" (funcall shown)))
+        (ygg-git-compare-tour-tests--request)
+        (ygg-git-compare-tour-tests--deliver root)
+        (should (string-match-p "tour ready — t to walk" (funcall shown)))))))
+
 (provide 'ygg-git-compare-tour-tests)
 ;;; ygg-git-compare-tour-tests.el ends here

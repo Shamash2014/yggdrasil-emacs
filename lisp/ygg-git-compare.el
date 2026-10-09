@@ -90,8 +90,6 @@ left out of a review."
   "This compare's review comments as kept, newest first.")
 (defvar-local ygg-git-compare--list-buffer nil
   "In the right pane, the diff of every file it belongs to.")
-(defvar-local ygg-git-compare--tour-ready nil
-  "Whether a received tour waits to be walked.")
 
 (defvar-local ygg-git-compare--tour-status nil
   "The guided-review step shown in the header, or nil off the tour.")
@@ -1117,7 +1115,9 @@ Nothing is selected and no window layout is remembered for magit's q."
                 ((and (fboundp 'ygg-git-compare-tour--finished-p)
                       (ygg-git-compare-tour--finished-p))
                  "  tour: agent finished without a tour — W asks again, w shows it")
-                 (ygg-git-compare--tour-ready "  tour ready — t to walk"))
+                ((and (fboundp 'ygg-git-compare-tour--ready-p)
+                      (ygg-git-compare-tour--ready-p))
+                 "  tour ready — t to walk"))
            (when ygg-git-compare--tour-status
              (concat "  " ygg-git-compare--tour-status)))))
 
