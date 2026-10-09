@@ -287,7 +287,8 @@ unless insert state follows, in which case insert-exit does instead."
     (unless (mark t) (push-mark (point) t nil))
     (setq mark-active t deactivate-mark nil)
     (when ygg--secondaries (ygg--prune-dead-secondaries))
-    (if ygg--secondaries (ygg--render-fake-cursors) (ygg--clear-fake-cursors)))
+    (if ygg--secondaries (ygg--render-fake-cursors) (ygg--clear-fake-cursors))
+    (unless ygg--replaying (ygg--sel-record)))
    (ygg--fake-cursor-ovs (ygg--clear-fake-cursors)))
   (when ygg--repeat-verb-pending
     (unless ygg--insert-p (setq ygg--repeat-vector ygg--repeat-verb-pending))
@@ -303,6 +304,87 @@ unless insert state follows, in which case insert-exit does instead."
                              ygg--repeat-tick (buffer-chars-modified-tick)))
               (remove-hook 'post-command-hook #'ygg--post-command t)
               (ygg-clear-secondaries))))
+
+;;; Selection history (M-u / M-U)
+
+(defconst ygg--sel-history-limit 100)
+(defvar-local ygg--sel-cur nil
+  "Vector [POINT MARK BEG END DIR ...] of the selection set last recorded.")
+(defvar-local ygg--sel-back nil "Older snapshots, newest first.")
+(defvar-local ygg--sel-fwd nil "Snapshots undone by `ygg-selection-undo', nearest first.")
+
+(defun ygg--sel-snapshot ()
+  (let* ((n (length ygg--secondaries))
+         (v (make-vector (+ 2 (* 3 n)) nil))
+         (i 2))
+    (aset v 0 (point))
+    (aset v 1 (or (mark t) (point)))
+    (dolist (ov ygg--secondaries)
+      (aset v i (overlay-start ov))
+      (aset v (+ i 1) (overlay-end ov))
+      (aset v (+ i 2) (ygg--dir ov))
+      (setq i (+ i 3)))
+    v))
+
+(defun ygg--sel-snapshot-current-p (snap)
+  (and (eql (point) (aref snap 0))
+       (eql (or (mark t) (point)) (aref snap 1))
+       (let ((i 2) (n (length snap)) (same t) (l ygg--secondaries))
+         (while (and same l (< i n))
+           (let ((ov (car l)))
+             (setq same (and (eql (overlay-start ov) (aref snap i))
+                             (eql (overlay-end ov) (aref snap (1+ i))))
+                   l (cdr l)
+                   i (+ i 3))))
+         (and same (null l) (= i n)))))
+
+(defun ygg--sel-record ()
+  (unless (and ygg--sel-cur (ygg--sel-snapshot-current-p ygg--sel-cur))
+    (when ygg--sel-cur
+      (push ygg--sel-cur ygg--sel-back)
+      (when (> (length ygg--sel-back) ygg--sel-history-limit)
+        (setcdr (nthcdr (1- ygg--sel-history-limit) ygg--sel-back) nil)))
+    (setq ygg--sel-fwd nil
+          ygg--sel-cur (ygg--sel-snapshot))))
+
+(defun ygg--sel-clamp (pos)
+  (max (point-min) (min (point-max) pos)))
+
+(defun ygg--sel-restore (snap)
+  (ygg-clear-secondaries)
+  (let ((i 2) (n (length snap)))
+    (while (< i n)
+      (ygg-add-selection (ygg--sel-clamp (aref snap i))
+                         (ygg--sel-clamp (aref snap (1+ i)))
+                         (aref snap (+ i 2)))
+      (setq i (+ i 3))))
+  (set-mark (ygg--sel-clamp (aref snap 1)))
+  (goto-char (ygg--sel-clamp (aref snap 0)))
+  (setq mark-active t)
+  (ygg--render-fake-cursors))
+
+(defun ygg--sel-travel (from to)
+  "Pop FROM onto `ygg--sel-cur', pushing the old current onto TO."
+  (let ((snap (pop (symbol-value from))))
+    (unless snap (user-error "No more selection history"))
+    (push ygg--sel-cur (symbol-value to))
+    (ygg--sel-restore snap)
+    (setq ygg--sel-cur (ygg--sel-snapshot))))
+
+(defun ygg-selection-undo ()
+  "Restore the previous selection set."
+  (interactive)
+  (ygg--sel-record)
+  (ygg--sel-travel 'ygg--sel-back 'ygg--sel-fwd))
+
+(defun ygg-selection-redo ()
+  "Re-apply the selection set undone by `ygg-selection-undo'."
+  (interactive)
+  (ygg--sel-travel 'ygg--sel-fwd 'ygg--sel-back))
+
+(yggdrasil-define-keys 'normal
+  "M-u" #'ygg-selection-undo :label "selection undo"
+  "M-U" #'ygg-selection-redo :label "selection redo")
 
 ;;; Collapse / flip / rotate / keep
 
