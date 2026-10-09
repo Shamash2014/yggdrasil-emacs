@@ -300,6 +300,45 @@
                 (should-not ygg-git-compare-job--timer)))
           (kill-buffer buffer))))))
 
+(defun ygg-git-compare-job-tests--timers ()
+  (seq-count (lambda (timer) (eq (timer--function timer) #'ygg-git-compare-job--tick))
+             timer-list))
+
+(ert-deftest ygg-git-compare-job-showing-again-rearms-one-timer-while-running ()
+  (let ((running (string-replace "\"completed\"" "\"in_progress\""
+                                 ygg-git-compare-job-tests--gh-job))
+        (visible nil)
+        base)
+    (ygg-git-compare-job-tests--with-forge `(("/logs\\'" . "x\n") ("/jobs/4242\\'" . ,running))
+      (let ((buffer (ygg-git-compare-job-tests--open
+                     ygg-git-compare-job-tests--gh-pr ygg-git-compare-job-tests--gh-url "build")))
+        (unwind-protect
+            (with-current-buffer buffer
+              (cl-letf (((symbol-function 'get-buffer-window) (lambda (&rest _) visible)))
+                (ygg-git-compare-job--stop)
+                (setq base (ygg-git-compare-job-tests--timers))
+                (ygg-git-compare-job--shown)
+                (should-not ygg-git-compare-job--timer)
+                (setq visible t)
+                (dotimes (_ 3) (ygg-git-compare-job--shown))
+                (should (timerp ygg-git-compare-job--timer))
+                (should (= (1+ base) (ygg-git-compare-job-tests--timers)))
+                (setq visible nil)
+                (cancel-timer ygg-git-compare-job--timer)
+                (ygg-git-compare-job--tick buffer)
+                (should-not ygg-git-compare-job--timer)
+                (setq visible t)
+                (dotimes (_ 3) (ygg-git-compare-job--shown))
+                (should (= (1+ base) (ygg-git-compare-job-tests--timers)))
+                (setq ygg-git-compare-job--details
+                      (ygg-git-compare-job--parse ygg-git-compare-job-tests--gh-pr
+                                                  ygg-git-compare-job-tests--gh-job))
+                (ygg-git-compare-job--stop)
+                (ygg-git-compare-job--shown)
+                (should-not ygg-git-compare-job--timer)
+                (should (= base (ygg-git-compare-job-tests--timers)))))
+          (kill-buffer buffer))))))
+
 (ert-deftest ygg-git-compare-job-id-wants-an-actions-job-url-on-the-pr-host ()
   (should-not (ygg-git-compare-job-id ygg-git-compare-job-tests--gh-pr
                                       "https://jenkins.example/job/77/"))

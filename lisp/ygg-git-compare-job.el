@@ -89,7 +89,7 @@
          :workflowName (plist-get item :workflow_name))))
 
 (defun ygg-git-compare-job--parse (pr text)
-  "The job in TEXT, the forge's answer for PR, as (:check C :steps S :conclusion X)."
+  "The job in TEXT, the forge's answer for PR, as a plist of :check and more."
   (let ((item (ygg-git-compare--json text)))
     (unless (keywordp (car-safe item)) (error "no job"))
     (if (eq (plist-get pr :forge) 'gitlab)
@@ -273,6 +273,12 @@ runs and BUFFER is on screen."
             (run-at-time ygg-git-compare-checks-running-ttl nil
                          #'ygg-git-compare-job--tick buffer)))))
 
+(defun ygg-git-compare-job--shown ()
+  (let ((buffer (current-buffer)))
+    (when (and (not ygg-git-compare-job--timer)
+               (get-buffer-window buffer 'visible))
+      (ygg-git-compare-job--arm buffer))))
+
 (defun ygg-git-compare-job--tick (buffer)
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
@@ -436,6 +442,8 @@ runs and BUFFER is on screen."
   "A CI job's header, steps and log."
   (setq-local revert-buffer-function (lambda (&rest _) (ygg-git-compare-job-refresh)))
   (setq-local truncate-lines t)
+  (add-hook 'window-buffer-change-functions
+            (lambda (_) (ygg-git-compare-job--shown)) nil t)
   (add-hook 'kill-buffer-hook #'ygg-git-compare-job--stop nil t))
 
 ;;; Opening
