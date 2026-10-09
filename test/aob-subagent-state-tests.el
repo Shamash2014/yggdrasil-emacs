@@ -25,19 +25,15 @@
              :title "Count files" :status (or status "in_progress")
              :ts (- (float-time) 100)))
 
-(defun aob-sub-state-tests--header (s)
-  (with-current-buffer (aob-subagents-buffer s)
-    header-line-format))
-
 (defun aob-sub-state-tests--subs-text (s)
-  (with-current-buffer (aob-subagents-buffer s)
-    (buffer-substring-no-properties (point-min) (point-max))))
+  (string-join (mapcar #'substring-no-properties (aob-subagents--lines s)) "\n"))
 
 (ert-deftest aob-sub-state-live-turn-runs ()
   (aob-sub-state-tests--with s
     (let ((ev (aob-sub-state-tests--task s)))
       (should (equal (aob-subagents--status ev) "running"))
-      (should (string-match-p "1 running" (aob-sub-state-tests--header s))))))
+      (should (= 1 (length (aob-subagents--lines s))))
+      (should (string-match-p "\\`running " (aob-sub-state-tests--subs-text s))))))
 
 (ert-deftest aob-sub-state-completed-is-done ()
   (aob-sub-state-tests--with s
@@ -57,7 +53,6 @@
         (should (= secs (aob-subagents--secs ev))))
       (should (string-match-p "stopped" (aob-sub-state-tests--subs-text s)))
       (should-not (string-match-p "running" (aob-sub-state-tests--subs-text s)))
-      (should-not (string-match-p "running" (aob-sub-state-tests--header s)))
       (should-not (eq (aob-trace--state ev) 'running)))))
 
 (ert-deftest aob-sub-state-cancelled-turn-stops ()

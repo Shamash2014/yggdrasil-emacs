@@ -47,7 +47,7 @@
 (defun ygg-aob--push-jump (&rest _)
   (when (fboundp 'ygg--jump-push) (ygg--jump-push)))
 
-(dolist (cmd '(aob-trace aob-plan aob-subagents aob-subagents-open aob-focus))
+(dolist (cmd '(aob-trace aob-plan aob-focus))
   (advice-add cmd :before #'ygg-aob--push-jump))
 
 ;; the rest of vim nav in agent buffers: goto/view prefixes, half-page
@@ -82,7 +82,6 @@
 (pcase-dolist (`(,mode . ,map)
                `((aob-trace-mode . ,aob-trace-mode-map)
                  (aob-plan-mode . ,aob-plan-mode-map)
-                 (aob-subagents-mode . ,aob-subagents-mode-map)
                  (aob-todo-mode . ,aob-todo-mode-map)
                  (aob-context-mode . ,aob-context-mode-map)
                  (aob-acp-mcp-mode . ,aob-acp-mcp-mode-map)))
@@ -109,8 +108,7 @@
     m)
   "The only special-mode keys agent buffers keep; the rest is yggdrasil's.")
 
-(dolist (map (list aob-trace-mode-map aob-plan-mode-map aob-subagents-mode-map
-                  aob-todo-mode-map))
+(dolist (map (list aob-trace-mode-map aob-plan-mode-map aob-todo-mode-map))
   (set-keymap-parent map (make-composed-keymap aob-object-map ygg-aob--special-keep)))
 (dolist (map (list aob-context-mode-map aob-acp-mcp-mode-map))
   (set-keymap-parent map ygg-aob--special-keep))
@@ -125,7 +123,7 @@
   (use-local-map ygg-aob--trace-local-map))
 
 (add-hook 'aob-trace-mode-hook #'ygg-aob--modalize-trace)
-(dolist (hook '(aob-plan-mode-hook aob-subagents-mode-hook aob-todo-mode-hook
+(dolist (hook '(aob-plan-mode-hook aob-todo-mode-hook
                 aob-context-mode-hook aob-acp-mcp-mode-hook))
   (add-hook hook #'ygg-aob--modalize))
 
@@ -149,7 +147,7 @@
 ;; how an agent answers is a property of the one in front of you, so it
 ;; is set from its own buffer: the localleader already knows which
 ;; session that is, where the global leader has to ask
-(dolist (mode '(aob-trace-mode aob-plan-mode aob-subagents-mode))
+(dolist (mode '(aob-trace-mode aob-plan-mode))
   (yggdrasil-localleader-def mode "S" #'aob-cancel "stop turn (twice: drop queue)")
   (yggdrasil-localleader-def mode "x" #'aob-acp-command "command")
   (yggdrasil-localleader-def mode "z" #'aob-acp-compact "compact context")
@@ -168,9 +166,9 @@
   (yggdrasil-localleader-def mode "c" #'aob-acp-mcp "mcp servers")
   (yggdrasil-localleader-def mode "g" #'aob-acp-goal "goal")
   (yggdrasil-localleader-def mode "r" #'aob-transcript-wake "wake it (resume acp)")
-  (yggdrasil-localleader-def mode "t" #'aob-subagents "subagents list (toggle)")
+  (yggdrasil-localleader-def mode "t" #'ygg-aob-subagents "subagents → quickfix")
   (yggdrasil-localleader-def mode "F" #'aob-acp-add-folder "add a folder"))
-(dolist (mode '(aob-plan-mode aob-subagents-mode))
+(dolist (mode '(aob-plan-mode))
   (yggdrasil-localleader-def mode "p" #'aob-compose "compose")
   (yggdrasil-localleader-def mode "k" #'aob-kill-session "kill session")
   (yggdrasil-localleader-def mode "w" #'aob-deliver-to "answer goes…"))
@@ -233,7 +231,7 @@ waits on, as ZQ does."
 (defun ygg-aob--no-quickscope ()
   (setq-local ygg-quickscope-inhibit t))
 
-(dolist (hook '(aob-trace-mode-hook aob-plan-mode-hook aob-subagents-mode-hook))
+(dolist (hook '(aob-trace-mode-hook aob-plan-mode-hook))
   (add-hook hook #'ygg-aob--no-quickscope))
 
 (defun ygg-aob--draft-target ()
@@ -355,6 +353,111 @@ actions keep their tool title.  The short path stays the clickable target."
     (let ((default-directory (or (aob-session-dir s) (aob-session-project s)
                                  default-directory)))
       (ygg-qf--collect (nreverse lines) t))))
+
+;; \ t on an agent → its subagents as a quickfix, one row each; a row opens
+;; the subagent's own trace.  The list follows the session's tick for as
+;; long as nothing else has replaced it, so a status never goes stale.  When
+;; the session goes the list stays as a last snapshot: its rows say so.
+(declare-function ygg-qf-define-kind "layer-quickfix")
+(declare-function ygg-qf-show-kind "layer-quickfix")
+(declare-function ygg-qf-kind-refresh "layer-quickfix")
+(declare-function ygg-qf-kind-at-point "layer-quickfix")
+(declare-function ygg-qf-kind-target-id "layer-quickfix")
+(declare-function ygg-qf-kind-list-p "layer-quickfix")
+(declare-function aob-subagents--lines "aob-trace")
+(declare-function aob-subagents--status "aob-trace")
+(declare-function aob-subagents--open "aob-trace")
+(declare-function aob-subagents--goto "aob-trace")
+(defvar aob--views)
+
+(defun ygg-aob--subagents-collect (s)
+  (cl-mapcar (lambda (row ev)
+               (list (cons (aob-session-id s) (plist-get ev :seq))
+                     row (aob-session-name s)))
+             (aob-subagents--lines s) (aob-session-subagents s)))
+
+(defun ygg-aob--subagents-live-p (s)
+  (eq s (aob-session-get (aob-session-id s))))
+
+(defun ygg-aob--subagent-open (id)
+  (if-let* ((s (aob-session-get (car id))))
+      (aob-subagents--open s (cdr id))
+    (user-error "aob: that session is gone")))
+
+(defun ygg-aob-subagent-open-trace (&optional id)
+  "Open the trace of the subagent ID, by default the one on this row."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (ygg-aob--subagent-open (or id (user-error "aob: no subagent here"))))
+
+(defun ygg-aob-subagent-jump-call (&optional id)
+  "Go to the call of the subagent ID, by default the one on this row."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (unless id (user-error "aob: no subagent here"))
+  (aob-subagents--goto (or (aob-session-get (car id))
+                           (user-error "aob: that session is gone"))
+                       (cdr id)))
+
+(defvar ygg-aob-subagent-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m "o" #'ygg-aob-subagent-open-trace)
+    (define-key m "c" #'ygg-aob-subagent-jump-call)
+    m)
+  "What embark offers on a subagent row of the quickfix.")
+
+(defvar ygg-aob--subagent-timers nil
+  "Alist of (BUFFER . TIMER) for the lists whose running rows count seconds.")
+
+(defun ygg-aob--subagents-running-p (s)
+  (seq-some (lambda (ev) (equal (aob-subagents--status ev) "running"))
+            (aob-session-subagents s)))
+
+(defun ygg-aob--subagents-stop (buf)
+  (when-let* ((timer (alist-get buf ygg-aob--subagent-timers nil nil #'eq)))
+    (cancel-timer timer))
+  (setq ygg-aob--subagent-timers (assq-delete-all buf ygg-aob--subagent-timers)))
+
+(defun ygg-aob--subagents-tick (buf token s)
+  (cond ((not (ygg-aob--subagents-running-p s)) (ygg-aob--subagents-stop buf))
+        ((not (get-buffer-window buf t)))
+        ((not (ygg-qf-kind-refresh buf token)) (ygg-aob--subagents-stop buf))))
+
+(defun ygg-aob--subagents-start (buf token s)
+  "Count seconds on the running rows of BUF, one timer however often it is asked."
+  (when (and (ygg-aob--subagents-running-p s)
+             (not (alist-get buf ygg-aob--subagent-timers nil nil #'eq)))
+    (push (cons buf (run-with-timer 1 1 #'ygg-aob--subagents-tick buf token s))
+          ygg-aob--subagent-timers)))
+
+(defun ygg-aob--subagents-arm (buf token s)
+  (letrec ((render (lambda ()
+                     (if (ygg-qf-kind-refresh buf token)
+                         (ygg-aob--subagents-start buf token s)
+                       (funcall disarm))))
+           (disarm (lambda ()
+                     (ygg-aob--subagents-stop buf)
+                     (when (eq (alist-get buf aob--views nil nil #'eq) render)
+                       (setq aob--views (assq-delete-all buf aob--views))))))
+    (aob-register-view buf render)
+    (ygg-aob--subagents-start buf token s)
+    disarm))
+
+(with-eval-after-load 'layer-quickfix
+  (ygg-qf-define-kind 'subagents
+                      :collect #'ygg-aob--subagents-collect
+                      :action #'ygg-aob--subagent-open
+                      :map 'ygg-aob-subagent-map
+                      :arm #'ygg-aob--subagents-arm
+                      :live-p #'ygg-aob--subagents-live-p))
+
+(defun ygg-aob-subagents (s)
+  "Collect every subagent S called into the quickfix; a row opens its trace."
+  (interactive (list (aob-target)))
+  (unless (aob-session-subagents s)
+    (user-error "aob: %s has called no subagents" (aob-session-name s)))
+  (require 'layer-quickfix)
+  (let ((default-directory (or (aob-session-dir s) (aob-session-project s)
+                               default-directory)))
+    (ygg-qf-show-kind 'subagents s)))
 
 (defvar aob-buffer-session-id)
 
@@ -569,8 +672,8 @@ standing in another."
 
 (defun ygg-aob-session-subagents (s)
   "The subagents S is running now, in the order it sent them.
-The tree shows what is still working; `aob-subagents' under the trace
-keeps every delegation, finished ones included."
+The tree shows what is still working; `ygg-aob-subagents' keeps every
+delegation, finished ones included."
   (seq-filter (lambda (ev) (member (plist-get ev :status)
                                    '("pending" "in_progress")))
               (aob-session-subagents s)))
@@ -1845,7 +1948,8 @@ A worker holding one is stopped where it stands, so the oldest waits least."
 (defun ygg-aob--qf-refresh (&rest _)
   (when-let* (((fboundp 'ygg-qf-buffer))
               (buf (ygg-qf-buffer))
-              ((get-buffer-window buf t)))
+              ((get-buffer-window buf t))
+              ((not (ygg-qf-kind-list-p buf))))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
         (save-excursion

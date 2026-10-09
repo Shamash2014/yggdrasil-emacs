@@ -30,8 +30,7 @@
     (buffer-substring-no-properties (point-min) (point-max))))
 
 (defun aob-sub-model-tests--subs-text (s)
-  (with-current-buffer (aob-subagents-buffer s)
-    (buffer-substring-no-properties (point-min) (point-max))))
+  (string-join (mapcar #'substring-no-properties (aob-subagents--lines s)) "\n"))
 
 (defun aob-sub-model-tests--call (s &rest u)
   (aob-acp--tool-call

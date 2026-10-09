@@ -1310,8 +1310,8 @@ a current_model_update names another model."
       (let ((inhibit-read-only t))
         (aob-trace--render t)
         ;; the Task says what it was sent to do and how many steps it
-        ;; took — never which step, expanded or not.  `aob-subagents'
-        ;; is where a subagent gets read in full.
+        ;; took — never which step, expanded or not.  The subagent's own
+        ;; trace is where it gets read in full.
         (should (string-match-p "Count files" (buffer-string)))
         (should (string-match-p " 1⟳1" (buffer-string)))
         (should-not (string-match-p "find | wc" (buffer-string)))
@@ -1553,8 +1553,11 @@ it cannot hold never blocks the queue, and steering falls back to cancel."
       (should-not flushed)
       (should (equal (aob-session-ref s :want-goal) "Ship it")))))
 
-(ert-deftest aob-subagents-panel-lists-delegations ()
-  "Every delegation gets a row — finished ones too — and RET opens its steps."
+(defun aob-tests--subs-text (s)
+  (string-join (mapcar #'substring-no-properties (aob-subagents--lines s)) "\n"))
+
+(ert-deftest aob-subagents-rows-list-delegations ()
+  "Every delegation gets a row — finished ones too — and opening one shows its steps."
   (aob-tests--with-session s
     (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"T1\",\"title\":\"Task\",\"kind\":\"think\",\"status\":\"in_progress\",\"rawInput\":{\"description\":\"Count files\"}}}}")
     (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"tool_call\",\"toolCallId\":\"c1\",\"title\":\"find | wc -l\",\"kind\":\"execute\",\"status\":\"completed\",\"_meta\":{\"claudeCode\":{\"parentToolUseId\":\"T1\"}}}}}")
@@ -1564,12 +1567,12 @@ it cannot hold never blocks the queue, and steering falls back to cancel."
                            (aob-session-subagents s))
                    '("Count files" "Read the schema")))
     (unwind-protect
-        (with-current-buffer (aob-subagents-buffer s)
-          (should (string-match-p "running .* 2 Count files" (buffer-string)))
-          (should (string-match-p "done .* 0 Read the schema" (buffer-string)))
-          (should-not (string-match-p "find | wc" (buffer-string)))
-          (goto-char (point-min))
-          (with-current-buffer (progn (aob-subagents-open) (current-buffer))
+        (progn
+          (should (string-match-p "running .* 2 Count files" (aob-tests--subs-text s)))
+          (should (string-match-p "done .* 0 Read the schema" (aob-tests--subs-text s)))
+          (should-not (string-match-p "find | wc" (aob-tests--subs-text s)))
+          (with-current-buffer (progn (aob-subagents--open s (plist-get (car (aob-session-subagents s)) :seq))
+                                      (current-buffer))
             (should (string-match-p "find | wc" (buffer-string)))))
       (dolist (b (buffer-list))
         (when (string-match-p "\\`\\(subs\\|trace\\):" (buffer-name b))
@@ -1611,13 +1614,10 @@ steps are its own trace, one row in the list, and folded in the parent."
             (should (equal (aob-session-id s) (aob-session-ref kid :parent-session)))
             (should (memq kid (aob-subagent-children s)))
             (should (eq 'working (aob-session-state kid)))
-            (with-current-buffer (aob-subagents-buffer s)
-              (should (string-match-p "^running .* 2 Count files" (buffer-string))))
+            (should (string-match-p "^running .* 2 Count files" (aob-tests--subs-text s)))
             (aob-tests--agent-done s "completed")
             (should (eq 'done (aob-session-state kid)))
-            (with-current-buffer (aob-subagents-buffer s)
-              (aob-subagents--render t)
-              (should (string-match-p "^done .* 2 Count files" (buffer-string))))
+            (should (string-match-p "^done .* 2 Count files" (aob-tests--subs-text s)))
             (with-current-buffer (aob-trace-buffer kid)
               (aob-trace--render t)
               (should (string-match-p "Count the files under src" (buffer-string)))
@@ -1641,8 +1641,7 @@ steps are its own trace, one row in the list, and folded in the parent."
           (aob-tests--agent-done s "failed")
           (let ((kid (aob-session-native-child s (car (aob-session-subagents s)))))
             (should (eq 'failed (aob-session-state kid)))
-            (with-current-buffer (aob-subagents-buffer s)
-              (should (string-match-p "^failed .* 0 Count files" (buffer-string))))))
+            (should (string-match-p "^failed .* 0 Count files" (aob-tests--subs-text s)))))
       (aob-tests--kill-views))))
 
 (ert-deftest aob-native-background-subagent-runs-until-its-sender-settles ()
@@ -1803,9 +1802,7 @@ that lost its agent saying that too."
                 (should (seq-find (lambda (e) (and (eq (plist-get e :type) 'state)
                                                    (string-match-p state (plist-get e :title))))
                                   (aob-session-events kid))))
-              (with-current-buffer (aob-subagents-buffer s)
-                (aob-subagents--render t)
-                (should (string-match-p (concat "^" row " ") (buffer-string))))))
+              (should (string-match-p (concat "^" row " ") (aob-tests--subs-text s)))))
         (aob-tests--kill-views)))))
 
 (ert-deftest aob-announced-subagent-trace-shows-its-own-stamped-steps ()
@@ -1854,9 +1851,7 @@ holding its last words once it ends."
             (should (equal "Count files" (plist-get call :title)))
             (should (equal "in_progress" (plist-get call :status)))
             (should (eq kid (aob-session-native-child s call)))
-            (with-current-buffer (aob-subagents-buffer s)
-              (aob-subagents--render t)
-              (should (string-match-p "^running .*Count files" (buffer-string))))
+            (should (string-match-p "^running .*Count files" (aob-tests--subs-text s)))
             (with-current-buffer (aob-trace-buffer s)
               (aob-trace--render t)
               (should (string-match-p "Count files" (buffer-string))))
@@ -1864,9 +1859,7 @@ holding its last words once it ends."
             (should (equal "completed" (plist-get call :status)))
             (should (plist-get call :done-ts))
             (should (string-match-p "There are 12 files" (aob-trace--content-text call)))
-            (with-current-buffer (aob-subagents-buffer s)
-              (aob-subagents--render t)
-              (should (string-match-p "^done .*Count files" (buffer-string))))
+            (should (string-match-p "^done .*Count files" (aob-tests--subs-text s)))
             (aob-tests--announce s "child-1")
             (should (= 1 (length (aob-session-subagents s))))
             (should (equal "in_progress" (plist-get call :status)))
@@ -1987,12 +1980,11 @@ does not, the call is still read as one."
           (let ((kid (car (aob-subagent-children s))))
             (should (= 1 (length (aob-subagent-children s))))
             (should (eq kid (aob-session-native-child s (car (aob-session-subagents s)))))
-            (with-current-buffer (aob-subagents-buffer s)
-              (aob-subagents--render t)
-              (should (string-match-p "Count files" (buffer-string)))
-              (goto-char (point-min))
-              (with-current-buffer (progn (aob-subagents-open) (current-buffer))
-                (should (equal (aob-trace--name kid) (buffer-name)))))))
+            (should (string-match-p "Count files" (aob-tests--subs-text s)))
+            (with-current-buffer (progn (aob-subagents--open
+                                         s (plist-get (car (aob-session-subagents s)) :seq))
+                                        (current-buffer))
+              (should (equal (aob-trace--name kid) (buffer-name))))))
       (aob-tests--kill-views)))
   (aob-tests--with-session s
     (unwind-protect
@@ -2078,23 +2070,20 @@ own trace; RET on the call in the trace opens it too."
           (aob-tests--agent-child s "k1" "find src | wc -l" "completed")
           (let* ((call (car (aob-session-subagents s)))
                  (kid (aob-session-native-child s call)))
-            (with-current-buffer (aob-subagents-buffer s)
-              (goto-char (point-min))
-              (let ((buf (aob-subagents-visit)))
-                (should (eq buf (get-buffer (aob-trace--name s))))
-                (with-current-buffer buf
-                  (should (eql (plist-get call :seq)
-                               (get-text-property (point) 'aob-event)))
-                  (aob-trace-answer))
-                (should (equal (aob-trace--name kid) (buffer-name (window-buffer))))))
-            (with-current-buffer (aob-subagents-buffer s)
-              (goto-char (point-min))
-              (with-current-buffer (progn (aob-subagents-open) (current-buffer))
-                (should (equal (aob-trace--name kid) (buffer-name)))))))
+            (let ((buf (aob-subagents--goto s (plist-get call :seq))))
+              (should (eq buf (get-buffer (aob-trace--name s))))
+              (with-current-buffer buf
+                (should (eql (plist-get call :seq)
+                             (get-text-property (point) 'aob-event)))
+                (aob-trace-answer))
+              (should (equal (aob-trace--name kid) (buffer-name (window-buffer)))))
+            (with-current-buffer (progn (aob-subagents--open s (plist-get call :seq))
+                                        (current-buffer))
+              (should (equal (aob-trace--name kid) (buffer-name))))))
       (aob-tests--kill-views))))
 
 (ert-deftest aob-native-subagent-start-splits-no-window ()
-  "A subagent starting and working shows nothing new: no split, no panel."
+  "A subagent starting and working shows nothing new: no split."
   (aob-tests--with-session s
     (unwind-protect
         (progn
@@ -2106,11 +2095,6 @@ own trace; RET on the call in the trace opens it too."
             (with-current-buffer (aob-trace-buffer s) (aob-trace--render t))
             (aob--render-all)
             (should (= before (length (window-list))))
-            (should-not (get-buffer-window (aob-subagents--name s)))
-            (aob-subagents s)
-            (should (get-buffer-window (aob-subagents--name s)))
-            (aob-subagents s)
-            (should-not (get-buffer-window (aob-subagents--name s)))
             (should (= before (length (window-list))))))
       (aob-tests--kill-views))))
 

@@ -781,7 +781,7 @@ it was when the call began."
   "A Task's subagent digest: how many steps, how many running, how many
 failed, what they changed.  Never what they are doing — a trace that
 echoed each subagent's current step would be five agents talking over
-the one you asked.  `aob-subagents' keeps them all in one place under the trace."
+the one you asked.  The quickfix keeps them all in one place."
   (concat
    (if-let* ((n (plist-get ev :children)))
       (concat
@@ -2117,7 +2117,7 @@ A collapsed block IS the cached line string, so an unchanged event stays
             (t (aob-trace--annotate
                 s ev (aob-trace--questions s ev (aob-trace--line-cached s ev))))))
      ;; subagent steps are NOT inlined here — they have their own trace
-     ;; (the row under the trace, `aob-subagents'); an expanded Task shows detail
+     ;; (the quickfix lists them); an expanded Task shows detail
      (t (concat (aob-trace--line-cached s ev) "\n"
                 (aob-trace--detail-block s ev))))))
 
@@ -2502,29 +2502,8 @@ them, grouped and in order, or in their own trace."
                          aob-trace-detail-lines)
                "\n")))
 
-;;; Subagents — every Agent or Task call the agent made, one row each, in
-;;; a panel along the bottom.  RET goes to the call in the trace; TAB or
-;;; o opens the subagent's own trace.
-
-(defvar-local aob-subagents--session-id nil)
-(defvar-local aob-subagents--tick -1)
-
-(defvar aob-subagents-mode-map
-  (let ((map (make-sparse-keymap)))
-    (set-keymap-parent map (make-composed-keymap aob-object-map special-mode-map))
-    (define-key map (kbd "RET") #'aob-subagents-visit)
-    (define-key map (kbd "<tab>") #'aob-subagents-open)
-    (define-key map "o" #'aob-subagents-open)
-    map))
-
-(define-derived-mode aob-subagents-mode special-mode "aob-subs"
-  "The subagents one session delegated to."
-  (ygg-ui-plain-layout)
-  (setq truncate-lines t)
-  (setq-local cursor-in-non-selected-windows nil)
-  (hl-line-mode 1))
-
-(defun aob-subagents--name (s) (aob--buffer-name "subs" s))
+;;; Subagents — every Agent or Task call the agent made, one row each; the
+;;; quickfix lists them and a row opens the subagent's own trace.
 
 (defun aob-subagents--status (ev)
   "Running, stopped, done, cancelled or failed, as the subagent call EV last
@@ -2565,50 +2544,16 @@ TAIL is its model and tokens."
      'aob-session (aob-session-id s)
      'aob-event (plist-get ev :seq))))
 
-(defun aob-subagents--restore (line)
-  "Put every window back on LINE: erasing collapses each window's point."
-  (goto-char (point-min))
-  (forward-line (1- line))
-  (dolist (w (get-buffer-window-list (current-buffer) nil t))
-    (when (window-live-p w)
-      (set-window-point w (point)))))
+(defun aob-subagents--lines (s)
+  "S's subagent rows, in the order of its trace."
+  (let ((subs (aob-session-subagents s)))
+    (cl-mapcar (lambda (ev tail) (aob-subagents--row s ev tail))
+               subs (mapcar (lambda (e) (aob-trace--sub-tail s e)) subs))))
 
-(defun aob-subagents--render (&optional force)
-  (when-let* ((s (aob-session-get aob-subagents--session-id)))
-    (let* ((subs (aob-session-subagents s))
-           (tails (mapcar (lambda (e) (aob-trace--sub-tail s e)) subs))
-           (tick (cons (or (aob-session-ref s :tick) 0) tails)))
-      (unless (and (not force) (equal aob-subagents--tick tick))
-        (setq aob-subagents--tick tick)
-        (let* ((live (seq-count (lambda (e)
-                                  (equal (aob-subagents--status e) "running"))
-                                subs))
-               (line (line-number-at-pos))
-               (inhibit-read-only t))
-          (setq header-line-format
-                (format " %s · %d subagent%s%s · RET the call · o its trace"
-                        (aob-session-name s) (length subs)
-                        (if (= (length subs) 1) "" "s")
-                        (if (> live 0) (format " · %d running" live) "")))
-          (erase-buffer)
-          (if subs
-              (cl-mapc (lambda (ev tail) (insert (aob-subagents--row s ev tail) "\n"))
-                       subs tails)
-            (insert (propertize " working alone\n" 'face 'shadow)))
-          (aob-subagents--restore line))))))
-
-(defun aob-subagents--at-point ()
-  "The session and the subagent call seq on this line, or a user error."
-  (let ((seq (get-text-property (line-beginning-position) 'aob-event))
-        (s (aob-session-get aob-subagents--session-id)))
-    (unless (and s seq) (user-error "aob: no subagent on this line"))
-    (cons s seq)))
-
-(defun aob-subagents-visit ()
-  "Go to the subagent call on this line in its agent's trace."
-  (interactive)
-  (pcase-let ((`(,s . ,seq) (aob-subagents--at-point)))
-    (aob-subagents--goto s seq)))
+(defun aob-subagents--open (s seq)
+  "Open the trace of the subagent S called at SEQ."
+  (aob-trace (or (aob-trace--child-at s seq)
+                 (user-error "aob: that subagent kept no trace"))))
 
 (defun aob-subagents--goto (s seq)
   "Show S's trace in a window other than this one, at the event SEQ."
@@ -2623,42 +2568,6 @@ TAIL is its model and tokens."
         (when (window-live-p win) (set-window-point win (car at)))))
     (when (window-live-p win) (select-window win))
     buf))
-
-(defun aob-subagents-open ()
-  "Open the trace of the subagent on this line."
-  (interactive)
-  (pcase-let ((`(,s . ,seq) (aob-subagents--at-point)))
-    (aob-trace (or (aob-trace--child-at s seq)
-                   (user-error "aob: that subagent kept no trace")))))
-
-(defun aob-subagents-buffer (s)
-  "Return S's subagents buffer, creating and registering it if needed."
-  (let ((buf (get-buffer-create (aob-subagents--name s))))
-    (with-current-buffer buf
-      (unless (derived-mode-p 'aob-subagents-mode) (aob-subagents-mode))
-      (setq aob-subagents--session-id (aob-session-id s)
-            aob-buffer-session-id (aob-session-id s))
-      (aob-register-view buf #'aob-subagents--render)
-      (let ((inhibit-read-only t)) (aob-subagents--render t)))
-    buf))
-
-(defcustom aob-subagents-display-action
-  '((display-buffer-reuse-window display-buffer-at-bottom)
-    (window-height . 0.3)
-    (preserve-size . (nil . t))
-    (window-parameters . ((no-delete-other-windows . t))))
-  "Where the subagents list opens: a panel along the bottom, as the quickfix does."
-  :type 'sexp :group 'aob)
-
-;;;###autoload
-(defun aob-subagents (s)
-  "Show the list of subagents S ran, or put it away when it is showing."
-  (interactive (list (aob-target)))
-  (if-let* ((win (get-buffer-window (aob-subagents--name s))))
-      (quit-window nil win)
-    (let ((win (display-buffer (aob-subagents-buffer s) aob-subagents-display-action)))
-      (when (window-live-p win) (select-window win))
-      win)))
 
 (defun aob-trace--render (&optional force)
   ;; another agent's chatter must not redraw this trace: skip unless

@@ -145,15 +145,103 @@ for the panel in hand."
 
 (declare-function pulse-momentary-highlight-one-line "pulse")
 
+(defvar ygg-qf-kinds nil
+  "The kinds of list that are not locations, as (KIND . SPEC).
+SPEC is a plist: :collect (a function of the arguments `ygg-qf-show-kind'
+got, returning rows of (ID TEXT NOTE)), :action (a function of a row's ID,
+run when it is opened), :map (the symbol of the keymap embark offers on a
+row), :glyph (the mark in the gutter), :drop (a function of a row's ID that
+removes it at its source), :live-p (a function of those arguments, nil once
+the list should stop following) and :arm.  :arm is a function of the buffer,
+a token and those arguments that calls `ygg-qf-kind-refresh' with the token
+whenever the rows may have changed, and returns a function of no arguments
+that undoes what it set up.  That one is called once, when another writer
+replaces the list, the kind is shown again, or a refresh says the list
+stopped following.")
+
+(defvar-local ygg-qf--kind nil
+  "How this list follows its kind, as a plist.
+:token names this showing, :kind and :args what filled the list and
+:disarm undoes the arm.  Nil when no kind owns the list.")
+
+(defvar ygg-qf--act-target nil
+  "The embark target a verb of a kind is running on.")
+
+(declare-function ygg-embark-add-map "ygg-embark")
+(defvar embark-around-action-hooks)
+
+(defun ygg-qf-kind-type (kind)
+  "The embark target type of a row of KIND."
+  (intern (format "ygg-qf-%s" kind)))
+
+(defun ygg-qf--kind-embark-around (&rest args)
+  "Run an embark verb with the id of the row it was offered on in hand."
+  (let ((ygg-qf--act-target (plist-get args :orig-target)))
+    (apply (plist-get args :run) args)))
+
+(defun ygg-qf-define-kind (kind &rest spec)
+  "Register KIND, a list of rows that are objects, not places in files."
+  (setf (alist-get kind ygg-qf-kinds) spec)
+  (when-let* ((map (plist-get spec :map)))
+    (with-eval-after-load 'ygg-embark
+      (with-eval-after-load 'embark
+        (ygg-embark-add-map (ygg-qf-kind-type kind) map)))))
+
+(defun ygg-qf-kind-at-point ()
+  "The (KIND . ID) of the row at point, or nil off a row of a kind."
+  (when-let* ((kind (get-text-property (line-beginning-position) 'ygg-qf-kind)))
+    (cons kind (get-text-property (line-beginning-position) 'ygg-qf-id))))
+
+(defun ygg-qf--kind-list-p ()
+  "Whether this list holds rows of a kind."
+  (text-property-not-all (point-min) (point-max) 'ygg-qf-kind nil))
+
+(defun ygg-qf-kind-list-p (&optional buffer)
+  "Whether BUFFER, or this one, holds rows of a kind."
+  (with-current-buffer (or buffer (current-buffer))
+    (and (ygg-qf--kind-list-p) t)))
+
+(defun ygg-qf--id-by-string (string)
+  "The id of the row of any list that reads as STRING, or nil."
+  (catch 'found
+    (dolist (buf (ygg-qf-lists))
+      (with-current-buffer buf
+        (save-excursion
+          (goto-char (point-min))
+          (while (not (eobp))
+            (when-let* ((at (ygg-qf-kind-at-point))
+                        ((equal (format "%s" (cdr at)) string)))
+              (throw 'found (cdr at)))
+            (forward-line 1)))))))
+
+(defun ygg-qf-kind-target-id (&optional target)
+  "The id of the row an embark TARGET stands for.
+TARGET defaults to the one being acted on, then to the row at point.  The
+id rides on the target string; once embark has copied the string bare it is
+looked up by how it reads."
+  (let ((target (or target ygg-qf--act-target)))
+    (cond ((and (stringp target) (> (length target) 0)
+                (get-text-property 0 'ygg-qf-id target)))
+          ((stringp target) (ygg-qf--id-by-string target))
+          (t (cdr (ygg-qf-kind-at-point))))))
+
+(defun ygg-qf--row-action ()
+  "The function of no arguments the row at point runs in place of a visit."
+  (when-let* ((at (ygg-qf-kind-at-point))
+              (action (plist-get (alist-get (car at) ygg-qf-kinds) :action)))
+    (lambda () (funcall action (cdr at)))))
+
 (defun ygg-qf--row-place ()
   "The row at point as (FILE . LINE), in either shape the list holds them.
-Grep writes `file:line:\'; a curated row is vimified to `file|line| \'."
-  (let ((line (buffer-substring-no-properties
-               (line-beginning-position) (line-end-position))))
-    (when (string-match "\\`\\(.+?\\)[:|]\\([0-9]+\\)\\(?: col [0-9]+\\)?[:|]" line)
-      (let ((file (expand-file-name (match-string 1 line) default-directory)))
-        (when (file-readable-p file)
-          (cons file (string-to-number (match-string 2 line))))))))
+Grep writes `file:line:\'; a curated row is vimified to `file|line| \'.
+A row of a kind names no place."
+  (unless (ygg-qf-kind-at-point)
+    (let ((line (buffer-substring-no-properties
+                 (line-beginning-position) (line-end-position))))
+      (when (string-match "\\`\\(.+?\\)[:|]\\([0-9]+\\)\\(?: col [0-9]+\\)?[:|]" line)
+        (let ((file (expand-file-name (match-string 1 line) default-directory)))
+          (when (file-readable-p file)
+            (cons file (string-to-number (match-string 2 line)))))))))
 
 (defun ygg-qf--preview-target ()
   "The window a preview belongs in: the biggest one that is not this list.
@@ -227,35 +315,73 @@ between there and point as a region; a list is read, not selected."
              (not (bound-and-true-p rectangle-mark-mode)))
     (deactivate-mark)))
 
+(defun ygg-qf--step (n)
+  "Move N entries on, back when N is negative.
+A list of a kind has no locations for compilation to walk, so its rows are
+found by what they carry."
+  (if (not (ygg-qf--kind-list-p))
+      (if (< n 0) (compilation-previous-error (- n)) (compilation-next-error n))
+    (let ((dir (if (< n 0) -1 1))
+          (left (abs n))
+          (from (point)))
+      (while (and (> left 0) (zerop (forward-line dir)) (not (eobp)))
+        (when (get-text-property (line-beginning-position) 'ygg-qf-kind)
+          (setq left (1- left))))
+      (when (> left 0)
+        (goto-char from)
+        (user-error "quickfix: no more rows")))))
+
 (defun ygg-qf-next ()
   "Move to the next entry and show it, entries and never lines.
 Line motion walks over banners and context rows and leaves the preview
 looking at whatever was under it last; this is what a quickfix means by
 down."
   (interactive)
-  (compilation-next-error 1)
+  (ygg-qf--step 1)
   (ygg-qf--settle)
   (ygg-qf--preview-tick (current-buffer)))
 
 (defun ygg-qf-prev ()
   "Move to the previous entry and show it."
   (interactive)
-  (compilation-previous-error 1)
+  (ygg-qf--step -1)
   (ygg-qf--settle)
   (ygg-qf--preview-tick (current-buffer)))
 
 (defun ygg-qf-open ()
   "Open the entry at point and leave the panel for it."
   (interactive)
-  (let ((display-buffer-overriding-action
-         '((display-buffer-reuse-window ygg-qf--preview-window)
-           (inhibit-same-window . t))))
-    (compile-goto-error)
-    (recenter)))
+  (if-let* ((action (ygg-qf--row-action)))
+      (funcall action)
+    (let ((display-buffer-overriding-action
+           '((display-buffer-reuse-window ygg-qf--preview-window)
+             (inhibit-same-window . t))))
+      (compile-goto-error)
+      (recenter))))
+
+(defun ygg-qf-display ()
+  "Show the entry at point and stay in the panel."
+  (interactive)
+  (if-let* ((action (ygg-qf--row-action)))
+      (funcall action)
+    (compilation-display-error)))
+
+(defun ygg-qf--goto-error-action (orig &optional event)
+  "Run the action of the row clicked or at point, else visit it as ORIG does."
+  (when (and event (mouse-event-p event))
+    (posn-set-point (event-end event)))
+  (if-let* ((action (and (ygg-qf--quickfix-buffer-p (current-buffer))
+                         (ygg-qf--row-action))))
+      (funcall action)
+    (funcall orig event)))
+
+(advice-add 'compile-goto-error :around #'ygg-qf--goto-error-action)
 
 (defun ygg-qf--row-file ()
-  "The path the row at point opens with, as written, or nil off a row."
-  (when (get-text-property (line-beginning-position) 'ygg-qf-row)
+  "The path the row at point opens with, as written, or nil off a row.
+A row of a kind opens no path."
+  (when (and (get-text-property (line-beginning-position) 'ygg-qf-row)
+             (not (get-text-property (line-beginning-position) 'ygg-qf-kind)))
     (let ((text (buffer-substring-no-properties (line-beginning-position)
                                                 (line-end-position))))
       (and (string-match "\\`\\([^|:\n]+\\)[|:]" text)
@@ -309,7 +435,7 @@ down."
     (define-key m "k" #'ygg-qf-prev)
     (define-key m "i" #'wgrep-change-to-wgrep-mode)
     (define-key m (kbd "RET") #'ygg-qf-open)
-    (define-key m "o" #'compilation-display-error)
+    (define-key m "o" #'ygg-qf-display)
     (define-key m "p" #'ygg-qf-preview-toggle)
     (define-key m "q" #'quit-window)
     (define-key m "g g" #'ygg-qf-first)
@@ -460,7 +586,7 @@ the panel stops behaving like a list.")
   (interactive)
   (goto-char (point-min))
   (unless (get-text-property (line-beginning-position) 'ygg-qf-row)
-    (condition-case nil (compilation-next-error 1)
+    (condition-case nil (ygg-qf--step 1)
       (error (user-error "Quickfix is empty"))))
   (ygg-qf--settle)
   (ygg-qf--preview-tick (current-buffer)))
@@ -469,7 +595,7 @@ the panel stops behaving like a list.")
   "Move to the last row of this list, opening nothing."
   (interactive)
   (goto-char (point-max))
-  (condition-case nil (compilation-previous-error 1)
+  (condition-case nil (ygg-qf--step -1)
     (error (user-error "Quickfix is empty")))
   (ygg-qf--settle)
   (ygg-qf--preview-tick (current-buffer)))
@@ -545,6 +671,7 @@ in the banner instead of from a row of its own."
     (goto-char (point-min))
     (when (get-text-property (point) 'ygg-qf-banner)
       (let* ((inhibit-read-only t)
+             (token (get-text-property (point) 'ygg-qf-token))
              (title (ygg-qf--subtitle))
              (queries (append ygg-qf--filters
                               (unless (string-empty-p ygg-qf--filter-query)
@@ -554,21 +681,30 @@ in the banner instead of from a row of its own."
                                    (string-join queries " / "))
                          title)))
         (delete-region (point) (min (1+ (line-end-position)) (point-max)))
-        (insert (ygg-qf--banner (ygg-qf--count-rows) subtitle))))))
+        (insert (ygg-qf--banner (ygg-qf--count-rows) subtitle))
+        (when token
+          (put-text-property (point-min) (1+ (point-min)) 'ygg-qf-token token))))))
 
 (defun ygg-qf-drop ()
   "Drop the row under point from the list.
 Curating is half of what a list is for, and the other way to do it —
-wgrep — opens every file the rows point at to remove one of them."
+wgrep — opens every file the rows point at to remove one of them.  A row
+of a kind goes at its source, by the kind's :drop, and the list follows."
   (interactive)
   (unless (get-text-property (line-beginning-position) 'ygg-qf-row)
     (user-error "quickfix: not on a row"))
-  (let ((inhibit-read-only t))
-    (delete-region (line-beginning-position)
-                   (min (1+ (line-end-position)) (point-max))))
-  (ygg-qf--refresh-banner)
-  (unless (get-text-property (line-beginning-position) 'ygg-qf-row)
-    (ignore-errors (ygg-qf-prev))))
+  (if-let* ((at (ygg-qf-kind-at-point)))
+      (let ((drop (plist-get (alist-get (car at) ygg-qf-kinds) :drop)))
+        (unless drop (user-error "quickfix: a %s row cannot be dropped" (car at)))
+        (funcall drop (cdr at))
+        (when ygg-qf--kind
+          (ygg-qf-kind-refresh (current-buffer) (plist-get ygg-qf--kind :token))))
+    (let ((inhibit-read-only t))
+      (delete-region (line-beginning-position)
+                     (min (1+ (line-end-position)) (point-max))))
+    (ygg-qf--refresh-banner)
+    (unless (get-text-property (line-beginning-position) 'ygg-qf-row)
+      (ignore-errors (ygg-qf-prev)))))
 
 (defvar-local ygg-qf--filter-source nil
   "The rows the list held before a filter narrowed it, raw text each.
@@ -590,8 +726,10 @@ filter and F takes the last one off.")
       (goto-char (point-min))
       (while (not (eobp))
         (when (get-text-property (line-beginning-position) 'ygg-qf-row)
-          (push (buffer-substring-no-properties (line-beginning-position)
-                                                (line-end-position))
+          (push (if (ygg-qf-kind-at-point)
+                    (buffer-substring (line-beginning-position) (line-end-position))
+                  (buffer-substring-no-properties
+                   (line-beginning-position) (line-end-position)))
                 rows))
         (forward-line 1)))
     (nreverse rows)))
@@ -642,7 +780,7 @@ say.  A term is a regexp when it reads as one and plain text otherwise."
     (ygg-qf--style-grep start (point-max))
     (ygg-qf--refresh-banner)
     (goto-char (point-min))
-    (ignore-errors (compilation-next-error 1))))
+    (ignore-errors (ygg-qf--step 1))))
 
 (defun ygg-qf--filtered-rows (queries)
   "The rows of the whole list that every query of QUERIES keeps."
@@ -726,7 +864,9 @@ What stands after the filters, since those are the rows on show; a
 buffer that was filled by hand, with no styled row, is read line by line."
   (when-let* ((buffer (ygg-qf-buffer list)))
     (with-current-buffer buffer
-      (delq nil (mapcar #'ygg-qf-row-location
+      (delq nil (mapcar (lambda (row)
+                          (unless (get-text-property 0 'ygg-qf-kind row)
+                            (ygg-qf-row-location row)))
                         (or (ygg-qf--rows-raw)
                             (split-string (buffer-substring-no-properties
                                            (point-min) (point-max))
@@ -873,7 +1013,7 @@ The file is read once for the list and its lines kept."
   (let* ((file (expand-file-name path))
          (lines (or (gethash file ygg-qf--file-lines)
                     (puthash file
-                             (if (file-readable-p file)
+                             (if (and (file-regular-p file) (file-readable-p file))
                                  (with-temp-buffer
                                    (insert-file-contents file)
                                    (vconcat (split-string (buffer-string)
@@ -934,6 +1074,23 @@ Only the display changes, so grep still parses the row and jumps to it."
     (ygg-qf--context from to path line)
     (setq ygg-qf--prev-path path)))
 
+(defun ygg-qf--style-kind (beg)
+  "Hang the note of every row of a kind from BEG on at the right margin."
+  (save-excursion
+    (goto-char beg)
+    (while (not (eobp))
+      (let ((bol (line-beginning-position)))
+        (when-let* (((get-text-property bol 'ygg-qf-kind))
+                    (note (get-text-property bol 'ygg-qf-note)))
+          (let ((overlay (make-overlay (line-end-position) (line-end-position))))
+            (overlay-put overlay 'ygg-qf t)
+            (overlay-put overlay 'after-string
+                         (concat (propertize
+                                  " " 'display
+                                  `(space :align-to (- right ,(1+ (string-width note)))))
+                                 (propertize note 'face 'shadow))))))
+      (forward-line 1))))
+
 (defun ygg-qf--style-rows (beg)
   "Style curated `file|line col N| text' rows from BEG (quicker.nvim look)."
   (setq ygg-qf--prev-path nil)
@@ -942,7 +1099,8 @@ Only the display changes, so grep still parses the row and jumps to it."
     (while (< (point) (point-max))
       (let ((bol (line-beginning-position))
             (lend (line-end-position)))
-        (when (not (get-text-property bol 'ygg-qf-banner))
+        (when (not (or (get-text-property bol 'ygg-qf-banner)
+                       (get-text-property bol 'ygg-qf-kind)))
           (goto-char bol)
           (when (re-search-forward
                  "^\\([^|\n]+\\)|\\([0-9]+\\)\\(?: col [0-9]+\\)?| " lend t)
@@ -951,6 +1109,7 @@ Only the display changes, so grep still parses the row and jumps to it."
                               (match-string-no-properties 2))))
         (goto-char bol))
       (forward-line 1)))
+  (ygg-qf--style-kind beg)
   (ygg-qf--claim-subtitle beg))
 
 (defun ygg-qf--style-grep (beg end &optional require-hit)
@@ -997,6 +1156,28 @@ as locations (a `mouse-face') are touched — this skips grep's own header."
 
 (add-hook 'compilation-finish-functions #'ygg-qf--style-on-finish-keys)
 
+(defun ygg-qf--disown ()
+  "End the claim a kind has on this list, undoing what its arm set up."
+  (when ygg-qf--kind
+    (let ((disarm (plist-get ygg-qf--kind :disarm)))
+      (setq ygg-qf--kind nil)
+      (when (eq next-error-function #'ygg-qf--kind-next-error)
+        (setq next-error-function #'compilation-next-error-function))
+      (when disarm (funcall disarm)))))
+
+(defun ygg-qf-reset ()
+  "Empty this list for a writer that fills it from scratch.
+Every writer that erases a list calls this first, so no kind goes on
+following rows that are no longer there."
+  (ygg-qf--disown)
+  (let ((inhibit-read-only t))
+    (remove-overlays (point-min) (point-max) 'ygg-qf t)
+    (clrhash ygg-qf--file-lines)
+    (setq ygg-qf--context-drawn 0)
+    (setq ygg-qf--filter-source nil ygg-qf--filters nil
+          ygg-qf--filter-query "")
+    (erase-buffer)))
+
 (defun ygg-qf--collect (lines &optional replace list)
   "Append LINES (grep-format strings) to LIST, or to the one in hand.
 With REPLACE, clear it first."
@@ -1005,23 +1186,19 @@ With REPLACE, clear it first."
         (buf (ygg-qf-buffer-create list)))
     (with-current-buffer buf
       (let ((inhibit-read-only t) (start nil) (fresh nil))
+        (ygg-qf--disown)
         (unless (derived-mode-p 'grep-mode) (grep-mode))
         ;; the location hangs off the right margin; a wrapped row would
         ;; carry it somewhere it means nothing
         (setq-local truncate-lines t)
         (setq default-directory dir)
-        (when replace
-          (remove-overlays (point-min) (point-max) 'ygg-qf t)
-          (clrhash ygg-qf--file-lines)
-          (setq ygg-qf--context-drawn 0)
-          (setq ygg-qf--filter-source nil ygg-qf--filters nil
-                ygg-qf--filter-query "")
-          (erase-buffer))
+        (when replace (ygg-qf-reset))
         (setq fresh (= (point-min) (point-max)))
         (when fresh (insert (ygg-qf--banner)))
         (goto-char (point-max))
         (setq start (point))
-        (dolist (l lines) (insert (ygg-qf--vimify l dir) "\n"))
+        (dolist (l lines)
+          (insert (ygg-qf--vimify l dir) "\n"))
         (ygg-qf--style-rows start)
         (ygg-qf--refresh-banner)
         ;; a list drawn from scratch opens at its first entry: point left at
@@ -1032,6 +1209,157 @@ With REPLACE, clear it first."
           (ignore-errors (compilation-next-error 1)))))
     (setq next-error-last-buffer buf)
     (select-window (display-buffer buf))))
+
+;;; Kinds — lists of objects (subagents, todos…) that open by their action
+
+(defconst ygg-qf--kind-prefix ":| "
+  "What every row of a kind opens with, shown as its glyph.
+None of the shapes grep, a curated row or a context row reads a location
+from can begin with it, so no text after it is taken for one.")
+
+(defun ygg-qf--kind-rows (kind args)
+  "The rows of KIND for ARGS, each carrying its kind, id and note."
+  (let* ((spec (alist-get kind ygg-qf-kinds))
+         (glyph (propertize (concat (or (plist-get spec :glyph) "▪") " ")
+                            'face 'ygg-qf-bullet)))
+    (mapcar
+     (pcase-lambda (`(,id ,text ,note))
+       (let ((row (propertize
+                   (concat ygg-qf--kind-prefix
+                           (replace-regexp-in-string "[\n\0]" " " text))
+                   'ygg-qf-kind kind 'ygg-qf-id id 'ygg-qf-note note
+                   'ygg-qf-row t)))
+         (put-text-property 0 (length ygg-qf--kind-prefix) 'display glyph row)
+         row))
+     (apply (plist-get spec :collect) args))))
+
+(defun ygg-qf--kind-key (row)
+  "What of ROW decides whether a redraw would show anything new."
+  (list (substring-no-properties row)
+        (get-text-property 0 'ygg-qf-kind row)
+        (get-text-property 0 'ygg-qf-id row)
+        (get-text-property 0 'ygg-qf-note row)))
+
+(defun ygg-qf--kind-same-p (rows)
+  "Whether ROWS are the rows the list already holds."
+  (equal (mapcar #'ygg-qf--kind-key rows)
+         (mapcar #'ygg-qf--kind-key (or ygg-qf--filter-source (ygg-qf--rows-raw)))))
+
+(defun ygg-qf--place-at (pos)
+  "Where POS stands, as the id of its row and the index of its line."
+  (save-excursion
+    (goto-char pos)
+    (cons (cdr (ygg-qf-kind-at-point)) (1- (line-number-at-pos pos)))))
+
+(defun ygg-qf--place-pos (place)
+  "The start of the row PLACE names, else of the row that took its line."
+  (save-excursion
+    (goto-char (point-min))
+    (let ((found nil))
+      (while (and (car place) (not found) (not (eobp)))
+        (if (equal (car place) (cdr (ygg-qf-kind-at-point)))
+            (setq found t)
+          (forward-line 1)))
+      (unless found
+        (goto-char (point-min))
+        (forward-line (min (cdr place) (max 0 (1- (count-lines (point-min) (point-max))))))
+        (unless (get-text-property (line-beginning-position) 'ygg-qf-kind)
+          (or (ignore-errors (ygg-qf--step 1)) (ignore-errors (ygg-qf--step -1)))))
+      (line-beginning-position))))
+
+(defun ygg-qf--kind-redraw (rows)
+  "Make ROWS the rows on show, each window keeping its row and its scroll."
+  (let ((saved (mapcar (lambda (w)
+                         (list w (ygg-qf--place-at (window-point w))
+                               (1- (line-number-at-pos (window-start w)))))
+                       (get-buffer-window-list nil nil t)))
+        (here (ygg-qf--place-at (point))))
+    (if ygg-qf--filter-source
+        (progn (setq ygg-qf--filter-source rows)
+               (ygg-qf--refill (ygg-qf--filtered-rows
+                                (append ygg-qf--filters (list ygg-qf--filter-query)))))
+      (ygg-qf--refill rows))
+    (pcase-dolist (`(,w ,at ,top) saved)
+      (set-window-start w (save-excursion
+                            (goto-char (point-min))
+                            (forward-line (min top (max 0 (1- (count-lines
+                                                               (point-min) (point-max))))))
+                            (point))
+                        t)
+      (set-window-point w (ygg-qf--place-pos at)))
+    (goto-char (ygg-qf--place-pos here))))
+
+(defun ygg-qf--kind-owned-p (token)
+  "Whether the rows on show are still the ones TOKEN's showing drew."
+  (and (eq token (plist-get ygg-qf--kind :token))
+       (eq token (save-restriction
+                   (widen)
+                   (get-text-property (point-min) 'ygg-qf-token)))))
+
+(defun ygg-qf--kind-next-error (n &optional reset)
+  "Run the action of the row N rows on, from the top with RESET.
+This is the list's `next-error-function' while a kind fills it."
+  (if (not (ygg-qf--kind-list-p))
+      (progn (setq next-error-function #'compilation-next-error-function)
+             (compilation-next-error-function n reset))
+    (when reset (goto-char (point-min)))
+    (unless (zerop n) (ygg-qf--step n))
+    (dolist (w (get-buffer-window-list nil nil t))
+      (set-window-point w (point)))
+    (funcall (or (ygg-qf--row-action) (user-error "quickfix: not on a row")))))
+
+(defun ygg-qf-show-kind (kind &rest args)
+  "Fill the list in hand with KIND's rows for ARGS, select it and keep it current.
+Whatever kind filled the list before stops following it."
+  (let* ((spec (or (alist-get kind ygg-qf-kinds)
+                   (user-error "quickfix: no kind called %s" kind)))
+         (rows (ygg-qf--kind-rows kind args)))
+    (unless rows (user-error "quickfix: nothing to list as %s" kind))
+    (let ((dir default-directory)
+          (buf (ygg-qf-buffer-create))
+          (token (list kind)))
+      (with-current-buffer buf
+        (let ((inhibit-read-only t))
+          (ygg-qf-reset)
+          (unless (derived-mode-p 'grep-mode) (grep-mode))
+          (setq default-directory dir)
+          (setq-local truncate-lines t)
+          (insert (ygg-qf--banner))
+          (put-text-property (point-min) (1+ (point-min)) 'ygg-qf-token token)
+          (let ((start (point)))
+            (dolist (row rows) (insert row "\n"))
+            (ygg-qf--style-rows start))
+          (ygg-qf--refresh-banner)
+          (goto-char (point-min))
+          (ygg-qf--step 1))
+        (setq next-error-function #'ygg-qf--kind-next-error)
+        (add-hook 'kill-buffer-hook #'ygg-qf--disown nil t)
+        (setq ygg-qf--kind (list :token token :kind kind :args args))
+        (when-let* ((arm (plist-get spec :arm)))
+          (plist-put ygg-qf--kind :disarm (apply arm buf token args))))
+      (setq next-error-last-buffer buf)
+      (select-window (display-buffer buf)))))
+
+(defun ygg-qf-kind-refresh (buf token)
+  "Bring BUF up to date with the kind that filled it, while TOKEN is its showing.
+Non-nil while the list still follows that kind.  Nil, with BUF left as it
+stands, when TOKEN is not the showing any more, whether another writer
+replaced the rows or the kind was shown again; nil as well, and the arm
+undone, when the kind says it has nothing left to follow."
+  (when (buffer-live-p buf)
+    (with-current-buffer buf
+      (when (and token (eq token (plist-get ygg-qf--kind :token)))
+        (let* ((kind (plist-get ygg-qf--kind :kind))
+               (args (plist-get ygg-qf--kind :args))
+               (live (plist-get (alist-get kind ygg-qf-kinds) :live-p)))
+          (if (not (and (ygg-qf--kind-owned-p token)
+                        (or (null live) (apply live args))))
+              (progn (ygg-qf--disown) nil)
+            (let ((inhibit-read-only t)
+                  (rows (ygg-qf--kind-rows kind args)))
+              (unless (ygg-qf--kind-same-p rows)
+                (ygg-qf--kind-redraw rows)))
+            t))))))
 
 (defun ygg-qf--lines (beg end filter)
   "Lines between BEG and END; when FILTER, only file:line locations."
@@ -1085,7 +1413,7 @@ Project-wide when flymake has project state, else the current buffer's."
         (unless (derived-mode-p 'grep-mode) (grep-mode))
         (let ((inhibit-read-only t))
           (setq default-directory dir)
-          (erase-buffer)
+          (ygg-qf-reset)
           (insert (ygg-qf--banner))
           (let ((start (point)))
             (insert (mapconcat #'identity lines "\n") "\n")
@@ -1267,8 +1595,7 @@ the command line does.  Returns the process."
   (when-let* ((buf (ygg-qf-buffer)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
-        (remove-overlays (point-min) (point-max) 'ygg-qf t)
-        (erase-buffer)
+        (ygg-qf-reset)
         (insert (ygg-qf--banner)))))
   (message "quickfix: %s is empty" (ygg-qf-name)))
 

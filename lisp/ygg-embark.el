@@ -48,6 +48,11 @@
 (declare-function aob-session-id "aob" (session))
 (declare-function ygg-space-tree "yggdrasil-spacetree" ())
 (declare-function ygg-qf-open "layer-quickfix" ())
+(declare-function ygg-qf-kind-type "layer-quickfix" (kind))
+(declare-function ygg-qf-kind-at-point "layer-quickfix" ())
+(declare-function ygg-qf--kind-embark-around "layer-quickfix" (&rest args))
+(defvar ygg-qf-kinds)
+(defvar embark-around-action-hooks)
 (declare-function ygg-qf-drop "layer-quickfix" ())
 ;;; What point stands on
 
@@ -112,6 +117,15 @@ than stopping where the path does.")
     (ygg-embark--target 'ygg-space (plist-get space :name)
                         (ygg-embark--line-bounds))))
 
+(defun ygg-embark-target-qf-kind ()
+  "Tell embark point stands on a row of a kind of quickfix list, as KIND and ID."
+  (when-let* (((fboundp 'ygg-qf-kind-at-point))
+              (at (ygg-qf-kind-at-point)))
+    (ygg-embark--target (ygg-qf-kind-type (car at))
+                        (propertize (format "%s" (cdr at))
+                                    'ygg-qf-kind (car at) 'ygg-qf-id (cdr at))
+                        (ygg-embark--line-bounds))))
+
 (defun ygg-embark-target-qf-row ()
   "Tell embark point stands on a quickfix row, named as FILE:LINE."
   (when-let* ((row (ygg-embark--qf-row)))
@@ -126,6 +140,7 @@ than stopping where the path does.")
 
 (defconst ygg-embark-target-finders
   '(ygg-embark-target-space
+    ygg-embark-target-qf-kind
     ygg-embark-target-qf-row
     ygg-embark-target-mention)
   "Every finder this module adds, the narrowest thing first.")
@@ -266,11 +281,18 @@ Dropping it is the general map's DEL: the bounds cover the mention.")
       (setq tail (cdr tail)))
     (nreverse found)))
 
+(defun ygg-embark--kind-cells ()
+  "The (TYPE . KEYMAP) of every kind of quickfix row that has a keymap."
+  (delq nil (mapcar (lambda (kind)
+                      (when-let* ((map (plist-get (cdr kind) :map)))
+                        (cons (ygg-qf-kind-type (car kind)) map)))
+                    (bound-and-true-p ygg-qf-kinds))))
+
 (defun ygg-embark-verbs ()
   "Every command the maps here bind, each one once."
   (seq-uniq (seq-mapcat (lambda (cell)
                           (ygg-embark-commands (symbol-value (cdr cell))))
-                        ygg-embark-keymaps)))
+                        (append ygg-embark-keymaps (ygg-embark--kind-cells)))))
 
 ;;; The menu: the verbs shown the way a prefix key is shown
 
@@ -318,6 +340,19 @@ there to draw one."
                                   nil nil t
                                   #'ygg-embark--menu-shown-p))))))
 
+(defun ygg-embark-add-map (type map)
+  "Let embark offer MAP, a keymap symbol, on targets of TYPE.
+Its verbs take the target as the id it carries and are not given it again
+as input, so one that prompts keeps its own prompt."
+  (add-to-list 'embark-keymap-alist (cons type map))
+  (unless (keymap-parent (symbol-value map))
+    (set-keymap-parent (symbol-value map) embark-general-map))
+  (dolist (command (ygg-embark-commands (symbol-value map)))
+    (add-to-list 'embark-target-injection-hooks
+                 (list command #'embark--ignore-target))
+    (add-to-list 'embark-around-action-hooks
+                 (list command #'ygg-qf--kind-embark-around))))
+
 (defun ygg-embark-install ()
   "Let embark know every thing, every keymap and every verb here."
   (dolist (finder (reverse ygg-embark-target-finders))
@@ -336,6 +371,8 @@ there to draw one."
   (dolist (command (ygg-embark-verbs))
     (add-to-list 'embark-target-injection-hooks
                  (list command #'embark--ignore-target)))
+  (pcase-dolist (`(,type . ,map) (ygg-embark--kind-cells))
+    (ygg-embark-add-map type map))
   (setq embark-indicators (list #'ygg-embark-menu-indicator
                                 #'embark-highlight-indicator
                                 #'embark-isearch-highlight-indicator))

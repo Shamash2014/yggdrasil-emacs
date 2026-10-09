@@ -617,6 +617,6 @@ task tree, spent the whole CPU on one trackpad flick.")
   (advice-add 'ultra-scroll :around #'ygg-ui--pixel-scroll-or-lines))
 
 (dolist (hook '(ygg-trace-mode-hook ygg-task-tree-mode-hook aob-trace-mode-hook
-                aob-subagents-mode-hook ygg-pending-mode-hook))
+                ygg-pending-mode-hook))
   (add-hook hook #'ygg-ui-line-scroll-here))
 

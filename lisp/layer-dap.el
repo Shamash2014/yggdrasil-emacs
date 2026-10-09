@@ -15,6 +15,7 @@
 (require 'cl-lib)
 
 (declare-function ygg-qf-buffer-create "layer-quickfix" (&optional list))
+(declare-function ygg-qf-reset "layer-quickfix" ())
 (declare-function ygg-selection-effective-bounds "yggdrasil-selection")
 (declare-function consult-flymake "consult-flymake")
 
@@ -262,7 +263,7 @@
           (buf (ygg-qf-buffer-create)))
       (with-current-buffer buf
         (let ((inhibit-read-only t))
-          (erase-buffer)
+          (ygg-qf-reset)
           (setq default-directory dir)
           (insert (mapconcat #'identity lines "\n") "\n"))
         (grep-mode))

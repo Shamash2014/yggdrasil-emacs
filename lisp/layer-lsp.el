@@ -15,6 +15,7 @@
 (require 'ygg-jdk)
 
 (declare-function ygg-qf-buffer-create "layer-quickfix" (&optional list))
+(declare-function ygg-qf-reset "layer-quickfix" ())
 
 (declare-function eglot-managed-p "eglot")
 (declare-function eglot-format "eglot")
@@ -1225,7 +1226,7 @@ A degenerate (zero-width) selection formats the whole buffer instead."
          (buf (ygg-qf-buffer-create)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
-        (erase-buffer)
+        (ygg-qf-reset)
         (setq default-directory dir)
         (insert ygg-qf--header)
         (insert (mapconcat #'identity lines "\n") "\n"))
@@ -1580,7 +1581,7 @@ A degenerate (zero-width) selection formats the whole buffer instead."
                  syms)))
     (with-current-buffer buf
       (let ((inhibit-read-only t))
-        (erase-buffer)
+        (ygg-qf-reset)
         (setq default-directory dir)
         (insert ygg-qf--header)
         (insert (mapconcat #'identity lines "\n") "\n"))
