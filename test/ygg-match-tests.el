@@ -453,5 +453,156 @@
     (ygg-treesit-parent-node-end)
     (should (equal (ygg-match-tests--selected) "a,"))))
 
+;;; f t T m x textobjects
+
+(defun ygg-match-tests--obj (c which text-before)
+  "Text of object C/WHICH with point just after TEXT-BEFORE's first match."
+  (goto-char (point-min))
+  (search-forward text-before)
+  (when-let* ((b (ygg-match--textobject-bounds c which)))
+    (buffer-substring (car b) (cdr b))))
+
+(defmacro ygg-match-tests--with-ts (mode lang content &rest body)
+  (declare (indent 3))
+  `(let ((treesit-extra-load-path '("/Users/shamash/emacs-31/tree-sitter")))
+     (skip-unless (treesit-language-available-p ',lang))
+     (with-temp-buffer
+       (insert ,content)
+       (,mode)
+       ,@body)))
+
+(ert-deftest ygg-match-textobj-elisp-function ()
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(defun foo (a)\n  \"doc\"\n  (bar a))\n")
+    (should (equal (ygg-match-tests--obj ?f 'around "(bar") "(defun foo (a)\n  \"doc\"\n  (bar a))"))
+    (should (equal (ygg-match-tests--obj ?f 'inside "(bar") "\"doc\"\n  (bar a)"))))
+
+(ert-deftest ygg-match-textobj-elisp-test ()
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(defun foo () 1)\n\n(ert-deftest my-test ()\n  (should t))\n")
+    (should (equal (ygg-match-tests--obj ?T 'inside "(should") "(should t)"))
+    (should (equal (ygg-match-tests--obj ?T 'around "(should")
+                   "(ert-deftest my-test ()\n  (should t))"))
+    (should-not (ygg-match-tests--obj ?T 'inside "foo"))))
+
+(ert-deftest ygg-match-textobj-elisp-type ()
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(cl-defstruct point x y)\n")
+    (should (equal (ygg-match-tests--obj ?t 'around "x y") "(cl-defstruct point x y)"))
+    (should (equal (ygg-match-tests--obj ?t 'inside "x y") "x y"))))
+
+(ert-deftest ygg-match-textobj-closest-pair ()
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(a [b \"c d\"] e)")
+    (should (equal (ygg-match-tests--obj ?m 'around "c ") "\"c d\""))
+    (should (equal (ygg-match-tests--obj ?m 'inside "c ") "c d"))
+    (should (equal (ygg-match-tests--obj ?m 'inside "[b") "b \"c d\""))
+    (should (equal (ygg-match-tests--obj ?m 'around " e") "(a [b \"c d\"] e)"))))
+
+(ert-deftest ygg-match-textobj-closest-pair-grows ()
+  (ygg-with-temp-buffer "((a b))"
+    (ygg-set-selection 3 3)
+    (ygg-match-inside ?m)
+    (should (equal (ygg-match-tests--selected) "a b"))
+    (ygg-match-inside ?m)
+    (should (equal (ygg-match-tests--selected) "(a b)"))))
+
+(ert-deftest ygg-match-textobj-tag-moved-to-x ()
+  (with-temp-buffer
+    (html-mode)
+    (insert "<div><b>hi</b></div>")
+    (should (equal (ygg-match-tests--obj ?x 'inside "hi") "hi"))
+    (should (equal (ygg-match-tests--obj ?x 'around "hi") "<b>hi</b>"))
+    (should-not (ygg-match-tests--obj ?t 'inside "hi"))))
+
+(defconst ygg-match-tests--py-src
+  "class A:\n    def test_it(self, x):\n        y = x\n        return y\n\n    # note\n    def other(self):\n        pass\n")
+
+(ert-deftest ygg-match-textobj-ts-python-function ()
+  (ygg-match-tests--with-ts python-ts-mode python ygg-match-tests--py-src
+    (should (equal (ygg-match-tests--obj ?f 'inside "y = x") "y = x\n        return y"))
+    (should (string-prefix-p "def test_it" (ygg-match-tests--obj ?f 'around "y = x")))
+    (should (string-suffix-p "return y" (ygg-match-tests--obj ?f 'around "y = x")))
+    (should (string-prefix-p "def other" (ygg-match-tests--obj ?f 'around "pass")))))
+
+(ert-deftest ygg-match-textobj-ts-python-type ()
+  (ygg-match-tests--with-ts python-ts-mode python ygg-match-tests--py-src
+    (should (string-prefix-p "class A:" (ygg-match-tests--obj ?t 'around "y = x")))
+    (should (string-prefix-p "def test_it" (ygg-match-tests--obj ?t 'inside "y = x")))
+    (should (string-prefix-p "class A:" (ygg-match-tests--obj ?t 'around "note")))))
+
+(ert-deftest ygg-match-textobj-ts-python-test ()
+  (ygg-match-tests--with-ts python-ts-mode python ygg-match-tests--py-src
+    (should (string-prefix-p "def test_it" (ygg-match-tests--obj ?T 'around "y = x")))
+    (should (equal (ygg-match-tests--obj ?T 'inside "y = x") "y = x\n        return y"))
+    (should-not (ygg-match-tests--obj ?T 'around "pass"))))
+
+(ert-deftest ygg-match-textobj-ts-python-comment ()
+  (ygg-match-tests--with-ts python-ts-mode python ygg-match-tests--py-src
+    (should (equal (ygg-match-tests--obj ?c 'inside "# no") "# note"))))
+
+(ert-deftest ygg-match-textobj-ts-typescript-function-braces ()
+  (ygg-match-tests--with-ts typescript-ts-mode typescript "function f(a: number) {\n  return a;\n}\n"
+    (should (equal (ygg-match-tests--obj ?f 'inside "return") "\n  return a;\n"))
+    (should (equal (ygg-match-tests--obj ?f 'around "return")
+                   "function f(a: number) {\n  return a;\n}"))))
+
+(ert-deftest ygg-match-textobj-ts-typescript-test-call ()
+  (ygg-match-tests--with-ts typescript-ts-mode typescript "it('works', () => {\n  expect(1);\n});\n"
+    (should (equal (ygg-match-tests--obj ?T 'inside "expect") "\n  expect(1);\n"))
+    (should (string-prefix-p "it('works'" (ygg-match-tests--obj ?T 'around "expect")))))
+
+(ert-deftest ygg-match-textobj-ts-tsx-tag ()
+  (ygg-match-tests--with-ts tsx-ts-mode tsx "const a = <div><b>hi</b></div>;\n"
+    (should (equal (ygg-match-tests--obj ?x 'around "hi") "<b>hi</b>"))
+    (should (equal (ygg-match-tests--obj ?x 'inside "hi") "hi"))))
+
+(ert-deftest ygg-match-textobj-function-grows-on-repeat ()
+  (ygg-match-tests--with-ts python-ts-mode python
+      "def a():\n    def b():\n        x = 1\n    return b\n"
+    (yggdrasil-local-mode 1)
+    (goto-char (point-min))
+    (search-forward "x = 1")
+    (ygg-set-selection (point) (point))
+    (ygg-match-around ?f)
+    (should (string-prefix-p "def b" (ygg-match-tests--selected)))
+    (ygg-match-around ?f)
+    (should (string-prefix-p "def a" (ygg-match-tests--selected)))))
+
+(ert-deftest ygg-match-textobj-python-mode-function-inside-is-the-body ()
+  (with-temp-buffer
+    (python-mode)
+    (insert "def f(a,\n      b):\n    x = 1\n    return x\n\ndef g():\n    pass\n")
+    (should (equal (ygg-match-tests--obj ?f 'inside "x = 1") "    x = 1\n    return x"))
+    (should (string-prefix-p "def f(a," (ygg-match-tests--obj ?f 'around "x = 1")))))
+
+(ert-deftest ygg-match-textobj-elisp-string-and-comment ()
+  (with-temp-buffer
+    (emacs-lisp-mode)
+    (insert "(defun foo ()\n  \"the doc\"\n  ;; a note\n  1)\n")
+    (should (equal (ygg-match-tests--obj ?S 'inside "the d") "the doc"))
+    (should (equal (ygg-match-tests--obj ?S 'around "the d") "\"the doc\""))
+    (should (equal (ygg-match-tests--obj ?M 'inside "a no") ";; a note"))
+    (should-not (ygg-match-tests--obj ?S 'inside "a no"))))
+
+(ert-deftest ygg-match-textobj-combobulate-function ()
+  (let ((dir "/Users/shamash/emacs-31/elpaca/builds/combobulate"))
+    (skip-unless (and (member ".elc" load-suffixes)
+                      (file-exists-p (expand-file-name "combobulate.elc" dir))))
+    (add-to-list 'load-path dir)
+    (skip-unless (locate-library "combobulate"))
+    (ygg-match-tests--with-ts python-ts-mode python ygg-match-tests--py-src
+      (require 'combobulate)
+      (combobulate-mode 1)
+      (goto-char (point-min))
+      (search-forward "y = x")
+      (let ((fn (ygg-match--combobulate-node 'function)))
+        (should (string-prefix-p "def test_it" (treesit-node-text fn t))))
+      (should (equal (treesit-node-type (ygg-match--combobulate-node 'type)) "class_definition")))))
+
 (provide 'ygg-match-tests)
 ;;; ygg-match-tests.el ends here

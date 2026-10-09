@@ -241,13 +241,18 @@ blank lines, or its leading ones when there is no trailing run."
                 end))))))
 
 (defun ygg-match--enclosing-any-paren ()
-  "Innermost enclosing (), [], or {} pair around point; a raw character
-scan, so it works regardless of the buffer's syntax table."
-  (let (best)
-    (dolist (pair '((?\( . ?\)) (?\[ . ?\]) (?\{ . ?\})))
-      (let ((b (ygg-match--find-enclosing-charscan (car pair) (cdr pair))))
-        (when (and b (or (null best) (> (car b) (car best)))) (setq best b))))
-    best))
+  "Innermost enclosing (), [], or {} pair around point; the parser state
+answers it, a raw character scan covers odd syntax tables."
+  (or (when-let* ((open (nth 1 (syntax-ppss)))
+                  ((memq (char-after open) '(?\( ?\[ ?\{))))
+        (condition-case nil
+            (save-excursion (goto-char open) (forward-sexp 1) (cons open (point)))
+          (scan-error nil)))
+      (let (best)
+        (dolist (pair '((?\( . ?\)) (?\[ . ?\]) (?\{ . ?\})))
+          (let ((b (ygg-match--find-enclosing-charscan (car pair) (cdr pair))))
+            (when (and b (or (null best) (> (car b) (car best)))) (setq best b))))
+        best)))
 
 (defun ygg-match--comma-segments (beg end)
   "Top-level comma-split segments of BEG..END as ((SEG-BEG . SEG-END)...);
@@ -300,38 +305,58 @@ comma (trailing preferred, else leading). Matches only per-argument wrapper
 nodes (TS `required_parameter', Rust `parameter' &c.), NOT the plural
 container (`arguments'/`parameters') — bare call args have no wrapper node,
 so this returns nil and the comma-split fallback takes over."
-  (when (and (fboundp 'treesit-node-at) (treesit-parser-list))
-    (let ((node (treesit-node-at (point)))
-          (re "\\(?:\\`\\|_\\)\\(?:argument\\|parameter\\)\\'"))
-      (while (and node (not (string-match-p re (treesit-node-type node))))
-        (setq node (treesit-node-parent node)))
+  (let ((re "\\(?:\\`\\|_\\)\\(?:argument\\|parameter\\)\\'"))
+    (let ((node (ygg-match--ts-ancestor
+                 (lambda (n) (or (ygg-match--ts-thing-p n 'argument)
+                                 (string-match-p re (treesit-node-type n)))))))
       (when node
-        (let ((ibeg (treesit-node-start node))
-              (iend (treesit-node-end node)))
-          (if (eq which 'inside)
-              (cons ibeg iend)
-            (or (save-excursion            ; trailing ", " up to the next arg
-                  (goto-char iend)
-                  (skip-chars-forward " \t\n")
-                  (when (eq (char-after) ?,)
-                    (forward-char 1) (skip-chars-forward " \t\n")
-                    (cons ibeg (point))))
-                (save-excursion            ; else a leading " ,"
-                  (goto-char ibeg)
-                  (skip-chars-backward " \t\n")
-                  (when (eq (char-before) ?,)
-                    (backward-char 1) (skip-chars-backward " \t\n")
-                    (cons (point) iend)))
-                (cons ibeg iend))))))))
+        (ygg-match--argument-span (treesit-node-start node) (treesit-node-end node) which)))))
+
+(defun ygg-match--argument-span (ibeg iend which)
+  (if (eq which 'inside)
+      (cons ibeg iend)
+    (or (save-excursion
+          (goto-char iend)
+          (skip-chars-forward " \t\n")
+          (when (eq (char-after) ?,)
+            (forward-char 1) (skip-chars-forward " \t\n")
+            (cons ibeg (point))))
+        (save-excursion
+          (goto-char ibeg)
+          (skip-chars-backward " \t\n")
+          (when (eq (char-before) ?,)
+            (backward-char 1) (skip-chars-backward " \t\n")
+            (cons (point) iend)))
+        (cons ibeg iend))))
+
+(defconst ygg-match--argument-list-regexp
+  "\\`\\(?:[a-z_]*_\\)?\\(?:arguments\\|parameters\\|argument_list\\|parameter_list\\)\\'")
+
+(defun ygg-match--argument-children-bounds (which)
+  "The argument-list child around point, cheaper than a character scan."
+  (when-let* ((list (ygg-match--ts-ancestor
+                     (lambda (n) (string-match-p ygg-match--argument-list-regexp
+                                                 (treesit-node-type n)))))
+              (kids (seq-remove (lambda (n) (string-match-p "comment" (treesit-node-type n)))
+                                (treesit-node-children list t))))
+    (let* ((pt (point))
+           (kid (or (seq-find (lambda (n) (and (>= pt (treesit-node-start n))
+                                               (<= pt (treesit-node-end n))))
+                              kids)
+                    (car (last (seq-filter (lambda (n) (< (treesit-node-end n) pt)) kids)))
+                    (car kids))))
+      (ygg-match--argument-span (treesit-node-start kid) (treesit-node-end kid) which))))
+
+(defun ygg-match--argument-bounds (which)
+  (or (ygg-match--argument-children-bounds which)
+      (ygg-match--argument-fallback-bounds which)))
 
 (defun ygg-match--comment-treesit-bounds (which)
-  (when (and (fboundp 'treesit-node-at) (treesit-parser-list))
-    (let ((node (treesit-node-at (point))))
-      (while (and node (not (string-match-p "comment" (treesit-node-type node))))
-        (setq node (treesit-node-parent node)))
-      (when node
-        (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
-          (if (eq which 'around) (ygg-match--around-pad b) b))))))
+  (when-let* ((node (ygg-match--ts-ancestor
+                     (lambda (n) (or (ygg-match--ts-thing-p n 'comment)
+                                     (string-match-p "comment" (treesit-node-type n)))))))
+    (let ((b (cons (treesit-node-start node) (treesit-node-end node))))
+      (if (eq which 'around) (ygg-match--around-pad b) b))))
 
 (defun ygg-match--comment-bounds (which)
   "Treesit comment node when parsed, else `bounds-of-thing-at-point'
@@ -366,7 +391,365 @@ indentation (blank lines pass through); `ai' adds the header line above."
                 (if (bobp) beg (progn (forward-line -1) (line-beginning-position))))
               end1)))))
 
-;;; Tag textobject (vim it / at) — HTML/XML/JSX element pairs
+;;; Syntax-node textobjects (f t T): builtin treesit things, then combobulate,
+;;; then node-type regexps, then non-treesit fallbacks
+
+(declare-function combobulate-node-at-point "combobulate-navigation")
+(declare-function combobulate-procedure-collect-activation-nodes "combobulate-procedure")
+(declare-function combobulate-get "combobulate-setup")
+(declare-function python-nav-end-of-statement "python")
+
+(defconst ygg-match--type-regexp
+  "\\`\\(?:[a-z_]*_\\)?\\(?:\\(?:class\\|struct\\|impl\\|interface\\|enum\\|trait\\|module\\|protocol\\|object\\|record\\)\\(?:_\\(?:definition\\|declaration\\|item\\|specifier\\)\\)?\\|type_\\(?:alias_\\)?\\(?:declaration\\|definition\\|item\\|statement\\)\\)\\'"
+  "Node types counted as a type/class definition; annotations never are.")
+
+(defconst ygg-match--function-regexp
+  "\\`\\(?:[a-z_]*_\\)?\\(?:function\\|method\\|func\\|lambda\\)\\(?:_\\(?:definition\\|declaration\\|item\\|expression\\|literal\\|signature\\|signature_item\\)\\)?\\'"
+  "Node types counted as a function definition.")
+
+(defconst ygg-match--test-name-regexp
+  "\\`\\(?:[Tt]est\\|it_\\)\\|_test\\'\\|Test\\'"
+  "Function names that mark a test.")
+
+(defconst ygg-match--test-call-regexp
+  "\\`\\(?:it\\|test\\|describe\\|specify\\)\\(?:\\.[a-z]+\\)?\\'"
+  "Callee names of JS-style test blocks.")
+
+(defun ygg-match--ts-ancestor (pred &optional skip)
+  "Innermost node at point, or ancestor of it, satisfying PRED, after
+passing over SKIP matches; a decorator wrapper counts with its definition."
+  (when (and (fboundp 'treesit-node-at) (treesit-parser-list))
+    (let ((node (treesit-node-at (point))) (left (or skip 0)) last hit)
+      (while (and node (not hit))
+        (when (and (funcall pred node)
+                   (not (and last (treesit-node-eq (ygg-match--ts-unwrap node) last))))
+          (if (zerop left) (setq hit node) (setq left (1- left) last node)))
+        (unless hit (setq node (treesit-node-parent node))))
+      hit)))
+
+(defun ygg-match--ts-thing-p (node thing)
+  "Non-nil when NODE is THING per the mode's `treesit-thing-settings'."
+  (and (fboundp 'treesit-node-match-p)
+       (ignore-errors (treesit-node-match-p node thing t))))
+
+(defun ygg-match--ts-unwrap (node)
+  "The definition inside a decorator-style wrapper NODE, else NODE."
+  (or (treesit-node-child-by-field-name node "definition") node))
+
+(defun ygg-match--ts-type-p (node)
+  (let ((type (treesit-node-type (ygg-match--ts-unwrap node))))
+    (and (treesit-node-parent node)
+         (not (string-suffix-p "_body" type))
+         (string-match-p ygg-match--type-regexp type))))
+
+(defun ygg-match--ts-function-p (node)
+  (string-match-p ygg-match--function-regexp (treesit-node-type (ygg-match--ts-unwrap node))))
+
+(defun ygg-match--builtin-pred (kind)
+  (pcase kind
+    ('function (lambda (n) (and (or (ygg-match--ts-thing-p n 'defun)
+                                    (ygg-match--ts-thing-p n 'function))
+                                (not (ygg-match--ts-type-p n)))))
+    ('type (lambda (n) (and (or (ygg-match--ts-thing-p n 'defun)
+                                (ygg-match--ts-thing-p n 'type))
+                            (ygg-match--ts-type-p n))))))
+
+(defconst ygg-match--elixir-heads
+  '((function "def" "defp" "defmacro" "defmacrop")
+    (type "defmodule" "defprotocol" "defimpl")
+    (test "test" "describe")
+    (conditional "if" "unless" "case" "cond" "with")
+    (loop "for"))
+  "Call targets that make an Elixir `call' node each kind of object.")
+
+(defun ygg-match--elixir-p ()
+  (and (fboundp 'treesit-parser-list) (treesit-parser-list nil 'elixir) t))
+
+(defun ygg-match--elixir-pred (kind)
+  (if (eq kind 'block)
+      (lambda (n) (equal (treesit-node-type n) "do_block"))
+    (let ((heads (cdr (assq kind ygg-match--elixir-heads))))
+      (lambda (n)
+        (and (equal (treesit-node-type n) "call")
+             (when-let* ((target (treesit-node-child-by-field-name n "target")))
+               (member (treesit-node-text target t) heads)))))))
+
+(defun ygg-match--elixir-call-p (node)
+  (and (ygg-match--elixir-p) (equal (treesit-node-type node) "call")))
+
+(defun ygg-match--regexp-pred (kind)
+  (pcase kind
+    ('function #'ygg-match--ts-function-p)
+    ('type #'ygg-match--ts-type-p)))
+
+(defun ygg-match--combobulate-node (kind)
+  "Defun-class node at point from combobulate's per-language defun procedures."
+  (when (and (fboundp 'combobulate-node-at-point)
+             (fboundp 'combobulate-procedure-collect-activation-nodes)
+             (fboundp 'combobulate-get))
+    (let ((var (ignore-errors (combobulate-get 'procedures-defun))))
+      (when (and var (boundp var))
+        (let ((types (seq-filter
+                      (lambda (type)
+                        (let ((typep (string-match-p ygg-match--type-regexp type)))
+                          (if (eq kind 'type) typep (not typep))))
+                      (combobulate-procedure-collect-activation-nodes (symbol-value var)))))
+          (when types
+            (let ((node (ignore-errors (combobulate-node-at-point types t))))
+              (and node (not (and (eq kind 'function) (ygg-match--ts-type-p node)))
+                   node))))))))
+
+(defun ygg-match--ts-object-node (kind)
+  (when (treesit-parser-list)
+    (let ((skip (1- ygg-match--textobject-count)))
+      (if (ygg-match--elixir-p)
+          (ygg-match--ts-ancestor (ygg-match--elixir-pred kind) skip)
+        (or (ygg-match--ts-ancestor (ygg-match--builtin-pred kind) skip)
+            (and (zerop skip) (ygg-match--combobulate-node kind))
+            (ygg-match--ts-ancestor (ygg-match--regexp-pred kind) skip))))))
+
+(defun ygg-match--node-span (node)
+  (cons (treesit-node-start node) (treesit-node-end node)))
+
+(defun ygg-match--ts-brace-inner (body)
+  "BODY without its braces or do/end, else the whole node."
+  (let* ((kids (treesit-node-children body))
+         (open (seq-find (lambda (n) (member (treesit-node-type n) '("{" "do"))) kids))
+         (close (seq-find (lambda (n) (member (treesit-node-type n) '("}" "end")))
+                          (reverse kids))))
+    (if (and open close (< (treesit-node-start open) (treesit-node-start close)))
+        (cons (treesit-node-end open) (treesit-node-start close))
+      (ygg-match--node-span body))))
+
+(defun ygg-match--ts-go-type-body (def)
+  "The field list or interface inside a Go `type_declaration'."
+  (when-let* (((equal (treesit-node-type def) "type_declaration"))
+              (spec (treesit-node-child def 0 t))
+              (ty (treesit-node-child-by-field-name spec "type")))
+    (or (seq-find (lambda (n) (equal (treesit-node-type n) "field_declaration_list"))
+                  (treesit-node-children ty t))
+        ty)))
+
+(defun ygg-match--ts-body (def)
+  "The body of DEF: body field, R rhs function body, or if consequence."
+  (or (treesit-node-child-by-field-name def "body")
+      (ygg-match--ts-go-type-body def)
+      (seq-find (lambda (n) (equal (treesit-node-type n) "do_block"))
+                (and (ygg-match--elixir-call-p def) (treesit-node-children def t)))
+      (when-let* ((rhs (treesit-node-child-by-field-name def "rhs")))
+        (treesit-node-child-by-field-name rhs "body"))
+      (treesit-node-child-by-field-name def "consequence")))
+
+(defun ygg-match--ts-inner (node)
+  "Body of NODE without its braces, else the whole node."
+  (let* ((def (ygg-match--ts-unwrap node))
+         (body (ygg-match--ts-body def)))
+    (ygg-match--ts-brace-inner (or body def))))
+
+(defun ygg-match--lisp-form-bounds ()
+  "The defun around point as (BEG . END) without its trailing blank space."
+  (when-let* ((b (bounds-of-thing-at-point 'defun)))
+    (cons (car b) (save-excursion (goto-char (cdr b))
+                                  (skip-chars-backward " \t\n" (car b))
+                                  (point)))))
+
+(defun ygg-match--lisp-form-head (beg)
+  (save-excursion
+    (goto-char beg)
+    (and (eq (char-after) ?\()
+         (progn (forward-char 1) (thing-at-point 'symbol t)))))
+
+(defun ygg-match--lisp-form-inner (bounds skip-arglist)
+  "Body of the definition form BOUNDS: past head, name and arglist."
+  (save-excursion
+    (goto-char (1+ (car bounds)))
+    (ignore-errors
+      (forward-sexp 2)
+      (skip-chars-forward " \t\n")
+      (when (and skip-arglist (eq (char-after) ?\())
+        (forward-sexp 1)
+        (skip-chars-forward " \t\n")))
+    (cons (point) (max (point) (1- (cdr bounds))))))
+
+(defconst ygg-match--lisp-type-heads '("cl-defstruct" "defstruct" "defclass" "define-error"))
+
+(defun ygg-match--lisp-bounds (which heads-pred)
+  "Fallback f/t/T for buffers without a parser: the top-level form at point."
+  (when-let* ((b (ygg-match--lisp-form-bounds))
+              (head (ygg-match--lisp-form-head (car b)))
+              ((funcall heads-pred head)))
+    (if (eq which 'around)
+        b
+      (ygg-match--lisp-form-inner b (not (member head ygg-match--lisp-type-heads))))))
+
+(defun ygg-match--defun-body-bounds (bounds)
+  "BOUNDS of a non-treesit defun without its header: python's lines after
+the colon, else what sits between the first brace and the last."
+  (save-excursion
+    (goto-char (car bounds))
+    (or (when (derived-mode-p 'python-mode)
+          (ignore-errors
+            (python-nav-end-of-statement)
+            (when (< (1+ (point)) (cdr bounds))
+              (cons (min (1+ (point)) (cdr bounds)) (cdr bounds)))))
+        (when-let* (((search-forward "{" (cdr bounds) t))
+                    (open (point))
+                    (close (save-excursion (goto-char (cdr bounds))
+                                           (and (search-backward "}" open t) (point)))))
+          (cons open close))
+        bounds)))
+
+(defun ygg-match--function-bounds (which)
+  (if-let* ((node (ygg-match--ts-object-node 'function)))
+      (if (eq which 'around) (ygg-match--node-span node) (ygg-match--ts-inner node))
+    (or (ygg-match--lisp-bounds which (lambda (head) (not (member head ygg-match--lisp-type-heads))))
+        (when-let* (((not (treesit-parser-list)))
+                    (b (ygg-match--lisp-form-bounds)))
+          (if (or (eq which 'around) (derived-mode-p 'lisp-data-mode))
+              b
+            (ygg-match--defun-body-bounds b))))))
+
+(defun ygg-match--type-bounds (which)
+  (if-let* ((node (ygg-match--ts-object-node 'type)))
+      (if (eq which 'around) (ygg-match--node-span node) (ygg-match--ts-inner node))
+    (ygg-match--lisp-bounds which (lambda (head) (member head ygg-match--lisp-type-heads)))))
+
+(defun ygg-match--node-name (node)
+  (when-let* ((name (treesit-node-child-by-field-name (ygg-match--ts-unwrap node) "name")))
+    (treesit-node-text name t)))
+
+(defun ygg-match--test-function-p (node)
+  (let ((name (and (ygg-match--ts-function-p node) (ygg-match--node-name node))))
+    (or (and name (string-match-p ygg-match--test-name-regexp name))
+        (and name (when-let* ((prev (treesit-node-prev-sibling node t)))
+                    (and (string-match-p "attribute\\|decorator" (treesit-node-type prev))
+                         (string-match-p "test" (treesit-node-text prev t))))))))
+
+(defun ygg-match--test-call-p (node)
+  (and (string-match-p "\\`call" (treesit-node-type node))
+       (when-let* ((callee (treesit-node-child-by-field-name node "function")))
+         (string-match-p ygg-match--test-call-regexp (treesit-node-text callee t)))))
+
+(defun ygg-match--test-call-inner (node)
+  (let* ((args (treesit-node-child-by-field-name node "arguments"))
+         (fn (and args (seq-find #'ygg-match--ts-function-p
+                                 (reverse (treesit-node-children args t))))))
+    (if fn (ygg-match--ts-inner fn) (ygg-match--node-span node))))
+
+(defun ygg-match--test-bounds (which)
+  (if-let* ((node (ygg-match--ts-ancestor
+                   (if (ygg-match--elixir-p)
+                       (ygg-match--elixir-pred 'test)
+                     (lambda (n) (or (ygg-match--test-function-p n) (ygg-match--test-call-p n))))
+                   (1- ygg-match--textobject-count))))
+      (cond ((eq which 'around) (ygg-match--node-span node))
+            ((ygg-match--test-call-p node) (ygg-match--test-call-inner node))
+            (t (ygg-match--ts-inner node)))
+    (ygg-match--lisp-bounds which (lambda (head) (string-match-p "deftest\\'" head)))))
+
+;;; Loop, conditional, parameter, call, string, comment, block (l C P k S M B)
+
+(defconst ygg-match--simple-objects
+  `((?l (loop) "\\`\\(?:enhanced_\\)?\\(?:for\\|foreach\\|while\\|do\\|repeat\\|repeat_while\\|loop\\)\\(?:_in\\)?\\(?:_statement\\|_expression\\|_loop\\)?\\'" body)
+    (?C (conditional) "\\`\\(?:[a-z_]*_\\)?\\(?:if\\|switch\\|match\\|when\\|case\\)_\\(?:statement\\|expression\\)\\'" body)
+    (?P (parameter) "\\(?:\\`\\|_\\)\\(?:parameter\\|argument\\)\\'" span)
+    (?k (call) "call\\(?:_expression\\)?\\'\\|invocation" call)
+    (?S (string) "\\`\\(?:[a-z_]*_\\)?string\\(?:_literal\\)?\\'" string)
+    (?M (comment) "comment" span)
+    (?B (block) "block\\|function_body" block))
+  "Object char, treesit things, node-type regexp and inner kind per object.")
+
+(defun ygg-match--delimited-inner (node)
+  "NODE without its first and last child when those are bare delimiters."
+  (let ((first (treesit-node-child node 0))
+        (last (treesit-node-child node -1)))
+    (if (and first last (not (eq first last))
+             (string-match-p "\\`[a-zA-Z]*[\"'`(\\[{]+\\'" (treesit-node-text first t))
+             (string-match-p "\\`[]\"'`)}]+\\'" (treesit-node-text last t)))
+        (cons (treesit-node-end first) (treesit-node-start last))
+      (ygg-match--node-span node))))
+
+(defun ygg-match--call-suffix-arguments (node)
+  (when-let* ((suffix (seq-find (lambda (n) (equal (treesit-node-type n) "call_suffix"))
+                                (treesit-node-children node t))))
+    (seq-find (lambda (n) (equal (treesit-node-type n) "value_arguments"))
+              (treesit-node-children suffix t))))
+
+(defun ygg-match--simple-inner (node kind)
+  (pcase kind
+    ('body (ygg-match--ts-inner node))
+    ('block (ygg-match--ts-brace-inner node))
+    ('string (if (> (treesit-node-child-count node) 1)
+                 (ygg-match--delimited-inner node)
+               (let ((b (ygg-match--node-span node)))
+                 (if (> (- (cdr b) (car b)) 1) (cons (1+ (car b)) (1- (cdr b))) b))))
+    ('call (if-let* ((args (or (treesit-node-child-by-field-name node "arguments")
+                              (ygg-match--call-suffix-arguments node)
+                              (seq-find (lambda (n) (equal (treesit-node-type n) "token_tree"))
+                                        (treesit-node-children node t)))))
+               (ygg-match--delimited-inner args)
+             (ygg-match--node-span node)))
+    (_ (ygg-match--node-span node))))
+
+(defun ygg-match--simple-bounds (c which)
+  (pcase-let ((`(,things ,regexp ,kind) (cdr (assq c ygg-match--simple-objects))))
+    (when (treesit-parser-list)
+      (when-let* ((skip (1- ygg-match--textobject-count))
+                  (node (if (and (ygg-match--elixir-p) (memq c '(?l ?C ?B)))
+                            (ygg-match--ts-ancestor
+                             (ygg-match--elixir-pred (if (eq c ?B) 'block (car things)))
+                             skip)
+                          (or (ygg-match--ts-ancestor
+                               (lambda (n) (seq-some (lambda (th) (ygg-match--ts-thing-p n th)) things))
+                               skip)
+                              (ygg-match--ts-ancestor
+                               (lambda (n) (string-match-p regexp (treesit-node-type n)))
+                               skip)))))
+        (if (eq which 'around)
+            (ygg-match--node-span node)
+          (ygg-match--simple-inner node kind))))))
+
+;;; Syntax-table string and comment fallback (S M) for buffers without a parser
+
+(defun ygg-match--syntax-bounds (c which)
+  (let* ((ppss (syntax-ppss))
+         (start (and (if (eq c ?S) (nth 3 ppss) (nth 4 ppss)) (nth 8 ppss)))
+         (end (and start
+                   (save-excursion
+                     (goto-char start)
+                     (and (if (eq c ?S)
+                              (ignore-errors (forward-sexp 1) t)
+                            (forward-comment 1))
+                          (point))))))
+    (when end
+      (if (eq c ?S)
+          (if (eq which 'around) (cons start end) (cons (1+ start) (1- end)))
+        (let ((b (cons start (save-excursion (goto-char end)
+                                             (skip-chars-backward "\n" start)
+                                             (point)))))
+          (if (eq which 'around) (ygg-match--around-pad b) b))))))
+
+;;; Closest surround pair (Helix m)
+
+(defun ygg-match--closest-pair-candidates ()
+  "Pairs enclosing point as (BEG . END), innermost first."
+  (let (cands (ppss (syntax-ppss)))
+    (dolist (open '(?\( ?\[ ?\{))
+      (setq cands (append (ygg-match--enclosing-syntax-levels open) cands)))
+    (when (nth 3 ppss)
+      (when-let* ((s (condition-case nil
+                         (save-excursion (goto-char (nth 8 ppss)) (forward-sexp 1)
+                                         (cons (nth 8 ppss) (point)))
+                       (scan-error nil))))
+        (push s cands)))
+    (sort cands (lambda (a b) (> (car a) (car b))))))
+
+(defun ygg-match--closest-pair-bounds (which)
+  (when-let* ((b (nth (1- ygg-match--textobject-count)
+                      (ygg-match--closest-pair-candidates))))
+    (if (eq which 'around) b (cons (1+ (car b)) (1- (cdr b))))))
+
+;;; Tag textobject (x) — HTML/XML/JSX element pairs
 
 (declare-function sgml-get-context "sgml-mode")
 (declare-function sgml-skip-tag-forward "sgml-mode")
@@ -424,6 +807,7 @@ indentation (blank lines pass through); `ai' adds the header line above."
 (defun ygg-match--textobject-bounds (c which)
   (cond
    ((memq c ygg-match--quote-chars) (ygg-match--quote-textobj-bounds c which))
+   ((and (eq c ?B) (ygg-match--simple-bounds c which)))
    ((assq c ygg-match--bracket-pairs) (ygg-match--bracket-textobj-bounds c which))
    ((eq c ?w) (ygg-match--thing-bounds 'word which))
    ((eq c ?p) (ygg-match--paragraph-bounds which))
@@ -432,10 +816,19 @@ indentation (blank lines pass through); `ai' adds the header line above."
    ((eq c ?s) (ygg-match--thing-bounds 'sentence which))
    ((eq c ?e) (cons (point-min) (point-max)))
    ((eq c ?a) (or (ygg-match--argument-treesit-bounds which)
-                  (ygg-match--argument-fallback-bounds which)))
+                  (ygg-match--argument-bounds which)))
    ((eq c ?c) (ygg-match--comment-bounds which))
    ((eq c ?i) (ygg-match--indent-bounds which))
-   ((eq c ?t) (ygg-match--tag-bounds which))))
+   ((eq c ?x) (ygg-match--tag-bounds which))
+   ((eq c ?f) (ygg-match--function-bounds which))
+   ((eq c ?t) (ygg-match--type-bounds which))
+   ((eq c ?T) (ygg-match--test-bounds which))
+   ((eq c ?m) (ygg-match--closest-pair-bounds which))
+   ((eq c ?P) (or (ygg-match--simple-bounds c which)
+                  (ygg-match--argument-bounds which)))
+   ((assq c ygg-match--simple-objects)
+    (or (ygg-match--simple-bounds c which)
+        (and (memq c '(?S ?M)) (ygg-match--syntax-bounds c which))))))
 
 (defun ygg-match--textobject-level-bounds (c which level)
   (let ((ygg-match--textobject-count level))
@@ -448,7 +841,7 @@ level, and a selection already equal to it grows one level out."
     (ygg-each-selection-update
      (lambda (anchor cursor _dir)
        (let ((bounds (ygg-match--textobject-level-bounds c which level)))
-         (when (and bounds (assq c ygg-match--bracket-pairs)
+         (when (and bounds (or (memq c '(?m ?f ?t ?T ?l ?C ?k)) (assq c ygg-match--bracket-pairs))
                     (equal bounds (cons (min anchor cursor) (max anchor (1+ cursor)))))
            (setq bounds (or (ygg-match--textobject-level-bounds c which (1+ level))
                             bounds)))
@@ -587,12 +980,9 @@ space an opening bracket pads with."
 (defconst ygg-match--dispatch-chars
   (append ygg-match--quote-chars
           (mapcar #'car ygg-match--bracket-pairs)
-          '(?w ?p ?W ?s ?e ?a ?c ?i ?t))
+          '(?w ?p ?W ?s ?e ?a ?c ?i ?f ?t ?T ?m ?x))
   "Object chars `ygg-match--textobject-bounds' recognizes for mi/ma.
-f stays absent: layer-lsp owns it via :before-until advice for the
-function object. t hosts the vim/evil tag object here, but layer-lsp's
-type object (same advice) takes precedence when point sits inside a
-class/struct/impl node — so t means type in code, tag in markup.")
+w W p s e a c i f t T m x plus every quote and bracket char; `m m' stays jump.")
 
 (defun ygg-match--shortcut-command ()
   "Hel-style shortcut: `m C' selects inner object for C, as `m i C' would."

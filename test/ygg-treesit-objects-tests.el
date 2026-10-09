@@ -1,188 +1,190 @@
-;;; ygg-treesit-objects-tests.el --- Behavioral tests for treesit text objects -*- lexical-binding: t; -*-
+;;; ygg-treesit-objects-tests.el --- Treesit text objects through the match dispatcher -*- lexical-binding: t; -*-
 
 (require 'ert)
 (require 'treesit)
+(require 'cl-lib)
+(require 'yggdrasil-match)
 
-;;; Setup: configure treesit path
+(setq treesit-extra-load-path
+      (list (expand-file-name "../tree-sitter" (file-name-directory (or load-file-name buffer-file-name)))))
 
-(setq treesit-extra-load-path '("~/.emacs.d/tree-sitter"))
+(defmacro ygg-ts-objects-tests--in (mode lang text &rest body)
+  (declare (indent 3))
+  `(progn
+     (skip-unless (treesit-ready-p ',lang t))
+     (with-temp-buffer
+       (insert ,text)
+       (,mode)
+       ,@body)))
 
-;;; Test function textobject
+(defun ygg-ts-objects-tests--text (c which at)
+  (goto-char (point-min))
+  (search-forward at)
+  (let ((b (ygg-match--textobject-bounds c which)))
+    (and b (buffer-substring-no-properties (car b) (cdr b)))))
 
 (ert-deftest ygg-ts-func-bounds-ts ()
-  "Test function bounds in TypeScript."
-  (require 'layer-lsp)
-  (let ((buf (generate-new-buffer "*test-ts*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (typescript-ts-mode)
-          (insert "function add(a: number, b: number): number {
-  return a + b;
-}")
-          ;; Ensure parser is loaded
-          (unless (treesit-parser-list)
-            (ignore-errors (treesit-parser-create 'typescript)))
-          (when (treesit-parser-list)
-            ;; Position at line 2 (inside function body)
-            (goto-line 2)
-            ;; Test around: should get whole function
-            (let ((bounds-around (ygg-lsp--defun-bounds)))
-              (should bounds-around)
-              (let ((text (buffer-substring (car bounds-around) (cdr bounds-around))))
-                ;; Around should include 'function' keyword and braces
-                (should (string-match-p "function" text))))
-            ;; Test inner: should get just the body
-            (let ((node (treesit-defun-at-point)))
-              (when node
-                (let ((inner (ygg-lsp--inner-node-bounds node)))
-                  (should inner)
-                  (let ((text (buffer-substring (car inner) (cdr inner))))
-                    ;; Inner should not include 'function' keyword
-                    (should-not (string-match-p "function" text))))))))
-      (kill-buffer buf))))
-
-;;; Test parameter textobject
-
-(ert-deftest ygg-ts-param-bounds-ts ()
-  "Test parameter bounds in TypeScript."
-  (require 'layer-lsp)
-  (let ((buf (generate-new-buffer "*test-ts*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (typescript-ts-mode)
-          (insert "function test(a: number, b: string) {}")
-          (unless (treesit-parser-list)
-            (ignore-errors (treesit-parser-create 'typescript)))
-          (when (treesit-parser-list)
-            ;; Position on first parameter
-            (goto-char (string-match "a:" (buffer-string)))
-            (let ((bounds-inner (ygg-lsp--parameter-bounds 'inside)))
-              (should bounds-inner))
-            (let ((bounds-around (ygg-lsp--parameter-bounds 'around)))
-              (should bounds-around))))
-      (kill-buffer buf))))
-
-;;; Test loop textobject
-
-(ert-deftest ygg-ts-loop-bounds-ts ()
-  "Test loop bounds in TypeScript."
-  (require 'layer-lsp)
-  (let ((buf (generate-new-buffer "*test-ts*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (typescript-ts-mode)
-          (insert "for (let i = 0; i < 10; i++) {
-  console.log(i);
-}")
-          (unless (treesit-parser-list)
-            (ignore-errors (treesit-parser-create 'typescript)))
-          (when (treesit-parser-list)
-            ;; Position inside loop
-            (goto-line 2)
-            (let ((bounds-around (ygg-lsp--loop-bounds 'around)))
-              (should bounds-around)
-              (let ((text (buffer-substring (car bounds-around) (cdr bounds-around))))
-                (should (string-match-p "for" text))))
-            (let ((bounds-inside (ygg-lsp--loop-bounds 'inside)))
-              (should bounds-inside))))
-      (kill-buffer buf))))
-
-;;; Test conditional textobject
-
-(ert-deftest ygg-ts-cond-bounds-ts ()
-  "Test conditional bounds in TypeScript."
-  (require 'layer-lsp)
-  (let ((buf (generate-new-buffer "*test-ts*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (typescript-ts-mode)
-          (insert "if (value > 10) {
-  console.log('big');
-}")
-          (unless (treesit-parser-list)
-            (ignore-errors (treesit-parser-create 'typescript)))
-          (when (treesit-parser-list)
-            ;; Position inside if
-            (goto-line 2)
-            (let ((bounds-around (ygg-lsp--conditional-bounds 'around)))
-              (should bounds-around)
-              (let ((text (buffer-substring (car bounds-around) (cdr bounds-around))))
-                (should (string-match-p "if" text))))
-            (let ((bounds-inside (ygg-lsp--conditional-bounds 'inside)))
-              (should bounds-inside))))
-      (kill-buffer buf))))
-
-;;; Test string textobject
-
-(ert-deftest ygg-ts-string-bounds-ts ()
-  "Test string inner bounds in TypeScript."
-  (require 'layer-lsp)
-  (let ((buf (generate-new-buffer "*test-ts*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (typescript-ts-mode)
-          (insert "const msg = \"hello world\";")
-          (unless (treesit-parser-list)
-            (ignore-errors (treesit-parser-create 'typescript)))
-          (when (treesit-parser-list)
-            ;; Position inside string
-            (goto-char (string-match "hello" (buffer-string)))
-            (let ((bounds-inside (ygg-lsp--string-bounds 'inside)))
-              (should bounds-inside)
-              (let ((text (buffer-substring (car bounds-inside) (cdr bounds-inside))))
-                ;; Inner string should not include quotes
-                (should (string= text "hello world"))
-                (should-not (string-match-p "\"" text))))
-            (let ((bounds-around (ygg-lsp--string-bounds 'around)))
-              (should bounds-around)
-              (let ((text (buffer-substring (car bounds-around) (cdr bounds-around))))
-                ;; Around string should include quotes
-                (should (string-match-p "\"" text))))))
-      (kill-buffer buf))))
-
-;;; Test Python function
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript
+      "function add(a: number, b: number): number {\n  return a + b;\n}"
+    (should (string-prefix-p "function add" (ygg-ts-objects-tests--text ?f 'around "return")))
+    (let ((inner (ygg-ts-objects-tests--text ?f 'inside "return")))
+      (should (string-match-p "return a \\+ b" inner))
+      (should-not (string-match-p "function\\|[{}]" inner)))))
 
 (ert-deftest ygg-ts-py-func-bounds ()
-  "Test function bounds in Python."
-  (require 'layer-lsp)
-  (let ((buf (generate-new-buffer "*test-py*")))
-    (unwind-protect
-        (with-current-buffer buf
-          (python-ts-mode)
-          (insert "def add(a, b):
-    return a + b")
-          (unless (treesit-parser-list)
-            (ignore-errors (treesit-parser-create 'python)))
-          (when (treesit-parser-list)
-            ;; Position on second line (inside function body)
-            (goto-line 2)
-            (let ((bounds-around (ygg-lsp--defun-bounds)))
-              (should bounds-around)
-              (let ((text (buffer-substring (car bounds-around) (cdr bounds-around))))
-                (should (string-match-p "def" text))))))
-      (kill-buffer buf))))
+  (ygg-ts-objects-tests--in python-ts-mode python "def add(a, b):\n    return a + b"
+    (should (string-prefix-p "def add" (ygg-ts-objects-tests--text ?f 'around "return")))
+    (should (equal (ygg-ts-objects-tests--text ?f 'inside "return") "return a + b"))))
 
-;;; Test that new objects don't clash with existing match.el keys
+(ert-deftest ygg-ts-param-bounds-ts ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript "function test(a: number, b: string) {}"
+    (should (equal (ygg-ts-objects-tests--text ?P 'inside "a:") "a: number"))
+    (should (equal (ygg-ts-objects-tests--text ?P 'around "a:") "a: number"))))
 
-(ert-deftest ygg-ts-no-key-clashes ()
-  "Verify new treesit object keys don't clash with match.el keys."
-  ;; Load layer-lsp which defines the new bounds functions
-  (condition-case nil
-      (require 'layer-lsp)
-    (error nil))
-  ;; Verify layer-lsp bounds functions exist for new objects (treesit)
-  (should (fboundp 'ygg-lsp--string-bounds))
-  (should (fboundp 'ygg-lsp--comment-bounds))
-  (should (fboundp 'ygg-lsp--block-bounds))
-  (should (fboundp 'ygg-lsp--parameter-bounds))
-  (should (fboundp 'ygg-lsp--loop-bounds))
-  (should (fboundp 'ygg-lsp--conditional-bounds))
-  ;; Verify motions exist for new objects
-  (should (fboundp 'ygg-next-loop))
-  (should (fboundp 'ygg-prev-loop))
-  ;; Keys: layer-lsp adds f,t,l,C,P,k,S,M,B
-  ;; match.el uses w,p,W,s,e,a,c,i and bracket/quote pairs
-  ;; No clashes except 't' which is intentionally overridden
-  (should t))
+(ert-deftest ygg-ts-loop-bounds-ts ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript
+      "for (let i = 0; i < 10; i++) {\n  console.log(i);\n}"
+    (should (string-prefix-p "for" (ygg-ts-objects-tests--text ?l 'around "console")))
+    (should (string-match-p "console.log" (ygg-ts-objects-tests--text ?l 'inside "console")))))
+
+(ert-deftest ygg-ts-cond-bounds-ts ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript
+      "if (value > 10) {\n  console.log('big');\n}"
+    (should (string-prefix-p "if" (ygg-ts-objects-tests--text ?C 'around "console")))
+    (should (string-match-p "console.log" (ygg-ts-objects-tests--text ?C 'inside "console")))))
+
+(ert-deftest ygg-ts-string-bounds-ts ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript "const msg = \"hello world\";"
+    (should (equal (ygg-ts-objects-tests--text ?S 'inside "hello") "hello world"))
+    (should (equal (ygg-ts-objects-tests--text ?S 'around "hello") "\"hello world\""))))
+
+(ert-deftest ygg-ts-call-bounds-ts ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript "run(first, second);"
+    (should (equal (ygg-ts-objects-tests--text ?k 'around "first") "run(first, second)"))
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "first") "first, second"))))
+
+(ert-deftest ygg-ts-comment-and-block-bounds-ts ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript
+      "function f() {\n  // note here\n  go();\n}"
+    (should (equal (ygg-ts-objects-tests--text ?M 'around "note") "// note here"))
+    (should (equal (ygg-ts-objects-tests--text ?M 'inside "note") "// note here"))
+    (should (string-prefix-p "{" (ygg-ts-objects-tests--text ?B 'around "go()")))
+    (let ((inner (ygg-ts-objects-tests--text ?B 'inside "go()")))
+      (should (string-match-p "go()" inner))
+      (should-not (string-match-p "[{}]" inner)))))
+
+(ert-deftest ygg-ts-python-simple-objects ()
+  (ygg-ts-objects-tests--in python-ts-mode python
+      "def f(a, b):\n    for x in a:\n        print(\"hi\")  # c\n    if b:\n        pass\n"
+    (should (string-prefix-p "for x" (ygg-ts-objects-tests--text ?l 'around "print")))
+    (should (string-match-p "print" (ygg-ts-objects-tests--text ?l 'inside "print")))
+    (should (string-prefix-p "if b" (ygg-ts-objects-tests--text ?C 'around "pass")))
+    (should (equal (ygg-ts-objects-tests--text ?C 'inside "pass") "pass"))
+    (should (equal (ygg-ts-objects-tests--text ?S 'inside "hi") "hi"))
+    (should (equal (ygg-ts-objects-tests--text ?P 'inside "(a") "a"))
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "\"hi") "\"hi\""))
+    (should (equal (ygg-ts-objects-tests--text ?M 'around "# c") "# c"))))
+
+(ert-deftest ygg-ts-type-never-selects-body ()
+  (ygg-ts-objects-tests--in python-ts-mode python "class A:\n    def m(self):\n        return 1\n"
+    (should (string-prefix-p "class A" (ygg-ts-objects-tests--text ?t 'around "return")))
+    (should (string-prefix-p "def m" (ygg-ts-objects-tests--text ?t 'inside "return")))))
+
+(defconst ygg-ts-objects-tests--elixir
+  "defmodule M do\n  def run(a, b) do\n    IO.puts(a)\n  end\n\n  test \"x\" do\n    if a do\n      b\n    end\n  end\nend\n")
+
+(ert-deftest ygg-ts-elixir-definitions ()
+  (ygg-ts-objects-tests--in elixir-ts-mode elixir ygg-ts-objects-tests--elixir
+    (should (equal (ygg-ts-objects-tests--text ?f 'inside "IO.pu") "\n    IO.puts(a)\n  "))
+    (should (string-prefix-p "def run(a, b) do" (ygg-ts-objects-tests--text ?f 'around "IO.pu")))
+    (should (string-prefix-p "defmodule M do" (ygg-ts-objects-tests--text ?t 'around "IO.pu")))
+    (should (string-match-p "def run" (ygg-ts-objects-tests--text ?t 'inside "IO.pu")))
+    (should (string-prefix-p "test \"x\" do" (ygg-ts-objects-tests--text ?T 'around "      b")))
+    (should (string-prefix-p "if a do" (ygg-ts-objects-tests--text ?C 'around "      b")))
+    (should (equal (ygg-ts-objects-tests--text ?B 'inside "      b") "\n      b\n    "))
+    (should (string-prefix-p "do" (ygg-ts-objects-tests--text ?B 'around "      b")))))
+
+(ert-deftest ygg-ts-loop-is-the-whole-loop ()
+  (ygg-ts-objects-tests--in go-ts-mode go
+      "package p\nfunc f() {\n\tfor i := 0; i < 3; i++ {\n\t\tg(i)\n\t}\n}\n"
+    (should (string-prefix-p "for i := 0" (ygg-ts-objects-tests--text ?l 'around "i :=")))
+    (should (string-suffix-p "}" (ygg-ts-objects-tests--text ?l 'around "i :=")))
+    (should (equal (ygg-ts-objects-tests--text ?l 'inside "i :=") "\n\t\tg(i)\n\t"))))
+
+(ert-deftest ygg-ts-type-needs-a-declaration ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript "interface I {\n  x: number;\n}\n"
+    (should (string-prefix-p "interface I" (ygg-ts-objects-tests--text ?t 'around "x: nu"))))
+  (ygg-ts-objects-tests--in go-ts-mode go "package p\ntype S struct {\n\tA int\n\tB string\n}\n"
+    (should (equal (ygg-ts-objects-tests--text ?t 'around "A in")
+                   "type S struct {\n\tA int\n\tB string\n}"))
+    (should (equal (ygg-ts-objects-tests--text ?t 'inside "A in") "\n\tA int\n\tB string\n"))))
+
+(ert-deftest ygg-ts-count-picks-the-enclosing-match ()
+  (ygg-ts-objects-tests--in python-ts-mode python
+      "def a():\n    def b():\n        x = 1\n        return x\n    return b\n"
+    (goto-char (point-min))
+    (search-forward "x = 1")
+    (should (string-prefix-p "def b" (let ((ygg-match--textobject-count 1))
+                                       (buffer-substring (car (ygg-match--textobject-bounds ?f 'around))
+                                                         (cdr (ygg-match--textobject-bounds ?f 'around))))))
+    (let* ((ygg-match--textobject-count 2)
+           (b (ygg-match--textobject-bounds ?f 'around)))
+      (should (string-prefix-p "def a" (buffer-substring (car b) (cdr b)))))))
+
+(ert-deftest ygg-ts-rust-macro-and-bodyless-fn ()
+  (ygg-ts-objects-tests--in rust-ts-mode rust
+      "trait T { fn m(&self); }\nfn main() {\n    println!(\"a {}\", x);\n}\n"
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "\"a") "\"a {}\", x"))
+    (should (equal (ygg-ts-objects-tests--text ?k 'around "\"a") "println!(\"a {}\", x)"))
+    (should (equal (ygg-ts-objects-tests--text ?f 'around "fn m") "fn m(&self);"))
+    (should (equal (ygg-ts-objects-tests--text ?f 'inside "fn m") "fn m(&self);"))))
+
+(ert-deftest ygg-ts-arguments-in-a-big-buffer-are-quick ()
+  (ygg-ts-objects-tests--in python-ts-mode python
+      (concat (mapconcat (lambda (i) (format "def f%d(a, b):\n    return a + b + %d\n\n" i i))
+                         (number-sequence 1 7000) "")
+              "g(first, second)\n")
+    (goto-char (point-max))
+    (search-backward "second")
+    (should (equal (let ((b (ygg-match--textobject-bounds ?a 'inside)))
+                     (buffer-substring-no-properties (car b) (cdr b)))
+                   "second"))
+    (should (< (car (benchmark-run 5 (ygg-match--textobject-bounds ?a 'around))) 0.1))
+    (should (< (car (benchmark-run 5 (ygg-match--textobject-bounds ?P 'around))) 0.1))))
+
+(ert-deftest ygg-ts-no-advice-on-dispatcher ()
+  (should-not (advice--p (symbol-function 'ygg-match--textobject-bounds))))
 
 (provide 'ygg-treesit-objects-tests)
+
+(ert-deftest ygg-ts-python-block-is-the-body ()
+  (ygg-ts-objects-tests--in python-ts-mode python "def f(a):\n    x = 1\n    return x\n"
+    (should (string-match-p "\\`x = 1" (ygg-ts-objects-tests--text ?B 'inside "return")))
+    (should (string-match-p "return x" (ygg-ts-objects-tests--text ?B 'around "return")))))
+
+(ert-deftest ygg-ts-block-beats-object-literal ()
+  (ygg-ts-objects-tests--in typescript-ts-mode typescript
+      "function f() {\n  const o = {a: g(1)};\n  return o;\n}"
+    (let ((around (ygg-ts-objects-tests--text ?B 'around "g(1")))
+      (should (string-prefix-p "{\n  const o" around))
+      (should (string-suffix-p "return o;\n}" around)))))
+
+(ert-deftest ygg-ts-elixir-call-and-parameter ()
+  (ygg-ts-objects-tests--in elixir-ts-mode elixir ygg-ts-objects-tests--elixir
+    (should (equal (ygg-ts-objects-tests--text ?k 'around "IO.puts(a") "IO.puts(a)"))
+    (should (ygg-ts-objects-tests--text ?P 'inside "run(a"))))
+
+(defconst ygg-ts-objects-tests--swift-mode-dir
+  (expand-file-name "../elpaca/builds/swift-ts-mode"
+                    (file-name-directory (or load-file-name buffer-file-name))))
+
+(ert-deftest ygg-ts-swift-loop-call-parameter ()
+  (add-to-list 'load-path ygg-ts-objects-tests--swift-mode-dir)
+  (skip-unless (and (treesit-ready-p 'swift t) (require 'swift-ts-mode nil t)))
+  (ygg-ts-objects-tests--in swift-ts-mode swift
+      "func f(a: Int, b: Int) {\n  for i in xs {\n    run(first, second)\n  }\n}\n"
+    (should (equal (ygg-ts-objects-tests--text ?l 'inside "run") "\n    run(first, second)\n  "))
+    (should (equal (ygg-ts-objects-tests--text ?k 'inside "first") "first, second"))
+    (should (equal (ygg-ts-objects-tests--text ?k 'around "first") "run(first, second)"))
+    (should (equal (ygg-ts-objects-tests--text ?P 'around "a: In") "a: Int"))
+    (should (equal (ygg-ts-objects-tests--text ?P 'around "b: In") "b: Int"))))

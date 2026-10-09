@@ -6,9 +6,22 @@
 
 (defvar dape-configs)
 (declare-function swift-ts-mode "swift-ts-mode")
-(declare-function ygg-lsp--textobject-bounds "layer-lsp")
+(declare-function ygg-match--textobject-bounds "yggdrasil-match")
 (declare-function ygg-dap-ios-install "ygg-dap-ios")
 (declare-function ygg-dap-ios-launch "ygg-dap-ios")
+
+(defconst swift-layer-test--root
+  (file-name-directory (directory-file-name
+                        (file-name-directory (or load-file-name buffer-file-name)))))
+
+(defun swift-layer-test--grammar-path ()
+  (cons (expand-file-name "tree-sitter" swift-layer-test--root) treesit-extra-load-path))
+
+(defun swift-layer-test--ts-mode-p ()
+  (add-to-list 'load-path (expand-file-name "elpaca/builds/swift-ts-mode" swift-layer-test--root))
+  (and (require 'swift-ts-mode nil t)
+       (let ((treesit-extra-load-path (swift-layer-test--grammar-path)))
+         (treesit-ready-p 'swift t))))
 
 (defmacro swift-layer-test--in-dir (files &rest body)
   "Run BODY in a temp dir holding FILES; a trailing slash makes a directory."
@@ -248,17 +261,16 @@
       (delete-process proc))))
 
 (ert-deftest swift-layer-treesit-objects-in-swift-ts-mode ()
-  (let ((treesit-extra-load-path (cons (expand-file-name "tree-sitter" user-emacs-directory)
-                                       treesit-extra-load-path)))
-    (skip-unless (and (require 'swift-ts-mode nil t) (treesit-ready-p 'swift t)))
-    (require 'layer-lsp)
+  (let ((treesit-extra-load-path (swift-layer-test--grammar-path)))
+    (skip-unless (swift-layer-test--ts-mode-p))
+    (require 'yggdrasil-match)
     (with-temp-buffer
       (insert "protocol Loader {\n    func load() -> Int\n}\n\nstruct Probe {\n    func fetch(url: String, retries: Int) -> Int {\n        return g(url, retries)\n    }\n}\n")
       (swift-ts-mode)
       (cl-flet ((text (c at)
                   (goto-char (point-min))
                   (search-forward at)
-                  (let ((b (ygg-lsp--textobject-bounds c 'around)))
+                  (let ((b (ygg-match--textobject-bounds c 'around)))
                     (and b (buffer-substring-no-properties (car b) (cdr b))))))
         (should (string-prefix-p "func fetch(" (text ?f "retr")))
         (should (string-prefix-p "struct Probe" (text ?t "retr")))
@@ -266,9 +278,8 @@
         (should (equal (text ?P "retr") "retries: Int"))))))
 
 (ert-deftest swift-layer-split-arguments ()
-  (let ((treesit-extra-load-path (cons (expand-file-name "tree-sitter" user-emacs-directory)
-                                       treesit-extra-load-path)))
-    (skip-unless (and (require 'swift-ts-mode nil t) (treesit-ready-p 'swift t)))
+  (let ((treesit-extra-load-path (swift-layer-test--grammar-path)))
+    (skip-unless (swift-layer-test--ts-mode-p))
     (with-temp-buffer
       (insert "func f() {\n    load(url: u, retries: 2)\n}\n")
       (swift-ts-mode)
