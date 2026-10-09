@@ -271,6 +271,9 @@ form), keep the set open: they can always answer in their own words, so
 never phrase the options as exhaustive, and take a typed answer as the
 answer.
 
+Read big files (over ~400 lines) in line ranges: find the spot with grep -n
+first. Don't re-read a file you already read unless it changed.
+
 Use the aob MCP server only for what your own tools cannot do: code
 references, symbol outlines, tree-sitter parses, diagnostics, and other
 conversations open in this editor."
