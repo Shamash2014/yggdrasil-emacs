@@ -25,6 +25,7 @@
 (require 'aob-todo-view)
 (require 'aob-schedule)
 (require 'aob-shells)
+(require 'aob-edits-qf)
 (require 'aob-workflow)
 (require 'ygg-ui)
 
@@ -40,6 +41,9 @@
 (define-key aob-trace-mode-map (kbd "<tab>") #'aob-trace-tab)
 (define-key aob-trace-mode-map (kbd "C-i") #'ygg-jump-forward)
 (define-key aob-trace-mode-map "Q" #'aob-btw)
+(dolist (key '("1" "2" "3" "4" "5" "6" "7" "8" "9"))
+  (define-key aob-trace-mode-map key
+    '(menu-item "" ygg-aob-trace-key :filter ygg-aob--trace-key-filter)))
 
 ;; ...and something for them to jump between: opening an agent's view is a
 ;; jump, but nothing was recording where you left, so C-o from a trace had
@@ -135,6 +139,7 @@
 (declare-function aob-acp-goal "aob-acp")
 (declare-function aob-transcript-wake "aob-transcript" (s))
 (declare-function aob-acp-cycle-mode "aob-acp")
+(declare-function aob-mode-prev "aob-acp")
 (declare-function aob-acp-compact "aob-acp")
 (declare-function aob-acp-clear "aob-acp")
 (declare-function aob-acp-new "aob-acp")
@@ -165,6 +170,7 @@ BINDINGS is a list of (KEY COMMAND LABEL)."
    mode "m" "settings"
    '(("m" aob-acp-set-mode "mode")
      ("n" aob-acp-cycle-mode "next mode")
+     ("p" aob-mode-prev "previous mode")
      ("l" aob-acp-model "model")
      ("L" aob-acp-backend "other backend")
      ("e" aob-acp-config "effort / options")
@@ -2148,7 +2154,8 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "X" #'aob-context-list :label "context: list"
   "s" #'aob-schedule :label "schedule a prompt"
   "S" #'aob-schedule-list :label "schedules"
-  "p" #'aob-shells :label "running commands")
+  "p" #'aob-shells :label "running commands"
+  "e" #'aob-edits :label "files edited")
 
 (unless noninteractive (aob-schedule-start))
 

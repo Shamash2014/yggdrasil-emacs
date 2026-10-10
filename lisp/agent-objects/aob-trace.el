@@ -109,6 +109,12 @@ and a config that arranges sessions can address them its own way.")
     (define-key map "C" #'aob-trace-comment)
     (define-key map (kbd "] p") #'aob-trace-queued-next)
     (define-key map (kbd "[ p") #'aob-trace-queued-prev)
+    (define-key map (kbd "] ]") #'aob-trace-turn-next)
+    (define-key map (kbd "[ [") #'aob-trace-turn-prev)
+    (define-key map (kbd "] t") #'aob-trace-tool-next)
+    (define-key map (kbd "[ t") #'aob-trace-tool-prev)
+    (define-key map (kbd "] c") #'aob-trace-hunk-next)
+    (define-key map (kbd "[ c") #'aob-trace-hunk-prev)
     (define-key map "o" #'aob-compose)
     map))
 
@@ -1475,10 +1481,12 @@ A run of more than forty replaced lines is shown whole, unrefined."
           (push (pcase op
                   ('same (concat (propertize "  " 'font-lock-face 'shadow)
                                  (aob-trace--add-face (copy-sequence line) 'aob-trace-diff-context)))
-                  ('del (concat (propertize "− " 'font-lock-face 'shadow)
-                                (aob-trace--add-face (copy-sequence line) 'aob-trace-diff-removed)))
-                  ('add (concat (propertize "+ " 'font-lock-face 'shadow)
-                                (aob-trace--add-face (copy-sequence line) 'aob-trace-diff-added))))
+                  ('del (propertize (concat (propertize "− " 'font-lock-face 'shadow)
+                                            (aob-trace--add-face (copy-sequence line) 'aob-trace-diff-removed))
+                                    'aob-hunk t))
+                  ('add (propertize (concat (propertize "+ " 'font-lock-face 'shadow)
+                                            (aob-trace--add-face (copy-sequence line) 'aob-trace-diff-added))
+                                    'aob-hunk t)))
                 out))))
     (nreverse out)))
 
@@ -2715,6 +2723,211 @@ An entry is (TEXT ATTACHMENTS EVENT), as the session keeps it."
   "Go to the message before this one waiting to be sent."
   (interactive)
   (aob-trace--queued-go -1))
+
+(declare-function ygg--bracketed-goto "yggdrasil-motions" (finder))
+(declare-function ygg--record-bracket-motion "yggdrasil-motions" (dir letter))
+(defvar ygg-match--textobject-count)
+
+(defvar-local aob-trace--seq-types nil
+  "Event types by seq: (HEAD NEVENTS . TABLE) of the events they came from.")
+
+(defun aob-trace--seq-type (seq)
+  "The type of the session event numbered SEQ."
+  (when-let* ((s (aob-session-get aob-trace--session-id)))
+    (let ((events (aob-session-events s))
+          (n (aob-session-nevents s)))
+      (unless (and aob-trace--seq-types
+                   (eq (car aob-trace--seq-types) (car events))
+                   (eql (cadr aob-trace--seq-types) n))
+        (let ((table (make-hash-table :test #'eql)))
+          (dolist (e events) (puthash (plist-get e :seq) (plist-get e :type) table))
+          (setq aob-trace--seq-types (cons (car events) (cons n table)))))
+      (gethash seq (cddr aob-trace--seq-types)))))
+
+(defun aob-trace--block-containing (pos)
+  "The event block (BEG END TYPE SEQ) drawn over POS, or nil."
+  (when-let* ((seq (and (<= (point-min) pos) (< pos (point-max))
+                        (get-text-property pos 'aob-event))))
+    (list (or (previous-single-property-change (1+ pos) 'aob-event nil (point-min)) (point-min))
+          (or (next-single-property-change pos 'aob-event nil (point-max)) (point-max))
+          (aob-trace--seq-type seq)
+          seq)))
+
+(defun aob-trace--block-before (pos)
+  "The last event block that begins before POS, or nil."
+  (let ((p (min pos (point-max))))
+    (while (and (> p (point-min)) (null (get-text-property (1- p) 'aob-event)))
+      (setq p (or (previous-single-property-change p 'aob-event nil (point-min)) (point-min))))
+    (and (> p (point-min)) (aob-trace--block-containing (1- p)))))
+
+(defun aob-trace--block-at-point ()
+  "The block point is in, else the last one before it."
+  (or (aob-trace--block-containing (point)) (aob-trace--block-before (point))))
+
+(defun aob-trace--first-block ()
+  (when-let* ((p (text-property-not-all (point-min) (point-max) 'aob-event nil)))
+    (aob-trace--block-containing p)))
+
+(defun aob-trace--block-start-after (pos type)
+  "The first start after POS of an event block of TYPE, or nil."
+  (let ((p pos) found)
+    (while (and (not found) (setq p (next-single-property-change p 'aob-event)))
+      (when-let* ((seq (get-text-property p 'aob-event)))
+        (when (eq (aob-trace--seq-type seq) type) (setq found p))))
+    found))
+
+(defun aob-trace--block-start-before (pos type)
+  "The last start before POS of an event block of TYPE, or nil."
+  (let ((p pos) found)
+    (while (and (not found) (setq p (nth 0 (aob-trace--block-before p))))
+      (when (eq (nth 2 (aob-trace--block-containing p)) type) (setq found p)))
+    found))
+
+(defun aob-trace--hunk-continues-p (beg)
+  "Whether the run of changed lines at BEG carries on one that ended a line before."
+  (and (>= beg (+ (point-min) 2))
+       (eq (char-before beg) ?\n)
+       (get-text-property (- beg 2) 'aob-hunk)))
+
+(defun aob-trace--hunk-start-after (pos)
+  "The first start after POS of a run of added or removed diff lines, or nil."
+  (let ((max (point-max)) (p pos) found)
+    (while (and (not found) p)
+      (when (and (< p max) (get-text-property p 'aob-hunk))
+        (setq p (or (text-property-any p max 'aob-hunk nil) max)))
+      (setq p (and (< p max) (text-property-not-all p max 'aob-hunk nil)))
+      (when (and p (not (aob-trace--hunk-continues-p p))) (setq found p)))
+    found))
+
+(defun aob-trace--hunk-start-before (pos)
+  "The last start before POS of a run of added or removed diff lines, or nil."
+  (let ((min (point-min)) (p (min pos (point-max))) found)
+    (while (and (not found) p)
+      (while (and (> p min) (null (get-text-property (1- p) 'aob-hunk)))
+        (setq p (or (previous-single-property-change p 'aob-hunk nil min) min)))
+      (if (<= p min)
+          (setq p nil)
+        (while (and (> p min) (get-text-property (1- p) 'aob-hunk))
+          (setq p (or (previous-single-property-change p 'aob-hunk nil min) min)))
+        (unless (aob-trace--hunk-continues-p p) (setq found p))))
+    found))
+
+(defun aob-trace--step (kind dir pos)
+  "The start of the unit of KIND after (DIR positive) or before POS, or nil."
+  (if (eq kind 'hunk)
+      (if (> dir 0) (aob-trace--hunk-start-after pos) (aob-trace--hunk-start-before pos))
+    (let ((type (if (eq kind 'turn) 'prompt 'tool)))
+      (if (> dir 0)
+          (aob-trace--block-start-after pos type)
+        (aob-trace--block-start-before pos type)))))
+
+(defun aob-trace--bracket-go (kind dir n)
+  "Go N units of KIND in direction DIR, as far as there are that many."
+  (ygg--record-bracket-motion dir (pcase kind ('turn "]") ('tool "t") ('hunk "c")))
+  (ygg--bracketed-goto
+   (lambda ()
+     (let ((pos (if (> dir 0) (point) (line-beginning-position)))
+           (i 0) last next)
+       (while (and (< i n) (setq next (aob-trace--step kind dir pos)))
+         (setq last next pos next i (1+ i)))
+       last))))
+
+(defun aob-trace-turn-next (&optional n)
+  "Go to the start of the Nth next turn."
+  (interactive "p")
+  (aob-trace--bracket-go 'turn 1 (or n 1)))
+
+(defun aob-trace-turn-prev (&optional n)
+  "Go to the start of this turn, or of the Nth turn before."
+  (interactive "p")
+  (aob-trace--bracket-go 'turn -1 (or n 1)))
+
+(defun aob-trace-tool-next (&optional n)
+  "Go to the Nth next tool call."
+  (interactive "p")
+  (aob-trace--bracket-go 'tool 1 (or n 1)))
+
+(defun aob-trace-tool-prev (&optional n)
+  "Go to the start of this tool call, or of the Nth one before."
+  (interactive "p")
+  (aob-trace--bracket-go 'tool -1 (or n 1)))
+
+(defun aob-trace-hunk-next (&optional n)
+  "Go to the Nth next run of changed lines in a diff."
+  (interactive "p")
+  (aob-trace--bracket-go 'hunk 1 (or n 1)))
+
+(defun aob-trace-hunk-prev (&optional n)
+  "Go to the start of this run of changed lines, or of the Nth one before."
+  (interactive "p")
+  (aob-trace--bracket-go 'hunk -1 (or n 1)))
+
+(defun aob-trace--turn-bounds (which)
+  "The turn at point: its reply for `inside', prompt and reply for `around'."
+  (when-let* ((here (aob-trace--block-at-point)))
+    (let* ((from (if (eq (nth 2 here) 'prompt)
+                     (car here)
+                   (or (aob-trace--block-start-before (car here) 'prompt)
+                       (car (aob-trace--first-block)))))
+           (to (aob-trace--block-start-after (car here) 'prompt))
+           (last (if to (aob-trace--block-before to) (aob-trace--block-before (point-max))))
+           (head (aob-trace--block-containing from))
+           (first-reply (if (eq (nth 2 head) 'message)
+                            head
+                          (when-let* ((s (aob-trace--block-start-after from 'message)))
+                            (and (or (null to) (< s to)) (aob-trace--block-containing s)))))
+           (last-reply-start (aob-trace--block-start-before (or to (point-max)) 'message))
+           (last-reply (and last-reply-start (>= last-reply-start from)
+                            (aob-trace--block-containing last-reply-start))))
+      (if (eq which 'around)
+          (cons from (nth 1 last))
+        (and first-reply last-reply (cons (car first-reply) (nth 1 last-reply)))))))
+
+(defun aob-trace--tool-bounds (which)
+  "The tool call at point: its body for `inside', header and body for `around'."
+  (let ((b (aob-trace--block-containing (point))))
+    (when (and b (eq (nth 2 b) 'tool))
+      (if (eq which 'around)
+          (cons (car b) (cadr b))
+        (save-excursion
+          (goto-char (car b))
+          (end-of-line)
+          (and (< (1+ (point)) (cadr b)) (cons (1+ (point)) (cadr b))))))))
+
+(defun aob-trace--fence-bounds (which)
+  "The fenced code block at point: the code for `inside', fences too for `around'."
+  (let ((b (let ((b (aob-trace--block-containing (point)))) (and b (not (eq (nth 2 b) 'tool)) b)))
+        (pt (point))
+        found)
+    (when b
+      (save-excursion
+        (goto-char (car b))
+        (while (and (not found) (re-search-forward "^[ \t]*\\(```+\\|~~~+\\)" (cadr b) t))
+          (let* ((open (match-beginning 0))
+                 (close-re (format "^[ \t]*%c\\{%d,\\}[ \t]*$" (char-after (match-beginning 1))
+                                   (length (match-string 1))))
+                 (body (progn (forward-line 1) (point))))
+            (if (re-search-forward close-re (cadr b) t)
+                (when (<= open pt (match-end 0))
+                  (setq found (list open body (match-beginning 0) (match-end 0))))
+              (goto-char (cadr b)))))))
+    (pcase found
+      (`(,open ,body ,close ,end)
+       (if (eq which 'around)
+           (cons open end)
+         (and (< body close) (cons body (1- close))))))))
+
+(defun aob-trace--textobject-bounds (orig c which)
+  "Turn, tool call and fence objects on t, c and f in a trace; ORIG for the rest."
+  (if (and (derived-mode-p 'aob-trace-mode) (memq c '(?t ?c ?f)))
+      (pcase c
+        (?t (aob-trace--turn-bounds which))
+        (?c (aob-trace--tool-bounds which))
+        (?f (aob-trace--fence-bounds which)))
+    (funcall orig c which)))
+
+(with-eval-after-load 'yggdrasil-match
+  (advice-add 'ygg-match--textobject-bounds :around #'aob-trace--textobject-bounds))
 
 (defun aob-trace-queue-steer ()
   "Say the queued prompt on this line now, into the turn that is running.

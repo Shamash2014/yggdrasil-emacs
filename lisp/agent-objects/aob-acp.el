@@ -4598,16 +4598,39 @@ about what it takes; the choice is kept and put to it when it wakes."
     (aob-acp--put-mode s (aob-acp--pick-plist "Mode" modes :name :id
                                               (aob-session-ref s :mode-id)))))
 
-(defun aob-acp-cycle-mode (s)
-  "Step S to the next mode the agent advertises."
-  (interactive (list (aob-target)))
-  (let* ((ids (mapcar (lambda (m) (plist-get m :id)) (aob-acp--mode-choices s)))
-         (now (aob-session-ref s :mode-id))
-         (next (or (cadr (member now ids)) (car ids))))
+(defun aob-acp--step-mode (s step)
+  "Put S in the mode STEP places after its current one, in advertised order."
+  (let* ((modes (aob-acp--mode-choices s))
+         (ids (mapcar (lambda (m) (plist-get m :id)) modes))
+         (at (seq-position ids (aob-session-ref s :mode-id))))
     (unless ids (user-error "aob: %s advertises no modes" (aob-session-name s)))
-    (aob-acp--put-mode s next)
-    (message "aob: mode %s" next)))
+    (let* ((i (mod (if at (+ at step) (if (> step 0) 0 -1)) (length ids)))
+           (mode (nth i modes)))
+      (aob-acp--put-mode s (nth i ids))
+      (message "aob: mode %s" (or (plist-get mode :name) (nth i ids))))))
 
+(defun aob-mode-next (s)
+  "Step S to the next mode the agent advertises, wrapping."
+  (interactive (list (aob-target)))
+  (aob-acp--step-mode s 1))
+
+(defun aob-mode-prev (s)
+  "Step S to the previous mode the agent advertises, wrapping."
+  (interactive (list (aob-target)))
+  (aob-acp--step-mode s -1))
+
+(defalias 'aob-acp-cycle-mode #'aob-mode-next
+  "Step S to the next mode the agent advertises.")
+
+(defvar aob-mode-repeat-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "n" #'aob-mode-next)
+    (define-key map "p" #'aob-mode-prev)
+    map)
+  "Sticky mode cycling: repeat.el keymap entered after a mode step.")
+
+(dolist (cmd '(aob-mode-next aob-mode-prev aob-acp-cycle-mode))
+  (put cmd 'repeat-map 'aob-mode-repeat-map))
 
 (defcustom aob-acp-models
   '(("claude" "opus" "sonnet" "haiku")
