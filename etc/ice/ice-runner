@@ -377,8 +377,20 @@ def counts(report):
     return total
 
 
+# Package and tool caches stay real: generated project files (package_config.json) record their paths and outlive the sandbox.
+REAL_CACHES = (("PUB_CACHE", ".pub-cache"), ("GRADLE_USER_HOME", ".gradle"), ("CARGO_HOME", ".cargo"),
+               ("RUSTUP_HOME", ".rustup"), ("GOPATH", "go"), ("npm_config_cache", ".npm"),
+               ("YARN_CACHE_FOLDER", ".cache/yarn"), ("MISE_DATA_DIR", ".local/share/mise"),
+               ("MISE_CACHE_DIR", ".cache/mise"))
+GENERATED_FILES = (".dart_tool/package_config.json", ".dart_tool/package_graph.json", ".packages")
+
+
 def sandboxed_env(sandbox):
     env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", GIT_CONFIG_GLOBAL=os.devnull, GIT_CONFIG_NOSYSTEM="1")
+    real_home = os.path.expanduser("~")
+    for key, sub in REAL_CACHES:
+        env.setdefault(key, os.path.join(real_home, sub))
+    env.setdefault("GOMODCACHE", os.path.join(env["GOPATH"].split(os.pathsep)[0], "pkg", "mod"))
     for key, sub in (("HOME", "home"), ("TMPDIR", "tmp"), ("XDG_CONFIG_HOME", "home/.config"),
                      ("XDG_CACHE_HOME", "home/.cache"), ("XDG_DATA_HOME", "home/.local/share"),
                      ("XDG_STATE_HOME", "home/.local/state"), ("CODEX_HOME", "home/.codex"),
@@ -386,6 +398,35 @@ def sandboxed_env(sandbox):
         env[key] = os.path.join(sandbox, sub)
         os.makedirs(env[key], exist_ok=True)
     return env
+
+
+def snapshot_generated(root):
+    kept = {}
+    for rel in GENERATED_FILES:
+        path = os.path.join(root, rel)
+        if os.path.isfile(path):
+            with open(path, "rb") as f:
+                kept[rel] = (f.read(), os.stat(path).st_mtime_ns)
+    return kept
+
+
+def restore_generated(root, sandbox, kept):
+    needle = sandbox.encode()
+    for rel in GENERATED_FILES:
+        path = os.path.join(root, rel)
+        if not os.path.isfile(path):
+            continue
+        with open(path, "rb") as f:
+            if needle not in f.read():
+                continue
+        data, mtime = kept.get(rel, (None, None))
+        if data is None or needle in data:
+            print("note: %s points into the removed baseline sandbox; run the project's package fetch (flutter pub get) to regenerate it" % rel)
+            continue
+        with open(path, "wb") as f:
+            f.write(data)
+        os.utime(path, ns=(mtime, mtime))
+        print("note: %s restored; the baseline run had pointed it into its sandbox" % rel)
 
 
 def baseline(root, force):
@@ -410,6 +451,7 @@ def baseline(root, force):
     sandbox = os.path.join(state, "baseline-sandbox")
     shutil.rmtree(sandbox, ignore_errors=True)
     log = os.path.join(state, "baseline.log")
+    kept = snapshot_generated(root)
     try:
         out = subprocess.run(argv, cwd=root, capture_output=True, text=True, env=sandboxed_env(sandbox),
                              timeout=BASELINE_TIMEOUT)
@@ -419,6 +461,7 @@ def baseline(root, force):
     except subprocess.TimeoutExpired as err:
         code, text = None, "timed out after %ds\n%s" % (BASELINE_TIMEOUT, err.stdout or "")
     finally:
+        restore_generated(root, sandbox, kept)
         shutil.rmtree(sandbox, ignore_errors=True)
     with open(log, "w", encoding="utf-8") as f:
         f.write("$ %s\n%s\nexit %s\n" % (" ".join(argv), text, code))
