@@ -1,6 +1,6 @@
 ---
 name: ice
-description: Run a change the ICE way (Intent, Context, Expectation). Apply in a repo wired for ICE (.ice/, openspec/), when the owner asks for ICE, or as a lead.
+description: Run a change the ICE way (Intent, Context, Expectation). Apply in a repo wired for ICE (.ice/, openspec/), when the owner asks for ICE, or as a lead. Works with or without the lead preset; see Without the lead preset.
 ---
 
 # ICE
@@ -58,6 +58,32 @@ Then, once per repo, you see to verification through workers:
   unit-verified or live-verified row exists for that exact content; it
   never runs tests itself, only hashes the staged tree and reads the
   ledger, and git --no-verify skips it the way it skips any hook.
+
+## Without the lead preset
+
+An agent running this skill on its own gets everything the lead preset
+would have given it. Load these skills at the step each serves:
+
+- daemon, to route the ask before running it;
+- wayfinder, to orient before step 2;
+- restate (step 4);
+- define-checkpoints (step 5) and sequence-verifiable-units (step 6,
+  when cutting slices);
+- track-the-plan, for the checklist, kept through the todo tools;
+- decision-memo, when a turn must choose between options the work builds on.
+
+Read lead-howto/briefs.md for every brief, lead-howto/levels.md for the
+worker levels, lead-howto/sending.md and lead-howto/list.md for dispatch,
+lead-howto/checking.md for the verdict rule, lead-howto/asking.md for
+owner questions, and lead-howto/holds.md when an item blocks. The rest of
+lead-howto is there when a step names it.
+
+All work goes to subagents through the native subagent tool, reads and
+searches included, at most six out. Levels: build=opus/medium,
+quick=sonnet/low, deep=opus/high, gaps=opus/medium, review=opus/high,
+ui=opus/medium, verify=sonnet/medium. Never edit a file yourself. A
+worker's report is not a verdict: read its diff, run VERIFY yourself, and
+tick only on a verify worker's PASS and your own green run.
 
 ## What the lead does, and what stays the owner's
 
