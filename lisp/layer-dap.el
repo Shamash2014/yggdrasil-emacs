@@ -225,6 +225,87 @@
       (delete-window win)
     (ygg-dape-view-watch)))
 
+;;; Adapter picker: dape reads its config with read-from-minibuffer, which vertico never sees
+
+(defconst ygg-dape--edit-entry "✎ edit…")
+
+(defvar dape-command)
+(defvar dape-history)
+(defvar dape-history-add)
+(defvar dape-configs)
+(declare-function dape--config-to-string "dape")
+(declare-function dape--config-mode-p "dape")
+(declare-function dape--config-ensure "dape")
+(declare-function dape--guess-root "dape")
+(declare-function dape--config-from-string "dape")
+(declare-function dape--config-eval "dape")
+
+(defun ygg-dape--valid-config-p (config)
+  (and config
+       (dape--config-mode-p config)
+       (ignore-errors (dape--config-ensure config))))
+
+(defun ygg-dape--candidates ()
+  "Return an alist of (STRING . (KIND . COMMAND)) in picker order."
+  (let (out)
+    (cl-flet ((add (str kind config)
+                (when (and str (not (assoc str out)))
+                  (push (cons str (cons kind (plist-get config 'command))) out))))
+      (when dape-command
+        (let ((str (dape--config-to-string (car dape-command) (cdr dape-command))))
+          (add str "default" (cdr dape-command))))
+      (cl-loop for str in dape-history
+               for (_ config) = (ignore-errors (dape--config-from-string str))
+               when (ygg-dape--valid-config-p config)
+               do (add str "default" config)
+               and return nil)
+      (cl-loop for (name . config) in dape-configs
+               when (ygg-dape--valid-config-p config)
+               do (add (symbol-name name) "suggested" config))
+      (cl-loop for str in dape-history
+               for (_ config) = (ignore-errors (dape--config-from-string str))
+               when (ygg-dape--valid-config-p config) do (add str "history" config)))
+    (nreverse out)))
+
+(defun ygg-dape--config-table (candidates)
+  (lambda (string pred action)
+    (if (eq action 'metadata)
+        `(metadata
+          (category . ygg-dape-config)
+          (display-sort-function . identity)
+          (cycle-sort-function . identity)
+          (annotation-function
+           . ,(lambda (cand)
+                (when-let* ((info (cdr (assoc cand candidates))))
+                  (concat "  " (car info)
+                          (when (cdr info) (format "  %s" (cdr info))))))))
+      (complete-with-action action (mapcar #'car candidates) string pred))))
+
+(defun ygg-dape--read-config-picker (orig)
+  "Offer dape configs through `completing-read' so vertico renders them."
+  (run-hooks 'dape-read-config-hook)
+  (let* ((candidates (append (ygg-dape--candidates)
+                             (list (cons ygg-dape--edit-entry '("edit")))))
+         (str (let ((history-add-new-input nil))
+                (completing-read "Run adapter: "
+                                 (ygg-dape--config-table candidates)
+                                 nil nil nil 'dape-history))))
+    (if (equal str ygg-dape--edit-entry)
+        (let ((dape-read-config-hook nil))
+          (funcall orig))
+      (pcase-let* ((`(,key ,config)
+                    (dape--config-from-string (substring-no-properties str)))
+                   (evaled-config
+                    (let ((default-directory (dape--guess-root config)))
+                      (dape--config-eval key config))))
+        (if (eq dape-history-add 'input)
+            (add-to-history 'dape-history (substring-no-properties str))
+          (push (dape--config-to-string key evaled-config) dape-history))
+        evaled-config))))
+
+(with-eval-after-load 'dape
+  (advice-add 'dape--read-config :around #'ygg-dape--read-config-picker))
+
 ;;; Commands needing more than a direct bind
 
 (defun ygg-dape-continue ()
