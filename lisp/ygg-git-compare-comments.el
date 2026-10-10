@@ -632,6 +632,7 @@ those of the forge.")
 (autoload 'ygg-git-compare--remote-comments "ygg-git-compare-threads")
 (autoload 'ygg-git-compare--conversation-spans "ygg-git-compare-pr-info")
 (autoload 'ygg-git-compare--remote-block "ygg-git-compare-threads")
+(autoload 'ygg-git-compare--remote-shown "ygg-git-compare-threads")
 (autoload 'ygg-git-compare-threads-toggle-resolved "ygg-git-compare-threads" nil t)
 (autoload 'ygg-git-compare-threads-open "ygg-git-compare-threads" nil t)
 (autoload 'ygg-git-compare-threads-copy "ygg-git-compare-threads" nil t)
@@ -805,6 +806,9 @@ it has no place for at the top of the diff of every file."
                                (when top
                                  (concat (ygg-git-compare--shown-text top) "\n")))))))))
 
+(defvar ygg-git-compare-comments-changed-functions nil
+  "Functions called with a compare's list buffer after its comments redraw.")
+
 (defun ygg-git-compare--redraw-comments (list)
   "Show LIST's comments again wherever they are shown."
   (dolist (buffer (buffer-list))
@@ -814,7 +818,8 @@ it has no place for at the top of the diff of every file."
         (cond ((derived-mode-p 'ygg-git-compare-comments-summary-mode)
                (ygg-git-compare--summary-insert))
               ((bound-and-true-p ygg-git-compare-mode)
-               (ygg-git-compare--draw-comments)))))))
+               (ygg-git-compare--draw-comments))))))
+  (run-hook-with-args 'ygg-git-compare-comments-changed-functions list))
 
 ;;; Acting on the comment at point
 
@@ -827,6 +832,16 @@ it has no place for at the top of the diff of every file."
     (and ids (seq-filter (lambda (c) (member (plist-get c :id) ids))
                          (ygg-git-compare-comments-list t)))))
 
+(defun ygg-git-compare--first-line (comment)
+  "The first line of COMMENT's text."
+  (car (split-string (or (plist-get comment :text) "") "\r?\n")))
+
+(defun ygg-git-compare--comment-tags (comment)
+  "COMMENT's type, priority and author, as far as it has them."
+  (delq nil (list (when-let* ((type (plist-get comment :type))) (format "[%s]" type))
+                  (when-let* ((p (plist-get comment :priority))) (format "P%s" p))
+                  (plist-get comment :author))))
+
 (defun ygg-git-compare--comment-candidates (comments)
   "COMMENTS as (LABEL . COMMENT), each label its text's first line, grouped
 by file, those pending by author, and noted with type, priority, author
@@ -834,17 +849,14 @@ and place."
   (let (rows)
     (dolist (c comments (nreverse rows))
       (let ((label (truncate-string-to-width
-                    (car (split-string (or (plist-get c :text) "") "\n")) 60 nil nil "…"))
+                    (ygg-git-compare--first-line c) 60 nil nil "…"))
             (group (if (ygg-git-compare--pending-p c)
                        (format "Pending · %s" (or (plist-get c :author) "agent"))
                      (if (memq (plist-get c :level) '(nil line range file))
                          (plist-get c :new-path)
                        "Review")))
             (note (string-join
-                   (delq nil (list (when-let* ((type (plist-get c :type))) (format "[%s]" type))
-                                   (when-let* ((p (plist-get c :priority))) (format "P%s" p))
-                                   (plist-get c :author)
-                                   (ygg-git-compare--where c)))
+                   (append (ygg-git-compare--comment-tags c) (list (ygg-git-compare--where c)))
                    " ")))
         (while (assoc label rows) (setq label (concat label "'")))
         (push (cons (ygg-git-compare--group label (or group "Review") note) c) rows)))))
@@ -869,27 +881,38 @@ it was made on none."
       (plist-put comment :range (with-current-buffer (ygg-git-compare--list)
                                   (ygg-git-compare--range-label))))))
 
+(defun ygg-git-compare--delete-comment (comment)
+  "Delete COMMENT, asking first unless it is pending a check."
+  (when (or (ygg-git-compare--pending-p comment)
+            (y-or-n-p (format "Delete the comment on %s? "
+                              (ygg-git-compare--where comment))))
+    (ygg-git-compare-comments-drop (list (plist-get comment :id)))))
+
+(defun ygg-git-compare--copy-comment (comment)
+  "Copy the text of COMMENT."
+  (let ((text (or (plist-get comment :text) "")))
+    (kill-new text)
+    (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
+
+(defun ygg-git-compare--accept-comment (comment)
+  "Accept COMMENT that an agent proposed."
+  (ygg-git-compare--put (ygg-git-compare--accepted comment)))
+
 (defun ygg-git-compare-comment-delete ()
   "Delete the comment at point, asking first unless it is pending a check."
   (interactive)
-  (let ((comment (ygg-git-compare--comment-at-point)))
-    (when (or (ygg-git-compare--pending-p comment)
-              (y-or-n-p (format "Delete the comment on %s? "
-                                (ygg-git-compare--where comment))))
-      (ygg-git-compare-comments-drop (list (plist-get comment :id))))))
+  (ygg-git-compare--delete-comment (ygg-git-compare--comment-at-point)))
 
 (defun ygg-git-compare-comment-copy ()
   "Copy the text of the comment at point."
   (interactive)
-  (let ((text (plist-get (ygg-git-compare--comment-at-point) :text)))
-    (kill-new text)
-    (message "Copied: %s" (truncate-string-to-width text 60 nil nil "…"))))
+  (ygg-git-compare--copy-comment (ygg-git-compare--comment-at-point)))
 
 (defun ygg-git-compare-comment-accept ()
   "Accept the comment at point that an agent proposed."
   (interactive)
-  (ygg-git-compare--put (ygg-git-compare--accepted
-                         (ygg-git-compare--comment-at-point #'ygg-git-compare--pending-p))))
+  (ygg-git-compare--accept-comment
+   (ygg-git-compare--comment-at-point #'ygg-git-compare--pending-p)))
 
 (defun ygg-git-compare-comments-accept-all ()
   "Accept every comment pending a check."
@@ -1053,6 +1076,115 @@ it lists."
     (pop-to-buffer (ygg-git-compare--list))
     (ygg-git-compare--goto-comment id)))
 
+;;; In the quickfix
+
+(declare-function ygg-qf-define-kind "layer-quickfix" (kind &rest spec))
+(declare-function ygg-qf-show-kind "layer-quickfix" (kind &rest args))
+(declare-function ygg-qf-kind-refresh "layer-quickfix" (buf token))
+(declare-function ygg-qf-kind-target-id "layer-quickfix" (&optional target))
+
+(defun ygg-git-compare-comments-qf--all (list)
+  "The comments of LIST's compare as kept, then those from the forge."
+  (unless (buffer-live-p list) (user-error "That comment is gone"))
+  (append (with-current-buffer list (ygg-git-compare-comments-list t))
+          (seq-filter (lambda (c) (ygg-git-compare--remote-id-p (plist-get c :id)))
+                      (ignore-errors (ygg-git-compare--remote-shown list)))))
+
+(defun ygg-git-compare-comments-qf--find (id)
+  (or (seq-find (lambda (c) (equal (plist-get c :id) (cdr id)))
+                (ygg-git-compare-comments-qf--all (car id)))
+      (user-error "That comment is gone")))
+
+(defun ygg-git-compare-comments-qf--rows (list)
+  (mapcar (lambda (c)
+            (list (cons list (plist-get c :id))
+                  (format "%s  %s" (ygg-git-compare--where c)
+                          (ygg-git-compare--first-line c))
+                  (string-join
+                   (cons (if (ygg-git-compare--remote-id-p (plist-get c :id))
+                             "forge"
+                           (ygg-git-compare--audience c))
+                         (ygg-git-compare--comment-tags c))
+                   " ")))
+          (ygg-git-compare-comments-qf--all list)))
+
+(defun ygg-git-compare-comments-qf-goto (id)
+  "Show the comment ID, a row id, in the diff of every file."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (ygg-git-compare-comments-qf--find id)
+  (pop-to-buffer (car id))
+  (ygg-git-compare--goto-comment (cdr id)))
+
+(defun ygg-git-compare-comments-qf-copy (id)
+  "Copy the text of the comment ID, a row id."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (ygg-git-compare--copy-comment (ygg-git-compare-comments-qf--find id)))
+
+(defun ygg-git-compare-comments-qf-accept (id)
+  "Accept the comment ID, a row id, that an agent proposed."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (let ((comment (ygg-git-compare-comments-qf--find id)))
+    (unless (ygg-git-compare--pending-p comment) (user-error "Not pending a check"))
+    (with-current-buffer (car id)
+      (ygg-git-compare--accept-comment comment))))
+
+(defun ygg-git-compare-comments-qf-open (id)
+  "Open the forge's comment ID, a row id, in the browser."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (browse-url (or (plist-get (ygg-git-compare-comments-qf--find id) :url)
+                  (user-error "This comment has no page"))))
+
+(defun ygg-git-compare-comments-qf-drop (id)
+  "Delete the comment ID, a row id, asking first unless it is pending a check."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (let ((comment (ygg-git-compare-comments-qf--find id)))
+    (when (ygg-git-compare--remote-id-p (plist-get comment :id))
+      (user-error "That comment is the forge's"))
+    (with-current-buffer (car id)
+      (ygg-git-compare--delete-comment comment))))
+
+(defvar ygg-git-compare-comments-qf-map
+  (let ((m (make-sparse-keymap)))
+    (define-key m "v" #'ygg-git-compare-comments-qf-goto)
+    (define-key m "y" #'ygg-git-compare-comments-qf-copy)
+    (define-key m "a" #'ygg-git-compare-comments-qf-accept)
+    (define-key m "o" #'ygg-git-compare-comments-qf-open)
+    (define-key m "d" #'ygg-git-compare-comments-qf-drop)
+    m)
+  "What embark offers on a comment row of the quickfix.")
+
+(defun ygg-git-compare-comments-qf--arm (buf token list)
+  (letrec ((follow (lambda (changed)
+                     (when (eq changed list)
+                       (ignore-errors
+                         (unless (ygg-qf-kind-refresh buf token)
+                           (funcall disarm))))))
+           (leave (lambda () (run-at-time 0 nil follow list)))
+           (disarm (lambda ()
+                     (remove-hook 'ygg-git-compare-comments-changed-functions follow)
+                     (when (buffer-live-p list)
+                       (with-current-buffer list
+                         (remove-hook 'kill-buffer-hook leave t))))))
+    (add-hook 'ygg-git-compare-comments-changed-functions follow)
+    (with-current-buffer list (add-hook 'kill-buffer-hook leave nil t))
+    disarm))
+
+(with-eval-after-load 'layer-quickfix
+  (ygg-qf-define-kind 'compare-comments
+                      :collect #'ygg-git-compare-comments-qf--rows
+                      :action #'ygg-git-compare-comments-qf-goto
+                      :map 'ygg-git-compare-comments-qf-map
+                      :drop #'ygg-git-compare-comments-qf-drop
+                      :live-p #'buffer-live-p
+                      :arm #'ygg-git-compare-comments-qf--arm))
+
+(defun ygg-git-compare-comments-qf ()
+  "List every comment of this compare in the quickfix, those kept first and
+then the forge's."
+  (interactive)
+  (require 'layer-quickfix)
+  (ygg-qf-show-kind 'compare-comments (ygg-git-compare--list)))
+
 ;;; From an agent
 
 (defun ygg-git-compare--received (comment author)
@@ -1131,6 +1263,7 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
     ("h" "on the hunk" ygg-git-compare-comment-hunk)
     ("f" "on the file" ygg-git-compare-comment-file)
     ("L""list them" ygg-git-compare-comments-summary)
+    ("Q" "list in quickfix" ygg-git-compare-comments-qf)
     ("A" "accept all pending" ygg-git-compare-comments-accept-all)
     ("X" "dismiss all pending" ygg-git-compare-comments-dismiss-all)]
    ["Navigate"

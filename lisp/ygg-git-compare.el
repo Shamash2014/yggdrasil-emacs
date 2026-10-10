@@ -1899,6 +1899,7 @@ when that is known, and a compare that is not its range says why instead."
 (autoload 'ygg-git-compare-comment-delete "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-copy "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-accept "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-comments-qf "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comments-summary "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-dispatch "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comments-receive "ygg-git-compare-comments")
@@ -2064,6 +2065,7 @@ around past the end."
   "d" (cons "delete" ygg-git-compare-delete-map)
   "y" #'ygg-git-compare-export-markdown
   "Y" #'ygg-git-compare-comment-copy
+  "Q" #'ygg-git-compare-comments-qf
   "a" #'ygg-git-compare-comment-accept
   "s" #'ygg-git-compare-read-only
   "S" #'ygg-git-compare-read-only
