@@ -85,6 +85,7 @@
 (let ((dir (locate-user-emacs-file "lisp")))
   (add-to-list 'load-path dir)
   (add-to-list 'load-path (expand-file-name "agent-objects" dir))
+  (add-to-list 'load-path (expand-file-name "vendor/agent-shell" dir))
   (dolist (stale (directory-files dir t "\\`layer-.*\\.elc\\'"))
     (delete-file stale))
   (dolist (f (directory-files dir t "\\`yggdrasil.*\\.el\\'"))

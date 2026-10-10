@@ -27,6 +27,7 @@
 (require 'aob-shells)
 (require 'aob-edits-qf)
 (require 'aob-workflow)
+(require 'aob-awake)
 (require 'ygg-ui)
 
 (declare-function ygg-notify "layer-ui" (msg &optional level))
@@ -1957,11 +1958,10 @@ needs no key."
   "Sessions that want you, blocked ones first, then the unread, each in list order."
   (let ((live (seq-remove (lambda (s) (or (ygg-aob--put-down-p s)
                                           (aob-session-ref s :hidden)))
-                          (aob-live-sessions))))
+                          (aob-live-sessions)))
+        (unread (aob-unread-sessions)))
     (append (seq-filter (lambda (s) (eq (aob-session-state s) 'blocked)) live)
-            (seq-filter (lambda (s) (and (aob-session-unread-p s)
-                                         (not (eq (aob-session-state s) 'blocked))))
-                        live))))
+            (seq-filter (lambda (s) (memq s unread)) live))))
 
 (defun ygg-aob--attention-step (by)
   (let* ((all (ygg-aob--attention-sessions))
@@ -2192,7 +2192,10 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "s" #'aob-schedule :label "schedule a prompt"
   "S" #'aob-schedule-list :label "schedules"
   "p" #'aob-shells :label "running commands"
-  "e" #'aob-edits :label "files edited")
+  "e" #'aob-edits :label "files edited"
+  "k" #'aob-keep-awake-mode :label "keep awake while working")
+
+(unless noninteractive (aob-keep-awake-mode 1))
 
 (unless noninteractive (aob-schedule-start))
 

@@ -3145,7 +3145,7 @@ even from an agent that would have reconnected silently."
 (defmacro aob-tests--with-markdown (&rest body)
   "Run BODY with the markdown helper stubbed to face the whole text bold."
   (declare (indent 0))
-  `(cl-letf (((symbol-function 'ygg-ui-markdown)
+  `(cl-letf (((symbol-function 'agent-shell-markdown-convert)
               (lambda (text) (propertize (or text "") 'font-lock-face 'bold))))
      ,@body))
 
@@ -3190,8 +3190,8 @@ even from an agent that would have reconnected silently."
 
 (ert-deftest aob-trace-markdown-absent-helper-renders-plain ()
   "With no helper the row still carries the text, unfaced."
-  (cl-letf (((symbol-function 'ygg-ui-markdown) nil))
-    (should-not (fboundp 'ygg-ui-markdown))
+  (cl-letf (((symbol-function 'agent-shell-markdown-convert) nil))
+    (should-not (fboundp 'agent-shell-markdown-convert))
     (let ((line (aob-trace--line '(:type message :ts 0 :text "# head"))))
       (should (string-match-p "# head" line))
       (should-not (eq 'bold (aob-tests--md-face line "# head"))))))

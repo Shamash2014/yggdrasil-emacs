@@ -140,10 +140,15 @@ sessions/YYYY/MM/DD/rollout-<time>-ID.jsonl."
            (t
             (seq-some
              (lambda (home)
-               (let ((file (expand-file-name
-                            (format "projects/%s/%s.jsonl" (aob-transcript--slug dir) id)
-                            home)))
-                 (and (file-readable-p file) file)))
+               (seq-some
+                (lambda (where)
+                  (let ((file (expand-file-name
+                               (format "projects/%s/%s%s.jsonl"
+                                       (aob-transcript--slug dir) where id)
+                               home)))
+                    (and (file-readable-p file) file)))
+                ;; a conversation put away lies in archive/ beside the rest
+                '("" "archive/")))
              homes)))))))
 
 (defvar aob-transcript--titles (make-hash-table :test 'equal)
@@ -822,6 +827,7 @@ Asleep: it carries the id its agent answers to, and no process."
           (aob-session-put s :asleep entry)
           (aob-session-put s :named-by-user (plist-get entry :named-by-user))
           (aob-session-put s :auto-named (plist-get entry :auto-named))
+          (aob-session-put s :unread (plist-get entry :unread))
           (dolist (turn (aob-transcript-turns file t))
             (if (equal (car turn) "tool")
                 (aob-event s 'tool :title (cdr turn) :status "completed")

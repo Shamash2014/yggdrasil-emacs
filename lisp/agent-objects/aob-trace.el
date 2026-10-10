@@ -14,8 +14,11 @@
 (require 'aob-context nil t)
 (require 'aob-litellm nil t)
 (require 'ygg-diagram nil t)
+(require 'agent-shell-markdown nil t)
 
-(declare-function ygg-ui-markdown "ygg-ui" (text))
+(declare-function agent-shell-markdown-convert "agent-shell-markdown" (markdown))
+(declare-function agent-shell-markdown-reconstruct "agent-shell-markdown" (beg end &optional deepen))
+(defvar agent-shell-markdown-table-max-width-fraction)
 (declare-function aob-session-model-now "aob" (s))
 (defvar ygg-modeline-name)
 (declare-function ygg-diagram-fence-at-point "ygg-diagram" ())
@@ -135,32 +138,42 @@ window as following and pulls the page back down."
   (setq truncate-lines nil)
   (setq-local char-property-alias-alist '((face font-lock-face)))
   (visual-line-mode 1)
-  (add-to-invisibility-spec 'markdown-markup)
-  (require 'markdown-mode nil t)
+  (require 'agent-shell-markdown nil t)
+  (require 'ygg-markdown-fences nil t)
   ;; whatever a face inherits from, it is drawn in this family: one
   ;; proportional heading is one line that does not line up
   (let ((mono (face-attribute 'default :family nil t)))
-    (dolist (f '(variable-pitch markdown-inline-code-face markdown-pre-face
-                 markdown-code-face markdown-language-keyword-face
-                 markdown-header-face markdown-header-face-1
-                 markdown-header-face-2 markdown-header-face-3))
+    (dolist (f '(variable-pitch agent-shell-markdown-table))
       (when (facep f)
-        (face-remap-add-relative f :family mono))))
+        (face-remap-add-relative f :family mono)))
+    (dolist (f '(agent-shell-markdown-header-1 agent-shell-markdown-header-2
+                 agent-shell-markdown-header-3 agent-shell-markdown-header-4
+                 agent-shell-markdown-header-5 agent-shell-markdown-header-6))
+      (when (facep f)
+        (face-remap-set-base f :inherit 'font-lock-function-name-face
+                             :weight 'bold :height 1.0 :family mono)))
+    (when (facep 'agent-shell-markdown-inline-code)
+      (face-remap-set-base 'agent-shell-markdown-inline-code
+                           :inherit 'font-lock-constant-face :family mono))
+    (when (facep 'ygg-markdown-fences-block)
+      (face-remap-set-base 'agent-shell-markdown-source-block
+                           :inherit 'ygg-markdown-fences-block :family mono)
+      (face-remap-set-base 'agent-shell-markdown-source-block-language
+                           :inherit '(ygg-markdown-fences-label
+                                      agent-shell-markdown-source-block))
+      (face-remap-set-base 'agent-shell-markdown-table-zebra
+                           :inherit '(ygg-markdown-fences-block
+                                      agent-shell-markdown-table))))
   (face-remap-add-relative 'aob-trace-prose :height aob-trace-prose-height)
   (face-remap-add-relative 'aob-trace-small :height aob-trace-tool-height)
-  (dolist (f '(markdown-header-face markdown-header-face-1 markdown-header-face-2
-               markdown-header-face-3 markdown-header-face-4
-               markdown-header-face-5 markdown-header-face-6))
-    (when (facep f)
-      (face-remap-set-base f :weight 'bold)))
   (when (aob-trace--delta-p)
     (setq-local line-spacing 0.3)
     (setq-local left-margin-width 4)
     (setq-local fill-column aob-trace-measure))
   (setq-local word-wrap t)
   (setq-local mwheel-scroll-down-function #'aob-trace--wheel-back)
-  (add-function :filter-return (local 'filter-buffer-substring-function)
-                #'aob-trace--unmarked)
+  (add-function :around (local 'filter-buffer-substring-function)
+                #'aob-trace--filter-substring)
   (add-hook 'window-configuration-change-hook #'aob-trace--fit-margins nil t)
   (add-hook 'window-buffer-change-functions
             (lambda (_frame) (aob-trace--fit-margins)) nil t)
@@ -407,6 +420,32 @@ text is what the line says, not what its gutter or a thumbnail drew."
         (setq i next)))
     (apply #'concat (nreverse parts))))
 
+(defun aob-trace--copy-markdown (beg end)
+  "The text from BEG to END with each drawn span back as its markdown, marks and pictures left out."
+  (let* ((lo (previous-single-property-change (1+ beg) 'agent-shell-markdown-source nil (point-min)))
+         (hi (next-single-property-change (1- end) 'agent-shell-markdown-source nil (point-max)))
+         (text (buffer-substring lo hi)))
+    (with-temp-buffer
+      (insert text)
+      (let ((from (copy-marker (1+ (- beg lo))))
+            (to (copy-marker (1+ (- end lo))))
+            (pos (point-min)))
+        (while (< pos (point-max))
+          (let ((next (min (next-single-property-change pos 'aob-status nil (point-max))
+                           (next-single-property-change pos 'aob-thumb nil (point-max)))))
+            (if (or (get-text-property pos 'aob-status) (get-text-property pos 'aob-thumb))
+                (delete-region pos next)
+              (setq pos next))))
+        (agent-shell-markdown-reconstruct from to)))))
+
+(defun aob-trace--filter-substring (orig beg end &optional delete)
+  "Copy BEG to END through ORIG, as the markdown it was drawn from when it was."
+  (if (and (fboundp 'agent-shell-markdown-reconstruct)
+           (text-property-not-all beg end 'agent-shell-markdown-source nil))
+      (prog1 (aob-trace--copy-markdown beg end)
+        (when delete (funcall orig beg end delete)))
+    (aob-trace--unmarked (funcall orig beg end delete))))
+
 (defun aob-trace-shell-live-p (ev)
   "Non-nil while the command tool call EV ran is still running.
 A command handed off to the background outlives its call: it runs until
@@ -534,185 +573,184 @@ is quadratic in the length of the turn."
           (string-trim-right head)
         (concat (aob-trace--bound head) (propertize "\n…" 'face 'shadow))))))
 
-(defcustom aob-trace-live-markdown-max 1500
+(defcustom aob-trace-live-markdown-max 6000
   "Longest answer decorated while it is still arriving, in characters.
-A streaming message is re-fontified on every redraw, so its cost is
+A streaming message is rendered again on every redraw, so its cost is
 paid ten times a second; past this it waits and is decorated once, when
 the turn settles."
   :type 'natnum :group 'aob)
 
+(defun aob-trace--table-fraction ()
+  "The share of the selected window's width a table may take to fit the trace."
+  (/ (+ (max 20 (1- (aob-trace--text-width))) 0.5)
+     (float (or (ignore-errors (window-body-width)) 80))))
+
+(defun aob-trace--face-property-only (str)
+  "STR with its faces under `font-lock-face' alone."
+  (let ((i 0) (n (length str)))
+    (while (< i n)
+      (let ((next (next-single-property-change i 'face str n))
+            (face (get-text-property i 'face str)))
+        (when face
+          (put-text-property i next 'font-lock-face face str)
+          (remove-text-properties i next '(face nil) str))
+        (setq i next)))
+    str))
+
+(defun aob-trace--rendered (text)
+  "TEXT with its markdown drawn: markup gone, the faces on what is left."
+  (let ((default-directory (or (aob-trace--root) default-directory))
+        (agent-shell-markdown-table-max-width-fraction (aob-trace--table-fraction)))
+    (aob-trace--face-property-only (agent-shell-markdown-convert text))))
+
 (defun aob-trace--md (text &optional live)
   "TEXT carrying markdown faces, or TEXT as it is when that is too dear.
 LIVE says the text is still arriving and will be redrawn again shortly."
-  (if (and (fboundp 'ygg-ui-markdown)
+  (if (and (fboundp 'agent-shell-markdown-convert)
            (not (and live (> (length text) aob-trace-live-markdown-max))))
-      (aob-trace--diff-blocks (aob-trace--tables (ygg-ui-markdown text)))
+      (let ((drawn (aob-trace--diff-blocks (aob-trace--rendered text))))
+        (if live drawn (aob-trace--file-links drawn)))
     text))
 
-(defun aob-trace--diff-blocks (text)
-  "TEXT with the lines of each diff fence in it coloured as a diff is.
-markdown-mode shades a fence as code and nothing more, and a change shown
-as a diff is read by its plus and minus lines."
-  (if (not (and (stringp text) (string-match-p "^[ \t]*```[ \t]*\\(?:diff\\|patch\\)" text)))
-      text
-    (let ((out (copy-sequence text)) (pos 0) (in nil))
-      (dolist (line (split-string out "\n"))
-        (let ((end (+ pos (length line))))
-          (cond
-           ((string-match-p "^[ \t]*```[ \t]*\\(?:diff\\|patch\\)" line) (setq in t))
-           ((and in (string-match-p "^[ \t]*```" line)) (setq in nil))
-           (in
-            (when-let* ((face (cond ((string-prefix-p "@@" line) 'aob-trace-diff-context)
-                                    ((string-prefix-p "+" line) 'aob-trace-diff-added)
-                                    ((string-prefix-p "-" line) 'aob-trace-diff-removed))))
-              (let ((i pos))
-                (while (< i end)
-                  (let* ((next (next-single-property-change i 'font-lock-face out end))
-                         (old (get-text-property i 'font-lock-face out)))
-                    (put-text-property i next 'font-lock-face
-                                       (cons face (cond ((null old) nil)
-                                                        ((listp old) old)
-                                                        (t (list old))))
-                                       out)
-                    (setq i next)))))))
-          (setq pos (1+ end))))
+(defcustom aob-trace-file-link-max 60
+  "Most file candidates one event is checked against the disk for."
+  :type 'natnum :group 'aob)
+
+(defconst aob-trace--file-link-re
+  (concat "\\[[^]\n]+\\](\\([^) \n]+\\))"
+          "\\|\\(?:^\\|[^[:alnum:]/.~:_@+-]\\)\\([~/]?[[:alnum:]_.@+/-]*[[:alnum:]_]\\)"
+          "\\(?::\\([0-9]+\\)\\(?::\\([0-9]+\\)\\)?\\|#L\\([0-9]+\\)\\)?")
+  "A markdown link to a file, or a bare path with its line and column.")
+
+(defconst aob-trace--file-suffix-re
+  "\\(?::\\([0-9]+\\)\\(?::\\([0-9]+\\)\\)?\\|#L\\([0-9]+\\)\\)\\'"
+  "A line, or line and column, at the end of a path.")
+
+(defvar aob-trace-file-link-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'aob-trace-open-link)
+    (define-key map [mouse-1] #'aob-trace-open-link)
+    map)
+  "Keys on a file the agent's text names.")
+
+(defun aob-trace--fence-ranges (str)
+  "The (BEG . END) of each fenced block in STR, drawn or still as typed."
+  (let ((pos 0) out open)
+    (let ((i 0) (n (length str)))
+      (while (< i n)
+        (let ((next (next-single-property-change
+                     i 'agent-shell-markdown-source-block-rendered str n)))
+          (when (get-text-property i 'agent-shell-markdown-source-block-rendered str)
+            (push (cons i next) out))
+          (setq i next))))
+    (while (string-match "^[ \t]*```" str pos)
+      (setq pos (match-end 0))
+      (if open
+          (progn (push (cons open pos) out) (setq open nil))
+        (setq open (match-beginning 0))))
+    (when open (push (cons open (length str)) out))
+    out))
+
+(defun aob-trace--link-file (str beg end file nums)
+  "Make STR between BEG and END open FILE at the line and column in NUMS."
+  (add-text-properties
+   beg end
+   (list 'aob-link (list file
+                         (let ((n (string-to-number (or (nth 0 nums) (nth 2 nums) "0"))))
+                           (and (> n 0) n))
+                         nil
+                         (and (nth 1 nums) (string-to-number (nth 1 nums))))
+         'keymap aob-trace-file-link-map
+         'mouse-face 'highlight
+         'help-echo (abbreviate-file-name file))
+   str)
+  (aob-trace--add-face str 'aob-trace-target beg end))
+
+(defun aob-trace--file-links (str)
+  "STR with each existing file it names made a link RET and mouse-1 open."
+  (if (not (and (stringp str)
+                (or (string-match-p "[/.]" str)
+                    (text-property-not-all 0 (length str) 'agent-shell-markdown-url nil str))))
+      str
+    (let ((root (or (aob-trace--root) default-directory))
+          (out (copy-sequence str))
+          (fences (aob-trace--fence-ranges str))
+          (seen (make-hash-table :test 'equal))
+          (budget aob-trace-file-link-max)
+          (pos 0))
+      (while (and (> budget 0) (string-match aob-trace--file-link-re out pos))
+        (let* ((link (match-beginning 1))
+               (beg (if link (match-beginning 0) (match-beginning 2)))
+               (end (match-end 0))
+               (path (match-string (if link 1 2) out))
+               (nums (unless link
+                       (list (match-string 3 out) (match-string 4 out)
+                             (match-string 5 out)))))
+          (setq pos (max end (1+ (match-beginning 0))))
+          (when (and link (string-match aob-trace--file-suffix-re path))
+            (setq nums (list (match-string 1 path) (match-string 2 path)
+                             (match-string 3 path))
+                  path (substring path 0 (match-beginning 0))))
+          (when (and (string-match-p "[/.]" path)
+                     (not (string-match-p "\\`[a-z]+:" path))
+                     (not (seq-find (lambda (r) (and (>= beg (car r)) (< beg (cdr r))))
+                                    fences)))
+            (let ((file (gethash path seen 'unset)))
+              (when (eq file 'unset)
+                (setq budget (1- budget)
+                      file (let* ((file-name-handler-alist nil)
+                                  (abs (expand-file-name path root)))
+                             (and (file-exists-p abs) (not (file-directory-p abs)) abs)))
+                (puthash path file seen))
+              (when file (aob-trace--link-file out beg end file nums))))))
+      (let ((i 0) (n (length out)))
+        (while (< i n)
+          (let ((next (next-single-property-change i 'agent-shell-markdown-url out n))
+                (url (get-text-property i 'agent-shell-markdown-url out)))
+            (when (and (> budget 0) (stringp url) (not (string-match-p "\\`[a-z]+:" url)))
+              (setq budget (1- budget))
+              (let* ((nums (when (string-match aob-trace--file-suffix-re url)
+                             (list (match-string 1 url) (match-string 2 url)
+                                   (match-string 3 url))))
+                     (path (if nums (substring url 0 (string-match aob-trace--file-suffix-re url)) url))
+                     (abs (let ((file-name-handler-alist nil))
+                            (expand-file-name path root))))
+                (when (and (file-exists-p abs) (not (file-directory-p abs)))
+                  (aob-trace--link-file out i next abs nums))))
+            (setq i next))))
       out)))
 
-(defconst aob-trace--table-row-re "^[ \t]*|.*|[ \t]*$"
-  "A markdown table row: a line between pipes.")
+(defun aob-trace-open-link (&optional event)
+  "Open the file the link at point, or at the click EVENT, names."
+  (interactive (list last-nonmenu-event))
+  (let* ((pos (if (mouse-event-p event) (posn-point (event-start event)) (point)))
+         (spec (and pos (get-text-property pos 'aob-link))))
+    (if spec
+        (aob-trace--visit spec)
+      (user-error "aob: no file here"))))
 
-(defconst aob-trace--table-rule-re "\\`[ \t]*:?-+:?[ \t]*\\'"
-  "A cell of the line under a table's header: dashes, colons for alignment.")
+(defconst aob-trace--diff-fence-re "\\`[ \t]*```+[ \t]*\\(?:diff\\|patch\\)"
+  "The opening of a diff fence, as the renderer stashes it.")
 
-(defun aob-trace--visible-width (str)
-  "Columns STR takes on screen, what markdown hid not counted."
-  (let ((w 0) (i 0) (n (length str)))
-    (while (< i n)
-      (unless (get-text-property i 'invisible str)
-        (setq w (+ w (char-width (aref str i)))))
-      (setq i (1+ i)))
-    w))
-
-(defun aob-trace--visible-cut (str width)
-  "STR cut to WIDTH visible columns, an ellipsis standing for the rest."
-  (if (<= (aob-trace--visible-width str) width)
-      str
-    (let ((w 0) (i 0) (n (length str)))
-      (while (and (< i n)
-                  (or (get-text-property i 'invisible str)
-                      (<= (+ w (char-width (aref str i))) (1- width))))
-        (unless (get-text-property i 'invisible str)
-          (setq w (+ w (char-width (aref str i)))))
-        (setq i (1+ i)))
-      (concat (substring str 0 i) "…"))))
-
-(defun aob-trace--table-cells (line)
-  "LINE's cells, trimmed, their text properties kept."
-  (let* ((body (string-trim line))
-         (body (substring body (if (string-prefix-p "|" body) 1 0)
-                          (if (string-suffix-p "|" body) -1 nil)))
-         (cells nil) (start 0) (i 0) (n (length body)))
-    (while (< i n)
-      (cond ((and (eq (aref body i) ?\\) (< (1+ i) n)) (setq i (1+ i)))
-            ((eq (aref body i) ?|)
-             (push (substring body start i) cells)
-             (setq start (1+ i))))
-      (setq i (1+ i)))
-    (push (substring body start) cells)
-    (mapcar #'string-trim (nreverse cells))))
-
-(defun aob-trace--table-render (rows width)
-  "ROWS, a header and its cells, as aligned lines no wider than WIDTH, or nil.
-The second row is the rule under the header and says each column's
-alignment.  Columns are trimmed widest first when the table does not
-fit; one that would not fit at ten columns each is left as written."
-  (let* ((head (car rows))
-         (align (mapcar (lambda (c)
-                          (let ((c (substring-no-properties c)))
-                            (cond ((and (string-prefix-p ":" c) (string-suffix-p ":" c)) 'center)
-                                  ((string-suffix-p ":" c) 'right)
-                                  (t 'left))))
-                        (cadr rows)))
-         (body (cddr rows))
-         (ncol (apply #'max (mapcar #'length (cons head body))))
-         (all (mapcar (lambda (r) (append r (make-list (- ncol (length r)) "")))
-                      (cons head body)))
-         (widths (mapcar (lambda (i)
-                           (apply #'max 1 (mapcar (lambda (r) (aob-trace--visible-width (nth i r)))
-                                                  all)))
-                         (number-sequence 0 (1- ncol))))
-         (frame (+ 1 (* 3 ncol))))
-    (while (and (> (+ frame (apply #'+ widths)) width)
-                (> (apply #'max widths) 10))
-      (let ((i (seq-position widths (apply #'max widths))))
-        (setf (nth i widths) (1- (nth i widths)))))
-    (when (<= (+ frame (apply #'+ widths)) width)
-      ;; and wider when it can: a table spans the page it is on, its spare
-      ;; columns shared out by how much each column already holds
-      (let* ((room (- (min width (or (aob-trace--measure-width) width)) 1 frame))
-             (sum (apply #'+ widths))
-             (extra (- room sum)))
-        (when (> extra 0)
-          (let ((given 0))
-            (setq widths (mapcar (lambda (w)
-                                   (let ((add (floor (* extra w) sum)))
-                                     (setq given (+ given add))
-                                     (+ w add)))
-                                 widths))
-            (setf (car (last widths)) (+ (car (last widths)) (- extra given))))))
-      (let* ((bar (propertize "│" 'font-lock-face 'shadow))
-             (line (lambda (row bold)
-                     (concat
-                      bar
-                      (mapconcat
-                       (lambda (i)
-                         (let* ((w (nth i widths))
-                                (cell (aob-trace--visible-cut (nth i row) w))
-                                (pad (- w (aob-trace--visible-width cell)))
-                                (how (or (nth i align) 'left))
-                                (left (pcase how ('right pad) ('center (/ pad 2)) (_ 0)))
-                                (cell (if bold
-                                          (let ((c (copy-sequence cell)))
-                                            (add-face-text-property 0 (length c) 'bold t c)
-                                            c)
-                                        cell)))
-                           (concat " " (make-string left ?\s) cell
-                                   (make-string (- pad left) ?\s) " " bar)))
-                       (number-sequence 0 (1- ncol)) ""))))
-             (rule (propertize
-                    (concat "├"
-                            (mapconcat (lambda (w) (make-string (+ w 2) ?─)) widths "┼")
-                            "┤")
-                    'font-lock-face 'shadow)))
-        (append (list (funcall line (car all) t) rule)
-                (mapcar (lambda (r) (funcall line r nil)) (cdr all)))))))
-
-(defun aob-trace--tables (text)
-  "TEXT with each markdown table in it drawn with its columns lined up.
-markdown-mode colours a table and leaves it as typed, and its hidden
-markup, the stars around a bold word, pulls every cell after it out of
-line."
-  (if (not (and (stringp text) (string-match-p "^[ \t]*|" text)))
+(defun aob-trace--diff-blocks (text)
+  "TEXT with the lines of each rendered diff fence coloured as a diff card is."
+  (if (not (and (stringp text)
+                (text-property-not-all 0 (length text) 'agent-shell-markdown-source-block-body nil text)))
       text
-    (let ((lines (split-string text "\n"))
-          (width (aob-trace--text-width))
-          out)
-      (while lines
-        (if (and (cdr lines)
-                 (string-match-p aob-trace--table-row-re (car lines))
-                 (string-match-p aob-trace--table-row-re (cadr lines))
-                 (seq-every-p (lambda (c) (string-match-p aob-trace--table-rule-re
-                                                          (substring-no-properties c)))
-                              (aob-trace--table-cells (cadr lines))))
-            (let ((block (list (pop lines) (pop lines))))
-              (while (and lines (string-match-p aob-trace--table-row-re (car lines)))
-                (setq block (append block (list (pop lines)))))
-              (dolist (l (or (aob-trace--table-render
-                              (mapcar #'aob-trace--table-cells block) width)
-                             block))
-                (push l out)))
-          (push (pop lines) out)))
-      (mapconcat #'identity (nreverse out) "\n"))))
+    (let ((out (copy-sequence text)) (n (length text)) (pos 0))
+      (while (< pos n)
+        (let* ((eol (or (string-search "\n" out pos) n))
+               (src (and (get-text-property pos 'agent-shell-markdown-source-block-body out)
+                         (get-text-property pos 'agent-shell-markdown-source out))))
+          (when (and src (string-match-p aob-trace--diff-fence-re src))
+            (let ((face (cond ((eq (aref out pos) ?@) 'aob-trace-diff-context)
+                              ((eq (aref out pos) ?+) 'aob-trace-diff-added)
+                              ((eq (aref out pos) ?-) 'aob-trace-diff-removed))))
+              (put-text-property pos (min n (1+ eol)) 'font-lock-face
+                                 (delq nil (list face 'agent-shell-markdown-source-block))
+                                 out)))
+          (setq pos (1+ eol))))
+      out)))
 
 (defun aob-trace--status (ev)
   "EV's status as words on its row; the fringe carries the rest when it can."
@@ -1680,6 +1718,8 @@ default size, since their columns line up only at that size."
                                                    str i (min eol (+ i 40))))))))
         (cond (fenced (setq fence (not fence)))
               ((or fence (= i eol)
+                   (get-text-property i 'agent-shell-markdown-source-block-rendered str)
+                   (get-text-property i 'wrap-prefix str)
                    (string-match-p aob-trace--literal-re
                                    (substring-no-properties str i (min eol (+ i 8))))))
               (t (funcall fn i eol)))
@@ -4390,7 +4430,7 @@ itself on its summary row, else the block point is in."
 (defun aob-trace--visit (spec)
   "Open SPEC, a (FILE LINE SEARCH) a chip or a card names, beside the trace.
 LINE is where to land; without one, SEARCH is text to land on."
-  (pcase-let ((`(,file ,line ,search) spec))
+  (pcase-let ((`(,file ,line ,search . ,rest) spec))
     (unless (file-exists-p file)
       (user-error "aob: %s is not there" (abbreviate-file-name file)))
     (pop-to-buffer (find-file-noselect file)
@@ -4398,7 +4438,10 @@ LINE is where to land; without one, SEARCH is text to land on."
                      (inhibit-same-window . t)))
     (widen)
     (goto-char (point-min))
-    (cond ((and line (> line 0)) (forward-line (1- line)))
+    (cond ((and line (> line 0))
+           (forward-line (1- line))
+           (when-let* ((col (car rest)))
+             (move-to-column (max 0 (1- col)))))
           ((and search (not (string-empty-p search)) (search-forward search nil t))
            (goto-char (match-beginning 0))))))
 

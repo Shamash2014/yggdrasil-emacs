@@ -4920,14 +4920,27 @@ killing it must not be what makes it unreachable."
                     (aob-acp--persisted-entries))))
         (make-directory (file-name-directory aob-acp-persist-file) t)
         (with-temp-file aob-acp-persist-file
-          (prin1 (seq-take (append fresh past) aob-acp-history-limit)
+          (prin1 (aob-acp--trim (append fresh past))
                  (current-buffer)))))))
+
+(defun aob-acp--trim (entries)
+  "ENTRIES cut to `aob-acp-history-limit', those with a gone folder first to go."
+  (if (<= (length entries) aob-acp-history-limit)
+      entries
+    (let ((here (lambda (e) (file-directory-p (or (plist-get e :dir) "")))))
+      (seq-take (append (seq-filter here entries) (seq-remove here entries))
+                aob-acp-history-limit))))
 
 (add-hook 'kill-emacs-hook #'aob-acp--persist)
 (add-hook 'aob-session-removed-hook #'aob-acp--persist)
 
-(defun aob-acp--persist-unread (_s)
-  (aob-acp--persist))
+(defun aob-acp--persist-unread (s)
+  (when-let* ((acp-id (aob-session-ref s :acp-id)))
+    (unless (aob-acp--rewrite acp-id
+                              (lambda (entry)
+                                (plist-put (copy-sequence entry) :unread
+                                           (aob-session-ref s :unread))))
+      (aob-acp--persist))))
 
 (add-hook 'aob-unread-change-hook #'aob-acp--persist-unread)
 
@@ -5026,19 +5039,56 @@ A header line asks for these on every redisplay.")
     (user-error "aob: %s is not a folder" dir))
   (let* ((new (file-name-as-directory (expand-file-name dir)))
          (old (plist-get e :dir))
-         (same (lambda (a) (and a old (equal (directory-file-name a)
-                                             (directory-file-name old))))))
-    (unless (aob-acp--rewrite
-             (plist-get e :acp-id)
-             (lambda (entry)
-               (let ((entry (plist-put (copy-sequence entry) :dir new)))
-                 (if (funcall same (plist-get entry :project))
-                     (plist-put entry :project new)
-                   entry))))
+         (acp-id (plist-get e :acp-id))
+         (held (seq-filter (lambda (s) (equal (aob-session-ref s :acp-id) acp-id))
+                           (aob-sessions)))
+         (saved (aob-acp--rewrite
+                 acp-id (lambda (entry) (aob-acp--rebase-entry entry old new)))))
+    (unless (or saved held)
       (user-error "aob: no saved sessions to rebind"))
+    (dolist (s held)
+      (aob-acp--rebase-session s old new))
     (message "aob: %s now lives in %s"
              (or (plist-get e :name) (plist-get e :agent))
              (abbreviate-file-name new))))
+
+(defun aob-acp--rebase (path old new)
+  "PATH with the folder OLD it lay under replaced by NEW; PATH when elsewhere."
+  (let* ((from (and old (directory-file-name (expand-file-name old))))
+         (to (directory-file-name (expand-file-name new)))
+         (abs (and path from (expand-file-name path))))
+    (if (and abs (or (equal (directory-file-name abs) from)
+                     (string-prefix-p (concat from "/") abs)))
+        (concat to (substring abs (length from)))
+      path)))
+
+(defun aob-acp--rebase-entry (entry old new)
+  "ENTRY with every path under OLD moved under NEW, and its :dir NEW itself."
+  (let ((entry (copy-sequence entry)))
+    (dolist (key '(:project :task :todo-file))
+      (when-let* ((path (plist-get entry key)))
+        (setq entry (plist-put entry key (aob-acp--rebase path old new)))))
+    (when-let* ((dirs (plist-get entry :extra-dirs)))
+      (setq entry (plist-put entry :extra-dirs
+                             (mapcar (lambda (d) (aob-acp--rebase d old new)) dirs))))
+    (plist-put entry :dir new)))
+
+(defun aob-acp--rebase-session (s old new)
+  "Move S, awake or asleep, from folder OLD to NEW as its saved entry moved."
+  (let ((moved (aob-acp--rebase-entry
+                (list :project (aob-session-project s)
+                      :dir (aob-session-dir s)
+                      :task (aob-session-ref s :task)
+                      :todo-file (aob-session-ref s :todo-file)
+                      :extra-dirs (aob-session-ref s :extra-dirs))
+                old new)))
+    (setf (aob-session-project s) (plist-get moved :project)
+          (aob-session-dir s) new)
+    (dolist (key '(:task :todo-file :extra-dirs))
+      (when (aob-session-ref s key)
+        (aob-session-put s key (plist-get moved key))))
+    (when-let* ((asleep (aob-session-ref s :asleep)))
+      (aob-session-put s :asleep (aob-acp--rebase-entry asleep old new)))))
 
 (defun aob-acp-archived-entries ()
   "Conversations put away: still resumable, no longer offered."
@@ -5048,17 +5098,20 @@ A header line asks for these on every redisplay.")
 (defun aob-acp--rewrite (acp-id fn)
   "Replace the entry for ACP-ID with the result of FN on it.
 FN answering nil drops it.  The file is the record of what can be
-resumed, so it is rewritten whole rather than appended to."
+resumed, so it is rewritten whole rather than appended to.  Non-nil
+only when an entry for ACP-ID was there to replace."
   (when (and aob-acp-persist-file (file-readable-p aob-acp-persist-file))
-    (let ((kept (delq nil
-                      (mapcar (lambda (e)
-                                (if (equal (plist-get e :acp-id) acp-id)
-                                    (funcall fn e)
-                                  e))
-                              (aob-acp--persisted-entries)))))
-      (with-temp-file aob-acp-persist-file
-        (prin1 kept (current-buffer)))
-      kept)))
+    (let* ((hit nil)
+           (kept (delq nil
+                       (mapcar (lambda (e)
+                                 (if (equal (plist-get e :acp-id) acp-id)
+                                     (progn (setq hit t) (funcall fn e))
+                                   e))
+                               (aob-acp--persisted-entries)))))
+      (when hit
+        (with-temp-file aob-acp-persist-file
+          (prin1 kept (current-buffer)))
+        t))))
 
 (defun aob-acp--renamed (s)
   "Hold S to the name it was just given, asleep, awake and on disk."
@@ -5075,7 +5128,7 @@ resumed, so it is rewritten whole rather than appended to."
         (let ((entries (cons entry (aob-acp--persisted-entries))))
           (make-directory (file-name-directory aob-acp-persist-file) t)
           (with-temp-file aob-acp-persist-file
-            (prin1 (seq-take entries aob-acp-history-limit) (current-buffer)))))))))
+            (prin1 (aob-acp--trim entries) (current-buffer)))))))))
 
 (defun aob-acp--pick-entry (prompt entries)
   (let* ((rows (mapcar (lambda (e)

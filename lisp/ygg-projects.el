@@ -2103,11 +2103,16 @@ state, every session selected, after one question."
 (defun ygg-projects--ended-p (entry)
   (and (consp entry) (proper-list-p entry) (plist-member entry :acp-id) t))
 
+(defun ygg-projects--resumable-p (entry)
+  (and (ygg-projects--ended-p entry)
+       (file-directory-p (or (plist-get entry :dir) ""))))
+
 (defun ygg-projects-resume ()
-  "Start the conversation on this line up again, or each one selected."
+  "Start the conversation on this line up again, or each one selected.
+A selection skips the conversations whose folder is gone."
   (interactive)
   (if (ygg-projects--selecting-p)
-      (ygg-projects--act "resume" #'ygg-projects--ended-p
+      (ygg-projects--act "resume" #'ygg-projects--resumable-p
                          #'aob-acp-resume-entry t)
     (let ((entry (ygg-projects--entry-at-point)))
       (unless (ygg-projects--ended-p entry)

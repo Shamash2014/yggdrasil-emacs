@@ -1902,6 +1902,13 @@ attachments whose [[ImageN]] survived the user's editing ride along."
                         "[ \t]*\\[\\[Image[0-9]+\\]\\][ \t]*" " " raw))
           (nreverse files))))
 
+(defun aob-compose--home-window (draft)
+  "The window a send from DRAFT runs in: the one under it when it floats."
+  (or (when-let* ((frame (aob-compose--float-frame draft))
+                  (parent (frame-parent frame)))
+        (frame-selected-window parent))
+      (selected-window)))
+
 (defun aob-compose-send ()
   (interactive)
   (pcase-let* ((draft (current-buffer))
@@ -1914,6 +1921,8 @@ attachments whose [[ImageN]] survived the user's editing ride along."
                                    (aob-compose--harvest (or (car rewritten) raw))))
                (atts (append atts (cdr rewritten)))
                (tgt aob-compose--target)
+               (steer aob-compose--steer)
+               (spawn aob-compose-spawn-function)
                (session (and (stringp tgt) (aob-session-get tgt))))
     (when (and (string-empty-p text) (null atts)
                (not aob-compose-allow-empty))
@@ -1923,26 +1932,28 @@ attachments whose [[ImageN]] survived the user's editing ride along."
     ;; whatever the draft goes to — a session, a spawn, a caller — it is
     ;; words the owner typed, and a spawn queues its first turn right here
     (let ((aob-prompt-typed t))
-      (cond ((null rewritten))
-            (hold (funcall hold text atts))
-            ((and session
-                  (or aob-compose--steer
-                      ;; a turn that takes words mid-way gets them now: a
-                      ;; subagent can keep a turn open for an hour, and a
-                      ;; queued message waits behind all of it
-                      (and (eq (aob-session-state session) 'working)
-                           (fboundp 'aob-acp--steers-p)
-                           (ignore-errors (aob-acp--steers-p session)))))
-             (aob-interject session text atts))
-            (session (aob-prompt session text atts))
-            ((stringp tgt) (user-error "aob: target session is gone"))
-            ;; a function target wants the words themselves rather than a
-            ;; session to send them to — a caller composing a brief, say
-            ((functionp tgt) (funcall tgt text atts))
-            (aob-compose-spawn-function
-             (funcall aob-compose-spawn-function text (and (consp tgt) (cdr tgt))
-                      atts))
-            (t (user-error "aob: no session and no spawn function"))))
+      ;; a float's window shows only the draft, so a send that shows a buffer errs there
+      (with-selected-window (aob-compose--home-window draft)
+        (set-buffer draft)
+        (cond ((null rewritten))
+              (hold (funcall hold text atts))
+              ((and session
+                    (or steer
+                        ;; a turn that takes words mid-way gets them now: a
+                        ;; subagent can keep a turn open for an hour, and a
+                        ;; queued message waits behind all of it
+                        (and (eq (aob-session-state session) 'working)
+                             (fboundp 'aob-acp--steers-p)
+                             (ignore-errors (aob-acp--steers-p session)))))
+               (aob-interject session text atts))
+              (session (aob-prompt session text atts))
+              ((stringp tgt) (user-error "aob: target session is gone"))
+              ;; a function target wants the words themselves rather than a
+              ;; session to send them to — a caller composing a brief, say
+              ((functionp tgt) (funcall tgt text atts))
+              (spawn
+               (funcall spawn text (and (consp tgt) (cdr tgt)) atts))
+              (t (user-error "aob: no session and no spawn function")))))
     ;; read after the send: a refused send leaves you in the draft, and a
     ;; spawn function is free to say where this one should land
     (let ((after (and rewritten aob-compose-after-send)))
@@ -2282,50 +2293,65 @@ Proceed based on it."
 (defvar aob-unread-change-hook nil
   "Run with the session when it becomes unread or is read.")
 
-(defvar aob--unread-timer nil)
-(defvar aob--unread-last nil)
+(defvar aob--dwell-timer nil)
+(defvar aob--dwell-shown nil)
+(defvar aob--dwell-start nil)
 
 (defun aob-session-unread-p (s)
   (and (aob-session-ref s :unread) t))
 
 (defun aob-unread-sessions ()
-  (seq-filter #'aob-session-unread-p
-              (seq-remove (lambda (s) (aob-session-ref s :hidden)) (aob-sessions))))
+  "The unread conversations that want you: live, not put down, not blocked."
+  (seq-filter (lambda (s)
+                (and (aob-session-unread-p s)
+                     (not (eq (aob-session-state s) 'blocked))
+                     (not (and (fboundp 'ygg-aob--put-down-p)
+                               (ygg-aob--put-down-p s)))))
+              (aob-live-sessions)))
 
 (defun aob--shown-p (s)
-  (equal (buffer-local-value 'aob-buffer-session-id (window-buffer (selected-window)))
-         (aob-session-id s)))
+  (seq-some (lambda (w)
+              (equal (buffer-local-value 'aob-buffer-session-id (window-buffer w))
+                     (aob-session-id s)))
+            (window-list nil 'no-minibuf)))
 
-(defun aob--unread-sync-timer ()
-  (let ((any (aob-unread-sessions)))
-    (cond ((and any (not (timerp aob--unread-timer)))
-           (setq aob--unread-last nil
-                 aob--unread-timer (run-with-timer 0.5 0.5 #'aob--unread-tick)))
-          ((and (not any) aob--unread-timer)
-           (when (timerp aob--unread-timer) (cancel-timer aob--unread-timer))
-           (setq aob--unread-timer nil)))))
+(defun aob--shown-unread ()
+  (seq-filter #'aob--shown-p
+              (seq-filter #'aob-session-unread-p
+                          (seq-remove (lambda (s) (aob-session-ref s :hidden))
+                                      (aob-sessions)))))
+
+(defun aob--dwell-cancel ()
+  (when (timerp aob--dwell-timer) (cancel-timer aob--dwell-timer))
+  (setq aob--dwell-timer nil aob--dwell-shown nil aob--dwell-start nil))
+
+(defun aob--dwell-sync (&rest _)
+  "Time the unread conversations in view; a change in what is watched restarts it."
+  (let ((ids (mapcar #'aob-session-id (aob--shown-unread))))
+    (cond ((null ids) (aob--dwell-cancel))
+          ((not (and aob--dwell-timer (equal ids aob--dwell-shown)))
+           (aob--dwell-cancel)
+           (setq aob--dwell-shown ids
+                 aob--dwell-start (float-time)
+                 aob--dwell-timer (run-with-timer aob-unread-dwell nil
+                                                  #'aob--dwell-fire))))))
+
+(defun aob--dwell-fire ()
+  "Read what stayed in view for `aob-unread-dwell' seconds, unless Emacs was blocked."
+  (let ((ids aob--dwell-shown)
+        (late (> (- (float-time) (or aob--dwell-start 0)) (+ aob-unread-dwell 1)))
+        (shown (aob--shown-unread)))
+    (setq aob--dwell-timer nil aob--dwell-shown nil)
+    (if (and (not late) (equal ids (mapcar #'aob-session-id shown)))
+        (dolist (s shown) (aob--set-unread s nil))
+      (aob--dwell-sync))))
 
 (defun aob--set-unread (s on)
   (unless (eq (aob-session-unread-p s) (and on t))
     (aob-session-put s :unread (and on t))
-    (aob-session-put s :unread-since nil)
     (aob--dirty s)
-    (aob--unread-sync-timer)
+    (aob--dwell-sync)
     (run-hook-with-args 'aob-unread-change-hook s)))
-
-(defun aob--unread-tick ()
-  "Read what has been in the selected window for `aob-unread-dwell' seconds.
-A gap of over a second between ticks means Emacs was blocked or asleep,
-so the dwell starts over."
-  (let* ((now (float-time))
-         (gap (and aob--unread-last (- now aob--unread-last))))
-    (setq aob--unread-last now)
-    (dolist (s (aob-unread-sessions))
-      (let ((since (aob-session-ref s :unread-since)))
-        (cond ((not (aob--shown-p s)) (aob-session-put s :unread-since nil))
-              ((or (null since) (and gap (> gap 1)))
-               (aob-session-put s :unread-since now))
-              ((>= (- now since) aob-unread-dwell) (aob--set-unread s nil)))))))
 
 (defun aob--unread-on-state (s old new)
   (when (and (eq old 'working)
@@ -2334,12 +2360,11 @@ so the dwell starts over."
              (not (aob--shown-p s)))
     (aob--set-unread s t)))
 
-(defun aob--unread-on-roster (&rest _)
-  (aob--unread-sync-timer))
-
 (add-hook 'aob-state-change-hook #'aob--unread-on-state -50)
-(add-hook 'aob-session-created-hook #'aob--unread-on-roster)
-(add-hook 'aob-session-removed-hook #'aob--unread-on-roster)
+(add-hook 'aob-session-created-hook #'aob--dwell-sync)
+(add-hook 'aob-session-removed-hook #'aob--dwell-sync)
+(add-hook 'window-selection-change-functions #'aob--dwell-sync)
+(add-hook 'window-buffer-change-functions #'aob--dwell-sync)
 
 (defvar aob-modeline-string "")
 (put 'aob-modeline-string 'risky-local-variable t)
