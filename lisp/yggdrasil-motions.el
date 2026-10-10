@@ -299,19 +299,29 @@ With LINEWISE, land on the target line's first non-blank (vim `')."
                       (goto-char pos)
                       (when linewise (back-to-indentation))))))))
 
+(defvar ygg-jump-back-functions nil
+  "Hook run by `ygg-jump-back' until a function returns non-nil.
+Such a function has gone back itself.")
+
+(defvar ygg-jump-forward-functions nil
+  "Hook run by `ygg-jump-forward' until a function returns non-nil.
+Such a function has gone forward itself.")
+
 (defun ygg-jump-back (&optional count)
   "Go to the previous position in the jump list (vim C-o)."
   (interactive "p")
-  (if (fboundp 'better-jumper-jump-backward)
-      (better-jumper-jump-backward count)
-    (user-error "Jump list not ready (better-jumper still installing)")))
+  (cond ((run-hook-with-args-until-success 'ygg-jump-back-functions))
+        ((fboundp 'better-jumper-jump-backward)
+         (better-jumper-jump-backward count))
+        (t (user-error "Jump list not ready (better-jumper still installing)"))))
 
 (defun ygg-jump-forward (&optional count)
   "Go to the next position in the jump list (vim C-i)."
   (interactive "p")
-  (if (fboundp 'better-jumper-jump-forward)
-      (better-jumper-jump-forward count)
-    (user-error "Jump list not ready (better-jumper still installing)")))
+  (cond ((run-hook-with-args-until-success 'ygg-jump-forward-functions))
+        ((fboundp 'better-jumper-jump-forward)
+         (better-jumper-jump-forward count))
+        (t (user-error "Jump list not ready (better-jumper still installing)"))))
 
 (defun ygg-jumplist-pick ()
   "Pick from the jump list (vim :jumps); candidates show file and position."

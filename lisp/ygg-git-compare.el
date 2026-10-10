@@ -86,6 +86,8 @@ left out of a review."
 (defvar-local ygg-git-compare--file-window nil)
 (defvar-local ygg-git-compare--shown nil "(RANGE . FILE) the right pane shows.")
 (defvar-local ygg-git-compare--timer nil)
+(defvar ygg-jump-back-functions)
+(defvar ygg-jump-forward-functions)
 (defvar-local ygg-git-compare--comments nil
   "This compare's review comments as kept, newest first.")
 (defvar-local ygg-git-compare--list-buffer nil
@@ -1239,7 +1241,8 @@ an untracked one against nothing."
             (magit-buffer-diff-files-suspended nil)
             (magit-git-global-arguments (ygg-git-compare--global-args))))
       (setq magit-buffer-locked-p t
-            ygg-git-compare--list-buffer list)
+            ygg-git-compare--list-buffer list
+            ygg-git-compare--shown (cons range file))
       (ygg-git-compare-mode 1)
       (current-buffer))))
 
@@ -1314,11 +1317,16 @@ an untracked one against nothing."
         (ygg-git-compare-mode 1)
         (when (window-live-p window) (select-window window))))))
 
+(defvar ygg-git-compare--forward nil
+  "(LIST FILE-BUFFER POINT) a jump back from a file left, for jumping forward.")
+
 (defun ygg-git-compare--close (list)
   "Kill LIST and the panes it opened; return the windows from before it."
   (let ((config (buffer-local-value 'ygg-git-compare--window-config list))
         (timer (buffer-local-value 'ygg-git-compare--timer list)))
     (when timer (cancel-timer timer))
+    (when (eq (car ygg-git-compare--forward) list)
+      (setq ygg-git-compare--forward nil))
     (dolist (b (buffer-list))
       (when (or (eq b list)
                 (eq (buffer-local-value 'ygg-git-compare--list-buffer b) list))
@@ -2482,6 +2490,72 @@ fetched in the background and the compare drawn again when they are here."
                                            (or (plist-get entry :error) why)
                                            (cdr (car opened))))))
     (car cell)))
+
+(defun ygg-git-compare--owner (buffer)
+  "The live compare list that BUFFER is or belongs to."
+  (let ((list (if (buffer-local-value 'ygg-git-compare--a-spec buffer)
+                  buffer
+                (buffer-local-value 'ygg-git-compare--list-buffer buffer))))
+    (and (buffer-live-p list) list)))
+
+(defun ygg-git-compare--jumper-stays-in-buffer-p ()
+  "Non-nil when better-jumper's next jump back lands in the current file."
+  (when (and (fboundp 'better-jumper--get-struct)
+             (fboundp 'better-jumper--get-jump-list))
+    (let* ((struct (better-jumper--get-struct))
+           (ring (better-jumper--get-jump-list))
+           (idx (better-jumper-jump-list-struct-idx struct))
+           (here (list (buffer-file-name) (point)))
+           (head (and (not (ring-empty-p ring)) (ring-ref ring 0)))
+           (target (cond ((>= idx 0) (1+ idx))
+                         ((and head (equal (list (nth 0 head) (nth 1 head)) here)) 1)
+                         (t 0))))
+      (and (< target (ring-length ring))
+           (equal (nth 0 (ring-ref ring target)) (buffer-file-name))))))
+
+(defun ygg-git-compare--jump-back ()
+  "Bring back the compare pane that the file in this window replaced."
+  (when-let* ((file (current-buffer))
+              ((buffer-file-name file))
+              ((not (ygg-git-compare--owner file)))
+              ((not (ygg-git-compare--jumper-stays-in-buffer-p)))
+              (window (selected-window))
+              ((eq (window-buffer window) file))
+              (previous (car (window-prev-buffers window)))
+              ((buffer-live-p (car previous)))
+              (list (ygg-git-compare--owner (car previous))))
+    (setq ygg-git-compare--forward (list list file (copy-marker (window-point window))))
+    (unless (get-buffer-window list (selected-frame))
+      (delete-other-windows)
+      (switch-to-buffer list)
+      (setq window (split-window nil (round (* ygg-git-compare-list-width
+                                              (window-total-width)))
+                                 'right)))
+    (set-window-buffer window (car previous))
+    (set-window-point window (or (nth 2 previous) (nth 1 previous)))
+    (with-current-buffer list
+      (setq ygg-git-compare--file-window window
+            ygg-git-compare--shown (buffer-local-value 'ygg-git-compare--shown
+                                                       (car previous))))
+    (select-window window)
+    t))
+
+(defun ygg-git-compare--jump-forward ()
+  "Go back to the file that a jump back left, once."
+  (when-let* ((state ygg-git-compare--forward)
+              (list (ygg-git-compare--owner (current-buffer)))
+              ((eq list (car state)))
+              ((buffer-live-p (nth 1 state)))
+              (window (buffer-local-value 'ygg-git-compare--file-window list))
+              ((window-live-p window)))
+    (setq ygg-git-compare--forward nil)
+    (select-window window)
+    (switch-to-buffer (nth 1 state) nil t)
+    (goto-char (nth 2 state))
+    t))
+
+(add-hook 'ygg-jump-back-functions #'ygg-git-compare--jump-back)
+(add-hook 'ygg-jump-forward-functions #'ygg-git-compare--jump-forward)
 
 (provide 'ygg-git-compare)
 ;;; ygg-git-compare.el ends here
