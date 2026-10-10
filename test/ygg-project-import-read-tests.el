@@ -60,3 +60,25 @@
   (ygg-project-import-read-tests--with '("/b/new/") ygg-project-import--browse
     (ygg-project-import--read-root)
     (should (= asyncs 0))))
+
+;; importing a folder that is not on the list yet puts it there, so the sidebar shows it
+(ert-deftest ygg-project-import-remembers-a-new-repository ()
+  (let* ((dir (file-name-as-directory (make-temp-file "ygg-import" t)))
+         (process-environment (cons "GIT_CONFIG_GLOBAL=/dev/null" process-environment))
+         (project-list-file (make-temp-file "ygg-projects-list"))
+         (project--list nil)
+         ran)
+    (unwind-protect
+        (progn
+          (let ((default-directory dir)) (call-process "git" nil nil nil "init" "-q"))
+          (cl-letf (((symbol-function 'ygg-project-import--run)
+                     (lambda (root &rest _) (setq ran root)))
+                    ((symbol-function 'project--write-project-list) #'ignore))
+            (ygg-project-import dir))
+          (should ran)
+          (should (member (file-name-as-directory (file-truename dir))
+                          (mapcar (lambda (d) (file-name-as-directory (file-truename d)))
+                                  (ygg-project-roots)))))
+      (delete-directory dir t)
+      (delete-file project-list-file))))
+

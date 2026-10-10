@@ -338,7 +338,7 @@ refreshed behind the prompt for the next time."
           dir)))))
 
 ;;;###autoload
-(defun ygg-project-import (root &optional callback extras)
+(cl-defun ygg-project-import (root &optional callback extras)
   "Take ROOT in: its project skills, the config its agents answer under,
 what it is laid out as and what it can run.  EXTRAS, picked when called
 interactively, add the config's skills for every agent (skills) and ICE
@@ -350,6 +350,11 @@ Nothing here blocks."
                      nil
                      (ygg-project-import--read-extras)))
   (let ((root (ygg-project--key root)))
+    (unless (member (file-name-as-directory (expand-file-name root)) (ygg-project-roots))
+      (let ((pr (project-current nil root)))
+        (if (and pr (not (eq (car-safe pr) 'ygg-umbrella)))
+            (let ((ygg-project--importing t)) (project-remember-project pr))
+          (cl-return-from ygg-project-import (ygg-project-add root)))))
     ;; an import is also a re-import: whatever was cached about this
     ;; project is what the import is being run to replace
     (when (fboundp 'aob-transcript-forget) (aob-transcript-forget))
