@@ -591,6 +591,94 @@ icons the state it finds is never drawn, so it is not rechecked at all."
 (with-eval-after-load 'doom-modeline-segments
   (ygg-modeline-slow-file-state-refresh))
 
+;;; winner — undo and redo window layouts
+
+(require 'winner)
+(winner-mode 1)
+
+(defvar ygg-winner-repeat-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "u" #'winner-undo)
+    (define-key map "U" #'winner-redo)
+    map)
+  "Sticky layout history: u undoes, U redoes after SPC w u or SPC w U.")
+
+(dolist (cmd '(winner-undo winner-redo))
+  (put cmd 'repeat-map 'ygg-winner-repeat-map))
+
+(yggdrasil-define-keys 'ygg-leader-window-map
+  "u" #'winner-undo :label "undo layout"
+  "U" #'winner-redo :label "redo layout"
+  "p" #'ygg-popup-restore :label "reopen popup"
+  "P" #'ygg-popup-toggle :label "toggle popups")
+
+;;; popups — built-in transient buffers in a side window
+
+(defcustom ygg-popup-rules
+  '(("\\`\\*Help\\*\\'" bottom 0.35 t)
+    ("\\`\\*Messages\\*\\'" bottom 0.25 t)
+    ("\\`\\*Warnings\\*\\'" bottom 0.25 nil)
+    ("\\`\\*Backtrace\\*\\'" bottom 0.4 t)
+    ("\\`\\*Man [^*]+\\*\\'" right 0.45 t)
+    ("\\`\\*info\\*\\'" right 0.45 t)
+    ("\\`\\*Apropos\\*\\'" bottom 0.35 t)
+    ("\\`\\*Calc\\(?:ulator\\)?\\*\\'" bottom 0.3 t))
+  "Popup rules: (BUFFER-REGEXP SIDE SIZE SELECT).
+SIDE is bottom or right, SIZE a fraction of the frame, SELECT whether the
+popup takes focus.  *Compile-Log* is left to the quickfix panel."
+  :type '(repeat (list regexp (choice (const bottom) (const right))
+                       number boolean))
+  :group 'ygg)
+
+(defvar ygg-popup--shown nil
+  "Popup buffers most recently displayed first.")
+
+(defun ygg-popup--note (window select)
+  (let ((buf (window-buffer window)))
+    (setq ygg-popup--shown (cons buf (delq buf ygg-popup--shown)))
+    (when select (select-window window))))
+
+(defun ygg-popup--entry (rule)
+  (pcase-let ((`(,regexp ,side ,size ,select) rule))
+    (list regexp
+          '(display-buffer-reuse-window display-buffer-in-side-window)
+          (cons 'side side)
+          '(slot . 0)
+          '(ygg-popup . t)
+          (if (eq side 'bottom) (cons 'window-height size) (cons 'window-width size))
+          '(window-parameters . ((no-delete-other-windows . t)))
+          (cons 'body-function
+                (lambda (window) (ygg-popup--note window select))))))
+
+(defun ygg-popup-install ()
+  "Rebuild the popup entries of `display-buffer-alist' from `ygg-popup-rules'."
+  (setq display-buffer-alist
+        (append (seq-remove (lambda (e) (assq 'ygg-popup (and (consp e) (cddr e)))) display-buffer-alist)
+                (mapcar #'ygg-popup--entry ygg-popup-rules))))
+
+(defun ygg-popup--visible ()
+  (seq-filter (lambda (w)
+                (and (window-parameter w 'window-side)
+                     (memq (window-buffer w) ygg-popup--shown)))
+              (window-list)))
+
+(defun ygg-popup-restore ()
+  "Show the most recent popup that is not on screen."
+  (interactive)
+  (setq ygg-popup--shown (seq-filter #'buffer-live-p ygg-popup--shown))
+  (if-let* ((buf (seq-find (lambda (b) (not (get-buffer-window b))) ygg-popup--shown)))
+      (select-window (display-buffer buf))
+    (user-error "No popup to reopen")))
+
+(defun ygg-popup-toggle ()
+  "Hide every visible popup, or reopen the last one when none shows."
+  (interactive)
+  (if-let* ((wins (ygg-popup--visible)))
+      (mapc #'delete-window wins)
+    (ygg-popup-restore)))
+
+(ygg-popup-install)
+
 (ygg-focus-mode 1)
 (ygg-tile-mode 1)
 

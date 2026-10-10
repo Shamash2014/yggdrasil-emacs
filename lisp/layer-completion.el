@@ -17,6 +17,13 @@
 (declare-function corfu-complete "corfu")
 (declare-function corfu-quit "corfu")
 (declare-function cape-dabbrev "cape")
+(declare-function dabbrev--same-major-mode-p "dabbrev")
+(declare-function cape-same-mode-buffers "cape")
+(declare-function vertico-directory-tidy "vertico-directory")
+(declare-function vertico-directory-delete-char "vertico-directory")
+(declare-function vertico-directory-delete-word "vertico-directory")
+(defvar dabbrev-friend-buffer-function)
+(defvar cape-dabbrev-buffer-function)
 (declare-function cape-file "cape")
 (declare-function cape-keyword "cape")
 (declare-function consult-buffer "consult")
@@ -61,6 +68,12 @@
     (define-key vertico-map (kbd "C-u") #'vertico-scroll-down)
     ;; ESC cancels the picker (helix/evil), not just C-g
     (define-key vertico-map [escape] #'abort-minibuffers)))
+
+(with-eval-after-load 'vertico
+  (require 'vertico-directory)
+  (define-key vertico-map (kbd "DEL") #'vertico-directory-delete-char)
+  (define-key vertico-map (kbd "M-DEL") #'vertico-directory-delete-word)
+  (add-hook 'rfn-eshadow-update-overlay-hook #'vertico-directory-tidy))
 
 (setq minibuffer-prompt-properties
       '(read-only t cursor-intangible t face minibuffer-prompt))
@@ -184,6 +197,24 @@ C-g and C-u would never reach the popup.")
     (with-eval-after-load 'nerd-icons-corfu
       (setf (plist-get (alist-get 'snippet nerd-icons-corfu-mapping) :face) nil))))
 
+(defconst ygg-dabbrev-max-buffer-size 1048576
+  "Buffers larger than this many characters are not scanned for dabbrev candidates.")
+
+(defun ygg-dabbrev-small-buffer-p (buffer)
+  (<= (buffer-size buffer) ygg-dabbrev-max-buffer-size))
+
+(defun ygg-dabbrev-friend-buffer-p (buffer)
+  (and (ygg-dabbrev-small-buffer-p buffer)
+       (dabbrev--same-major-mode-p buffer)))
+
+(defun ygg-cape-dabbrev-buffers ()
+  (seq-filter #'ygg-dabbrev-small-buffer-p (cape-same-mode-buffers)))
+
+(setq dabbrev-friend-buffer-function #'ygg-dabbrev-friend-buffer-p)
+
+(with-eval-after-load 'cape
+  (setq cape-dabbrev-buffer-function #'ygg-cape-dabbrev-buffers))
+
 (when (fboundp 'elpaca)
   (elpaca cape
     ;; append: dabbrev is a buffer scan — let real capfs win first, it fires
@@ -256,6 +287,29 @@ C-g and C-u would never reach the popup.")
   (call-interactively #'tempel-insert)
   (ygg-insert-state))
 
+(autoload 'consult-yank-pop "consult" nil t)
+(autoload 'consult-register-load "consult" nil t)
+
+(defun ygg-insert-path-relative (file)
+  "Insert FILE relative to the project root, else the current directory."
+  (interactive (list (read-file-name "Insert path: ")))
+  (let ((root (if-let* ((p (project-current))) (project-root p) default-directory)))
+    (insert (file-relative-name (expand-file-name file) root))))
+
+(defun ygg-insert-path-absolute (file)
+  "Insert the absolute path of FILE."
+  (interactive (list (read-file-name "Insert path: ")))
+  (insert (expand-file-name file)))
+
+(yggdrasil-define-keys 'ygg-leader-insert-map
+  "s" #'ygg-tempel-insert :label "snippet"
+  "i" #'ygg-tempel-insert :label "snippet"
+  "f" #'ygg-insert-path-relative :label "file path (project)"
+  "F" #'ygg-insert-path-absolute :label "file path (absolute)"
+  "u" #'insert-char :label "unicode char"
+  "y" #'consult-yank-pop :label "yank history"
+  "r" #'consult-register-load :label "register")
+
 ;; snippet expansion via tempel, surfaced through corfu as a capf
 (when (fboundp 'elpaca)
   (elpaca tempel
@@ -264,7 +318,6 @@ C-g and C-u would never reach the popup.")
     (add-hook 'after-change-major-mode-hook #'ygg-tempel--merge-capf)
     (add-hook 'eglot-managed-mode-hook #'ygg-tempel--merge-capf 90)
     (add-hook 'ygg-insert-exit-hook #'ygg-tempel--finish-on-exit)
-    (yggdrasil-leader-def "i" #'ygg-tempel-insert "insert snippet")
     (with-eval-after-load 'tempel
       ;; field navigation while a template is being filled
       (define-key tempel-map (kbd "TAB") #'tempel-next)

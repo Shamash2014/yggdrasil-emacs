@@ -835,6 +835,21 @@ the colon, else what sits between the first brace and the last."
   (or (ygg-match--tag-treesit-bounds which)
       (ygg-match--tag-sgml-bounds which)))
 
+(defun ygg-match--url-bounds (which)
+  (when-let* ((b (bounds-of-thing-at-point 'url)))
+    (let ((beg (car b)) (end (cdr b)))
+      (when (and (memq (char-after beg) '(?< ?\()) (> (- end beg) 2))
+        (setq beg (1+ beg)))
+      (when (and (memq (char-before end) '(?> ?\))) (> (- end beg) 1))
+        (setq end (1- end)))
+      (let ((open (and (> beg (point-min)) (char-before beg)))
+            (close (char-after end)))
+        (if (and (eq which 'around)
+                 (or (and (eq open ?<) (eq close ?>))
+                     (and (eq open ?\() (eq close ?\)))))
+            (cons (1- beg) (1+ end))
+          (cons beg end))))))
+
 (defun ygg-match--textobject-bounds (c which)
   (cond
    ((memq c ygg-match--quote-chars) (ygg-match--quote-textobj-bounds c which))
@@ -848,6 +863,7 @@ the colon, else what sits between the first brace and the last."
    ((eq c ?e) (cons (point-min) (point-max)))
    ((eq c ?a) (or (ygg-match--argument-treesit-bounds which)
                   (ygg-match--argument-bounds which)))
+   ((eq c ?u) (ygg-match--url-bounds which))
    ((eq c ?c) (ygg-match--comment-bounds which))
    ((eq c ?i) (ygg-match--indent-bounds which))
    ((eq c ?x) (ygg-match--tag-bounds which))
@@ -903,11 +919,27 @@ level, and a selection already equal to it grows one level out."
     (when (and name (not (string-empty-p name)))
       (cons (format "%s(" name) ")"))))
 
+(defcustom ygg-match-mode-surround-pairs
+  '((emacs-lisp-mode (?` "`" . "'"))
+    (latex-mode (?` "``" . "''"))
+    (LaTeX-mode (?` "``" . "''")))
+  "Extra surround pairs per major mode as (MODE (CHAR OPEN . CLOSE)...).
+Lookup follows `derived-mode-p'; these win over the global pairs."
+  :type '(alist :key-type symbol :value-type (repeat (cons character (cons string string))))
+  :group 'yggdrasil)
+
+(defun ygg-match--mode-surround-pair (c)
+  (cl-some (lambda (entry)
+             (when (provided-mode-derived-p major-mode (car entry))
+               (cdr (assq c (cdr entry)))))
+           ygg-match-mode-surround-pairs))
+
 (defun ygg-match--surround-pair (c &optional tight)
   "Opening and closing strings for surrounding with C; TIGHT drops the
 space an opening bracket pads with."
   (cond
    ((eq c 27) nil)
+   ((ygg-match--mode-surround-pair c))
    ((memq c '(?x ?<)) (ygg-match--read-tag))
    ((eq c ?f) (ygg-match--read-function))
    ((assq c ygg-match--bracket-pairs)

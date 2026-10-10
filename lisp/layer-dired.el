@@ -70,6 +70,34 @@
 (yggdrasil-define-keys 'normal
   "-" #'ygg-dired-jump :label "dired")
 
+(defvar ygg-leader-open-map (make-sparse-keymap) "The o prefix: open external things.")
+
+(defun ygg-finder--reveal (path)
+  (unless (eq system-type 'darwin) (user-error "Finder is macOS only"))
+  (call-process "open" nil 0 nil "-R" (expand-file-name path)))
+
+(defun ygg-finder-reveal ()
+  "Reveal the current file, or the dired directory, in Finder."
+  (interactive)
+  (ygg-finder--reveal
+   (or (if (derived-mode-p 'dired-mode)
+           (or (dired-get-filename nil t) default-directory)
+         buffer-file-name)
+       (user-error "No file to reveal"))))
+
+(defun ygg-finder-open-project ()
+  "Open the project root in Finder."
+  (interactive)
+  (unless (eq system-type 'darwin) (user-error "Finder is macOS only"))
+  (call-process "open" nil 0 nil
+                (expand-file-name (if-let* ((pr (project-current)))
+                                      (project-root pr)
+                                    default-directory))))
+
+(yggdrasil-define-keys 'ygg-leader-open-map
+  "o" #'ygg-finder-reveal :label "reveal in Finder"
+  "O" #'ygg-finder-open-project :label "project root in Finder")
+
 ;;; Modal keys, bound straight into dired-mode-map (oil.nvim muscle memory)
 
 ;;; / search over filenames with vim n/N repeat (oil is just a vim buffer)

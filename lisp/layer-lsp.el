@@ -78,14 +78,16 @@ other server keeps the nil it was already sent."
 (defconst ygg-lsp--harness-prose-re "/\\(?:\\.aob\\|openspec\\)/"
   "Directories whose prose is written by the harness, not read by a person.")
 
+(defvar ygg-markdown-large-size)
+
 (defun ygg-lsp-may-join-server-p (&rest _)
   "Whether this buffer may join a language server at all.
 A terminal frame is the agent workflow, where a server answers nobody
 and costs a process per buffer.  A buffer with no file, and one whose
 unmodified text belongs to a path that was moved away, has nothing a
 server can open.  The harness scratch tree joins nothing, and prose the
-harness wrote gets no grammar checker, while markdown the owner opens
-by hand in a window keeps the one it had."
+harness wrote gets no grammar checker, nor does large markdown, while
+other markdown the owner opens by hand in a window keeps the one it had."
   (let ((file (and buffer-file-name (expand-file-name buffer-file-name))))
     (and (display-graphic-p)
          file
@@ -93,6 +95,8 @@ by hand in a window keeps the one it had."
          (not (string-match-p ygg-lsp--agent-dir-re file))
          (not (and (memq major-mode '(markdown-mode gfm-mode))
                    (or (string-prefix-p "*" (buffer-name))
+                       (and (boundp 'ygg-markdown-large-size)
+                            (> (buffer-size) ygg-markdown-large-size))
                        (string-match-p ygg-lsp--harness-prose-re file)))))))
 
 (advice-add 'eglot-ensure :before-while #'ygg-lsp-may-join-server-p)
@@ -145,6 +149,7 @@ whichever completes last re-modes the stragglers."
     ;; Never auto-install grammars: they're already prebuilt for common languages,
     ;; and 'ask would prompt once per buffer during session restore
     (setopt treesit-auto-install-grammar 'never)
+    (setopt treesit-font-lock-level 4)
     ;; anything restored before elpaca finishes sits modeless — heal it now
     (ygg-lsp--remode-fundamentals)))
 
@@ -693,6 +698,53 @@ the common prefix of several results, is left to the default handlers."
 ;;; 4. Eglot — fully async posture: never block on connect, no event log,
 ;;; batch didChange on idle, and no server chatter the mode line redraws for
 
+(defcustom ygg-lsp-shutdown-delay 3
+  "Seconds to wait after a server's last buffer closes before shutting it down.
+Zero or nil shuts down immediately, as eglot does."
+  :type '(choice (const :tag "Immediately" nil) number)
+  :group 'eglot)
+
+(defvar ygg-lsp--in-managed-mode nil)
+(defvar ygg-lsp--shutdown-timers (make-hash-table :test #'eq)
+  "Server to its pending deferred-shutdown timer.")
+
+(defvar eglot--managed-mode)
+(declare-function eglot--managed-buffers "eglot")
+(declare-function eglot-current-server "eglot")
+(declare-function jsonrpc-running-p "jsonrpc")
+
+(defun ygg-lsp--cancel-shutdown (server)
+  (when-let* ((timer (gethash server ygg-lsp--shutdown-timers)))
+    (cancel-timer timer)
+    (remhash server ygg-lsp--shutdown-timers)))
+
+(defun ygg-lsp--shutdown-if-idle (fn server args)
+  (remhash server ygg-lsp--shutdown-timers)
+  (when (and (null (eglot--managed-buffers server))
+             (jsonrpc-running-p server))
+    (apply fn server args)))
+
+(defun ygg-lsp--managed-mode-a (fn &rest args)
+  "Mark that `eglot-shutdown' is the autoshutdown; cancel a pending one on re-join."
+  (prog1 (let ((ygg-lsp--in-managed-mode t))
+           (apply fn args))
+    (when-let* ((server (and (bound-and-true-p eglot--managed-mode)
+                             (eglot-current-server))))
+      (ygg-lsp--cancel-shutdown server))))
+
+(defun ygg-lsp--defer-shutdown-a (fn server &rest args)
+  (if (and ygg-lsp--in-managed-mode
+           (numberp ygg-lsp-shutdown-delay)
+           (> ygg-lsp-shutdown-delay 0))
+      (progn
+        (ygg-lsp--cancel-shutdown server)
+        (puthash server
+                 (run-at-time ygg-lsp-shutdown-delay nil
+                              #'ygg-lsp--shutdown-if-idle fn server args)
+                 ygg-lsp--shutdown-timers))
+    (ygg-lsp--cancel-shutdown server)
+    (apply fn server args)))
+
 (with-eval-after-load 'eglot
   (setq eglot-autoshutdown t
         eglot-sync-connect nil
@@ -704,6 +756,8 @@ the common prefix of several results, is left to the default handlers."
         eglot-ignored-server-capabilities
         '(:semanticTokensProvider :documentOnTypeFormattingProvider))
   (setq-default eglot-workspace-configuration #'ygg-lsp-workspace-configuration)
+  (advice-add 'eglot--managed-mode :around #'ygg-lsp--managed-mode-a)
+  (advice-add 'eglot-shutdown :around #'ygg-lsp--defer-shutdown-a)
   (when (ygg-lsp--executable "expert")
     (add-to-list 'eglot-server-programs
                  '((elixir-ts-mode elixir-mode heex-ts-mode) . ("expert" "--stdio"))))
@@ -1020,18 +1074,43 @@ TYPE-RE (and whose text matches TEXT-RE when given)."
 
 ;;; 6. Formatting — the = verb
 
+(declare-function ygg-format-region "layer-format")
+(defvar apheleia-mode)
+
+(defun ygg-format--multiline-p (beg end)
+  (and (< beg end)
+       (save-excursion
+         (goto-char beg)
+         (search-forward "\n" (1- end) t))))
+
+(defun ygg-format--whole-lines (beg end)
+  (save-excursion
+    (goto-char beg)
+    (let ((from (line-beginning-position)))
+      (goto-char end)
+      (cons from (if (bolp) end (min (point-max) (line-beginning-position 2)))))))
+
 (defun ygg-format ()
-  "Format each selection: eglot when the buffer is managed, else `indent-region'.
-A degenerate (zero-width) selection formats the whole buffer instead."
+  "Format each selection: the save formatter on a multi-line one, else eglot, else `indent-region'.
+A multi-line selection grows to whole lines.  A degenerate (zero-width)
+selection formats the whole buffer instead, with the save formatter only
+when it already runs on save here."
   (interactive)
   (ygg-with-verb
     (ygg-do-selections
      (lambda (beg end _dir)
-       (let ((whole (= beg end))
-             (managed (and (fboundp 'eglot-managed-p) (eglot-managed-p))))
-         (if managed
-             (if whole (eglot-format) (eglot-format beg end))
-           (if whole (indent-region (point-min) (point-max)) (indent-region beg end))))))))
+       (let* ((whole (= beg end))
+              (beg (if whole (point-min) beg))
+              (end (if whole (point-max) end))
+              (managed (and (fboundp 'eglot-managed-p) (eglot-managed-p)))
+              (fallback (if managed "eglot" "indent-region"))
+              (lines (cond (whole (and (bound-and-true-p apheleia-mode) (cons beg end)))
+                           ((ygg-format--multiline-p beg end) (ygg-format--whole-lines beg end)))))
+         (unless (and lines (fboundp 'ygg-format-region)
+                      (ygg-format-region (car lines) (cdr lines) fallback))
+           (if managed
+               (if whole (eglot-format) (eglot-format beg end))
+             (indent-region beg end))))))))
 
 (yggdrasil-define-keys 'normal
   "=" #'ygg-format :label "format")

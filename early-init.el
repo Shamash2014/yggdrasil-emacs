@@ -8,12 +8,16 @@
 (setq gc-cons-threshold most-positive-fixnum
       gc-cons-percentage 0.6
       file-name-handler-alist nil)
+(defun ygg--merge-file-name-handlers (current saved)
+  (delete-dups (append current saved)))
 (add-hook 'emacs-startup-hook
           (lambda ()
             ;; a pause marks the live heap whatever the step: fewer GCs, fixed headroom
             (setq gc-cons-threshold (* 128 1024 1024)
                   gc-cons-percentage 0.05
-                  file-name-handler-alist ygg--file-name-handler-alist)
+                  file-name-handler-alist (ygg--merge-file-name-handlers
+                                             file-name-handler-alist
+                                             ygg--file-name-handler-alist))
             (message "Yggdrasil up in %s (%d GCs)" (emacs-init-time) gcs-done)))
 
 ;; a stale .elc beats its source by default, which is how a file compiled

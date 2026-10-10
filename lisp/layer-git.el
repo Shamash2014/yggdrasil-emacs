@@ -481,7 +481,40 @@ so it rendered two lines for a mode with a hundred keys."
   (define-key magit-section-mode-map (kbd "C-y") #'scroll-down-line)
   (define-key magit-section-mode-map (kbd "G") #'end-of-buffer))
 
+(defvar ygg-git-compare-mode)
+(defvar git-commit-summary-max-length)
+(defvar git-commit-style-convention-checks)
+(defvar magit-previous-window-configuration)
+
+(defun ygg-magit-quit-all ()
+  "Kill this repository's magit buffers and restore the layout from before them.
+Buffers of an open compare are kept; q in the compare closes those."
+  (interactive)
+  (let* ((buffers (magit-mode-get-buffers))
+         (winconf (seq-some (lambda (b)
+                              (buffer-local-value 'magit-previous-window-configuration b))
+                            buffers))
+         (kept nil))
+    (dolist (buffer buffers)
+      (when-let* ((process (get-buffer-process buffer))
+                  ((process-live-p process)))
+        (user-error "%s still running, wait or kill it from the process buffer ($)"
+                    (string-join (process-command process) " "))))
+    (dolist (buffer buffers)
+      (if (with-current-buffer buffer (bound-and-true-p ygg-git-compare-mode))
+          (setq kept t)
+        (kill-buffer buffer)))
+    (when (and winconf (not kept)
+               (equal (selected-frame) (window-configuration-frame winconf)))
+      (set-window-configuration winconf))))
+
+(with-eval-after-load 'git-commit
+  (setq git-commit-summary-max-length 50
+        git-commit-style-convention-checks '(overlong-summary-line non-empty-second-line))
+  (add-hook 'git-commit-setup-hook (lambda () (setq fill-column 72))))
+
 (with-eval-after-load 'magit-mode
+  (define-key magit-mode-map (kbd "Q") #'ygg-magit-quit-all)
   (define-key magit-mode-map (kbd "j") #'magit-section-forward)
   (define-key magit-mode-map (kbd "k") #'magit-section-backward)
   (define-key magit-mode-map (kbd "K") #'magit-delete-thing)

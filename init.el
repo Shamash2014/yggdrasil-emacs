@@ -59,8 +59,7 @@
         markdown-gfm-uppercase-checkbox t
         markdown-hide-urls nil
         markdown-enable-math t
-        markdown-max-image-size '(800 . nil))
-  (when (fboundp 'global-so-long-mode) (global-so-long-mode 1)))
+        markdown-max-image-size '(800 . nil)))
 (elpaca (vui :host github :repo "d12frosted/vui.el")
   (require 'vui))
 (elpaca bufferfile
@@ -690,9 +689,39 @@ address space, which is not what a freed cache gives back."
               tab-width 4)
 (setq project-mode-line t)
 (add-to-list 'mode-line-misc-info '(project-mode-line project-mode-line-format))
+(defcustom ygg-so-long-line-threshold 10000
+  "Longest line, in characters, past which a buffer gets so-long treatment."
+  :type 'integer
+  :group 'convenience)
+(defvar-local ygg--so-long-fns nil)
+(put 'ygg--so-long-fns 'permanent-local t)
+(defun ygg-so-long-p ()
+  (unless (string-prefix-p " " (buffer-name))
+    (let ((longest (cadr (buffer-line-statistics))))
+      (when (> longest ygg-so-long-line-threshold)
+        (setq ygg--so-long-fns
+              (if (> longest (* 5 ygg-so-long-line-threshold))
+                  '(so-long-mode . so-long-mode-revert)
+                '(so-long-minor-mode . turn-off-so-long-minor-mode)))
+        t))))
+(with-eval-after-load 'so-long
+  (add-to-list 'so-long-action-alist
+               (list 'ygg-so-long "Enable so-long-mode or so-long-minor-mode"
+                     (lambda () (funcall (or (car ygg--so-long-fns) #'ignore)))
+                     (lambda () (funcall (or (cdr ygg--so-long-fns) #'ignore)))))
+  (setq so-long-action 'ygg-so-long
+        so-long-predicate #'ygg-so-long-p)
+  (setq so-long-minor-modes (delq 'font-lock-mode so-long-minor-modes))
+  (add-to-list 'so-long-variable-overrides '(font-lock-maximum-decoration . 1)))
+(setq large-file-warning-threshold (* 50 1024 1024))
+(when (eq system-type 'darwin)
+  (setq delete-by-moving-to-trash t
+        ns-pop-up-frames nil
+        locate-command "mdfind"))
 (global-so-long-mode 1)
 (electric-pair-mode 1)
 (editorconfig-mode 1)
+(setq editorconfig-trim-whitespaces-mode #'ws-butler-mode)
 (setq window-divider-default-places t
       window-divider-default-right-width 1
       window-divider-default-bottom-width 1)

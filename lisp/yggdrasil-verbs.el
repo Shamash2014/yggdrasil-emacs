@@ -26,6 +26,9 @@ A differing ring head means the kill came from outside — another program's
 clipboard, or a plain Emacs kill — and then neither `ygg--kill-list' nor
 `ygg--kill-linewise' describes what `p' is about to paste.")
 
+(defvar-local ygg--last-paste-markers nil
+  "Markers (BEG END PRIMARY) of the text the last paste inserted.")
+
 (defvar ygg--last-paste-linewise nil
   "Linewise flag of the paste that `ygg-paste-pop' is cycling.")
 
@@ -173,13 +176,16 @@ contents, \"# selection indices, \"_ black hole (empty) — all vim/helix."
                  (save-excursion (goto-char e) (or (bolp) (eobp))))))
         regions)))
 
-(defun ygg--yank-selections (&optional kind)
+(defun ygg--yank-selections (&optional kind text-fn)
   "Store selection texts in `ygg--kill-list' and push them as one kill.
 KIND is `yank' or `delete'; it feeds the vim register conventions
-\(\"0 for yanks, the \"1-\"9 ring for deletes, named on demand)."
+\(\"0 for yanks, the \"1-\"9 ring for deletes, named on demand).
+TEXT-FN maps (BEG END) to the text kept for a selection."
   (let* ((regions (ygg--verb-regions))
-         (texts (mapcar (lambda (r) (substring-no-properties
-                                     (filter-buffer-substring (car r) (cadr r))))
+         (texts (mapcar (lambda (r)
+                          (substring-no-properties
+                           (funcall (or text-fn #'filter-buffer-substring)
+                                    (car r) (cadr r))))
                         regions))
          (reg (ygg--register-consume)))
     ;; "_ black hole: leave the kill ring and every register untouched
@@ -250,6 +256,10 @@ invalidate a position already collected."
             (prog1 (list (marker-position (car m)) (marker-position (cadr m)) (caddr m))
               (set-marker (car m) nil)
               (set-marker (cadr m) nil)))
+          markers))
+
+(defun ygg--copy-markers (markers)
+  (mapcar (lambda (m) (list (copy-marker (car m)) (copy-marker (cadr m)) (caddr m)))
           markers))
 
 ;;; d / M-d — delete
@@ -350,6 +360,29 @@ whole line (vim dd, count deletes N lines)."
     (ygg-flash-region beg end))
   (ygg--verb-exit))
 
+(defun ygg--unindented-text (beg end)
+  (let* ((start (save-excursion
+                  (goto-char beg)
+                  (if (looking-back "^[ \t]*" (line-beginning-position))
+                      (line-beginning-position)
+                    beg)))
+         (lines (split-string (buffer-substring-no-properties start end) "\n"))
+         (indents (mapcar (lambda (l) (and (string-match "\\`[ \t]*[^ \t]" l)
+                                           (1- (match-end 0))))
+                          lines))
+         (cut (apply #'min (or (delq nil indents) '(0)))))
+    (mapconcat (lambda (l) (replace-regexp-in-string
+                            (format "\\`[ \t]\\{0,%d\\}" cut) "" l))
+               lines "\n")))
+
+(defun ygg-yank-unindented ()
+  "Copy every selection with its common indentation removed."
+  (interactive)
+  (ygg--yank-selections 'yank #'ygg--unindented-text)
+  (pcase-dolist (`(,beg ,end ,_) (ygg--verb-regions))
+    (ygg-flash-region beg end))
+  (ygg--verb-exit))
+
 ;;; p / P / visual-p — paste
 
 (defun ygg--paste-insert (before)
@@ -378,7 +411,8 @@ whole line (vim dd, count deletes N lines)."
               (insert text)
               (push (list (copy-marker pos) (copy-marker (point)) primary) markers)))))
       (setq idx (1- idx)))
-    (setq ygg--last-paste-linewise line)
+    (setq ygg--last-paste-linewise line
+          ygg--last-paste-markers (ygg--copy-markers markers))
     (ygg--install-selection-set (ygg--markers-to-regions markers))))
 
 (defvar-local ygg-paste-function nil
@@ -434,7 +468,15 @@ Routes through `ygg-paste-function' when set so a read-only page buffer
                         (substring text 0 -1)
                       text))
             (push (list (copy-marker beg) (copy-marker (point)) primary) markers)))
+        (setq ygg--last-paste-markers (ygg--copy-markers markers))
         (ygg--install-selection-set (ygg--markers-to-regions markers))))))
+
+(defun ygg-reselect-paste ()
+  "Select the text the last paste inserted."
+  (interactive)
+  (unless ygg--last-paste-markers (user-error "Nothing pasted"))
+  (ygg--install-selection-set
+   (ygg--markers-to-regions (ygg--copy-markers ygg--last-paste-markers))))
 
 (defun ygg-paste-pop (&optional n)
   "After a paste, replace it with the next-older kill (like `yank-pop')."
@@ -729,18 +771,46 @@ Returns position of the first inserted space, or nil if no join occurred."
 
 ;;; o / O — open line, then insert
 
+(defcustom ygg-open-continue-comments t
+  "Non-nil makes o and O on a comment-only line open a commented line."
+  :type 'boolean
+  :group 'yggdrasil)
+
+(defun ygg--comment-only-line-p ()
+  (and ygg-open-continue-comments comment-start
+       (save-excursion
+         (let ((bol (line-beginning-position))
+               (indent (progn (back-to-indentation) (point))))
+           (end-of-line)
+           (let* ((ppss (syntax-ppss))
+                  (start (nth 8 ppss)))
+             (and (nth 4 ppss) (not (nth 3 ppss)) start
+                  (or (< start bol) (= start indent))))))))
+
 (defun ygg--open-below (_beg end)
   (goto-char end)
   (end-of-line)
-  (newline-and-indent)
+  (if (ygg--comment-only-line-p)
+      (comment-indent-new-line)
+    (newline-and-indent))
   (point))
+
+(defun ygg--comment-prefix-below ()
+  (end-of-line)
+  (comment-indent-new-line)
+  (prog1 (buffer-substring-no-properties (line-beginning-position) (point))
+    (delete-region (1- (line-beginning-position)) (point))))
 
 (defun ygg--open-above (beg _end)
   (goto-char beg)
-  (let ((indent (save-excursion (back-to-indentation) (current-column))))
+  (let ((indent (save-excursion (back-to-indentation) (current-column)))
+        (prefix (and (ygg--comment-only-line-p)
+                     (save-excursion (ygg--comment-prefix-below)))))
     (beginning-of-line)
     (open-line 1)
-    (indent-to indent)
+    (if prefix
+        (insert prefix)
+      (indent-to indent))
     (point)))
 
 (defvar-local ygg-open-line-redirect-function nil
@@ -1404,6 +1474,8 @@ is preserved."
   "I" #'ygg-insert-column-0 :label "insert at column 0"
   "C-a" #'ygg-number-increment-sequential :label "sequential increment"
   "C-x" #'ygg-number-decrement-sequential :label "sequential decrement"
+  "P" #'ygg-reselect-paste :label "select last paste"
+  "y" #'ygg-yank-unindented :label "yank unindented"
   "q" #'ygg-reflow :label "reflow"
   "X" #'ygg-exchange :label "exchange"
   "!" #'ygg-rotate-text :label "rotate token"

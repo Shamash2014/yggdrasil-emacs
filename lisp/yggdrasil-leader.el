@@ -21,6 +21,9 @@
 
 (defvar ygg-leader-file-map (make-sparse-keymap) "The f prefix: files.")
 (defvar ygg-leader-buffer-map (make-sparse-keymap) "The b prefix: buffers.")
+(defvar ygg-leader-insert-map (make-sparse-keymap) "The i prefix: insert.")
+(defvar ygg-leader-help-map (make-sparse-keymap) "The h prefix: help.")
+(defvar ygg-leader-help-keys-map (make-sparse-keymap) "The h B prefix: which-key views.")
 (defvar ygg-leader-window-map (make-sparse-keymap) "The w prefix: windows.")
 (defvar ygg-leader-quit-map (make-sparse-keymap) "The q prefix: quit.")
 
@@ -115,7 +118,41 @@ kill it outright, detaching any process; otherwise kill with the usual prompts."
   "d" #'yggdrasil-leader--kill-buffer :label "kill"
   "k" #'yggdrasil-leader--kill-choose :label "kill (choose)"
   "n" #'next-buffer :label "next"
-  "p" #'previous-buffer :label "previous")
+  "p" #'previous-buffer :label "previous"
+  "s" #'save-buffer :label "save"
+  "S" #'save-some-buffers :label "save all"
+  "r" #'revert-buffer :label "revert"
+  "R" #'rename-buffer :label "rename buffer"
+  "l" #'mode-line-other-buffer :label "last buffer"
+  "x" #'scratch-buffer :label "scratch"
+  "z" #'bury-buffer :label "bury"
+  "m" #'bookmark-set :label "bookmark set"
+  "M" #'ygg-leader--bookmark-jump :label "bookmark jump")
+
+(autoload 'consult-bookmark "consult" nil t)
+
+(defun ygg-leader--bookmark-jump ()
+  "Jump to a bookmark through consult when it is installed."
+  (interactive)
+  (call-interactively (if (fboundp 'consult-bookmark) #'consult-bookmark #'bookmark-jump)))
+
+(yggdrasil-define-keys 'ygg-leader-help-keys-map
+  "b" #'which-key-show-top-level :label "top level"
+  "m" #'which-key-show-major-mode :label "major mode"
+  "k" #'which-key-show-keymap :label "keymap")
+
+(yggdrasil-define-keys 'ygg-leader-help-map
+  "f" #'describe-function :label "function"
+  "v" #'describe-variable :label "variable"
+  "k" #'describe-key :label "key"
+  "F" #'describe-face :label "face"
+  "m" #'describe-mode :label "mode"
+  "t" #'load-theme :label "theme"
+  "p" #'describe-package :label "package"
+  "a" #'apropos :label "apropos"
+  "i" #'info :label "info"
+  "B" ygg-leader-help-keys-map :label "which-key")
+(set-keymap-parent ygg-leader-help-map help-map)
 
 (yggdrasil-define-keys 'ygg-leader-window-map
   "s" #'yggdrasil-leader--split-below :label "split below"
@@ -260,6 +297,7 @@ Practice directly in the buffer; edits never touch the source file."
 (declare-function ygg-select-buffer "yggdrasil-selection")
 (yggdrasil-leader-def "w" ygg-leader-window-map "windows")
 (yggdrasil-leader-def "q" ygg-leader-quit-map "quit")
-(yggdrasil-leader-def "h" #'help-command "help")
+(yggdrasil-leader-def "h" ygg-leader-help-map "help")
+(yggdrasil-leader-def "i" ygg-leader-insert-map "insert")
 (provide 'yggdrasil-leader)
 ;;; yggdrasil-leader.el ends here

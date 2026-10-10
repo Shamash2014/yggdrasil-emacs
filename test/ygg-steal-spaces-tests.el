@@ -1,0 +1,70 @@
+;;; ygg-steal-spaces-tests.el --- SPC p p lands in the project space, Finder keys -*- lexical-binding: t; -*-
+
+(setq load-prefer-newer t)
+(require 'ert)
+(require 'cl-lib)
+(require 'yggdrasil)
+(require 'layer-sessions)
+(require 'layer-dired)
+(require 'layer-terminal)
+
+(ert-deftest ygg-steal-spaces-existing-space-is-reused ()
+  (let (made went)
+    (cl-letf (((symbol-function 'project-prompt-project-dir) (lambda () "/tmp/proj/"))
+              ((symbol-function 'ygg-space--ensure-root) #'ignore)
+              ((symbol-function 'ygg-space--tab-for-dir) (lambda (_) '((ygg-id . "a"))))
+              ((symbol-function 'ygg-space--goto-id) (lambda (id) (setq went id)))
+              ((symbol-function 'ygg-space--echo) #'ignore)
+              ((symbol-function 'ygg-space--name) (lambda (_) "proj"))
+              ((symbol-function 'ygg-space-new-on) (lambda (d) (setq made d))))
+      (ygg-project-switch-to-space)
+      (should (equal went "a"))
+      (should-not made))))
+
+(ert-deftest ygg-steal-spaces-missing-space-is-created ()
+  (let (made)
+    (cl-letf (((symbol-function 'project-prompt-project-dir) (lambda () "/tmp/proj/"))
+              ((symbol-function 'ygg-space--ensure-root) #'ignore)
+              ((symbol-function 'ygg-space--landing) (lambda (_) (list 'new)))
+              ((symbol-function 'ygg-space-new-on) (lambda (d) (setq made d))))
+      (ygg-project-switch-to-space)
+      (should made))))
+
+(ert-deftest ygg-steal-spaces-keys-resolve ()
+  (should (eq (lookup-key ygg-leader-workspace-map "p") #'ygg-project-switch-to-space))
+  (should (eq (lookup-key ygg-leader-workspace-map "S") #'project-switch-project))
+  (should (eq (lookup-key ygg-leader-open-map "o") #'ygg-finder-reveal))
+  (should (eq (lookup-key ygg-leader-open-map "O") #'ygg-finder-open-project)))
+
+(ert-deftest ygg-steal-spaces-reveal-argv ()
+  (let (argv (system-type 'darwin))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (&rest a) (setq argv (cons (car a) (nthcdr 4 a))) 0)))
+      (with-temp-buffer
+        (setq buffer-file-name "/tmp/x.txt")
+        (ygg-finder-reveal)
+        (should (equal argv '("open" "-R" "/tmp/x.txt")))
+        (set-buffer-modified-p nil)))))
+
+(ert-deftest ygg-steal-spaces-reveal-without-file-errors ()
+  (let ((system-type 'darwin))
+    (cl-letf (((symbol-function 'call-process) (lambda (&rest _) (error "ran"))))
+      (with-temp-buffer
+        (should-error (ygg-finder-reveal) :type 'user-error)))))
+
+(ert-deftest ygg-steal-spaces-project-root-argv ()
+  (let (argv (system-type 'darwin))
+    (cl-letf (((symbol-function 'call-process)
+               (lambda (&rest a) (setq argv (cons (car a) (nthcdr 4 a))) 0))
+              ((symbol-function 'project-current) (lambda (&rest _) '(vc Git "/tmp/proj/")))
+              ((symbol-function 'project-root) (lambda (_) "/tmp/proj/")))
+      (ygg-finder-open-project)
+      (should (equal argv '("open" "/tmp/proj/"))))))
+
+(ert-deftest ygg-steal-spaces-finder-off-darwin-errors ()
+  (let ((system-type 'gnu/linux))
+    (should-error (ygg-finder-reveal) :type 'user-error)
+    (should-error (ygg-finder-open-project) :type 'user-error)))
+
+(provide 'ygg-steal-spaces-tests)
+;;; ygg-steal-spaces-tests.el ends here

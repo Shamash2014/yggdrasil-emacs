@@ -564,6 +564,40 @@ the panel stops behaving like a list.")
           (push (cons kw 'hl-todo) hl-todo-keyword-faces))))
     (global-hl-todo-mode 1)))
 
+(declare-function hl-todo-next "hl-todo")
+(declare-function hl-todo-previous "hl-todo")
+(declare-function ygg--record-bracket-motion "yggdrasil-motions")
+(declare-function ygg--bracketed-goto "yggdrasil-motions")
+(defvar hl-todo-wrap-movement)
+
+(defun ygg--find-todo (n)
+  "Position N keywords away (negative is backward), or nil at the edge."
+  (require 'hl-todo)
+  (let ((start (point))
+        (hl-todo-wrap-movement nil))
+    (save-excursion
+      (condition-case nil
+          (progn (if (> n 0) (hl-todo-next n) (hl-todo-previous (- n)))
+                 (goto-char (match-beginning 0))
+                 (and (if (> n 0) (> (point) start) (< (point) start)) (point)))
+        (user-error nil)))))
+
+(defun ygg-next-todo (&optional n)
+  "Move to the Nth next TODO-style keyword."
+  (interactive "p")
+  (ygg--record-bracket-motion 1 "o")
+  (ygg--bracketed-goto (lambda () (ygg--find-todo (or n 1)))))
+
+(defun ygg-prev-todo (&optional n)
+  "Move to the Nth previous TODO-style keyword."
+  (interactive "p")
+  (ygg--record-bracket-motion -1 "o")
+  (ygg--bracketed-goto (lambda () (ygg--find-todo (- (or n 1))))))
+
+(yggdrasil-define-keys 'normal
+  "] o" #'ygg-next-todo :label "next todo"
+  "[ o" #'ygg-prev-todo :label "prev todo")
+
 (with-eval-after-load 'layer-completion
   (yggdrasil-define-keys 'ygg-leader-search-map
     "c" #'ygg-search-multibuffer :label "multibuffer (context)"))

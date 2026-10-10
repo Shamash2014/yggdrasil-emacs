@@ -101,6 +101,11 @@ server runs.")
 (defvar apheleia-formatter)
 (defvar apheleia-formatters-respect-indent-level)
 (defvar apheleia-inhibit-functions)
+(defvar apheleia-inhibit)
+(defvar apheleia-mode)
+(declare-function apheleia--get-formatters "apheleia-formatters")
+(declare-function apheleia--disallowed-p "apheleia")
+(declare-function apheleia-format-buffer "apheleia")
 
 (declare-function flymake-collection-hook-setup "flymake-collection-hook")
 (declare-function flymake-start "flymake")
@@ -315,8 +320,120 @@ NAME), else node_modules/.bin or .venv/bin within the project."
       (apheleia-mode 'toggle)
     (message "yggdrasil-format: apheleia not loaded yet")))
 
+(defun ygg-format-save-without-format ()
+  "Save this buffer once without running the on-save formatter."
+  (interactive)
+  (let ((apheleia-mode nil))
+    (save-buffer)))
+
 (yggdrasil-define-keys 'ygg-leader-code-map
-  "s" #'ygg-format-on-save-toggle :label "format on save")
+  "s" #'ygg-format-on-save-toggle :label "format on save"
+  "w" #'ygg-format-save-without-format :label "save without formatting")
+
+;;; 5b. Region formatting through the same formatter as save
+
+(defcustom ygg-format-region-timeout 5
+  "Seconds `ygg-format-region' waits for the formatter before giving up."
+  :type 'number
+  :group 'apheleia)
+
+(defun ygg-format--first-indent ()
+  (save-excursion
+    (goto-char (point-min))
+    (skip-chars-forward " \t\n")
+    (current-indentation)))
+
+(defun ygg-format--stop-formatter ()
+  (when (and (boundp 'apheleia--current-process) (process-live-p apheleia--current-process))
+    (let ((pipe (get-process (concat (process-name apheleia--current-process) " stderr"))))
+      (set-process-sentinel apheleia--current-process #'ignore)
+      (delete-process apheleia--current-process)
+      (when pipe (delete-process pipe)))))
+
+(defun ygg-format--fragment (src beg end formatters fallback)
+  "Formatted text of SRC's BEG..END run through FORMATTERS, or nil on failure.
+A timeout kills the formatter and says FALLBACK is used instead."
+  (let ((text (buffer-substring-no-properties beg end))
+        (mode (buffer-local-value 'major-mode src))
+        (dir (buffer-local-value 'default-directory src))
+        (name (when-let* ((file (buffer-file-name src)))
+                (expand-file-name (concat "ygg-format" (file-name-extension file t))
+                                  (buffer-local-value 'default-directory src))))
+        (tabs (buffer-local-value 'indent-tabs-mode src))
+        (width (buffer-local-value 'tab-width src))
+        (standard (buffer-local-value 'standard-indent src))
+        (tmp (generate-new-buffer " *ygg-format*"))
+        (done nil)
+        (failed nil))
+    (unwind-protect
+        (with-current-buffer tmp
+          (setq default-directory dir
+                major-mode mode)
+          (setq-local indent-tabs-mode tabs
+                      tab-width width
+                      standard-indent standard)
+          (insert text)
+          (let ((indent (ygg-format--first-indent))
+                (deadline (+ (float-time) ygg-format-region-timeout)))
+            (when (> indent 0)
+              (indent-rigidly (point-min) (point-max) (- indent)))
+            (set-buffer-modified-p nil)
+            (let ((buffer-file-name name))
+              (apheleia-format-buffer
+               formatters nil
+               :callback (lambda (&rest args)
+                           (setq done t failed (plist-get args :error)))))
+            (while (and (not done) (< (float-time) deadline))
+              (accept-process-output nil 0.02))
+            (if (not done)
+                (message "format: %s timed out, used %s" (car formatters) fallback)
+              (unless failed
+                (let ((new (ygg-format--first-indent)))
+                  (when (> indent new)
+                    (indent-rigidly (point-min) (point-max) (- indent new))))
+                (let ((out (buffer-string)))
+                  (if (string-suffix-p "\n" text)
+                      (concat (string-trim-right out "\n+") "\n")
+                    (string-trim-right out "\n+")))))))
+      (with-current-buffer tmp
+        (ygg-format--stop-formatter)
+        (set-buffer-modified-p nil))
+      (kill-buffer tmp))))
+
+(defun ygg-format--saves-p ()
+  "Whether this buffer's project formats on save."
+  (not (or (bound-and-true-p apheleia-inhibit)
+           (run-hook-with-args-until-success 'apheleia-inhibit-functions))))
+
+(defun ygg-format-region (beg end &optional fallback)
+  "Replace BEG..END with the save formatter's output; non-nil when it did.
+Nil means the project does not format on save, no apheleia formatter applies,
+or it could not format the fragment.  FALLBACK names what is used instead."
+  (when (and (require 'apheleia nil t)
+             (ygg-format--saves-p)
+             (not (apheleia--disallowed-p)))
+    (when-let* ((formatters (apheleia--get-formatters))
+                (out (ygg-format--fragment (current-buffer) beg end formatters
+                                           (or fallback "indent-region"))))
+      (replace-region-contents beg end (lambda () out))
+      t)))
+
+;;; 5c. editorconfig wins over dtrt-indent
+
+(declare-function dtrt-indent--search-hook-mapping "dtrt-indent")
+
+(defun ygg-format--editorconfig-indent-p ()
+  "Whether directory-local settings, which carry editorconfig's, fix this buffer's indentation."
+  (let ((var (nth 2 (dtrt-indent--search-hook-mapping major-mode))))
+    (seq-some (lambda (cell) (memq (car cell) (list 'indent-tabs-mode 'tab-width var)))
+              dir-local-variables-alist)))
+
+(defun ygg-format--dtrt-skip-a (fn &rest args)
+  (unless (ygg-format--editorconfig-indent-p)
+    (apply fn args)))
+
+(defun ygg-format-install-dtrt-guard ()
+  (advice-add 'dtrt-indent-try-set-offset :around #'ygg-format--dtrt-skip-a))
 
 ;;; 6. ws-butler — trim trailing whitespace only on touched lines (no
 ;;; whole-file whitespace diffs) — and dtrt-indent — adopt each file's
@@ -331,7 +448,10 @@ NAME), else node_modules/.bin or .venv/bin within the project."
      1 nil (lambda () (require 'ws-butler) (ws-butler-global-mode 1))))
   (elpaca dtrt-indent
     (run-with-idle-timer
-     1 nil (lambda () (require 'dtrt-indent) (dtrt-indent-global-mode 1)))))
+     1 nil (lambda ()
+             (require 'dtrt-indent)
+             (ygg-format-install-dtrt-guard)
+             (dtrt-indent-global-mode 1)))))
 
 (provide 'layer-format)
 ;;; layer-format.el ends here
