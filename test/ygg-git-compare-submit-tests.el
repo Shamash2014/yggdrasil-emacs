@@ -590,7 +590,9 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                 ((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>"))
                 ((symbol-function 'aob-prompt) (lambda (&rest args) (push args sent)))
                 ((symbol-function 'ygg-git-compare-show-trace) #'ignore))
-        (should-error (ygg-git-compare-submit-agent) :type 'user-error)
+        (should (string-search "1 goes to the PR; give it the todo or fix"
+                               (cadr (should-error (ygg-git-compare-submit-agent)
+                                                   :type 'user-error))))
         (should-not sent)
         (should-not ygg-git-compare-submit-tests--dropped)))))
 
@@ -679,7 +681,7 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
         (should (equal ygg-git-compare-submit-tests--dropped '("nit")))
         (should (string-prefix-p "Posted 1 comment to"
                                  (car ygg-git-compare-submit-tests--messages)))
-        (should (string-search "No comments held"
+        (should (string-search "No comments for the pull request"
                                (cadr (should-error (ygg-git-compare-submit-forge 'comment)
                                                    :type 'user-error))))))))
 
@@ -691,5 +693,39 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
       (should (equal (car ygg-git-compare-submit-tests--messages)
                      (format "Posted 4 comments to gitlab MR !7%s (%s)" (cdr case)
                              (plist-get ygg-git-compare-submit-tests--gitlab-pr :url)))))))
+
+
+(ert-deftest ygg-git-compare-submit-forge-refusal-counts-agent-comments ()
+  (ygg-git-compare-submit-tests--with
+      (list (ygg-git-compare-submit-tests--c "todo" :level 'file :file "a.txt" :type 'todo))
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (should (string-search "1 goes to the agent; give it a type"
+                           (cadr (should-error (ygg-git-compare-submit-forge 'comment)
+                                               :type 'user-error))))))
+
+(ert-deftest ygg-git-compare-submit-forge-refusal-pluralises ()
+  (ygg-git-compare-submit-tests--with
+      (list (ygg-git-compare-submit-tests--c "a" :level 'file :file "a.txt" :type 'todo)
+            (ygg-git-compare-submit-tests--c "b" :level 'file :file "a.txt" :type 'fix))
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (should (string-search "2 go to the agent; give one a type"
+                           (cadr (should-error (ygg-git-compare-submit-forge 'comment)
+                                               :type 'user-error))))))
+
+(ert-deftest ygg-git-compare-submit-agent-refusal-pluralises ()
+  (ygg-git-compare-submit-tests--with
+      (list (ygg-git-compare-submit-tests--c "a") (ygg-git-compare-submit-tests--c "b"))
+      nil #'ignore
+    (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session)))))
+      (should (string-search "2 go to the PR; give one the todo or fix"
+                             (cadr (should-error (ygg-git-compare-submit-agent)
+                                                 :type 'user-error)))))))
+
+(ert-deftest ygg-git-compare-submit-agent-refusal-with-no-comments-is-bare ()
+  (ygg-git-compare-submit-tests--with nil nil #'ignore
+    (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session)))))
+      (should (equal "No comments for the agent"
+                     (cadr (should-error (ygg-git-compare-submit-agent)
+                                         :type 'user-error)))))))
 
 ;;; ygg-git-compare-submit-tests.el ends here

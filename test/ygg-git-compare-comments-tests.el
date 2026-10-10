@@ -894,3 +894,27 @@ and adds b.txt; main stays checked out."
           (should (string-search "No comment here" (cadr err))))
         (should-not (seq-some (lambda (b) (string-prefix-p "compose:review:" (buffer-name b)))
                               (buffer-list)))))))
+
+(ert-deftest ygg-git-compare-comments-block-names-its-audience ()
+  (dolist (case '((todo . "agent") (fix . "agent") (nit . "PR") (issue . "PR") (nil . "PR")))
+    (let ((block (substring-no-properties
+                  (ygg-git-compare--comment-block (list :id "x" :type (car case) :text "body")))))
+      (should (string-match-p (format "\\(^\\|[] ]\\)%s\\($\\| \\)" (cdr case))
+                              (car (split-string block "\n"))))
+      (should-not (string-match-p (if (equal (cdr case) "PR") "agent" "\\bPR\\b")
+                                  (car (split-string block "\n")))))))
+
+(ert-deftest ygg-git-compare-comments-draft-says-where-it-goes ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (with-current-buffer (ygg-git-compare-comment)
+        (should (member "to PR" aob-compose--tags))
+        (ygg-git-compare-draft-cycle-type-back)
+        (should (member "[fix]" aob-compose--tags))
+        (should (member "to agent" aob-compose--tags))
+        (should-not (member "to PR" aob-compose--tags))
+        (ygg-git-compare-draft-cycle-type)
+        (ygg-git-compare-draft-cycle-type)
+        (should (member "[issue]" aob-compose--tags))
+        (should (member "to PR" aob-compose--tags))))))

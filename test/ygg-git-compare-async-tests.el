@@ -1237,7 +1237,7 @@ glab, every message collected in `--said'."
                           (ygg-git-compare-async-tests--read (expand-file-name "api.log" fake))
                           "\n" t))
                  1))
-      (should (string-search "No comments held"
+      (should (string-search "No comments for the pull request"
                              (cadr (should-error (ygg-git-compare-submit-forge 'comment)
                                                  :type 'user-error)))))))
 

@@ -152,6 +152,10 @@ with INCLUDE-PENDING."
   "Whether COMMENT goes to the pull request rather than an agent."
   (not (memq (plist-get comment :type) ygg-git-compare-agent-types)))
 
+(defun ygg-git-compare--audience (comment)
+  "Where COMMENT goes: \"PR\" or \"agent\"."
+  (if (ygg-git-compare--forge-p comment) "PR" "agent"))
+
 (defun ygg-git-compare--new-comment (level anchor)
   (append (list :id (ygg-git-compare--new-id) :level level :type nil :text nil)
           anchor
@@ -376,6 +380,7 @@ changed line to its last, a line when it changed only one."
   (list (if-let* ((type (plist-get ygg-git-compare--draft :type)))
             (format "[%s]" type)
           "untyped")
+        (concat "to " (ygg-git-compare--audience ygg-git-compare--draft))
         "TAB type" "ZZ saves" "empty drops it"))
 
 (defun ygg-git-compare--keep (comment list text &optional existing)
@@ -674,6 +679,7 @@ is on, anywhere on the line, and to what it was otherwise."
                            (and priority (propertize (format "[P%s]" priority) 'face face))
                            (and type (propertize (format "[%s]" type)
                                                  'face (ygg-git-compare--type-face type)))
+                           (propertize (ygg-git-compare--audience comment) 'face 'shadow)
                            (and (eq (plist-get comment :level) 'range)
                                 (propertize (format "L%s–L%s" (plist-get comment :start-line)
                                                     (plist-get comment :line))

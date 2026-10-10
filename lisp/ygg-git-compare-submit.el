@@ -606,7 +606,12 @@ send or one was made on another range."
                                            (not (equal (plist-get c :range) here))))
                           comments)))
     (unless (or comments (eq event 'approve))
-      (user-error "No comments held for the pull request"))
+      (user-error "No comments for the pull request%s"
+                  (if-let* ((n (length (ygg-git-compare-submit--select 'agent max-priority)))
+                            ((> n 0)))
+                      (format ": %d %s to the agent; give %s a type other than todo or fix to send it here"
+                              n (if (= n 1) "goes" "go") (if (= n 1) "it" "one"))
+                    "")))
     (when stale
       (user-error "A comment was made on %s; drop it or send it to an agent"
                   (plist-get stale :range)))
@@ -694,7 +699,13 @@ out findings less urgent than it."
   (require 'aob-acp)
   (with-current-buffer (ygg-git-compare--list)
     (let* ((comments (ygg-git-compare-submit--select 'agent max-priority))
-           (_ (unless comments (user-error "No comments held for an agent")))
+           (_ (unless comments
+                (user-error "No comments for the agent%s"
+                            (if-let* ((n (length (ygg-git-compare-submit--select 'forge max-priority)))
+                                      ((> n 0)))
+                                (format ": %d %s to the PR; give %s the todo or fix type to send it here"
+                                        n (if (= n 1) "goes" "go") (if (= n 1) "it" "one"))
+                              ""))))
            (text (ygg-git-compare-submit--agent-prompt comments))
            (session (ygg-git-compare-send-to-reviewer default-directory text)))
       (ygg-git-compare-submit--drop comments)

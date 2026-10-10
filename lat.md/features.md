@@ -686,7 +686,7 @@ Compare any two sides (worktrees, branches, commits, pull requests) read-only in
 Compare buffer, comments, marks, interdiff, explain, dispatch menu.
 
 - Compare A with B; swap sides, switch base, toggle A...B and A..B, log of each side.
-- Comments on a line, lines, hunk, file or the whole review; edit, append, delete, accept an agent's proposal.
+- Comments on a line, lines, hunk, file or the whole review; edit, append, delete, accept an agent's proposal. Each comment and the draft box say where it goes: "agent" for the todo and fix types, "PR" for the rest.
 - Marks: check files and hunks off as reviewed; jump to the next unreviewed.
 - Interdiff: what B changed since it was last seen.
 - Explain: ask a new agent session to explain the change.
