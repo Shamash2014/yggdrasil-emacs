@@ -88,8 +88,8 @@ handed to that project's agents as an additional directory."
              (current-buffer))))
   roots)
 
-(defun ygg-project-scan--load ()
-  "The saved scan, when it is still worth believing."
+(defun ygg-project-scan--load (&optional any-age)
+  "The saved scan, when it is still worth believing; ANY-AGE takes it stale."
   (ignore-errors
     (when (file-readable-p ygg-project-scan-cache-file)
       (let ((saved (with-temp-buffer
@@ -99,8 +99,9 @@ handed to that project's agents as an additional directory."
         ;; different question
         (when (and (equal (plist-get saved :paths) ygg-project-search-paths)
                    (equal (plist-get saved :depth) ygg-project-search-depth)
-                   (< (- (float-time) (or (plist-get saved :when) 0))
-                      ygg-project-scan-ttl))
+                   (or any-age
+                       (< (- (float-time) (or (plist-get saved :when) 0))
+                          ygg-project-scan-ttl)))
           (plist-get saved :roots))))))
 
 (defun ygg-project-scan-async (&optional callback)
@@ -292,6 +293,50 @@ ICE or refreshes its wiring."
                       (string-join ygg-project-import-extras ",")))))
     (seq-intersection picked ygg-project-import--extra-names)))
 
+(defconst ygg-project-import--browse "📁 browse…")
+
+(defun ygg-project-import--read-root ()
+  "A project folder: found on disk, already imported, or any folder.
+Reads the saved scan and never waits for a walk; a stale one is
+refreshed behind the prompt for the next time."
+  (let* ((fresh (ygg-project-scan--load))
+         (_ (unless fresh (ygg-project-scan-async)))
+         (known (mapcar #'abbreviate-file-name (ygg-project-roots)))
+         (found (seq-difference
+                 (sort (delete-dups
+                        (mapcar (lambda (d)
+                                  (abbreviate-file-name
+                                   (file-name-as-directory (expand-file-name d))))
+                                (or fresh ygg-project-scan--found (ygg-project-scan--load t))))
+                       #'string<)
+                 known))
+         (rows (append found known (list ygg-project-import--browse)))
+         (notes (make-hash-table :test 'equal)))
+    (dolist (d found)
+      (puthash d (format "found  %s"
+                         (abbreviate-file-name
+                          (file-name-directory (directory-file-name d))))
+               notes))
+    (dolist (d known) (puthash d "imported" notes))
+    (let ((pick (completing-read
+                 "Import project: "
+                 (lambda (string predicate action)
+                   (if (eq action 'metadata)
+                       `(metadata (category . ygg-project-root)
+                                  (display-sort-function . identity)
+                                  (cycle-sort-function . identity)
+                                  (annotation-function
+                                   . ,(lambda (c)
+                                        (when-let* ((n (gethash c notes)))
+                                          (concat "  " n)))))
+                     (complete-with-action action rows string predicate))))))
+      (if (equal pick ygg-project-import--browse)
+          (read-directory-name "Project: " "~/" nil t)
+        (let ((dir (expand-file-name pick)))
+          (unless (file-directory-p dir)
+            (user-error "not a directory: %s" pick))
+          dir)))))
+
 ;;;###autoload
 (defun ygg-project-import (root &optional callback extras)
   "Take ROOT in: its project skills, the config its agents answer under,
@@ -301,10 +346,7 @@ wiring (ice), a gh or glab login terminal (gh, glab), an agent folding
 old docs into the ICE layer (docs).  CALLBACK is
 called with ROOT when the last of it settles.
 Nothing here blocks."
-  (interactive (list (completing-read "Import project: "
-                                      (mapcar #'abbreviate-file-name
-                                              (ygg-project-roots))
-                                      nil t)
+  (interactive (list (ygg-project-import--read-root)
                      nil
                      (ygg-project-import--read-extras)))
   (let ((root (ygg-project--key root)))

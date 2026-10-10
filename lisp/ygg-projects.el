@@ -26,6 +26,7 @@
 (declare-function ygg-term--project-root "layer-terminal" (dir))
 (declare-function ygg-project-roots "ygg-project-scan" (&optional refresh))
 (declare-function ygg-project-candidates "ygg-project-scan" (&optional refresh))
+(declare-function ygg-project-import--read-root "ygg-project-scan" ())
 (declare-function ygg-project-import-mark "ygg-project-scan" (root))
 (declare-function ygg-project-top-roots "ygg-project-scan" ())
 (declare-function ygg-project-children "ygg-project-scan" (root))
@@ -1815,19 +1816,8 @@ on its row the same way."
 (defun ygg-projects-add (dir)
   "Import DIR and show it in the sidebar.
 Repositories the scan found but nobody has imported are offered by
-name; anything else, and the folder picker takes over."
-  (interactive
-   (let* ((found (mapcar #'abbreviate-file-name
-                         (and (fboundp 'ygg-project-candidates)
-                              (ignore-errors (ygg-project-candidates)))))
-          (pick (string-trim
-                 (completing-read
-                  (if found "Import (found on disk, or a folder): " "Import: ")
-                  found nil nil))))
-     (list (if (and (not (string-empty-p pick))
-                    (file-directory-p (expand-file-name pick)))
-               (expand-file-name pick)
-             (read-directory-name "Project: " nil nil t)))))
+name, and the picker takes any other folder."
+  (interactive (list (ygg-project-import--read-root)))
   (ygg-project-add dir)
   (ygg-projects-refresh))
 
