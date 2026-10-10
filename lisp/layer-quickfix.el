@@ -10,6 +10,7 @@
 
 (require 'yggdrasil-core)
 (require 'yggdrasil-leader)
+(require 'yggdrasil-localleader)
 (require 'ygg-ui)
 
 (declare-function wgrep-change-to-wgrep-mode "wgrep")
@@ -19,8 +20,9 @@
 (declare-function compilation-previous-error "compile")
 (declare-function compilation-display-error "compile")
 (declare-function compile-goto-error "compile")
-(declare-function xref-next-line "xref")
-(declare-function xref-prev-line "xref")
+(declare-function xref-query-replace-in-results "xref")
+(declare-function xref-change-to-xref-edit-mode "xref")
+(declare-function xref-edit-save-changes "xref")
 (declare-function flymake--project-diagnostics "flymake")
 (declare-function flymake-diagnostics "flymake")
 (declare-function flymake-diagnostic-buffer "flymake")
@@ -37,9 +39,9 @@
 (defvar grep-mode-map)
 (defvar compilation-mode-map)
 (defvar compilation-minor-mode-map)
-(defvar xref--xref-buffer-mode-map)
 (defvar wgrep-mode-map)
 (defvar wgrep-auto-save-buffer)
+(defvar xref-edit-mode-map)
 
 (when (fboundp 'elpaca)
   (elpaca wgrep
@@ -477,9 +479,26 @@ the panel stops behaving like a list.")
   (dolist (map (list compilation-mode-map compilation-minor-mode-map))
     (define-key map "p" #'ygg-qf-preview-toggle)))
 
+(add-to-list 'ygg-modal-special-modes 'xref--xref-buffer-mode)
+(add-to-list 'ygg-modal-special-mode-keep
+             '(xref--xref-buffer-mode ("j" . xref-next-line) ("k" . xref-prev-line)
+                                      ("<tab>" . "TAB") ("] f" . "N") ("[ f" . "P")))
+
 (with-eval-after-load 'xref
-  (define-key xref--xref-buffer-mode-map "j" #'xref-next-line)
-  (define-key xref--xref-buffer-mode-map "k" #'xref-prev-line))
+  (define-key xref-edit-mode-map [remap ygg-save-and-kill-buffer] #'xref-edit-save-changes)
+  (add-hook 'xref-edit-mode-hook
+            (lambda ()
+              (when yggdrasil-local-mode
+                (setq ygg--special-keep-map nil)
+                (ygg--mode-keys-refresh)
+                (ygg-normal-state))))
+  (advice-add 'xref-edit-save-changes :after
+              (lambda (&rest _)
+                (when (derived-mode-p 'xref--xref-buffer-mode)
+                  (ygg--modalize-special)))))
+
+(yggdrasil-localleader-def 'xref--xref-buffer-mode "r" #'xref-query-replace-in-results "replace in results")
+(yggdrasil-localleader-def 'xref--xref-buffer-mode "e" #'xref-change-to-xref-edit-mode "edit results")
 
 ;; wgrep edit sessions get the full modal engine, wdired-style round trip
 (with-eval-after-load 'wgrep
