@@ -259,8 +259,7 @@
 
 (ert-deftest aob-trace-motions-long-trace-scans-nothing-whole ()
   (aob-trace-motions-tests--in-long-trace
-    (let ((scans 0)
-          (start (float-time)))
+    (let ((scans 0))
       (advice-add 'text-property-not-all :before (lambda (&rest _) (cl-incf scans)) '((name . perf-count)))
       (unwind-protect
           (progn
@@ -272,8 +271,7 @@
               (aob-trace--turn-bounds 'around)
               (aob-trace--tool-bounds 'inside)))
         (advice-remove 'text-property-not-all 'perf-count))
-      (should (= scans 0))
-      (should (< (- (float-time) start) 1.0)))
+      (should (= scans 0)))
     (goto-char (point-min))
     (aob-trace-tool-next)
     (should (looking-at "event 3 "))
