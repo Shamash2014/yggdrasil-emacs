@@ -134,7 +134,9 @@
                  '(dart
                    modes (dart-mode dart-ts-mode)
                    ensure dape-ensure-command
-                   command "dart"
+                   command (lambda ()
+                             (require 'layer-lsp)
+                             (ygg-lsp--dart-sdk-dart (dape-command-cwd)))
                    command-args ("debug_adapter")
                    command-cwd dape-command-cwd
                    :type "dart"

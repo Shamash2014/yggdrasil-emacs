@@ -325,13 +325,94 @@ whichever completes last re-modes the stragglers."
 (defun ygg-lsp-python-contact (&rest _)
   (or (ygg-lsp--python-server) (user-error "No Python language server runnable")))
 
+(defvar ygg-lsp--dart-which-cache (make-hash-table :test 'equal)
+  "Real `dart' per (pin-root . pin-file mtimes), from `mise which dart'.")
+
+(defconst ygg-lsp--mise-pin-files '(".tool-versions" "mise.toml" ".mise.toml"))
+
+(defun ygg-lsp--mise-pin-root (dir)
+  (or (locate-dominating-file
+       dir (lambda (d) (seq-some (lambda (f) (file-exists-p (expand-file-name f d)))
+                                 ygg-lsp--mise-pin-files)))
+      dir))
+
+(defun ygg-lsp--mise-shim-p (path)
+  (or (string-match-p "/mise/shims/" path)
+      (equal (file-name-nondirectory (file-truename path)) "mise")))
+
+(defun ygg-lsp--mise-which-dart (dir)
+  "Output of `mise which dart' run in DIR, or nil on any failure."
+  (when-let* ((mise (or (executable-find "mise")
+                        (let ((f (expand-file-name "~/.local/bin/mise")))
+                          (and (file-executable-p f) f)))))
+    (let* ((default-directory dir)
+           (out (generate-new-buffer " *mise-which*"))
+           (err (generate-new-buffer " *mise-which-err*"))
+           (proc (ignore-errors
+                   (make-process :name "mise-which" :buffer out :noquery t
+                                 :connection-type 'pipe :stderr err
+                                 :sentinel #'ignore
+                                 :command (list mise "which" "dart"))))
+           (deadline (+ (float-time) 5)))
+      (unwind-protect
+          (when proc
+            (while (and (process-live-p proc) (< (float-time) deadline))
+              (accept-process-output proc 0.1))
+            (if (process-live-p proc)
+                (delete-process proc)
+              (accept-process-output proc 0)
+              (when (zerop (process-exit-status proc))
+                (let ((path (string-trim (with-current-buffer out (buffer-string)))))
+                  (and (file-executable-p path) path)))))
+        (kill-buffer out)
+        (when-let* ((p (get-buffer-process err))) (delete-process p))
+        (kill-buffer err)))))
+
+(defun ygg-lsp--mise-real-dart (dir)
+  (let* ((root (ygg-lsp--mise-pin-root dir))
+         (key (cons root
+                    (mapcar (lambda (f)
+                              (file-attribute-modification-time
+                               (file-attributes (expand-file-name f root))))
+                            ygg-lsp--mise-pin-files))))
+    (or (gethash key ygg-lsp--dart-which-cache)
+        (when-let* ((real (ygg-lsp--mise-which-dart dir)))
+          (puthash key real ygg-lsp--dart-which-cache)))))
+
+(defun ygg-lsp--fvm-sdk (dir)
+  (when-let* ((root (locate-dominating-file dir ".fvm/flutter_sdk")))
+    (expand-file-name ".fvm/flutter_sdk" root)))
+
+(defun ygg-lsp--flutter-sdk-dart (sdk)
+  "Dart inside the Flutter SDK at SDK, preferring its cached engine copy."
+  (let ((cached (expand-file-name "bin/cache/dart-sdk/bin/dart" sdk))
+        (wrapper (expand-file-name "bin/dart" sdk)))
+    (cond ((file-executable-p cached) cached)
+          ((file-executable-p wrapper) wrapper))))
+
+(defun ygg-lsp--dart-sdk-dart (dir)
+  "Absolute `dart' for DIR: FVM sdk, else mise's pin, on the Flutter sdk's Dart."
+  (let ((dir (file-name-as-directory (expand-file-name dir))))
+    (or (when-let* ((sdk (ygg-lsp--fvm-sdk dir)))
+          (ygg-lsp--flutter-sdk-dart sdk))
+        (when-let* ((dart (ygg-lsp--executable "dart")))
+          (let ((real (or (and (ygg-lsp--mise-shim-p dart)
+                               (ygg-lsp--mise-real-dart dir))
+                          dart)))
+            (let ((sdk (file-name-directory
+                        (directory-file-name (file-name-directory real)))))
+              (or (and (equal (file-name-nondirectory real) "dart")
+                       (or (file-executable-p
+                            (expand-file-name "bin/cache/dart-sdk/bin/dart" sdk))
+                           (file-exists-p (expand-file-name "bin/flutter" sdk)))
+                       (ygg-lsp--flutter-sdk-dart sdk))
+                  real))))
+        "dart")))
+
 (defun ygg-lsp-dart-contact (&rest _)
-  "Dart's server, on the flutter-pinned sdk when the install carries one."
-  (let* ((dart (or (ygg-lsp--executable "dart") "dart"))
-         (flutter-dart (expand-file-name "cache/dart-sdk/bin/dart"
-                                         (file-name-directory dart))))
-    (list (if (file-exists-p flutter-dart) flutter-dart dart)
-          "language-server" "--protocol=lsp")))
+  "Dart's server, on the Flutter-pinned sdk's Dart when the project has one."
+  (list (ygg-lsp--dart-sdk-dart (if-let* ((p (project-current))) (project-root p) default-directory))
+        "language-server" "--protocol=lsp"))
 
 (defun ygg-lsp--angular-root ()
   (locate-dominating-file default-directory "angular.json"))
