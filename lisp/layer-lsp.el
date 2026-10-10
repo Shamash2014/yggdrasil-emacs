@@ -281,8 +281,9 @@ whichever completes last re-modes the stragglers."
           nil
         path))))
 
-;;; Server roster (ported from nvim core/lsp.lua): register + hook only
-;;; when the binary exists, so no buffer ever waits on a doomed connect
+;;; Server roster (ported from nvim core/lsp.lua): register always, hook
+;;; when the buffer opens and the binary exists, so no buffer ever waits on a
+;;; doomed connect.  PATH is not final at load: mise and envrc extend it per buffer.
 
 (defconst ygg-lsp--server-binaries
   '(("expert" . "Elixir (expert)")
@@ -295,26 +296,42 @@ whichever completes last re-modes the stragglers."
     ("ngserver" . "Angular"))
   "Server binaries probed with `ygg-lsp--executable'; missing ones only warn.")
 
-(dolist (spec ygg-lsp--server-binaries)
-  (unless (ygg-lsp--executable (car spec))
-    (message "yggdrasil-lsp: %s server (%s) not runnable" (cdr spec) (car spec))))
+(defvar ygg-lsp--warned nil
+  "Labels already reported as not runnable this session.")
+
+(defun ygg-lsp--warn-once (label)
+  (unless (member label ygg-lsp--warned)
+    (push label ygg-lsp--warned)
+    (message "yggdrasil-lsp: %s not runnable" label)))
+
+(defun ygg-lsp--binary-label (bin)
+  (when-let* ((name (cdr (assoc bin ygg-lsp--server-binaries))))
+    (format "%s server (%s)" name bin)))
 
 ;; uvx last, the way the TypeScript chain below keeps bunx last: it needs no
 ;; global install, so it leaves nothing on PATH to rot the next time the system
 ;; python moves out from under a launcher script.  Python and TypeScript stay
 ;; out of the roster above: with a fallback chain the warning belongs to the
 ;; chain, not to any one binary in it.
-(defconst ygg-lsp--python-server
+(defun ygg-lsp--python-server ()
+  "Command eglot runs for Python, or nil when no server can be reached."
   (cond ((ygg-lsp--executable "basedpyright-langserver")
          '("basedpyright-langserver" "--stdio"))
         ((ygg-lsp--executable "pyright-langserver")
          '("pyright-langserver" "--stdio"))
         ((ygg-lsp--executable "uvx")
-         '("uvx" "--from" "basedpyright" "basedpyright-langserver" "--stdio")))
-  "Command eglot runs for Python, or nil when no server can be reached.")
+         '("uvx" "--from" "basedpyright" "basedpyright-langserver" "--stdio"))))
 
-(unless ygg-lsp--python-server
-  (message "yggdrasil-lsp: Python (basedpyright/pyright/uvx) server not runnable"))
+(defun ygg-lsp-python-contact (&rest _)
+  (or (ygg-lsp--python-server) (user-error "No Python language server runnable")))
+
+(defun ygg-lsp-dart-contact (&rest _)
+  "Dart's server, on the flutter-pinned sdk when the install carries one."
+  (let* ((dart (or (ygg-lsp--executable "dart") "dart"))
+         (flutter-dart (expand-file-name "cache/dart-sdk/bin/dart"
+                                         (file-name-directory dart))))
+    (list (if (file-exists-p flutter-dart) flutter-dart dart)
+          "language-server" "--protocol=lsp")))
 
 (defun ygg-lsp--angular-root ()
   (locate-dominating-file default-directory "angular.json"))
@@ -333,14 +350,15 @@ HTML server, else Emmet."
            '("emmet-language-server" "--stdio"))
           (t (user-error "No HTML language server runnable")))))
 
-(defconst ygg-lsp--html-servers-p
-  (or (ygg-lsp--executable "ngserver") (ygg-lsp--executable "emmet-language-server"))
-  "Whether HTML has a server beyond the one eglot knows by default.")
-
 ;; Emmet takes CSS only where no full CSS server would be displaced
-(defconst ygg-lsp--emmet-css-p
+(defun ygg-lsp--emmet-css-p ()
   (and (ygg-lsp--executable "emmet-language-server")
        (not (ygg-lsp--executable "vscode-css-language-server"))))
+
+(defun ygg-lsp-css-contact (&rest _)
+  (if (ygg-lsp--emmet-css-p)
+      '("emmet-language-server" "--stdio")
+    '("vscode-css-language-server" "--stdio")))
 
 (defcustom ygg-lsp-ts-server 'tsls
   "The TypeScript/JavaScript language server.
@@ -393,9 +411,6 @@ A new value applies to the next server started."
   "Eglot contact for TypeScript and JavaScript buffers."
   (ygg-lsp-ts-command))
 
-(unless (ygg-lsp-ts-command)
-  (message "yggdrasil-lsp: TypeScript/JavaScript (typescript-language-server/vtsls/bunx) server not runnable"))
-
 (defun ygg-lsp-ts-server-kind (server)
   "Which TypeScript server SERVER runs, tsls, vtsls or tsgo, through rass or not."
   (when-let* ((process (ignore-errors (jsonrpc--process server))))
@@ -432,24 +447,21 @@ eglot-tempel to step through.  vtsls also runs the workspace TypeScript."
              (lambda (a b) (version< (file-name-nondirectory b)
                                      (file-name-nondirectory a))))))
 
-(defconst ygg-lsp--jdtls
+(defun ygg-lsp--jdtls ()
+  "The jdtls launcher, or nil.
+The daemon's PATH is frozen into the app bundle at build time, so a
+jdtls mise installed later is looked up in mise's install tree."
   (or (ygg-lsp--executable "jdtls")
       (when-let* ((dir (ygg-lsp--newest-version-dir
                         (expand-file-name "http-jdtls/*" ygg-lsp--mise-installs))))
-        (ygg-lsp--executable (expand-file-name "bin/jdtls" dir))))
-  "The jdtls launcher, or nil.
-The daemon's PATH is frozen into the app bundle at build time, so a
-jdtls mise installed later is looked up in mise's install tree.")
+        (ygg-lsp--executable (expand-file-name "bin/jdtls" dir)))))
 
-(unless ygg-lsp--jdtls
-  (message "yggdrasil-lsp: Java (jdtls) server not runnable"))
-
-(defconst ygg-lsp--kotlin-lsp
+(defun ygg-lsp--kotlin-lsp ()
+  "JetBrains kotlin-lsp, looked up in mise's install tree like jdtls."
   (or (ygg-lsp--executable "kotlin-lsp")
       (when-let* ((dir (ygg-lsp--newest-version-dir
                         (expand-file-name "http-kotlin-lsp/*" ygg-lsp--mise-installs))))
-        (ygg-lsp--executable (expand-file-name "bin/kotlin-lsp" dir))))
-  "JetBrains kotlin-lsp, looked up in mise's install tree like jdtls.")
+        (ygg-lsp--executable (expand-file-name "bin/kotlin-lsp" dir)))))
 
 (defun ygg-lsp--kotlin-lsp-contact (_interactive _project)
   "kotlin-lsp run on its bundled runtime, importing on this buffer's JDK.
@@ -463,11 +475,8 @@ Its Gradle import otherwise takes the bundled runtime, or any JDK it finds."
                                      (concat "-Dcom.jetbrains.ls.imports.gradle.java.home=" home)
                                      (concat "-DJB_MAVEN_JAVA_HOME=" home)))
                      " "))
-            ygg-lsp--kotlin-lsp "--stdio")
-    (list ygg-lsp--kotlin-lsp "--stdio")))
-
-(unless ygg-lsp--kotlin-lsp
-  (message "yggdrasil-lsp: Kotlin (kotlin-lsp) server not runnable"))
+            (ygg-lsp--kotlin-lsp) "--stdio")
+    (list (ygg-lsp--kotlin-lsp) "--stdio")))
 
 (defconst ygg-lsp--jdtls-dir
   (file-name-as-directory (file-truename (locate-user-emacs-file "var/jdtls/")))
@@ -573,7 +582,7 @@ mise or direnv environment is not in effect.")
          (lombok (ygg-lsp--lombok-agent root))
          (bundles (ygg-lsp--jdtls-bundles)))
     (puthash root home ygg-lsp--jdtls-project-homes)
-    `(,ygg-lsp--jdtls
+    `(,(ygg-lsp--jdtls)
       ,@(when java (list "--java-executable" (expand-file-name "bin/java" java)))
       "--jvm-arg=-Djava.import.generatesMetadataFilesAtProjectRoot=false"
       ,@(when lombok (list (concat "--jvm-arg=-javaagent:" lombok)))
@@ -685,15 +694,14 @@ the common prefix of several results, is left to the default handlers."
 (defun ygg-lsp--add-jdt-handler ()
   (add-to-list 'file-name-handler-alist '("\\`jdt://" . ygg-lsp--jdt-file-handler)))
 
-(when ygg-lsp--jdtls
-  (ygg-lsp--add-jdt-handler)
-  ;; early-init empties the handler list until startup, then restores its own copy
-  (add-hook 'emacs-startup-hook #'ygg-lsp--add-jdt-handler 90)
-  (advice-add 'eglot-ensure :before-while #'ygg-lsp--not-jdt-source-p)
-  (with-eval-after-load 'yggdrasil-localleader
-    (dolist (mode '(java-mode java-ts-mode))
-      (yggdrasil-localleader-def mode "m u" #'ygg-lsp-java-update-project
-                                 "re-import build file"))))
+(ygg-lsp--add-jdt-handler)
+;; early-init empties the handler list until startup, then restores its own copy
+(add-hook 'emacs-startup-hook #'ygg-lsp--add-jdt-handler 90)
+(advice-add 'eglot-ensure :before-while #'ygg-lsp--not-jdt-source-p)
+(with-eval-after-load 'yggdrasil-localleader
+  (dolist (mode '(java-mode java-ts-mode))
+    (yggdrasil-localleader-def mode "m u" #'ygg-lsp-java-update-project
+                               "re-import build file")))
 
 ;;; 4. Eglot — fully async posture: never block on connect, no event log,
 ;;; batch didChange on idle, and no server chatter the mode line redraws for
@@ -758,71 +766,51 @@ Zero or nil shuts down immediately, as eglot does."
   (setq-default eglot-workspace-configuration #'ygg-lsp-workspace-configuration)
   (advice-add 'eglot--managed-mode :around #'ygg-lsp--managed-mode-a)
   (advice-add 'eglot-shutdown :around #'ygg-lsp--defer-shutdown-a)
-  (when (ygg-lsp--executable "expert")
-    (add-to-list 'eglot-server-programs
-                 '((elixir-ts-mode elixir-mode heex-ts-mode) . ("expert" "--stdio"))))
-  (when (ygg-lsp--executable "lua-language-server")
-    (add-to-list 'eglot-server-programs
-                 '((lua-mode lua-ts-mode) . ("lua-language-server"))))
-  (when-let* ((dart (ygg-lsp--executable "dart")))
-    ;; flutter installs pin their own dart sdk next to the binary
-    (let ((flutter-dart (expand-file-name "cache/dart-sdk/bin/dart"
-                                          (file-name-directory dart))))
-      (add-to-list 'eglot-server-programs
-                   `((dart-mode dart-ts-mode)
-                     . (,(if (file-exists-p flutter-dart) flutter-dart dart)
-                        "language-server" "--protocol=lsp")))))
-  (when (ygg-lsp--executable "sourcekit-lsp")
-    (add-to-list 'eglot-server-programs
-                 '((swift-mode swift-ts-mode) . ("sourcekit-lsp"))))
-  (when ygg-lsp--html-servers-p
-    (add-to-list 'eglot-server-programs
-                 '((html-mode html-ts-mode) . ygg-lsp-html-contact)))
-  (when ygg-lsp--emmet-css-p
-    (add-to-list 'eglot-server-programs
-                 '((css-mode css-ts-mode) . ("emmet-language-server" "--stdio"))))
-  (when ygg-lsp--kotlin-lsp
-    (add-to-list 'eglot-server-programs
-                 '((kotlin-mode kotlin-ts-mode) . ygg-lsp--kotlin-lsp-contact)))
-  (when ygg-lsp--jdtls
-    (add-to-list 'eglot-server-programs
-                 '((java-mode java-ts-mode) . ygg-lsp--jdtls-contact))
-    (advice-add 'eglot-path-to-uri :around #'ygg-lsp--jdt-source-uri))
-  (when ygg-lsp--python-server
-    (add-to-list 'eglot-server-programs
-                 (cons '(python-mode python-ts-mode) ygg-lsp--python-server)))
-  ;; yaml, schema and all: SchemaStore's compose entry matches both the
-  ;; docker-compose*.y{a,}ml and the compose*.y{a,}ml names
-  (when (ygg-lsp--executable "yaml-language-server")
-    (add-to-list 'eglot-server-programs
-                 '((yaml-mode yaml-ts-mode)
-                   . ("yaml-language-server" "--stdio"))))
-  ;; harper: grammar/spell checker for prose (no other LSP owns these modes)
-  (when (ygg-lsp--executable "harper-ls")
-    (add-to-list 'eglot-server-programs
-                 '((markdown-mode gfm-mode) . ("harper-ls" "--stdio"))))
+  (dolist (entry
+           '(((elixir-ts-mode elixir-mode heex-ts-mode) . ("expert" "--stdio"))
+             ((lua-mode lua-ts-mode) . ("lua-language-server"))
+             ((dart-mode dart-ts-mode) . ygg-lsp-dart-contact)
+             ((swift-mode swift-ts-mode) . ("sourcekit-lsp"))
+             ((html-mode html-ts-mode) . ygg-lsp-html-contact)
+             ((css-mode css-ts-mode) . ygg-lsp-css-contact)
+             ((kotlin-mode kotlin-ts-mode) . ygg-lsp--kotlin-lsp-contact)
+             ((java-mode java-ts-mode) . ygg-lsp--jdtls-contact)
+             ((python-mode python-ts-mode) . ygg-lsp-python-contact)
+             ;; yaml, schema and all: SchemaStore's compose entry matches both the
+             ;; docker-compose*.y{a,}ml and the compose*.y{a,}ml names
+             ((yaml-mode yaml-ts-mode) . ("yaml-language-server" "--stdio"))
+             ;; harper: grammar/spell checker for prose (no other LSP owns these modes)
+             ((markdown-mode gfm-mode) . ("harper-ls" "--stdio"))))
+    (add-to-list 'eglot-server-programs entry))
+  (advice-add 'eglot-path-to-uri :around #'ygg-lsp--jdt-source-uri)
   (cl-defmethod eglot-register-capability :around
     (server (_method (eql workspace/didChangeWatchedFiles)) _id &rest _)
     (unless (ygg-lsp--unwatched-server-p server)
       (cl-call-next-method)))
-  (when (ygg-lsp-ts-command)
-    (add-to-list 'eglot-server-programs
-                 '(((js-mode :language-id "javascript")
-                    (js-ts-mode :language-id "javascript")
-                    (js-jsx-mode :language-id "javascriptreact")
-                    (jsx-ts-mode :language-id "javascriptreact")
-                    (typescript-mode :language-id "typescript")
-                    (typescript-ts-mode :language-id "typescript")
-                    (tsx-ts-mode :language-id "typescriptreact"))
-                   . ygg-lsp-ts-contact))))
+  (add-to-list 'eglot-server-programs
+               '(((js-mode :language-id "javascript")
+                  (js-ts-mode :language-id "javascript")
+                  (js-jsx-mode :language-id "javascriptreact")
+                  (jsx-ts-mode :language-id "javascriptreact")
+                  (typescript-mode :language-id "typescript")
+                  (typescript-ts-mode :language-id "typescript")
+                  (tsx-ts-mode :language-id "typescriptreact"))
+                 . ygg-lsp-ts-contact)))
 
-(defun ygg-lsp--hook-when (bin hooks)
-  (when (ygg-lsp--executable bin)
-    (dolist (h hooks) (add-hook h #'eglot-ensure))))
+(defun ygg-lsp--hook-when (available hooks &optional label)
+  "Have HOOKS start eglot once AVAILABLE, a binary name or predicate, holds in the buffer."
+  (let ((fn (intern (format "ygg-lsp--ensure-when-%s" available)))
+        (label (or label (and (stringp available) (ygg-lsp--binary-label available)))))
+    (defalias fn
+      (lambda ()
+        (cond ((if (stringp available) (ygg-lsp--executable available) (funcall available))
+               (eglot-ensure))
+              (label (ygg-lsp--warn-once label)))))
+    (dolist (h hooks) (add-hook h fn))))
 
 (ygg-lsp--hook-when "expert" '(elixir-ts-mode-hook elixir-mode-hook heex-ts-mode-hook))
-(when ygg-lsp--python-server
-  (dolist (h '(python-mode-hook python-ts-mode-hook)) (add-hook h #'eglot-ensure)))
+(ygg-lsp--hook-when #'ygg-lsp--python-server '(python-mode-hook python-ts-mode-hook)
+                    "Python (basedpyright/pyright/uvx) server")
 (ygg-lsp--hook-when "yaml-language-server" '(yaml-mode-hook yaml-ts-mode-hook))
 (ygg-lsp--hook-when "harper-ls" '(markdown-mode-hook gfm-mode-hook))
 (ygg-lsp--hook-when "rust-analyzer" '(rust-mode-hook rust-ts-mode-hook))
@@ -831,27 +819,27 @@ Zero or nil shuts down immediately, as eglot does."
 (ygg-lsp--hook-when "dart" '(dart-mode-hook dart-ts-mode-hook))
 (ygg-lsp--hook-when "sourcekit-lsp" '(swift-mode-hook swift-ts-mode-hook))
 (ygg-lsp--hook-when "clangd" '(c-mode-hook c-ts-mode-hook c++-mode-hook c++-ts-mode-hook))
-(defun ygg-lsp--html-ensure ()
-  "Start eglot in HTML only where the contact has a server to give."
-  (when (or (ygg-lsp--executable "vscode-html-language-server")
-            (ygg-lsp--executable "emmet-language-server")
-            (ygg-lsp--angular-root))
-    (eglot-ensure)))
 
-(when ygg-lsp--html-servers-p
-  (dolist (h '(html-mode-hook html-ts-mode-hook)) (add-hook h #'ygg-lsp--html-ensure)))
-(when ygg-lsp--emmet-css-p
-  (dolist (h '(css-mode-hook css-ts-mode-hook)) (add-hook h #'eglot-ensure)))
-(when ygg-lsp--kotlin-lsp
-  (dolist (h '(kotlin-mode-hook kotlin-ts-mode-hook)) (add-hook h #'eglot-ensure)))
-(when ygg-lsp--jdtls
-  (dolist (h '(java-mode-hook java-ts-mode-hook))
-    (add-hook h #'eglot-ensure)
-    (add-hook h #'ygg-lsp--jdt-source-setup -50)))
-(when (ygg-lsp-ts-command)
-  (dolist (h '(typescript-ts-mode-hook tsx-ts-mode-hook
-               js-mode-hook js-ts-mode-hook js-jsx-mode-hook jsx-ts-mode-hook))
-    (add-hook h #'eglot-ensure)))
+(defun ygg-lsp--html-available-p ()
+  "Whether HTML has a server beyond eglot's default, and one for this buffer."
+  (and (or (ygg-lsp--executable "ngserver") (ygg-lsp--executable "emmet-language-server"))
+       (or (ygg-lsp--executable "vscode-html-language-server")
+           (ygg-lsp--executable "emmet-language-server")
+           (ygg-lsp--angular-root))))
+
+(ygg-lsp--hook-when #'ygg-lsp--html-available-p '(html-mode-hook html-ts-mode-hook)
+                    "Emmet server (emmet-language-server)")
+(ygg-lsp--hook-when #'ygg-lsp--emmet-css-p '(css-mode-hook css-ts-mode-hook))
+(ygg-lsp--hook-when #'ygg-lsp--kotlin-lsp '(kotlin-mode-hook kotlin-ts-mode-hook)
+                    "Kotlin (kotlin-lsp) server")
+(ygg-lsp--hook-when #'ygg-lsp--jdtls '(java-mode-hook java-ts-mode-hook)
+                    "Java (jdtls) server")
+(dolist (h '(java-mode-hook java-ts-mode-hook))
+  (add-hook h #'ygg-lsp--jdt-source-setup -50))
+(ygg-lsp--hook-when #'ygg-lsp-ts-command
+                    '(typescript-ts-mode-hook tsx-ts-mode-hook
+                      js-mode-hook js-ts-mode-hook js-jsx-mode-hook jsx-ts-mode-hook)
+                    "TypeScript/JavaScript (typescript-language-server/vtsls/bunx) server")
 
 (defun ygg-lsp--ts-source-locations (server)
   "SERVER's source definitions of the symbol at point, as LSP locations."
