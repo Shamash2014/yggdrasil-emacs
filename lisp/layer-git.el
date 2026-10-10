@@ -445,7 +445,29 @@ so it rendered two lines for a mode with a hundred keys."
 (define-key ygg-magit-goto-map (kbd "r") (cons "refresh" #'magit-refresh))
 (define-key ygg-magit-goto-map (kbd "?") (cons "this mode's keys" #'ygg-magit-keys))
 ;; G is buffer end everywhere else, so refresh-all moves in beside refresh
-(define-key ygg-magit-goto-map (kbd "R") (cons "refresh all" #'magit-refresh-all))
+(define-key ygg-magit-goto-map (kbd "R") (cons "refresh all" #'ygg-magit-refresh-all))
+
+(defvar ygg-git-worktree--cache)
+(defvar ygg-git-stack--info-cache)
+(declare-function magit-get-mode-buffer "magit-mode")
+(declare-function ygg-git-review-requests--repo "ygg-git-review-requests")
+(declare-function ygg-git-review-requests--ensure "ygg-git-review-requests")
+
+(defun ygg-magit-refresh-all ()
+  "Refresh the repository's magit buffers, refetching what status sections cache."
+  (interactive)
+  (when (boundp 'ygg-git-worktree--cache)
+    ;; stale, not dropped: rows keep their old counts until the new ones land
+    (maphash (lambda (_dir entry) (plist-put entry :at 0)) ygg-git-worktree--cache))
+  (when (boundp 'ygg-git-stack--info-cache)
+    (clrhash ygg-git-stack--info-cache))
+  (when-let* (((bound-and-true-p ygg-git-review-requests))
+              ((featurep 'ygg-git-review-requests))
+              (status (magit-get-mode-buffer 'magit-status-mode)))
+    (with-current-buffer status
+      (when-let* ((repo (ignore-errors (ygg-git-review-requests--repo))))
+        (ygg-git-review-requests--ensure repo t))))
+  (magit-refresh-all))
 
 (with-eval-after-load 'magit-section
   (define-key magit-section-mode-map (kbd "j") #'magit-section-forward)

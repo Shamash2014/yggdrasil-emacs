@@ -99,4 +99,33 @@ the files git itself leaves on disk for one, without asking git to make it."
 (ert-deftest ygg-git-worktree-status-is-on-the-leader ()
   (should (eq (keymap-lookup ygg-leader-git-map "W") #'ygg-git-worktree-status)))
 
+(ert-deftest ygg-magit-refresh-all-refetches-what-status-sections-cache ()
+  (require 'ygg-git-worktree)
+  (require 'ygg-git-stack)
+  (require 'ygg-git-review-requests)
+  (let ((ygg-git-worktree--cache (make-hash-table :test #'equal))
+        (ygg-git-stack--info-cache (make-hash-table :test 'equal))
+        (ygg-git-review-requests t)
+        (status (generate-new-buffer " status"))
+        forced refreshed)
+    (puthash "/w" (list :fp 'fp :counts 'counts :at (float-time)) ygg-git-worktree--cache)
+    (puthash "/r" (cons (float-time) 'info) ygg-git-stack--info-cache)
+    (unwind-protect
+        (cl-letf (((symbol-function 'magit-get-mode-buffer) (lambda (&rest _) status))
+                  ((symbol-function 'ygg-git-review-requests--repo) (lambda () 'repo))
+                  ((symbol-function 'ygg-git-review-requests--ensure)
+                   (lambda (repo force) (setq forced (list repo force (current-buffer)))))
+                  ((symbol-function 'magit-refresh-all) (lambda () (setq refreshed t))))
+          (ygg-magit-refresh-all)
+          (let ((entry (gethash "/w" ygg-git-worktree--cache)))
+            (should (eq (plist-get entry :counts) 'counts))
+            (should (ygg-git-worktree--stale-p entry 'fp)))
+          (should (zerop (hash-table-count ygg-git-stack--info-cache)))
+          (should (equal forced (list 'repo t status)))
+          (should refreshed))
+      (kill-buffer status))))
+
+(ert-deftest ygg-magit-refresh-all-is-g-R ()
+  (should (eq (keymap-lookup ygg-magit-goto-map "R") #'ygg-magit-refresh-all)))
+
 ;;; git-worktree-tests.el ends here
