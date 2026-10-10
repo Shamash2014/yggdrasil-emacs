@@ -102,6 +102,27 @@ other markdown the owner opens by hand in a window keeps the one it had."
 (advice-add 'eglot-ensure :before-while #'ygg-lsp-may-join-server-p)
 (advice-add 'eglot--maybe-activate-editing-mode
             :before-while #'ygg-lsp-may-join-server-p)
+
+(defvar ygg-session--restoring)
+(defvar ygg-session-buffer-restored-hook)
+(defvar-local ygg-lsp--ensure-deferred nil)
+
+(defun ygg-lsp--defer-ensure-while-restoring (&rest _)
+  "Hold back `eglot-ensure' for a buffer restored with version control off,
+so the server roots at the project it will have once that is back."
+  (if (bound-and-true-p ygg-session--restoring)
+      (progn (setq ygg-lsp--ensure-deferred t) nil)
+    t))
+
+(defun ygg-lsp--ensure-after-restore ()
+  (when ygg-lsp--ensure-deferred
+    (setq ygg-lsp--ensure-deferred nil)
+    (vc-file-setprop default-directory 'project-vc nil)
+    (eglot-ensure)))
+
+(advice-add 'eglot-ensure :before-while #'ygg-lsp--defer-ensure-while-restoring
+            '((depth . -100)))
+(add-hook 'ygg-session-buffer-restored-hook #'ygg-lsp--ensure-after-restore)
 (defvar eglot-report-progress)
 (defvar eglot-ignored-server-capabilities)
 

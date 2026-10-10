@@ -164,6 +164,12 @@ layout carries over under the new branch's name."
     (ygg-session--adopt name)
     (message "[ygg-session] Saved project session: %s" name)))
 
+(defvar ygg-session--restoring nil
+  "Non-nil while a session's buffers are being restored with version control off.")
+
+(defvar ygg-session-buffer-restored-hook nil
+  "Run in a restored buffer once it has its version-control state.")
+
 (defvar ygg-session--deferred-vc nil
   "Buffers restored with version control put off, refreshed on display.")
 
@@ -178,25 +184,27 @@ is shown, so a session of a hundred files pays for the ones you look at."
           (when buffer-file-name
             (ignore-errors (vc-refresh-state))
             (when (fboundp 'magit-auto-revert-mode-enable-in-buffer)
-              (ignore-errors (magit-auto-revert-mode-enable-in-buffer)))))))))
+              (ignore-errors (magit-auto-revert-mode-enable-in-buffer)))
+            (run-hooks 'ygg-session-buffer-restored-hook)))))))
 
 (defun ygg-session--load-fast (orig &rest args)
   "Around easysession's load: restore the buffers without asking git
 about each one, and ask on first display instead.
 Version control and magit's auto-revert cost most of what a restored
 buffer costs, a tenth of a second each, and a session is many buffers."
-  (let* ((before (buffer-list))
-         (vc-handled-backends nil)
-         (after-change-major-mode-hook
-          (remq 'magit-auto-revert-mode-enable-in-buffer
-                after-change-major-mode-hook))
-         (find-file-hook (remq 'vc-refresh-state find-file-hook)))
-    (prog1 (apply orig args)
-      (dolist (buffer (buffer-list))
-        (unless (memq buffer before)
-          (when (buffer-local-value 'buffer-file-name buffer)
-            (push buffer ygg-session--deferred-vc))))
-      (add-hook 'window-buffer-change-functions #'ygg-session--vc-on-display)
+  (let ((before (buffer-list)))
+    (prog1 (let* ((vc-handled-backends nil)
+                  (ygg-session--restoring t)
+                  (after-change-major-mode-hook
+                   (remq 'magit-auto-revert-mode-enable-in-buffer
+                         after-change-major-mode-hook))
+                  (find-file-hook (remq 'vc-refresh-state find-file-hook)))
+             (prog1 (apply orig args)
+               (dolist (buffer (buffer-list))
+                 (unless (memq buffer before)
+                   (when (buffer-local-value 'buffer-file-name buffer)
+                     (push buffer ygg-session--deferred-vc))))
+               (add-hook 'window-buffer-change-functions #'ygg-session--vc-on-display)))
       (ygg-session--vc-on-display (selected-frame)))))
 
 (declare-function ygg-space--apply-tab-bar-visibility "yggdrasil-spacetree")
