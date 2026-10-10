@@ -4887,7 +4887,8 @@ there is no load; resume asks for the history with replayFrom instead."
           :todo-file (aob-session-ref s :todo-file)
           :limits (aob-session-ref s :limits)
           :named-by-user (aob-session-ref s :named-by-user)
-          :auto-named (aob-session-ref s :auto-named))))
+          :auto-named (aob-session-ref s :auto-named)
+          :unread (aob-session-ref s :unread))))
 
 (defun aob-acp--persist (&optional removed &rest _)
   "Write every conversation this Emacs can still resume, REMOVED included.
@@ -4915,8 +4916,7 @@ killing it must not be what makes it unreachable."
              (ids (mapcar (lambda (e) (plist-get e :acp-id)) fresh))
              (past (seq-filter
                     (lambda (e)
-                      (and (not (member (plist-get e :acp-id) ids))
-                           (file-directory-p (or (plist-get e :dir) ""))))
+                      (not (member (plist-get e :acp-id) ids)))
                     (aob-acp--persisted-entries))))
         (make-directory (file-name-directory aob-acp-persist-file) t)
         (with-temp-file aob-acp-persist-file
@@ -4925,6 +4925,11 @@ killing it must not be what makes it unreachable."
 
 (add-hook 'kill-emacs-hook #'aob-acp--persist)
 (add-hook 'aob-session-removed-hook #'aob-acp--persist)
+
+(defun aob-acp--persist-unread (_s)
+  (aob-acp--persist))
+
+(add-hook 'aob-unread-change-hook #'aob-acp--persist-unread)
 
 (defun aob-acp--shutdown-all ()
   "Kill every agent this Emacs opened, whole process tree and all.
@@ -4984,6 +4989,56 @@ A header line asks for these on every redisplay.")
                        (not (plist-get e :archived))
                        (not (member (plist-get e :acp-id) live-ids))))
                 (aob-acp--persisted-entries))))
+
+(defun aob-acp--rebind-target ()
+  "A persisted conversation picked for a new folder, those with theirs gone first."
+  (let* ((gone (lambda (e) (not (file-directory-p (or (plist-get e :dir) "")))))
+         (entries (aob-acp--persisted-entries))
+         (rows (mapcar (lambda (e)
+                         (cons (format "%s · %s%s"
+                                       (or (plist-get e :name)
+                                           (plist-get e :agent) "session")
+                                       (abbreviate-file-name
+                                        (or (plist-get e :dir) ""))
+                                       (if (funcall gone e) "  [folder gone]" ""))
+                               e))
+                       (append (seq-filter gone entries)
+                               (seq-remove gone entries)))))
+    (unless rows (user-error "aob: nothing to choose from"))
+    (let ((names (mapcar #'car rows)))
+      (cdr (assoc (completing-read
+                   "Rebind: "
+                   (lambda (str pred action)
+                     (if (eq action 'metadata)
+                         '(metadata (display-sort-function . identity)
+                                    (cycle-sort-function . identity))
+                       (complete-with-action action names str pred)))
+                   nil t)
+                  rows)))))
+
+;;;###autoload
+(defun aob-acp-rebind-persisted (e dir)
+  "Point saved conversation E at folder DIR, keeping everything else about it."
+  (interactive
+   (let ((e (aob-acp--rebind-target)))
+     (list e (read-directory-name "New folder: " nil nil t))))
+  (unless (and dir (file-directory-p dir))
+    (user-error "aob: %s is not a folder" dir))
+  (let* ((new (file-name-as-directory (expand-file-name dir)))
+         (old (plist-get e :dir))
+         (same (lambda (a) (and a old (equal (directory-file-name a)
+                                             (directory-file-name old))))))
+    (unless (aob-acp--rewrite
+             (plist-get e :acp-id)
+             (lambda (entry)
+               (let ((entry (plist-put (copy-sequence entry) :dir new)))
+                 (if (funcall same (plist-get entry :project))
+                     (plist-put entry :project new)
+                   entry))))
+      (user-error "aob: no saved sessions to rebind"))
+    (message "aob: %s now lives in %s"
+             (or (plist-get e :name) (plist-get e :agent))
+             (abbreviate-file-name new))))
 
 (defun aob-acp-archived-entries ()
   "Conversations put away: still resumable, no longer offered."
@@ -5133,6 +5188,10 @@ than doubled: the one that comes back takes its trace, in the windows
 it was in, and its row in every list.  One that failed on an agent still
 running is let go of first, as a restart lets go of it, so the agent
 holds no turn, question or connection for a session no one reads."
+  (unless (file-directory-p (or (plist-get e :dir) ""))
+    (user-error "aob: %s ran in %s, which is gone; run M-x aob-acp-rebind-persisted"
+                (or (plist-get e :name) (plist-get e :agent) "session")
+                (abbreviate-file-name (or (plist-get e :dir) ""))))
   (when (fboundp 'aob-transcript-restore)
     (condition-case err
         (aob-transcript-restore e)
@@ -5175,6 +5234,8 @@ holds no turn, question or connection for a session no one reads."
                     (list :named-by-user t))
                   (when-let* ((auto (plist-get e :auto-named)))
                     (list :auto-named auto))
+                  (when (plist-get e :unread)
+                    (list :unread t))
                   (plist-get e :limits)
                   ;; a conversation reloaded onto another model is a
                   ;; different conversation from the second turn on

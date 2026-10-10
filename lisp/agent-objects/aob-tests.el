@@ -2797,17 +2797,16 @@ and space assignment, so they must survive the resume handshake."
                        (aob-create-session :id (concat "acp:" name) :backend 'acp
                                            :name name :project project :dir dir
                                            :state 'idle))))
-            (let* ((entry '(:agent "claude" :name "work:2"
-                           :project "/Users/shamash/temp/test-work/"
-                           :dir "/Users/shamash/temp/test-work/"
-                           :acp-id "session-123"
-                           :task "/Users/shamash/temp/test-work/.aob/tasks/my-task"))
+            (let* ((work-dir temporary-file-directory)
+                   (entry (list :agent "claude" :name "work:2"
+                                :project work-dir
+                                :dir work-dir
+                                :acp-id "session-123"
+                                :task (concat work-dir ".aob/tasks/my-task")))
                    (_s (aob-acp-resume-entry entry)))
               (should (= (length captured-args) 1))
               (should (equal (car captured-args)
-                             '("claude" "work:2"
-                               "/Users/shamash/temp/test-work/"
-                               "/Users/shamash/temp/test-work/"))))))
+                             (list "claude" "work:2" work-dir work-dir))))))
       (aob-remove-session held))))
 
 
@@ -6034,7 +6033,7 @@ next chunk does not pull the page back down."
                  (lambda (&rest _) (push aob-acp-session-refs seen) s))
                 ((symbol-function 'aob-acp--seed-history) #'ignore))
         (aob-acp-fork s)
-        (aob-acp-resume-entry (aob-acp--entry s)))
+        (aob-acp-resume-entry (plist-put (aob-acp--entry s) :dir temporary-file-directory)))
       (dolist (refs seen)
         (should (equal (plist-get refs :want-tools) '("Read")))
         (should (equal (plist-get refs :want-thinking) "low"))))

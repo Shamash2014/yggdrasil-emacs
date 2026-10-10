@@ -2275,6 +2275,72 @@ Proceed based on it."
 ;;; Modeline — a cached segment for `global-mode-string'; recomputed on
 ;;; state transitions only, never on the event stream
 
+(defcustom aob-unread-dwell 3
+  "Seconds a conversation stays in the selected window before it counts as read."
+  :type 'number :group 'aob)
+
+(defvar aob-unread-change-hook nil
+  "Run with the session when it becomes unread or is read.")
+
+(defvar aob--unread-timer nil)
+(defvar aob--unread-last nil)
+
+(defun aob-session-unread-p (s)
+  (and (aob-session-ref s :unread) t))
+
+(defun aob-unread-sessions ()
+  (seq-filter #'aob-session-unread-p
+              (seq-remove (lambda (s) (aob-session-ref s :hidden)) (aob-sessions))))
+
+(defun aob--shown-p (s)
+  (equal (buffer-local-value 'aob-buffer-session-id (window-buffer (selected-window)))
+         (aob-session-id s)))
+
+(defun aob--unread-sync-timer ()
+  (let ((any (aob-unread-sessions)))
+    (cond ((and any (not (timerp aob--unread-timer)))
+           (setq aob--unread-last nil
+                 aob--unread-timer (run-with-timer 0.5 0.5 #'aob--unread-tick)))
+          ((and (not any) aob--unread-timer)
+           (when (timerp aob--unread-timer) (cancel-timer aob--unread-timer))
+           (setq aob--unread-timer nil)))))
+
+(defun aob--set-unread (s on)
+  (unless (eq (aob-session-unread-p s) (and on t))
+    (aob-session-put s :unread (and on t))
+    (aob-session-put s :unread-since nil)
+    (aob--dirty s)
+    (aob--unread-sync-timer)
+    (run-hook-with-args 'aob-unread-change-hook s)))
+
+(defun aob--unread-tick ()
+  "Read what has been in the selected window for `aob-unread-dwell' seconds.
+A gap of over a second between ticks means Emacs was blocked or asleep,
+so the dwell starts over."
+  (let* ((now (float-time))
+         (gap (and aob--unread-last (- now aob--unread-last))))
+    (setq aob--unread-last now)
+    (dolist (s (aob-unread-sessions))
+      (let ((since (aob-session-ref s :unread-since)))
+        (cond ((not (aob--shown-p s)) (aob-session-put s :unread-since nil))
+              ((or (null since) (and gap (> gap 1)))
+               (aob-session-put s :unread-since now))
+              ((>= (- now since) aob-unread-dwell) (aob--set-unread s nil)))))))
+
+(defun aob--unread-on-state (s old new)
+  (when (and (eq old 'working)
+             (memq new '(idle blocked))
+             (not (aob-session-ref s :hidden))
+             (not (aob--shown-p s)))
+    (aob--set-unread s t)))
+
+(defun aob--unread-on-roster (&rest _)
+  (aob--unread-sync-timer))
+
+(add-hook 'aob-state-change-hook #'aob--unread-on-state -50)
+(add-hook 'aob-session-created-hook #'aob--unread-on-roster)
+(add-hook 'aob-session-removed-hook #'aob--unread-on-roster)
+
 (defvar aob-modeline-string "")
 (put 'aob-modeline-string 'risky-local-variable t)
 
@@ -2286,6 +2352,8 @@ Proceed based on it."
   "Agents at work." :group 'aob)
 (defface aob-modeline-sub '((t :inherit shadow))
   "Delegated agents at work." :group 'aob)
+(defface aob-modeline-unread '((t :inherit success :weight bold))
+  "Conversations that finished while you were elsewhere." :group 'aob)
 (defface aob-modeline-queued '((t :inherit shadow))
   "Messages waiting for a turn." :group 'aob)
 
@@ -2312,7 +2380,8 @@ Proceed based on it."
    'local-map aob-modeline--map))
 
 (defun aob--modeline-refresh (&rest _)
-  (let ((blocked 0) (working 0) (queued 0) (subs 0) (quietest nil))
+  (let ((blocked 0) (working 0) (queued 0) (subs 0) (quietest nil)
+        (unread (length (aob-unread-sessions))))
     (dolist (s (seq-remove (lambda (s) (aob-session-ref s :hidden)) (aob-sessions)))
       (cl-incf queued (length (aob-session-ref s :queued)))
       (when-let* ((label (aob-session-quiet s))
@@ -2331,6 +2400,9 @@ Proceed based on it."
            (when (> blocked 0)
              (aob--modeline-pill "nf-md-hand_back_right_outline" "■" blocked
                                  'aob-modeline-blocked "waiting on you"))
+           (when (> unread 0)
+             (aob--modeline-pill "nf-md-email_outline" "◆" unread
+                                 'aob-modeline-unread "unread"))
            (when (> working 0)
              (aob--modeline-pill "nf-md-robot_outline" "●" working
                                  'aob-modeline-working "agents working"))
@@ -2342,7 +2414,7 @@ Proceed based on it."
            (when (> queued 0)
              (aob--modeline-pill "nf-md-tray_full" "»" queued
                                  'aob-modeline-queued "messages queued"))
-           (when (> (+ blocked working subs queued) 0) "  ")))
+           (when (> (+ blocked unread working subs queued) 0) "  ")))
     (force-mode-line-update t)))
 
 (define-minor-mode aob-modeline-mode
@@ -2354,6 +2426,7 @@ Proceed based on it."
         (add-hook 'aob-session-created-hook #'aob--modeline-refresh)
         (add-hook 'aob-session-removed-hook #'aob--modeline-refresh)
         (add-hook 'aob-queue-change-hook #'aob--modeline-refresh)
+        (add-hook 'aob-unread-change-hook #'aob--modeline-refresh)
         (unless (memq 'aob-modeline-string global-mode-string)
           ;; a symbol-headed list reads as the (SYMBOL THEN ELSE)
           ;; conditional and renders *invalid* — keep a string first
@@ -2364,6 +2437,7 @@ Proceed based on it."
     (remove-hook 'aob-session-created-hook #'aob--modeline-refresh)
     (remove-hook 'aob-session-removed-hook #'aob--modeline-refresh)
     (remove-hook 'aob-queue-change-hook #'aob--modeline-refresh)
+    (remove-hook 'aob-unread-change-hook #'aob--modeline-refresh)
     (setq global-mode-string (delq 'aob-modeline-string global-mode-string))))
 
 (defvar aob-object-map

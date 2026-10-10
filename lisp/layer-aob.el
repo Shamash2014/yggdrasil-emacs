@@ -1951,6 +1951,39 @@ needs no key."
 (add-hook 'aob-session-removed-hook #'ygg-aob--attention-refresh)
 (add-hook 'aob-session-created-hook #'ygg-aob--attention-refresh)
 (add-hook 'aob-queue-change-hook #'ygg-aob--attention-refresh)
+(add-hook 'aob-unread-change-hook #'ygg-aob--attention-refresh)
+
+(defun ygg-aob--attention-sessions ()
+  "Sessions that want you, blocked ones first, then the unread, each in list order."
+  (let ((live (seq-remove (lambda (s) (or (ygg-aob--put-down-p s)
+                                          (aob-session-ref s :hidden)))
+                          (aob-live-sessions))))
+    (append (seq-filter (lambda (s) (eq (aob-session-state s) 'blocked)) live)
+            (seq-filter (lambda (s) (and (aob-session-unread-p s)
+                                         (not (eq (aob-session-state s) 'blocked))))
+                        live))))
+
+(defun ygg-aob--attention-step (by)
+  (let* ((all (ygg-aob--attention-sessions))
+         (here (and (boundp 'aob-buffer-session-id) aob-buffer-session-id))
+         (at (seq-position all here (lambda (s id) (equal (aob-session-id s) id)))))
+    (unless all (user-error "no agent needs you"))
+    (ygg-aob--goto
+     (nth (mod (if at (+ at by) (if (> by 0) 0 -1)) (length all)) all))))
+
+(defun ygg-aob-next-attention ()
+  "Go to the next agent that wants you: blocked first, then unread."
+  (interactive)
+  (ygg-aob--attention-step 1))
+
+(defun ygg-aob-prev-attention ()
+  "Go to the previous agent that wants you: blocked first, then unread."
+  (interactive)
+  (ygg-aob--attention-step -1))
+
+(yggdrasil-define-keys 'normal
+  "] u" #'ygg-aob-next-attention :label "next agent needing you"
+  "[ u" #'ygg-aob-prev-attention :label "prev agent needing you")
 
 (defun ygg-aob--say (msg &optional level)
   "Say MSG both ways a session's turn is announced, wherever either exists.
@@ -2119,6 +2152,7 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 (yggdrasil-define-keys 'ygg-leader-acp-map
   "C" #'ygg-aob-talk-existing :label "talk existing"
   "R" #'ygg-aob-resume-pick :label "resume a folder"
+  "B" #'aob-acp-rebind-persisted :label "rebind a lost folder"
   "o" #'ygg-aob-pick :label "go to"
   "r" #'ygg-aob-resolve-next :label "resolve"
   "q" #'aob-kill-session :label "kill")

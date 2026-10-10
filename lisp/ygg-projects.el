@@ -141,6 +141,10 @@ is to say something is running should be green at a glance."
   "Face for the dot of a session that is up but waiting on you."
   :group 'ygg-projects)
 
+(defface ygg-projects-unread '((t :inherit success))
+  "Face for the dot of a session that finished while you were elsewhere."
+  :group 'ygg-projects)
+
 (defface ygg-projects-idle '((t :inherit shadow))
   "Face for the dot of a quiet project." :group 'ygg-projects)
 
@@ -467,6 +471,8 @@ folder or a command has none and keeps the quiet dot."
                     (aob-session-state payload))))
     (cond ((memq state ygg-projects-busy-states) 'ygg-projects-live)
           ((null state) 'ygg-projects-idle)
+          ((and (eq state 'idle) (aob-session-ref payload :unread))
+           'ygg-projects-unread)
           ((memq state ygg-projects-over-states) 'ygg-projects-idle)
           (t 'ygg-projects-waiting))))
 
@@ -1264,7 +1270,8 @@ A folder's badge is its own, `ygg-projects--folder-badge'."
            (state (format "%s" (aob-session-state payload)))
            (clock (and (fboundp 'aob-session-clock) (aob-session-clock payload)))
            (spend (and (fboundp 'aob-session-spend) (aob-session-spend payload)))
-           (quiet (and (or clock spend) (member state '("working" "idle"))))
+           (unread (and (aob-session-ref payload :unread) (equal state "idle")))
+           (quiet (and (or clock spend) (not unread) (member state '("working" "idle"))))
            (parts (seq-filter
                    #'car
                    (list (list (car mark) (cdr mark) 1.5)
@@ -1275,7 +1282,7 @@ A folder's badge is its own, `ygg-projects--folder-badge'."
                          (list spend 'ygg-projects-count 1)
                          (list (ygg-projects--session-progress payload)
                                'ygg-projects-count 3)
-                         (list (unless quiet state)
+                         (list (cond (quiet nil) (unread "unread") (t state))
                                (ygg-projects--session-dot payload) 4)))))
       (ygg-projects--fit parts room)))))
 
