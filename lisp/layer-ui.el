@@ -110,6 +110,10 @@
   "Major mode listing past `ygg-notify' calls."
   (ygg-ui-plain-layout))
 
+(defvar ygg-modal-special-modes)
+(with-eval-after-load 'yggdrasil-core
+  (add-to-list 'ygg-modal-special-modes 'ygg-notify-history-mode))
+
 (defun ygg-notify-history ()
   "Show a buffer listing past `ygg-notify' calls, most recent first."
   (interactive)

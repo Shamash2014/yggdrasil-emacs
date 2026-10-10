@@ -36,6 +36,10 @@
   (setq-local truncate-lines nil)
   (visual-line-mode 1))
 
+(defvar ygg-modal-special-modes)
+(with-eval-after-load 'yggdrasil-core
+  (add-to-list 'ygg-modal-special-modes 'aob-btw-mode))
+
 (defun aob-btw--show (source question text &optional failed)
   "Show TEXT, the answer SOURCE's fork gave to QUESTION, in the popup.
 FAILED says TEXT is why there is no answer."

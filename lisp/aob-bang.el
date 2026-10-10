@@ -45,6 +45,10 @@
   (setq-local truncate-lines nil)
   (visual-line-mode 1))
 
+(defvar ygg-modal-special-modes)
+(with-eval-after-load 'yggdrasil-core
+  (add-to-list 'ygg-modal-special-modes 'aob-bang-mode))
+
 (defun aob-bang--dir ()
   "The folder the draft's commands run in: its session's, else the draft's."
   (let* ((s (and (stringp aob-compose--target)

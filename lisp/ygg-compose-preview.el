@@ -606,6 +606,10 @@ mise exec would otherwise set its own JAVA_HOME over one direnv gave."
   (add-hook 'window-size-change-functions #'ygg-compose-preview--resized nil t)
   (add-hook 'kill-buffer-hook #'ygg-compose-preview--stop-daemons nil t))
 
+(defvar ygg-modal-special-modes)
+(with-eval-after-load 'yggdrasil-core
+  (add-to-list 'ygg-modal-special-modes 'ygg-compose-preview-mode))
+
 (defun ygg-compose-preview--resized (window)
   (with-current-buffer (window-buffer window)
     (when ygg-compose-preview--shown
