@@ -23,6 +23,8 @@
 (declare-function eglot-code-actions "eglot")
 (declare-function eglot-reconnect "eglot")
 (declare-function eglot-inlay-hints-mode "eglot")
+(declare-function eglot-semantic-tokens-mode "eglot")
+(defvar eglot-semantic-tokens-mode)
 (defvar eglot-autoshutdown)
 (defvar eglot-server-programs)
 (defvar eglot-workspace-configuration)
@@ -314,7 +316,11 @@ whichever completes last re-modes the stragglers."
     ("dart" . "Dart")
     ("sourcekit-lsp" . "Swift")
     ("emmet-language-server" . "Emmet")
-    ("ngserver" . "Angular"))
+    ("ngserver" . "Angular")
+    ("marksman" . "Markdown (marksman)")
+    ("docker-langserver" . "Dockerfile")
+    ("sqruff" . "SQL")
+    ("taplo" . "TOML"))
   "Server binaries probed with `ygg-lsp--executable'; missing ones only warn.")
 
 (defvar ygg-lsp--warned nil
@@ -430,10 +436,13 @@ whichever completes last re-modes the stragglers."
                   real))))
         "dart")))
 
+(require 'ygg-dart-lsp)
+
 (defun ygg-lsp-dart-contact (&rest _)
   "Dart's server, on the Flutter-pinned sdk's Dart when the project has one."
-  (list (ygg-lsp--dart-sdk-dart (if-let* ((p (project-current))) (project-root p) default-directory))
-        "language-server" "--protocol=lsp"))
+  (append (list (ygg-lsp--dart-sdk-dart (if-let* ((p (project-current))) (project-root p) default-directory))
+                "language-server" "--protocol=lsp")
+          (ygg-dart-lsp-contact-options)))
 
 (defun ygg-lsp--angular-root ()
   (locate-dominating-file default-directory "angular.json"))
@@ -861,10 +870,8 @@ Zero or nil shuts down immediately, as eglot does."
         eglot-events-buffer-config '(:size 0)
         eglot-send-changes-idle-time 0.3
         eglot-report-progress nil
-        ;; these two only: inlay hints and highlights are on by choice here,
-        ;; and formatting happens on save rather than mid-keystroke
-        eglot-ignored-server-capabilities
-        '(:semanticTokensProvider :documentOnTypeFormattingProvider))
+        ;; formatting happens on save rather than mid-keystroke
+        eglot-ignored-server-capabilities '(:documentOnTypeFormattingProvider))
   (setq-default eglot-workspace-configuration #'ygg-lsp-workspace-configuration)
   (advice-add 'eglot--managed-mode :around #'ygg-lsp--managed-mode-a)
   (advice-add 'eglot-shutdown :around #'ygg-lsp--defer-shutdown-a)
@@ -881,8 +888,11 @@ Zero or nil shuts down immediately, as eglot does."
              ;; yaml, schema and all: SchemaStore's compose entry matches both the
              ;; docker-compose*.y{a,}ml and the compose*.y{a,}ml names
              ((yaml-mode yaml-ts-mode) . ("yaml-language-server" "--stdio"))
-             ;; harper: grammar/spell checker for prose (no other LSP owns these modes)
-             ((markdown-mode gfm-mode) . ("harper-ls" "--stdio"))))
+             ((markdown-mode gfm-mode) . ygg-lsp-markdown-contact)
+             ((dockerfile-ts-mode dockerfile-mode) . ("docker-langserver" "--stdio"))
+             ((sql-mode) . ("sqruff" "lsp"))
+             (((toml-ts-mode :language-id "toml") (conf-toml-mode :language-id "toml"))
+              . ("taplo" "lsp" "stdio"))))
     (add-to-list 'eglot-server-programs entry))
   (advice-add 'eglot-path-to-uri :around #'ygg-lsp--jdt-source-uri)
   (cl-defmethod eglot-register-capability :around
@@ -900,7 +910,8 @@ Zero or nil shuts down immediately, as eglot does."
                  . ygg-lsp-ts-contact)))
 
 (defun ygg-lsp--hook-when (available hooks &optional label)
-  "Have HOOKS start eglot once AVAILABLE, a binary name or predicate, holds in the buffer."
+  "Have HOOKS start eglot once AVAILABLE holds in the buffer.
+AVAILABLE is a binary name or a predicate."
   (let ((fn (intern (format "ygg-lsp--ensure-when-%s" available)))
         (label (or label (and (stringp available) (ygg-lsp--binary-label available)))))
     (defalias fn
@@ -914,7 +925,20 @@ Zero or nil shuts down immediately, as eglot does."
 (ygg-lsp--hook-when #'ygg-lsp--python-server '(python-mode-hook python-ts-mode-hook)
                     "Python (basedpyright/pyright/uvx) server")
 (ygg-lsp--hook-when "yaml-language-server" '(yaml-mode-hook yaml-ts-mode-hook))
-(ygg-lsp--hook-when "harper-ls" '(markdown-mode-hook gfm-mode-hook))
+(defun ygg-lsp-markdown-contact (&rest _)
+  "Marksman when installed, else harper-ls alone."
+  (if (ygg-lsp--executable "marksman")
+      '("marksman" "server")
+    '("harper-ls" "--stdio")))
+
+(defun ygg-lsp--markdown-available-p ()
+  (or (ygg-lsp--executable "marksman") (ygg-lsp--executable "harper-ls")))
+
+(ygg-lsp--hook-when #'ygg-lsp--markdown-available-p '(markdown-mode-hook gfm-mode-hook)
+                    "Markdown (marksman) server")
+(ygg-lsp--hook-when "docker-langserver" '(dockerfile-ts-mode-hook dockerfile-mode-hook))
+(ygg-lsp--hook-when "sqruff" '(sql-mode-hook))
+(ygg-lsp--hook-when "taplo" '(toml-ts-mode-hook conf-toml-mode-hook))
 (ygg-lsp--hook-when "rust-analyzer" '(rust-mode-hook rust-ts-mode-hook))
 (ygg-lsp--hook-when "gopls" '(go-mode-hook go-ts-mode-hook))
 (ygg-lsp--hook-when "lua-language-server" '(lua-mode-hook lua-ts-mode-hook))
@@ -998,6 +1022,20 @@ Zero or nil shuts down immediately, as eglot does."
   (dolist (mode '(js-mode js-ts-mode typescript-ts-mode tsx-ts-mode))
     (yggdrasil-localleader-def mode "m s" #'ygg-lsp-ts-source-definition
                                "source definition")))
+
+;; eglot turns semantic tokens on everywhere; tree-sitter faces suffice except in these modes
+(defcustom ygg-lsp-semantic-token-modes
+  '(dart-mode dart-ts-mode kotlin-ts-mode swift-mode swift-ts-mode rust-ts-mode)
+  "Major modes whose buffers take server semantic tokens."
+  :type '(repeat symbol)
+  :group 'eglot)
+
+(defun ygg-lsp--semantic-tokens-sync ()
+  (when (and (bound-and-true-p eglot-semantic-tokens-mode)
+             (not (derived-mode-p ygg-lsp-semantic-token-modes)))
+    (eglot-semantic-tokens-mode -1)))
+
+(add-hook 'eglot-managed-mode-hook #'ygg-lsp--semantic-tokens-sync)
 
 ;; inlay hints on by default under a managing server (Zed shows them always)
 (add-hook 'eglot-managed-mode-hook
@@ -1215,6 +1253,13 @@ when it already runs on save here."
       (eglot-inlay-hints-mode 'toggle)
     (message "yggdrasil-lsp: eglot not loaded in this buffer")))
 
+(defun ygg-toggle-semantic-tokens ()
+  "Toggle `eglot-semantic-tokens-mode' in the current buffer."
+  (interactive)
+  (if (fboundp 'eglot-semantic-tokens-mode)
+      (eglot-semantic-tokens-mode 'toggle)
+    (message "yggdrasil-lsp: eglot not loaded in this buffer")))
+
 ;;; 7. Diagnostics polish
 
 ;;; Leader: SPC c code submap
@@ -1395,6 +1440,7 @@ when it already runs on save here."
   "F" #'ygg-format :label "format selection"
   "R" #'ygg-ast-grep-rewrite :label "structural replace"
   "i" #'ygg-toggle-inlay-hints :label "inlay hints"
+  "k" #'ygg-toggle-semantic-tokens :label "semantic tokens"
   "n" #'ygg-lsp-reconnect :label "reconnect"
   "S" #'consult-eglot-symbols :label "workspace symbols"
   "t" #'ygg-lsp-type-definition :label "type definition"

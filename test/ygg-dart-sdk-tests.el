@@ -91,7 +91,7 @@
   (ygg-dart-sdk-tests--world (tmp shims project install counter)
     (let ((cached (ygg-dart-sdk-tests--cache-dart install))
           (default-directory project))
-      (should (equal (ygg-lsp-dart-contact)
+      (should (equal (seq-take (ygg-lsp-dart-contact) 3)
                      (list cached "language-server" "--protocol=lsp"))))))
 
 (ert-deftest ygg-dart-sdk-tests-dape-dart-command-resolves-the-same ()

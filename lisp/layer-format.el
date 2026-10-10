@@ -110,6 +110,8 @@ server runs.")
 (declare-function flymake-collection-hook-setup "flymake-collection-hook")
 (declare-function flymake-start "flymake")
 (declare-function eglot-managed-p "eglot")
+(declare-function eglot-current-server "eglot")
+(declare-function jsonrpc--process "jsonrpc")
 (defvar flymake-collection-hook-config)
 
 (declare-function yggdrasil-define-keys "yggdrasil-core")
@@ -262,12 +264,22 @@ NAME), else node_modules/.bin or .venv/bin within the project."
                  exec-path)))
     (apply backend args)))
 
+(defun ygg-format--server-runs-ruff-p ()
+  (when-let* ((server (eglot-current-server))
+              (proc (ignore-errors (jsonrpc--process server)))
+              (command (process-command proc)))
+    (and (member "server" command)
+         (seq-some (lambda (arg) (equal (file-name-nondirectory arg) "ruff")) command))))
+
 (defun ygg-format--rejoin-linters ()
-  "Put this mode's linters back beside eglot, which replaced them."
+  "Put this mode's linters back beside eglot, which replaced them.
+Ruff's linter stays out when the server already runs `ruff server'."
   (when-let* (((eglot-managed-p))
               (rows (ygg-format--rows :linter major-mode)))
     (dolist (tool rows)
-      (add-hook 'flymake-diagnostic-functions (plist-get tool :linter) nil t))
+      (unless (and (eq (plist-get tool :linter) 'flymake-collection-ruff)
+                   (ygg-format--server-runs-ruff-p))
+        (add-hook 'flymake-diagnostic-functions (plist-get tool :linter) nil t)))
     (flymake-start)))
 
 (defun ygg-format-setup-linters ()

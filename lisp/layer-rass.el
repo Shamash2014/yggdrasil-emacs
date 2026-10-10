@@ -28,24 +28,36 @@
          (end (cl-position "--" after :test #'equal)))
     (if end (cl-subseq after 0 end) cmd)))
 
+(defun ygg-rass--command (contact)
+  (seq-take contact (or (cl-position-if #'keywordp contact) (length contact))))
+
+(defun ygg-rass--options (contact)
+  (nthcdr (length (ygg-rass--command contact)) contact))
+
+(defun ygg-rass--wrappable-p (contact)
+  "Whether CONTACT is a local stdio command rass may lead."
+  (let ((command (ygg-rass--command contact)))
+    (and command
+         (cl-every #'stringp command)
+         (not (plist-member (ygg-rass--options contact) :autoport))
+         (not (member (file-name-nondirectory (car command)) '("rass" "harper-ls")))
+         (not (file-remote-p default-directory))
+         (executable-find "rass")
+         t)))
+
+(defun ygg-rass--harper-ready-p ()
+  (and (executable-find "harper-ls") (file-exists-p ygg-rass-harper-preset)))
+
 (defun ygg-rass-with-harper (contact)
   "CONTACT, a resolved eglot contact, running through rass beside harper-ls.
 Left as is when it is not a local stdio command or rass is missing.
 Keyword options such as :initializationOptions stay at the end."
-  (let* ((split (or (cl-position-if #'keywordp contact) (length contact)))
-         (command (seq-take contact split))
-         (options (nthcdr split contact)))
-    (if (and command
-             (cl-every #'stringp command)
-             (not (plist-member options :autoport))
-             (not (member (file-name-nondirectory (car command)) '("rass" "harper-ls")))
-             (not (file-remote-p default-directory))
-             (executable-find "rass")
-             (executable-find "harper-ls")
-             (file-exists-p ygg-rass-harper-preset))
-        `("rass" "--no-stream-diagnostics" "--log-level" "warn" ,ygg-rass-harper-preset
-          "--" ,@command "--" "harper-ls" "--stdio" ,@options)
-      contact)))
+  (if (and (ygg-rass--wrappable-p contact) (ygg-rass--harper-ready-p))
+      (ygg-rass--join ygg-rass-harper-preset contact
+                      (and (member (file-name-nondirectory (car contact))
+                                   '("vscode-html-language-server" "vscode-css-language-server"))
+                           (ygg-rass--tailwind-companions default-directory)))
+    contact))
 
 (defun ygg-rass--wrap-guess (guess)
   "GUESS, what eglot--guess-contact returns, with its contact beside harper."
@@ -64,7 +76,7 @@ Keyword options such as :initializationOptions stay at the end."
 A running server keeps its command until it is shut down and started again."
   (interactive)
   (advice-add 'eglot--guess-contact :around #'ygg-rass--guess-contact)
-  (ygg-rass-eslint-enable))
+  (ygg-rass-companions-enable))
 
 ;;;###autoload
 (defun ygg-rass-disable ()
@@ -119,22 +131,87 @@ A running server keeps its command until it is shut down and started again."
                     (file-name-directory (or load-file-name buffer-file-name)))
   "The rass preset pairing a TypeScript server with ESLint.")
 
+(defun ygg-rass--resolve (name directory)
+  "NAME's binary within the project at DIRECTORY, else NAME itself when on PATH."
+  (let ((project (let ((default-directory directory))
+                   (and (fboundp 'ygg-format--project-bin) (ygg-format--project-bin name)))))
+    (cond ((stringp project) project)
+          ((executable-find name) name))))
+
+(defun ygg-rass--biome-command (directory)
+  (and (not (file-remote-p directory))
+       (locate-dominating-file
+        directory
+        (lambda (dir) (or (file-exists-p (expand-file-name "biome.json" dir))
+                          (file-exists-p (expand-file-name "biome.jsonc" dir)))))
+       (and-let* ((biome (ygg-rass--resolve "biome" directory)))
+         (list biome "lsp-proxy"))))
+
+(defconst ygg-rass--tailwind-config-re "\\`tailwind\\.config\\.[cm]?[jt]s\\'")
+
+(defun ygg-rass--package-tailwind-p (directory)
+  (let ((file (expand-file-name "package.json" directory)))
+    (and (file-exists-p file)
+         (ignore-errors
+           (with-temp-buffer
+             (insert-file-contents file)
+             (let ((json (json-parse-buffer :object-type 'alist)))
+               (seq-some (lambda (key)
+                           (seq-some (lambda (dep) (assq dep (alist-get key json)))
+                                     '(tailwindcss nativewind)))
+                         '(dependencies devDependencies))))))))
+
+(defun ygg-rass--tailwind-p (directory)
+  (and (not (file-remote-p directory))
+       (executable-find "tailwindcss-language-server")
+       (locate-dominating-file
+        directory
+        (lambda (dir) (or (directory-files dir nil ygg-rass--tailwind-config-re t)
+                          (ygg-rass--package-tailwind-p dir))))
+       t))
+
+(defun ygg-rass--tailwind-companions (directory)
+  (and (ygg-rass--tailwind-p directory) '(("tailwindcss-language-server" "--stdio"))))
+
+(defun ygg-rass--typescript-companions (directory)
+  "The commands of the linters and tooling servers the project at DIRECTORY uses."
+  (append
+   (and (ygg-rass-eslint-p directory)
+        (executable-find "vscode-eslint-language-server")
+        '(("vscode-eslint-language-server" "--stdio")))
+   (and-let* ((biome (ygg-rass--biome-command directory))) (list biome))
+   (ygg-rass--tailwind-companions directory)))
+
+(defun ygg-rass--join (preset contact companions)
+  "CONTACT through rass with PRESET, COMPANIONS, then harper-ls, options last."
+  `("rass" "--no-stream-diagnostics" "--log-level" "warn" ,preset
+    "--" ,@(ygg-rass--command contact)
+    ,@(mapcan (lambda (companion) (cons "--" (copy-sequence companion))) companions)
+    ,@(and (executable-find "harper-ls") '("--" "harper-ls" "--stdio"))
+    ,@(ygg-rass--options contact)))
+
 (defun ygg-rass-with-eslint (base)
-  "BASE, a TypeScript server contact, paired with the project's ESLint.
+  "BASE, a TypeScript contact, paired with the project's ESLint, Biome, Tailwind.
 Its keyword options, such as :initializationOptions, stay at the end,
 where eglot reads them.  TypeScript 7's tsc is never paired."
-  (let* ((split (or (cl-position-if #'keywordp base) (length base)))
-         (command (seq-take base split))
-         (options (nthcdr split base)))
-    (if (and command
-             (not (equal (file-name-nondirectory (car command)) "tsc"))
-             (ygg-rass-eslint-p default-directory)
-             (executable-find "rass")
-             (executable-find "vscode-eslint-language-server"))
-        `("rass" "--no-stream-diagnostics" "--log-level" "warn" ,ygg-rass-typescript-preset
-          "--" ,@command "--" "vscode-eslint-language-server" "--stdio"
-          ,@(and (executable-find "harper-ls") '("--" "harper-ls" "--stdio"))
-          ,@options)
+  (let ((companions (and (ygg-rass--wrappable-p base)
+                         (not (equal (file-name-nondirectory (car base)) "tsc"))
+                         (ygg-rass--typescript-companions default-directory))))
+    (if companions
+        (ygg-rass--join (if (assoc "vscode-eslint-language-server" companions)
+                            ygg-rass-typescript-preset
+                          ygg-rass-harper-preset)
+                        base companions)
+      base)))
+
+(defun ygg-rass-with-ruff (base)
+  "BASE, a Python server contact, paired with `ruff server' when ruff runs."
+  (let ((ruff (and (ygg-rass--wrappable-p base)
+                   (not (equal (file-name-nondirectory (car base)) "ruff"))
+                   (ygg-rass--harper-ready-p)
+                   (ygg-rass--resolve "ruff" default-directory))))
+    (if ruff
+        (ygg-rass--join ygg-rass-harper-preset base (list (list ruff "server")))
       base)))
 
 (defun ygg-rass--typescript-entry-p (entry)
@@ -142,16 +219,26 @@ where eglot reads them.  TypeScript 7's tsc is never paired."
        (cl-some (lambda (mode) (eq (if (consp mode) (car mode) mode) 'tsx-ts-mode))
                 (car entry))))
 
-(defun ygg-rass-eslint-enable ()
-  "Let the TypeScript server entry bring the project's ESLint along, in place."
-  (when-let* ((entry (cl-find-if #'ygg-rass--typescript-entry-p eglot-server-programs))
-              (base (cdr entry))
+(defun ygg-rass--python-entry-p (entry)
+  (and (consp (car entry)) (memq 'python-mode (car entry)) t))
+
+(defun ygg-rass--wrap-entry (entry wrapper)
+  (when-let* ((base (cdr entry))
               ((not (assq base ygg-rass--wrapped-contacts)))
               ((or (functionp base) (and (consp base) (stringp (car base))))))
     (let ((wrapped (lambda (&rest args)
-                     (ygg-rass-with-eslint (if (functionp base) (apply base args) base)))))
+                     (funcall wrapper (if (functionp base) (apply base args) base)))))
       (push (cons wrapped base) ygg-rass--wrapped-contacts)
       (setf (cdr entry) wrapped))))
+
+(defun ygg-rass-companions-enable ()
+  "Let the TypeScript and Python entries bring companion servers along."
+  (when-let* ((entry (cl-find-if #'ygg-rass--typescript-entry-p eglot-server-programs)))
+    (ygg-rass--wrap-entry entry #'ygg-rass-with-eslint))
+  (when-let* ((entry (cl-find-if #'ygg-rass--python-entry-p eglot-server-programs)))
+    (ygg-rass--wrap-entry entry #'ygg-rass-with-ruff)))
+
+(define-obsolete-function-alias 'ygg-rass-eslint-enable #'ygg-rass-companions-enable "2026-10")
 
 (defun ygg-rass-typescript-configuration (server)
   "ESLint settings for SERVER when it serves TypeScript.
