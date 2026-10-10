@@ -74,6 +74,7 @@ Tests:
 - `test/ygg-modal-consistency-tests.el`
 - `test/ygg-mode-keys-tests.el`
 - `test/ygg-motions-tests.el`
+- `test/ygg-selection-history-tests.el`
 
 ## Leader keys and help
 
@@ -247,11 +248,11 @@ Spawning, trace buffer, subagents, modes and models, shells, todo, transcripts, 
 
 - Spawn an agent on a project with a model, resume, fork, archive, delete.
 - Trace: the conversation as operations, with a queue of prompts waiting to send.
-- Subagents: a delegation you can hold, list and open (`\ i t` lists them in the quickfix, one row each, following the session; a row opens the subagent's trace), each with its model (the call's own, the subagent session's own, its agent definition's `model:`, else the parent's at spawn and marked ↑; `?` when unknown) and tokens (a native subagent's own spend, else its context as `ctx`; `—` otherwise).
+- Subagents: a delegation you can hold, list and open (`\ i t` lists them in the quickfix, one row each, following the session; a row opens the subagent's trace), each with its model (the call's own, the subagent session's own, its agent definition's `model:`, else the parent's at spawn and marked ↑; `?` when unknown) and tokens (a native subagent's own spend, else its context as `ctx`; em dash otherwise).
 - Session modes, model, goal and worker effort per session.
 - Running shell commands across agents, with a way to stop one.
 - Todo list kept by you and the agent; transcripts of ended conversations.
-- Overall LiteLLM usage in a pi session's header (`LiteLLM $2.46 / $200 · 30d`): the key (from `models.json`, else the provider's entry in the project's pi home `auth.json`) is asked for `/key/info` in the background and cached five minutes per base URL and key, so all projects sharing it make one request. Nothing shows without a LiteLLM provider and key, and `LiteLLM ?` shows when the request fails and there was never a figure (otherwise the last good one stays) (`aob-litellm`, `aob-overall-usage-functions`).
+- Overall LiteLLM usage in a pi session's header (`LiteLLM $2.46 / $200 · 30d`): the key (from the pi models file, else the provider's entry in the project's pi home auth file) is asked for the LiteLLM key-info endpoint in the background and cached five minutes per base URL and key, so all projects sharing it make one request. Nothing shows without a LiteLLM provider and key, and `LiteLLM ?` shows when the request fails and there was never a figure (otherwise the last good one stays) (`aob-litellm`, `aob-overall-usage-functions`).
 
 ### How to get to it
 
@@ -278,7 +279,7 @@ Results below are read from docstrings and key labels, not driven live (unverifi
 1. `SPC a c c` asks for agent, project and model and spawns the session with a first prompt; its trace opens in a space.
 2. In the trace, `a`, `i` or `o` opens a compose buffer; `c` steers the turn already running (`aob-steer`).
 3. `RET` on a pending question or decision answers it (`aob-trace-answer`).
-4. `C` in normal or visual state comments on the line or selection in a box under it (`aob-trace-comment`); `ZZ` holds the comment for the next message, `C-RET` holds it and sends every held comment, `ZQ` cancels. `C` on a held comment's card or its marked words opens the same box on its words; saving it empty drops the comment.
+4. `C` in normal or visual state comments on the line or selection in a box under it (`aob-trace-comment`); `ZZ` holds the comment for the next message, Control-Return holds it and sends every held comment, `ZQ` cancels. `C` on a held comment's card or its marked words opens the same box on its words; saving it empty drops the comment.
 5. `SPC a c o` flashes labels over the agents in this space and jumps to the chosen one.
 6. `SPC a c p` lists every command the agents have running (`aob-shells`); `SPC a c q` kills this session (`aob-kill-session`).
 
@@ -304,6 +305,9 @@ The main files, then the test files that map to them by name.
 - `lisp/aob-todo-view.el`
 - `lisp/aob-transcript.el`
 - `lisp/ygg-todo.el`
+- `lisp/aob-transcript-pi.el`
+- `lisp/aob-decisions-qf.el`
+- `lisp/agent-objects/aob-litellm.el`
 
 Tests:
 
@@ -316,6 +320,14 @@ Tests:
 - `test/aob-question-prompt-tests.el`
 - `test/aob-reject-reason-tests.el`
 - `test/aob-steer-outcomes-tests.el`
+- `test/aob-litellm-tests.el`
+- `test/aob-resolve-ret-tests.el`
+- `test/aob-subagent-model-tests.el`
+- `test/aob-subagent-state-tests.el`
+- `test/aob-transcript-pi-tests.el`
+- `test/ygg-aob-localleader-tests.el`
+- `test/ygg-aob-subagents-quickfix-tests.el`
+- `test/ygg-qf-decisions-tests.el`
 
 ## Talking to agents
 
@@ -436,6 +448,7 @@ The main files, then the test files that map to them by name.
 - `skills/create-verification-skill/SKILL.md`
 - `skills/spec-mikado/mikado.py`
 - `skills/tcr/scripts/tcr.sh`
+- `skills/show-me/scripts/plan-lint`
 
 Tests:
 
@@ -446,6 +459,7 @@ Tests:
 - `test/regression-skill-tests.el`
 - `test/skills-description-tests.el`
 - `test/ygg-skill-index-tests.el`
+- `test/show-me-plan-lint-tests.el`
 
 ## Agent MCP sidecar
 
@@ -499,6 +513,7 @@ Tests:
 - `test/ygg-pi-harness-tests.el`
 - `test/aob-steal-small-tests.el`
 - `test/aob-trim-tests.el`
+- `test/aob-lat-mcp-tests.el`
 
 ## Git status and worktrees
 
@@ -601,10 +616,12 @@ What the code shows.
 The main files, then the test files that map to them by name.
 
 - `lisp/ygg-git-review-requests.el`
+- `lisp/ygg-git-pr-merge.el`
 
 Tests:
 
 - `test/ygg-git-review-requests-tests.el`
+- `test/ygg-git-pr-merge-tests.el`
 
 ## Stacked pull requests
 
@@ -619,7 +636,7 @@ Stack section, restack, branch on top, retarget after a merge, compare against t
 - The stack is the current branch's parents up to the default branch plus the children above it; a fork follows the first child by name.
 - Restack walks the stack from the first branch that no longer contains its parent and rebases the rest onto that parent with `--update-refs`, in the background, the old base being the reflog fork point. Only branches whose tip moved, and that the remote already has, are listed in one question and pushed with `--force-with-lease=<ref>:<expected sha>`; the default branch is never pushed.
 - A dirty worktree or a rebase in progress refuses the restack; a conflict stops it, opens magit status on the rebase, and the push question comes when the rebase is over, found on the next refresh, whether it was continued or aborted.
-- Make a branch on top of the current one with `magit-branch-and-checkout`, recording `branch.<name>.ygg-parent`.
+- Make a branch on top of the current one with Magit's branch-and-checkout, recording `branch.<name>.ygg-parent`.
 - After a merge from `ygg-git-pr-merge`, or when a request the section saw open is gone and the forge says it was merged, one question asks "Retarget #N to <target> and restack?": it edits the request's base through the merge command's retarget step, fetches, sets the child's parent to the target and restacks the stack above the merged branch onto it.
 - A compare of a stacked branch's request diffs against its recorded parent rather than the default branch (`ygg-git-compare--parent-base`).
 - v1 does not open pull requests.
@@ -731,6 +748,7 @@ The main files, then the test files that map to them by name.
 - `lisp/ygg-git-compare-interdiff.el`
 - `lisp/ygg-git-compare-explain.el`
 - `lisp/ygg-git-compare-tour.el`
+- `lisp/ygg-git-compare-job.el`
 
 Tests:
 
@@ -742,6 +760,7 @@ Tests:
 - `test/ygg-git-compare-marks-tests.el`
 - `test/ygg-git-compare-tests.el`
 - `test/ygg-git-compare-tour-tests.el`
+- `test/ygg-git-compare-job-tests.el`
 
 ## Review threads and submit
 
@@ -767,7 +786,7 @@ Both are reached from a compare buffer.
 - `r` — reply to the thread on this line, by `ygg-git-compare-threads-reply`
 - `TAB` — fold the thread, by `ygg-git-compare-threads-toggle-fold`
 - `RET` — open the log of the check on this row in the browser (`ygg-git-compare-check-open`)
-- `o` — open the log of the check on this row in the browser (`ygg-git-compare-check-open`)
+- `o` — open the log of the check on this row in the browser (`ygg-git-compare-check-browse`)
 - `y` — copy the address of the check on this row (`ygg-git-compare-check-copy`)
 
 ### Driving it
@@ -796,6 +815,7 @@ The main files, then the test files that map to them by name.
 - `lisp/ygg-git-compare-threads.el`
 - `lisp/ygg-git-compare-pr-info.el`
 - `lisp/ygg-git-compare-submit.el`
+- `lisp/ygg-comment.el`
 
 Tests:
 
@@ -898,12 +918,14 @@ The main files, then the test files that map to them by name.
 - `lisp/ygg-project-scan.el`
 - `lisp/ygg-project-setup.el`
 - `lisp/ygg-project-commands.el`
+- `lisp/ygg-forge-config.el`
 
 Tests:
 
 - `test/ygg-project-setup-tests.el`
 - `test/ygg-project-umbrella-tests.el`
 - `test/ygg-projects-tests.el`
+- `test/ygg-forge-config-tests.el`
 
 ## ICE and lat.md
 
@@ -918,6 +940,7 @@ Changes list, task views, connections, lat search, checks, wiring, maintain.
 - Check a change's intent, expectations and plan.
 - Wire a repository for ICE; preview the C4 views.
 - Maintain: keep the verification skill and feature map honest.
+- Assimilate: fold a project's old docs into its feature map, ADRs, glossary and C4 views, citing each source and leaving the old docs alone.
 
 ### How to get to it
 
@@ -930,6 +953,7 @@ ICE has a leader submenu under SPC a k built at load time (not listed by the sta
 - `M-x ygg-ice-approve-checkpoints` — approve a change's checkpoints (`ygg-ice-approve-checkpoints`)
 - `M-x ygg-ice-c4-preview` — preview the C4 views (`ygg-ice-c4-preview`)
 - `M-x ygg-ice-maintain` — keep the verification skill and map honest (`ygg-ice-maintain`)
+- `M-x ygg-ice-assimilate` — fold the old docs that changed into the ICE layer (`ygg-ice-assimilate`); `E` on a project's sidebar rows, or the `docs` extra of `SPC p i`
 
 ### Driving it
 
@@ -943,6 +967,7 @@ Results below are read from docstrings, not driven live (unverified).
 
 What the code shows.
 
+- `ygg-ice-assimilate` refuses while an agent session is live in the root, and says nothing new when no old doc changed since `.aob/assimilated.eld`; the agent moves the snapshot into place only when it does not block, and a doc that contradicts the code becomes an Owner decides item.
 - `ygg-ice-maintain-daily` arms an idle timer only when projects are named and Emacs is not in batch mode.
 - The scripts under `etc/ice/` are run through the `ygg-ice-*-script` options.
 
@@ -959,10 +984,14 @@ The main files, then the test files that map to them by name.
 - `etc/ice/ice-c4-drift`
 - `etc/ice/ice-compact`
 - `etc/ice/lat-init-agents.py`
+- `lisp/ygg-repowise.el`
+- `etc/ice/ice-repowise.mjs`
 
 Tests:
 
 - `test/ice-layer-tests.el`
+- `test/ygg-projects-context-tests.el`
+- `test/ygg-qf-context-tests.el`
 
 ## ICE gates and hooks
 
@@ -1472,6 +1501,8 @@ The main files, then the test files that map to them by name.
 Tests:
 
 - `test/ygg-term-env-tests.el`
+- `test/ygg-command-panel-tests.el`
+- `test/ygg-term-project-tests.el`
 
 ## Files, search and quickfix
 
@@ -1523,6 +1554,12 @@ The main files, then the test files that map to them by name.
 - `lisp/layer-dired.el`
 - `lisp/layer-pcre.el`
 - `lisp/layer-completion.el`
+
+Tests:
+
+- `test/ygg-qf-schedules-tests.el`
+- `test/ygg-qf-shells-tests.el`
+- `test/ygg-qf-todo-tests.el`
 
 ## UI and themes
 

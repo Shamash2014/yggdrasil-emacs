@@ -1104,6 +1104,22 @@ const yggdrasilPlugin = {
       emit.localleader({ mode: mapName(args[0]), key: keyText(args[1]), target: def.target, label: def.label });
       return true;
     }
+    if (head === "yggdrasil-define-mode-keys") {
+      pairs(`${mapName(args[0])}-keys`, args.slice(2), emit);
+      return true;
+    }
+    if (head === "ygg-aob--localleader-group") {
+      const mode = mapName(args[0]);
+      const key = keyText(args[1]);
+      const label = isStr(args[2]) ? args[2].value : null;
+      emit.localleader({ mode, key, kind: "prefix", target: label ?? "<expr>", label });
+      const list = isList(args[3]) && args[3][0] === "quote" ? args[3][1] : args[3];
+      for (const item of isList(list) ? list : []) {
+        if (!isList(item) || !isStr(item[0]) || typeof item[1] !== "string") continue;
+        emit.localleader({ mode, key: `${key} ${item[0].value}`, target: item[1], label: isStr(item[2]) ? item[2].value : null });
+      }
+      return true;
+    }
     return false;
   },
 };
@@ -1223,7 +1239,7 @@ function elispEntries(repo, plugins) {
       keyEntries.push(entry(b.kind === "map" ? "prefix" : "key", b.target, `${prefix} ${b.key}`.trim(), b.file, b.line, { map: b.map, label: b.label, roots }));
     }
   }
-  for (const l of localleader) keyEntries.push(entry("key", l.target, `\\ ${l.key}`, l.file, 1, { map: `localleader:${l.mode}`, label: l.label, roots: [`localleader:${l.mode}`] }));
+  for (const l of localleader) keyEntries.push(entry(l.kind ?? "key", l.target, `\\ ${l.key}`, l.file, 1, { map: `localleader:${l.mode}`, label: l.label, roots: [`localleader:${l.mode}`] }));
   const suffixEntries = [];
   for (const transient of entries.filter((e) => e.kind === "transient")) {
     for (const invoker of keyEntries.filter((k) => k.name === transient.name)) {
