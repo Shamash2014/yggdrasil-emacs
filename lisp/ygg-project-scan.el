@@ -277,15 +277,16 @@ The walk is a source of suggestions for the import, and nothing else."
 (defcustom ygg-project-import-extras nil
   "Extras an import runs without being picked: skills installs and
 refreshes the config's skills for every agent, gh and glab open a login
-terminal for the project unless it has one, ice wires the project for
+terminal for the project unless it has one, docs asks an agent to fold
+the project's old docs into its ICE layer, ice wires the project for
 ICE or refreshes its wiring."
-  :type '(set (const "skills") (const "gh") (const "glab") (const "ice")) :group 'ygg)
+  :type '(set (const "skills") (const "gh") (const "glab") (const "docs") (const "ice")) :group 'ygg)
 
-(defconst ygg-project-import--extra-names '("skills" "gh" "glab" "ice"))
+(defconst ygg-project-import--extra-names '("skills" "gh" "glab" "docs" "ice"))
 
 (defun ygg-project-import--read-extras ()
   (let ((picked (completing-read-multiple
-                 "Extras (skills, gh, glab, ice; RET for none): "
+                 "Extras (skills, gh, glab, docs, ice; RET for none): "
                  ygg-project-import--extra-names nil t
                  (and ygg-project-import-extras
                       (string-join ygg-project-import-extras ",")))))
@@ -296,7 +297,8 @@ ICE or refreshes its wiring."
   "Take ROOT in: its project skills, the config its agents answer under,
 what it is laid out as and what it can run.  EXTRAS, picked when called
 interactively, add the config's skills for every agent (skills) and ICE
-wiring (ice), a gh or glab login terminal (gh, glab).  CALLBACK is
+wiring (ice), a gh or glab login terminal (gh, glab), an agent folding
+old docs into the ICE layer (docs).  CALLBACK is
 called with ROOT when the last of it settles.
 Nothing here blocks."
   (interactive (list (completing-read "Import project: "
@@ -357,6 +359,13 @@ Nothing here blocks."
                                 (when (fboundp 'ygg-forge-config-import-step)
                                   (ygg-forge-config-import-step root kind)))))))
               '("gh" "glab"))
+      (and (member "docs" extras)
+           (list (cons "docs"
+                       (lambda ()
+                         (when (and (fboundp 'ygg-ice-assimilate)
+                                    (fboundp 'ygg-ice--changed-docs)
+                                    (car (ygg-ice--changed-docs root)))
+                           (ygg-ice-assimilate root))))))
       (and (member "ice" extras)
            (list (cons "ice"
                        (lambda ()

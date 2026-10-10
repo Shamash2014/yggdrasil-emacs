@@ -1100,6 +1100,86 @@ Presets come from PRESETS only; the preset path is layer-aob's own."
 
 ;;; The daily run is off unless projects are named
 
+(defconst ice-tests--old-docs
+  '(("README.md" . "# Shop\n")
+    ("docs/guide.md" . "How to shop.\n")
+    ("docs/adr/0001-use-postgres.md" . "# Use Postgres\n")
+    ("CONTEXT.md" . "**Token**: x\n")
+    ("lat.md/auth.md" . "# Auth\n")
+    ("openspec/changes/a/proposal.md" . "## Why\n")
+    ("node_modules/pkg/README.md" . "# pkg\n")
+    ("vendor/lib/README.md" . "# lib\n")
+    (".git/NOTES.md" . "x\n"))
+  "A repository holding two old docs among files that are not.")
+
+(defun ice-tests--mark-assimilated (root)
+  "Write ROOT's marker as if the pass had taken every old doc now there."
+  (make-directory (expand-file-name ".aob" root) t)
+  (with-temp-file (expand-file-name ".aob/assimilated.eld" root)
+    (prin1 (cdr (ygg-ice--changed-docs root)) (current-buffer))))
+
+(ert-deftest ice-assimilate-finds-readme-and-docs-and-skips-the-layer-and-vendored ()
+  (ice-tests--with-repo root ice-tests--old-docs
+    (should (equal (ygg-ice--old-docs root) '("README.md" "docs/guide.md")))))
+
+(ert-deftest ice-assimilate-takes-only-docs-changed-since-the-marker ()
+  (ice-tests--with-repo root ice-tests--old-docs
+    (should (equal (car (ygg-ice--changed-docs root)) '("README.md" "docs/guide.md")))
+    (ice-tests--mark-assimilated root)
+    (should-not (car (ygg-ice--changed-docs root)))
+    (with-temp-file (expand-file-name "docs/guide.md" root) (insert "Changed.\n"))
+    (with-temp-file (expand-file-name "docs/new.md" root) (insert "New.\n"))
+    (should (equal (car (ygg-ice--changed-docs root)) '("docs/guide.md" "docs/new.md")))))
+
+(ert-deftest ice-assimilate-spawns-under-its-preset-listing-only-the-changed-docs ()
+  (ice-tests--with-repo root ice-tests--old-docs
+    (ice-tests--mark-assimilated root)
+    (with-temp-file (expand-file-name "docs/guide.md" root) (insert "Changed.\n"))
+    (ice-tests--spawns spawns ice-tests--presets
+      (should (eq (ygg-ice-assimilate root) 'spawned))
+      (let ((text (car (car spawns))))
+        (should (string-prefix-p "@assimilate Run the assimilate pass on " text))
+        (should (string-search "<preset name=\"assimilate\">" text))
+        (should (string-search "- docs/guide.md" text))
+        (should-not (string-search "- README.md" text))
+        (should (string-search "Owner decides" text)))
+      (should (file-exists-p (expand-file-name ".aob/assimilating.eld" root))))))
+
+(ert-deftest ice-assimilate-leaves-no-ice-dir-on-an-unwired-project ()
+  (ice-tests--with-repo root ice-tests--old-docs
+    (ice-tests--spawns spawns ice-tests--presets
+      (ygg-ice-assimilate root)
+      (should-not (file-exists-p (expand-file-name ".ice" root)))
+      (should (file-exists-p (expand-file-name ".aob/assimilating.eld" root))))))
+
+(ert-deftest ice-assimilate-says-nothing-new-and-refuses-a-live-session ()
+  (ice-tests--with-repo root ice-tests--old-docs
+    (ice-tests--spawns spawns ice-tests--presets
+      (ice-tests--live-in (list (expand-file-name "sub/" root))
+        (should-error (ygg-ice-assimilate root) :type 'user-error)
+        (should-not spawns))
+      (ice-tests--mark-assimilated root)
+      (let ((err (should-error (ygg-ice-assimilate root) :type 'user-error)))
+        (should (string-match-p "nothing new to assimilate" (cadr err))))
+      (should-not spawns))))
+
+(ert-deftest ice-import-docs-step-sits-before-ice-and-skips-without-old-docs ()
+  (require 'ygg-project-scan)
+  (should (member "docs" ygg-project-import--extra-names))
+  (let (steps spawned)
+    (cl-letf (((symbol-function 'ygg-project-import--run) (lambda (_root s _cb) (setq steps s)))
+              ((symbol-function 'ygg-ice-assimilate) (lambda (r) (push r spawned))))
+      (ygg-project-import "/tmp/cart/" nil '("docs" "ice"))
+      (should (equal (mapcar #'car (last steps 2)) '("docs" "ice")))
+      (ice-tests--with-repo root '(("lat.md/auth.md" . "# Auth\n"))
+        (ygg-project-import root nil '("docs"))
+        (funcall (cdr (assoc "docs" steps)))
+        (should-not spawned))
+      (ice-tests--with-repo root ice-tests--old-docs
+        (ygg-project-import root nil '("docs"))
+        (funcall (cdr (assoc "docs" steps)))
+        (should (equal spawned (list (ygg-project--key root))))))))
+
 (ert-deftest ice-maintain-daily-is-off-by-default-with-no-timer ()
   (should (null (eval (car (get 'ygg-ice-maintain-daily 'standard-value)) t)))
   (should (null (default-toplevel-value 'ygg-ice-maintain-daily)))

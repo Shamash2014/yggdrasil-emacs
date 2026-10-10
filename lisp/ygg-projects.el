@@ -760,6 +760,7 @@ scan already learned not to do."
           (puthash root t ygg-projects--worktrees-pending))))))
 
 (declare-function ygg-ice-context-scan "ygg-ice" (root))
+(declare-function ygg-ice-assimilate "ygg-ice" (root))
 (declare-function ygg-ice-context-present-p "ygg-ice" (root))
 (declare-function ygg-ice-context-count "ygg-ice" (root))
 (declare-function ygg-ice-context-entries "ygg-ice" (root))
@@ -2073,6 +2074,14 @@ WHAT names where they go, for when there is nothing to hand over."
       (user-error "projects: no repowise update available"))
     (ygg-agent-maps--repowise-update root (lambda () (ygg-repowise-scan root)))))
 
+(defun ygg-projects-assimilate ()
+  "Ask an agent to fold this project's old docs into its ICE layer."
+  (interactive)
+  (let ((root (get-text-property (line-beginning-position) 'ygg-project)))
+    (unless (stringp root) (user-error "projects: no project on this line"))
+    (unless (fboundp 'ygg-ice-assimilate) (require 'ygg-ice nil t))
+    (ygg-ice-assimilate root)))
+
 (defun ygg-projects-delete ()
   "Remove what this line stands for: a session for good, or a project.
 A session that ran here is a conversation, so deleting it is deleting
@@ -2655,6 +2664,7 @@ umbrella's Folders row moves that repository."
     (define-key map "Q" #'ygg-projects-context-quickfix)
     (define-key map "c" #'ygg-projects-context-to-agent)
     (define-key map "W" #'ygg-projects-repowise-update)
+    (define-key map "E" #'ygg-projects-assimilate)
     (define-key map "q" #'ygg-projects-close)
     map)
   "The sidebar's own verbs, ahead of yggdrasil's normal state.")

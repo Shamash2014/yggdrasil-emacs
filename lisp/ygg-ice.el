@@ -1808,20 +1808,103 @@ It reads intent.md and the repo and writes gaps.md beside it."
                          (string-prefix-p root (file-truename (file-name-as-directory (expand-file-name dir))))))
                      (aob-live-sessions)))))
 
+(defun ygg-ice--refuse-live (what root)
+  "Signal a user-error when an agent session is live in ROOT, naming WHAT."
+  (when-let* ((live (ygg-ice--live-sessions-in root)))
+    (user-error "ice: %s skipped in %s: %d live agent session%s there"
+                what (abbreviate-file-name (directory-file-name (expand-file-name root)))
+                (length live) (if (cdr live) "s" ""))))
+
 (defun ygg-ice-maintain (root)
   "Keep ROOT's verification skill and lat.md feature map honest.
 A session under the maintain preset; it ends clean, changed or blocked.
 Skipped while an agent session is live in ROOT: its edits would land in
 the middle of that session's change."
   (interactive (list (ygg-ice-root)))
-  (when-let* ((live (ygg-ice--live-sessions-in root)))
-    (user-error "ice: maintain skipped in %s: %d live agent session%s there"
-                (abbreviate-file-name (directory-file-name (expand-file-name root)))
-                (length live) (if (cdr live) "s" "")))
+  (ygg-ice--refuse-live "maintain" root)
   (ygg-ice--spawn-under
    "maintain" root
    (format "Run the maintain pass on %s: every feature section of lat.md/features.md from source, then live."
            (abbreviate-file-name (directory-file-name (expand-file-name root))))))
+
+;;; Assimilating old docs into the ICE layer
+
+(defconst ygg-ice--old-docs-re
+  "\\(?:/README[^/]*\\|\\.\\(?:md\\|mdx\\|markdown\\|rst\\|adoc\\)\\)\\'"
+  "The files taken for old docs: any README and the markup-ish docs.")
+
+(defconst ygg-ice--old-docs-skip
+  '("lat.md" "openspec" "node_modules" "vendor" "dist" "build" "elpaca")
+  "Folders never searched for old docs; every dot folder is skipped too.")
+
+(defconst ygg-ice--old-docs-layer
+  '("CONTEXT.md" "AGENTS.md" "CLAUDE.md")
+  "Top-level files that are the layer or its instructions, not old docs.")
+
+(defun ygg-ice--old-docs (root)
+  "The old docs under ROOT, relative and sorted: what is not the ICE layer."
+  (let* ((root (file-name-as-directory (expand-file-name root)))
+         (own (mapcar (lambda (d) (directory-file-name d))
+                      (list (ygg-ice--adr-dir root)
+                            (expand-file-name "arch" (ygg-ice--docs-dir root)))))
+         (case-fold-search t))
+    (sort
+     (seq-remove
+      (lambda (rel) (member rel ygg-ice--old-docs-layer))
+      (mapcar (lambda (f) (file-relative-name f root))
+              (directory-files-recursively
+               root ygg-ice--old-docs-re nil
+               (lambda (dir)
+                 (let ((name (file-name-nondirectory dir)))
+                   (not (or (string-prefix-p "." name)
+                            (member name ygg-ice--old-docs-skip)
+                            (member (directory-file-name dir) own))))))))
+     #'string<)))
+
+(defun ygg-ice--doc-state (root)
+  "ROOT's old docs as an alist of (PATH . SHA1 of its contents)."
+  (mapcar (lambda (rel)
+            (cons rel (with-temp-buffer
+                        (insert-file-contents-literally (expand-file-name rel root))
+                        (secure-hash 'sha1 (current-buffer)))))
+          (ygg-ice--old-docs root)))
+
+(defun ygg-ice--assimilated (root)
+  "What the last assimilate pass of ROOT took, as (PATH . SHA1), or nil."
+  (let ((file (expand-file-name ".aob/assimilated.eld" root)))
+    (when (file-readable-p file)
+      (ignore-errors
+        (with-temp-buffer
+          (insert-file-contents file)
+          (read (current-buffer)))))))
+
+(defun ygg-ice--changed-docs (root)
+  "The old docs of ROOT the last pass has not seen, as (CHANGED . STATE)."
+  (let ((state (ygg-ice--doc-state root))
+        (seen (ygg-ice--assimilated root)))
+    (cons (mapcar #'car (seq-remove (lambda (e) (equal (cdr e) (cdr (assoc (car e) seen))))
+                                    state))
+          state)))
+
+(defun ygg-ice-assimilate (root)
+  "Fold ROOT's old docs that changed since the last pass into its ICE layer.
+A session under the assimilate preset; it ends clean, changed or blocked
+and moves the snapshot written here into .aob/assimilated.eld when it
+did not block.  Skipped while an agent session is live in ROOT."
+  (interactive (list (ygg-ice-root)))
+  (ygg-ice--refuse-live "assimilate" root)
+  (pcase-let ((`(,changed . ,state) (ygg-ice--changed-docs root)))
+    (unless changed
+      (user-error "ice: nothing new to assimilate in %s"
+                  (abbreviate-file-name (directory-file-name (expand-file-name root)))))
+    (make-directory (expand-file-name ".aob" root) t)
+    (with-temp-file (expand-file-name ".aob/assimilating.eld" root)
+      (let (print-length print-level) (prin1 state (current-buffer))))
+    (ygg-ice--spawn-under
+     "assimilate" root
+     (format "Run the assimilate pass on %s for these docs, then move .aob/assimilating.eld into place:\n%s"
+             (abbreviate-file-name (directory-file-name (expand-file-name root)))
+             (mapconcat (lambda (d) (concat "- " d)) changed "\n")))))
 
 ;;; The restate-back gate: the owner's Confirmed line
 
