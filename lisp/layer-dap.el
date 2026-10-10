@@ -576,6 +576,21 @@ Configs that name no mode at all are not this buffer's and are skipped."
   "x" #'consult-flymake :label "diagnostics"
   "X" #'ygg-diagnostics-project :label "diagnostics (project)")
 
+(defvar ygg-dape-step-repeat-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "c" #'ygg-dape-continue)
+    (define-key map "i" #'dape-step-in)
+    (define-key map "o" #'dape-next)
+    (define-key map "O" #'dape-step-out)
+    (define-key map "R" #'dape-restart)
+    map)
+  "Sticky debugger stepping: repeat.el keymap entered after SPC d c/i/o/O/R.")
+
+(with-eval-after-load 'dape
+  ;; dape puts its own repeat-map on these commands when it loads
+  (dolist (cmd '(ygg-dape-continue dape-step-in dape-next dape-step-out dape-restart))
+    (put cmd 'repeat-map 'ygg-dape-step-repeat-map)))
+
 (defun ygg-diagnostics-project ()
   "Project-wide diagnostics across every flymake-checked buffer (Zed panel)."
   (interactive)
