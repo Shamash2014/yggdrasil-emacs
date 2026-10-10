@@ -611,6 +611,26 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
                                      (oref magit-root-section children))
                            start))))))))
 
+(ert-deftest ygg-git-compare-pr-info-conversation-comment-takes-a-reply ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--seed-conversation)
+    (ygg-git-compare-pr-info-tests--put "checks.json" "{\"statusCheckRollup\":[]}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-conversation)))
+      (with-current-buffer buffer
+        (magit-section-show-level-4-all)
+        (goto-char (oref (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-conversation) start))
+        (search-forward "conversation note 1")
+        (should (eq (key-binding "r") #'ygg-git-compare-threads-reply))
+        (should (string-search "conversation note 1"
+                               (plist-get (ygg-git-compare--remote-at-point t) :text)))
+        (let (composed)
+          (cl-letf (((symbol-function 'ygg-git-compare--compose)
+                     (lambda (comment) (setq composed comment))))
+            (call-interactively (key-binding "r")))
+          (should (eq (plist-get composed :level) 'review)))))))
+
 (ert-deftest ygg-git-compare-pr-info-conversation-comes-before-checks-before-changes ()
   (ygg-git-compare-pr-info-tests--with-repo head
     (ygg-git-compare-pr-info-tests--seed-conversation)
