@@ -12,7 +12,7 @@
 (ert-deftest rass-wraps-a-stdio-server-and-keeps-its-options-last ()
   (rass-tests--with-bins
    (should (equal (ygg-rass-with-harper '("gopls" :initializationOptions (:a 1)))
-                  `("rass" "--no-stream-diagnostics" ,ygg-rass-harper-preset
+                  `("rass" "--no-stream-diagnostics" "--log-level" "warn" ,ygg-rass-harper-preset
                     "--" "gopls" "--" "harper-ls" "--stdio"
                     :initializationOptions (:a 1))))))
 

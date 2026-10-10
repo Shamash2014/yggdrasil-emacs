@@ -924,14 +924,17 @@ Zero or nil shuts down immediately, as eglot does."
 
 (defun ygg-lsp--html-available-p ()
   "Whether HTML has a server beyond eglot's default, and one for this buffer."
-  (and (or (ygg-lsp--executable "ngserver") (ygg-lsp--executable "emmet-language-server"))
-       (or (ygg-lsp--executable "vscode-html-language-server")
-           (ygg-lsp--executable "emmet-language-server")
-           (ygg-lsp--angular-root))))
+  (or (ygg-lsp--executable "vscode-html-language-server")
+      (ygg-lsp--executable "emmet-language-server")
+      (and (ygg-lsp--executable "ngserver") (ygg-lsp--angular-root))))
 
 (ygg-lsp--hook-when #'ygg-lsp--html-available-p '(html-mode-hook html-ts-mode-hook)
                     "Emmet server (emmet-language-server)")
-(ygg-lsp--hook-when #'ygg-lsp--emmet-css-p '(css-mode-hook css-ts-mode-hook))
+(defun ygg-lsp--css-available-p ()
+  (or (ygg-lsp--executable "vscode-css-language-server")
+      (ygg-lsp--executable "emmet-language-server")))
+
+(ygg-lsp--hook-when #'ygg-lsp--css-available-p '(css-mode-hook css-ts-mode-hook))
 (ygg-lsp--hook-when #'ygg-lsp--kotlin-lsp '(kotlin-mode-hook kotlin-ts-mode-hook)
                     "Kotlin (kotlin-lsp) server")
 (ygg-lsp--hook-when #'ygg-lsp--jdtls '(java-mode-hook java-ts-mode-hook)

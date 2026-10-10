@@ -375,7 +375,7 @@ The directory is bound to root."
     (rn-tests--project '(("eslint.config.js" . "") ("node_modules/.bin/eslint" . ""))
       (should (equal (ygg-rass-with-eslint
                       '("typescript-language-server" "--stdio" :initializationOptions (:a 1)))
-                     `("rass" "--no-stream-diagnostics" ,ygg-rass-typescript-preset
+                     `("rass" "--no-stream-diagnostics" "--log-level" "warn" ,ygg-rass-typescript-preset
                        "--" "typescript-language-server" "--stdio"
                        "--" "vscode-eslint-language-server" "--stdio"
                        "--" "harper-ls" "--stdio"
@@ -407,9 +407,9 @@ The directory is bound to root."
       (ygg-rass-eslint-enable)
       (rn-tests--project '(("eslint.config.js" . "") ("node_modules/.bin/eslint" . ""))
         (let ((contact (funcall (cdar eglot-server-programs) nil nil)))
-          (should (equal (seq-take contact 4)
-                         `("rass" "--no-stream-diagnostics" ,ygg-rass-typescript-preset "--")))
-          (should (equal (nth 4 contact) "typescript-language-server"))
+          (should (equal (seq-take contact 6)
+                         `("rass" "--no-stream-diagnostics" "--log-level" "warn" ,ygg-rass-typescript-preset "--")))
+          (should (equal (nth 6 contact) "typescript-language-server"))
           (should (member :initializationOptions contact))))
       (let ((wrapped (cdar eglot-server-programs)))
         (ygg-rass-eslint-enable)

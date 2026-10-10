@@ -43,7 +43,7 @@ Keyword options such as :initializationOptions stay at the end."
              (executable-find "rass")
              (executable-find "harper-ls")
              (file-exists-p ygg-rass-harper-preset))
-        `("rass" "--no-stream-diagnostics" ,ygg-rass-harper-preset
+        `("rass" "--no-stream-diagnostics" "--log-level" "warn" ,ygg-rass-harper-preset
           "--" ,@command "--" "harper-ls" "--stdio" ,@options)
       contact)))
 
@@ -131,7 +131,7 @@ where eglot reads them.  TypeScript 7's tsc is never paired."
              (ygg-rass-eslint-p default-directory)
              (executable-find "rass")
              (executable-find "vscode-eslint-language-server"))
-        `("rass" "--no-stream-diagnostics" ,ygg-rass-typescript-preset
+        `("rass" "--no-stream-diagnostics" "--log-level" "warn" ,ygg-rass-typescript-preset
           "--" ,@command "--" "vscode-eslint-language-server" "--stdio"
           ,@(and (executable-find "harper-ls") '("--" "harper-ls" "--stdio"))
           ,@options)
@@ -164,9 +164,25 @@ by itself."
 (defun ygg-rass--with-typescript-configuration (configuration server)
   (append (funcall configuration server) (ygg-rass-typescript-configuration server)))
 
+(defun ygg-rass--runs-harper-p (server)
+  (when-let* ((proc (ignore-errors (jsonrpc--process server))))
+    (seq-some (lambda (arg) (equal (file-name-nondirectory arg) "harper-ls"))
+              (process-command proc))))
+
+(defun ygg-rass--with-harper-configuration (configuration server)
+  "CONFIGURATION for SERVER, with harper-ls's empty settings beside its own.
+Harper behind rass is asked by section, and the language server leading the
+process is what picks the settings otherwise."
+  (let ((own (funcall configuration server)))
+    (if (and (ygg-rass--runs-harper-p server) (listp own) (not (plist-member own :harper-ls)))
+        (append own (list :harper-ls (make-hash-table :test 'equal)))
+      own)))
+
 (with-eval-after-load 'layer-lsp
   (advice-add 'ygg-lsp-workspace-configuration :around
-              #'ygg-rass--with-typescript-configuration))
+              #'ygg-rass--with-typescript-configuration)
+  (advice-add 'ygg-lsp-workspace-configuration :around
+              #'ygg-rass--with-harper-configuration '((depth . -100))))
 
 ;; run after layer-lsp has registered the base entries (require it later)
 (with-eval-after-load 'eglot

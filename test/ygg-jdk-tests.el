@@ -123,7 +123,7 @@
     (cl-letf (((symbol-function 'executable-find) (lambda (name &rest _) (concat "/bin/" name))))
       (should (equal (nth 3 (ygg-rass--wrap-guess
                              (list '(kotlin-ts-mode) nil 'eglot-lsp-server contact '("kotlin"))))
-                     `("rass" "--no-stream-diagnostics" ,ygg-rass-harper-preset "--"
+                     `("rass" "--no-stream-diagnostics" "--log-level" "warn" ,ygg-rass-harper-preset "--"
                        "env" "JAVA_HOME=/jdk" "kotlin-lsp" "--stdio"
                        "--" "harper-ls" "--stdio"))))))
 
