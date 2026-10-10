@@ -192,6 +192,9 @@ BINDINGS is a list of (KEY COMMAND LABEL)."
 ;; a queued message is still yours until it goes: change it or take it
 ;; back, from the line it is drawn on
 (yggdrasil-localleader-def 'aob-trace-mode "A" #'aob-answer "answer its questions")
+(yggdrasil-localleader-def 'aob-trace-mode "+" #'ygg-diagram-enlarge "enlarge diagrams")
+(yggdrasil-localleader-def 'aob-trace-mode "-" #'ygg-diagram-shrink "shrink diagrams")
+(yggdrasil-localleader-def 'aob-trace-mode "0" #'ygg-diagram-scale-reset "reset diagram size")
 (ygg-aob--localleader-group
  'aob-trace-mode "q" "queued"
  '(("e" aob-trace-queue-edit "rewrite")

@@ -412,4 +412,93 @@
         (ygg-diagram-markdown-tab)))
     (should (equal (nreverse calls) '(md image)))))
 
+(defun ygg-diagram-tab-tests--svg ()
+  (let ((f (make-temp-file "ygg-scale" nil ".svg")))
+    (with-temp-file f
+      (insert "<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"10\" height=\"10\"/>"))
+    f))
+
+(defmacro ygg-diagram-tab-tests--with-svg (var &rest body)
+  (declare (indent 1))
+  `(let ((,var (ygg-diagram-tab-tests--svg)))
+     (unwind-protect (progn ,@body)
+       (delete-file ,var))))
+
+(defun ygg-diagram-tab-tests--plist (ov)
+  (cdr (get-text-property 1 'display (overlay-get ov 'after-string))))
+
+(ert-deftest ygg-diagram-scale-enlarge-shrink-reset ()
+  (ygg-diagram-tab-tests--with-svg f
+    (with-temp-buffer
+      (insert "x\n")
+      (let ((ygg-diagram-scale 1.0) (ygg-diagram--scale nil) (inhibit-message t))
+        (ygg-diagram--place-image 2 f 840)
+        (let ((ov (car (ygg-diagram--overlays))))
+          (should (= 1.0 (plist-get (ygg-diagram-tab-tests--plist ov) :scale)))
+          (ygg-diagram-enlarge)
+          (ygg-diagram-enlarge)
+          (let ((plist (ygg-diagram-tab-tests--plist ov)))
+            (should (= 1.5625 (plist-get plist :scale)))
+            (should (= (round (* 800 1.5625)) (plist-get plist :max-width))))
+          (ygg-diagram-shrink)
+          (ygg-diagram-shrink)
+          (should (= 1.0 (plist-get (ygg-diagram-tab-tests--plist ov) :scale)))
+          (ygg-diagram-enlarge)
+          (ygg-diagram-scale-reset)
+          (should (= 1.0 (plist-get (ygg-diagram-tab-tests--plist ov) :scale)))
+          (dotimes (_ 20) (ygg-diagram-shrink))
+          (should (= 0.25 (plist-get (ygg-diagram-tab-tests--plist ov) :scale))))))))
+
+(ert-deftest ygg-diagram-scale-applies-to-new-images ()
+  (ygg-diagram-tab-tests--with-svg f
+    (with-temp-buffer
+      (insert "x\n")
+      (let ((ygg-diagram-scale 1.0) (ygg-diagram--scale nil) (inhibit-message t))
+        (ygg-diagram-enlarge)
+        (ygg-diagram--place-image 2 f 840)
+        (should (= 1.25 (plist-get (ygg-diagram-tab-tests--plist
+                                    (car (ygg-diagram--overlays)))
+                                   :scale)))))))
+
+(ert-deftest ygg-diagram-scale-repeat-map-set ()
+  (dolist (cmd '(ygg-diagram-enlarge ygg-diagram-shrink ygg-diagram-scale-reset))
+    (should (eq 'ygg-diagram-scale-repeat-map (get cmd 'repeat-map))))
+  (should (eq #'ygg-diagram-enlarge (lookup-key ygg-diagram-scale-repeat-map "+"))))
+
+(ert-deftest ygg-diagram-scale-localleader-keys ()
+  (require 'layer-markdown)
+  (dolist (mode '(markdown-mode gfm-mode))
+    (let ((map (ygg-localleader--get-map mode)))
+      (dolist (kv '(("+" . ygg-diagram-enlarge) ("-" . ygg-diagram-shrink)
+                    ("0" . ygg-diagram-scale-reset)))
+        (let ((b (lookup-key map (kbd (car kv)))))
+          (should (eq (cdr kv) (if (consp b) (cdr b) b))))))))
+
+(ert-deftest ygg-diagram-scale-capped-at-max ()
+  (ygg-diagram-tab-tests--with-svg f
+    (with-temp-buffer
+      (insert "x\n")
+      (let ((ygg-diagram-scale 1.0) (ygg-diagram-scale-max 4.0)
+            (ygg-diagram--scale nil) (inhibit-message t))
+        (ygg-diagram--place-image 2 f 840)
+        (dotimes (_ 20) (ygg-diagram-enlarge))
+        (let ((plist (ygg-diagram-tab-tests--plist (car (ygg-diagram--overlays)))))
+          (should (= 4.0 (plist-get plist :scale)))
+          (should (= (round (* 800 4.0)) (plist-get plist :max-width))))))))
+
+(ert-deftest ygg-diagram-scale-defcustom-below-floor-clamped-everywhere ()
+  (ygg-diagram-tab-tests--with-svg f
+    (with-temp-buffer
+      (insert "x\n")
+      (let ((ygg-diagram-scale 0.2) (ygg-diagram--scale nil) (inhibit-message t))
+        (ygg-diagram--place-image 2 f 840)
+        (should (= 0.25 (plist-get (ygg-diagram-tab-tests--plist
+                                    (car (ygg-diagram--overlays)))
+                                   :scale)))
+        (ygg-diagram-enlarge)
+        (ygg-diagram-scale-reset)
+        (should (= 0.25 (plist-get (ygg-diagram-tab-tests--plist
+                                    (car (ygg-diagram--overlays)))
+                                   :scale)))))))
+
 ;;; ygg-diagram-tab-tests.el ends here

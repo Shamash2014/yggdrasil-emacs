@@ -159,13 +159,91 @@ A cache hit resolves synchronously; a miss renders async so Emacs never blocks."
         (error (remhash svg ygg-diagram--rendering)
                (funcall on-done nil (error-message-string err))))))))
 
+(defcustom ygg-diagram-scale 1.0
+  "Size of inline diagrams, math and images relative to the window width.
+Above 1.0 they are drawn wider than the window and clip at its edge
+unless lines are truncated."
+  :type 'number)
+
+(defcustom ygg-diagram-scale-max 4.0
+  "Largest scale `ygg-diagram-enlarge' and `ygg-diagram-scale' can reach."
+  :type 'number)
+
+(defvar-local ygg-diagram--scale nil
+  "This buffer's diagram scale; nil until resized, then `ygg-diagram-scale'.")
+
+(defconst ygg-diagram--scale-step 1.25)
+(defconst ygg-diagram--scale-floor 0.25)
+
+(defun ygg-diagram--clamp-scale (scale)
+  (min ygg-diagram-scale-max (max ygg-diagram--scale-floor scale)))
+
+(defun ygg-diagram--effective-scale ()
+  (ygg-diagram--clamp-scale (or ygg-diagram--scale ygg-diagram-scale)))
+
+(defun ygg-diagram--make-image (file width scale)
+  (let ((base (max 200 (- width 40))))
+    (create-image file nil nil
+                  :max-width (round (* base scale)) :scale scale
+                  :ygg-base-width base)))
+
 (defun ygg-diagram--image (file width)
   "A display string for the image FILE scaled to at most WIDTH pixels.
 The type is read from the file rather than given, so a rendered diagram
 and a screenshot on disk both draw through this."
   (propertize " " 'display
-              (create-image file nil nil
-                            :max-width (max 200 (- width 40)) :scale 1)))
+              (ygg-diagram--make-image file width (ygg-diagram--effective-scale))))
+
+(defun ygg-diagram--rescale-string (str scale)
+  "A copy of STR whose image display specs are redrawn at SCALE."
+  (let ((out (copy-sequence str)) (pos 0))
+    (while (< pos (length out))
+      (let ((next (or (next-single-property-change pos 'display out) (length out)))
+            (disp (get-text-property pos 'display out)))
+        (when (and (eq (car-safe disp) 'image) (plist-get (cdr disp) :ygg-base-width))
+          (let ((spec (copy-sequence disp)))
+            (setcdr spec (plist-put (copy-sequence (cdr spec)) :scale scale))
+            (setcdr spec (plist-put (cdr spec) :max-width
+                                    (round (* scale (plist-get (cdr spec) :ygg-base-width)))))
+            (put-text-property pos next 'display spec out)))
+        (setq pos next)))
+    out))
+
+(defun ygg-diagram--set-scale (scale)
+  (setq ygg-diagram--scale (ygg-diagram--clamp-scale scale))
+  (dolist (ov (ygg-diagram--overlays))
+    (when-let* ((str (overlay-get ov 'after-string)))
+      (overlay-put ov 'after-string (ygg-diagram--rescale-string str ygg-diagram--scale))))
+  (message "diagrams %d%%%s" (round (* 100 ygg-diagram--scale))
+           (if (>= ygg-diagram--scale ygg-diagram-scale-max) " (max)" "")))
+
+(defun ygg-diagram-enlarge ()
+  "Draw the diagrams and math in this buffer larger, up to `ygg-diagram-scale-max'.
+Past the window width they clip at its edge unless lines are truncated."
+  (interactive)
+  (ygg-diagram--set-scale (* (ygg-diagram--effective-scale) ygg-diagram--scale-step)))
+
+(defun ygg-diagram-shrink ()
+  "Draw the diagrams and math in this buffer smaller."
+  (interactive)
+  (ygg-diagram--set-scale (/ (ygg-diagram--effective-scale) ygg-diagram--scale-step)))
+
+(defun ygg-diagram-scale-reset ()
+  "Draw the diagrams and math in this buffer at `ygg-diagram-scale'."
+  (interactive)
+  (ygg-diagram--set-scale ygg-diagram-scale)
+  (setq ygg-diagram--scale nil))
+
+(defvar ygg-diagram-scale-repeat-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map "+" #'ygg-diagram-enlarge)
+    (define-key map "-" #'ygg-diagram-shrink)
+    (define-key map "0" #'ygg-diagram-scale-reset)
+    map)
+  "Sticky size keys, entered after any of the diagram size commands.")
+
+(dolist (cmd '(ygg-diagram-enlarge ygg-diagram-shrink ygg-diagram-scale-reset))
+  (put cmd 'repeat-map 'ygg-diagram-scale-repeat-map))
 
 (defun ygg-diagram--overlays ()
   (seq-filter (lambda (o) (overlay-get o 'ygg-diagram))
@@ -194,10 +272,11 @@ and a screenshot on disk both draw through this."
        lang src
        (lambda (svg err)
          (when (overlay-buffer ov)
-           (overlay-put ov 'after-string
-                        (if svg (concat "\n" (ygg-diagram--image svg width) "\n")
-                          (concat "\n" (propertize (format "  ⚠ %s" (or err "render failed"))
-                                                   'face 'error) "\n")))))))))
+           (with-current-buffer (overlay-buffer ov)
+             (overlay-put ov 'after-string
+                          (if svg (concat "\n" (ygg-diagram--image svg width) "\n")
+                            (concat "\n" (propertize (format "  ⚠ %s" (or err "render failed"))
+                                                     'face 'error) "\n"))))))))))
 
 (defun ygg-diagram--show ()
   "Render every diagram fence and $$math$$ block; float images below each."

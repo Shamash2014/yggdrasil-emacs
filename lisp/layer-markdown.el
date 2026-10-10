@@ -14,12 +14,11 @@
 (require 'ygg-markdown-fences)
 
 (dolist (mode '(markdown-mode gfm-mode))
-  (yggdrasil-localleader-def mode "m" #'ygg-diagram-toggle "diagrams & math"))
-
-(dolist (mode '(markdown-mode gfm-mode))
-  (yggdrasil-localleader-def mode "f" #'ygg-markdown-fences-toggle "raw code fences"))
-
-(dolist (mode '(markdown-mode gfm-mode))
+  (yggdrasil-localleader-def mode "m" #'ygg-diagram-toggle "diagrams & math")
+  (yggdrasil-localleader-def mode "f" #'ygg-markdown-fences-toggle "raw code fences")
+  (yggdrasil-localleader-def mode "+" #'ygg-diagram-enlarge "enlarge diagrams")
+  (yggdrasil-localleader-def mode "-" #'ygg-diagram-shrink "shrink diagrams")
+  (yggdrasil-localleader-def mode "0" #'ygg-diagram-scale-reset "reset diagram size")
   (yggdrasil-define-mode-keys mode 'normal "<tab>" #'ygg-diagram-markdown-tab))
 
 (autoload 'ygg-md-paste-image "ygg-md-image" nil t)
