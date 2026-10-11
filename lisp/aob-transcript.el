@@ -828,6 +828,8 @@ Asleep: it carries the id its agent answers to, and no process."
           (aob-session-put s :named-by-user (plist-get entry :named-by-user))
           (aob-session-put s :auto-named (plist-get entry :auto-named))
           (aob-session-put s :unread (plist-get entry :unread))
+          (aob-session-put s :pinned (plist-get entry :pinned))
+          (aob-session-put s :queue-paused (plist-get entry :queue-paused))
           (dolist (turn (aob-transcript-turns file t))
             (if (equal (car turn) "tool")
                 (aob-event s 'tool :title (cdr turn) :status "completed")
