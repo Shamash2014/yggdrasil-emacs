@@ -2646,6 +2646,7 @@ file keeps it resumable."
   "Drop S's pending prompts so a cancel leaves nothing to flush back in."
   (when-let* ((q (aob-session-ref s :queued)))
     (aob-session-put s :queued nil)
+    (aob-session-put s :queue-paused nil)
     (dolist (e q)
       (when-let* ((ev (nth 2 e)))
         (plist-put ev :status "cancelled")
