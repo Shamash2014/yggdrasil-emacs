@@ -14,6 +14,9 @@
 (require 'aob-acp)
 (require 'ygg-git)
 
+(declare-function ygg-git-compare--forge-async "ygg-git-compare")
+(declare-function ygg-git-compare--ssh-environment "ygg-git-compare")
+
 (defgroup aob-gc nil "Sweeping merged agent worktrees and branches."
   :group 'aob)
 
@@ -22,7 +25,7 @@
   :type 'boolean :group 'aob-gc)
 
 (defcustom aob-gc-fetch-timeout 60
-  "Seconds a sweep's git fetch may take before it is killed."
+  "Seconds a sweep's git fetch or gh query may take before it is killed."
   :type 'integer :group 'aob-gc)
 
 (defcustom aob-gc-branches 'aob
@@ -43,11 +46,18 @@
   "Environment that keeps git from prompting.")
 
 (defcustom aob-gc-precious-ignored
-  '("\\(\\`\\|/\\)\\.env[^/]*/?\\'" "\\.local/?\\'" "\\.db/?\\'"
-    "\\.sqlite[^/]*/?\\'" "\\.pem/?\\'" "\\.key/?\\'"
-    "credentials[^/]*/?\\'" "secret[^/]*/?\\'")
-  "Regexps for ignored files whose worktree is never removed."
+  '("\\`\\.env" "\\.local\\'" "\\.db\\'" "\\.sqlite" "\\.pem\\'" "\\.key\\'"
+    "credentials" "secret")
+  "Regexps for the base names of ignored files whose worktree is never removed."
   :type '(repeat regexp) :group 'aob-gc)
+
+(defconst aob-gc--dependency-dirs
+  '("node_modules" ".venv" "venv" "target" "build" "dist" ".dart_tool" "Pods"
+    ".gradle" "__pycache__")
+  "Directories whose ignored files are never judged precious.")
+
+(defconst aob-gc--template-re "\\`\\.env\\.\\(?:example\\|sample\\|template\\)\\'"
+  "Base names of env files that only document a setup.")
 
 (defconst aob-gc--terminal-modes
   '(shell-mode eshell-mode vterm-mode eat-mode ghostel-mode compilation-mode
@@ -176,26 +186,20 @@
        (lambda (url code)
          (if (not (and (zerop code) (string-match-p "github\\.com" url)))
              (funcall callback nil)
-           (condition-case nil
-               (let ((buffer (generate-new-buffer " *aob-gc-gh*"))
-                     (callback (aob-gc--guarded callback))
-                     (default-directory (file-name-as-directory root)))
-                 (make-process
-                  :name "aob-gc-gh" :buffer buffer :noquery t
-                  :command (list "gh" "pr" "list" "--state" "merged" "--limit" "200"
-                                 "--json" "headRefName,headRefOid,isCrossRepository")
-                  :sentinel
-                  (lambda (process _event)
-                    (unless (process-live-p process)
-                      (let ((out (with-current-buffer buffer (buffer-string)))
-                            (ok (zerop (process-exit-status process))))
-                        (kill-buffer buffer)
-                        (let ((prs (and ok (ignore-errors
-                                             (json-parse-string out :object-type 'alist
-                                                                :array-type 'list)))))
-                          (puthash root prs aob-gc--prs)
-                          (funcall callback prs)))))))
-             (error (funcall callback nil))))))))))
+           (let ((callback (aob-gc--guarded callback))
+                 (default-directory (file-name-as-directory root)))
+             (require 'ygg-git-compare)
+             (ygg-git-compare--forge-async
+              "gh" '("pr" "list" "--state" "merged" "--limit" "200"
+                     "--json" "headRefName,headRefOid,isCrossRepository")
+              (lambda (status out _err)
+                (let ((prs (and (eql status 0)
+                                (ignore-errors
+                                  (json-parse-string out :object-type 'alist
+                                                     :array-type 'list)))))
+                  (puthash root prs aob-gc--prs)
+                  (funcall callback prs)))
+              aob-gc-fetch-timeout)))))))))
 
 (defun aob-gc--gh-merged-p (root branch sha callback)
   "CALLBACK gets non-nil when a PR of this repository merged BRANCH at SHA."
@@ -310,29 +314,63 @@ DIR may be gone already, which `file-in-directory-p' cannot judge."
   (delq nil (mapcar (lambda (e) (plist-get e :acp-id)) (aob-gc--saved dir))))
 
 (defun aob-gc--visited-p (dir)
-  "Non-nil when an Emacs buffer visits, edits or runs a shell in DIR."
+  "Non-nil when an Emacs buffer visits a file or runs a shell in DIR."
   (condition-case nil
       (and (seq-some
             (lambda (b)
               (with-current-buffer b
                 (or (aob-gc--inside-p buffer-file-name dir)
                     (and (aob-gc--inside-p default-directory dir)
-                         (or (buffer-modified-p)
-                             (get-buffer-process b)
+                         (or (get-buffer-process b)
                              (apply #'derived-mode-p aob-gc--terminal-modes))))))
             (buffer-list))
            t)
     (error t)))
 
 (defun aob-gc--precious-p (file)
-  "Non-nil when FILE, or a folder it lies in, matches `aob-gc-precious-ignored'."
-  (let ((parts (split-string file "/" t))
-        (path "")
-        found)
-    (while (and parts (not found))
-      (setq path (concat path (and (not (string-empty-p path)) "/") (pop parts)))
-      (setq found (seq-some (lambda (re) (string-match-p re path)) aob-gc-precious-ignored)))
-    found))
+  "Non-nil when the base name of FILE matches `aob-gc-precious-ignored'."
+  (let ((name (file-name-nondirectory file)))
+    (and (not (string-match-p aob-gc--template-re name))
+         (seq-some (lambda (re) (string-match-p re name)) aob-gc-precious-ignored)
+         t)))
+
+(defun aob-gc--checkout-verdict (dir callback)
+  "CALLBACK gets nil when the checkout DIR is clean and holds nothing precious."
+  (aob-gc--git
+   dir '("status" "--porcelain" "-z" "--ignore-submodules=none")
+   (lambda (out code)
+     (if (not (and (zerop code) (string-empty-p out)))
+         (funcall callback "dirty")
+       (aob-gc--git
+        dir (append '("ls-files" "--others" "--ignored" "--exclude-standard" "-z" "--" ".")
+                    (mapcar (lambda (d) (format ":(exclude,glob)**/%s/**" d))
+                            aob-gc--dependency-dirs))
+        (lambda (ignored icode)
+          (let ((precious (seq-filter #'aob-gc--precious-p
+                                      (split-string ignored "\0" t))))
+            (funcall callback
+                     (cond ((not (zerop icode)) "dirty")
+                           (precious
+                            (format "ignored files worth keeping: %s"
+                                    (string-join precious ", "))))))))))))
+
+(defun aob-gc--submodules-verdict (dir callback)
+  "CALLBACK gets nil when each initialized submodule of DIR is clean and plain."
+  (aob-gc--git
+   dir '("submodule" "status" "--recursive")
+   (lambda (out code)
+     (if (not (zerop code))
+         (funcall callback "dirty")
+       (aob-gc--any
+        (delq nil (mapcar (lambda (line)
+                            (and (string-match "\\`[ +U][0-9a-f]+ \\(.+?\\)\\(?: ([^)]*)\\)?\\'" line)
+                                 (match-string 1 line)))
+                          (split-string out "\n" t)))
+        (lambda (path k)
+          (aob-gc--checkout-verdict
+           (expand-file-name path dir)
+           (lambda (why) (funcall k (and why (format "submodule %s: %s" path why))))))
+        callback)))))
 
 (defun aob-gc--tree-verdict (dir branch callback)
   "CALLBACK gets nil when DIR is on BRANCH, clean and holds nothing precious."
@@ -342,21 +380,12 @@ DIR may be gone already, which `file-in-directory-p' cannot judge."
      (if (not (and (zerop hcode)
                    (equal (string-trim head) (concat "refs/heads/" branch))))
          (funcall callback "not on its branch")
-       (aob-gc--git
-        dir '("status" "--porcelain" "-z")
-        (lambda (out code)
-          (if (not (and (zerop code) (string-empty-p out)))
-              (funcall callback "dirty")
-            (aob-gc--git
-             dir '("ls-files" "--others" "--ignored" "--exclude-standard" "-z")
-             (lambda (ignored icode)
-               (let ((precious (seq-filter #'aob-gc--precious-p
-                                           (split-string ignored "\0" t))))
-                 (funcall callback
-                          (cond ((not (zerop icode)) "dirty")
-                                (precious
-                                 (format "ignored files worth keeping: %s"
-                                         (string-join precious ", ")))))))))))))))
+       (aob-gc--checkout-verdict
+        dir
+        (lambda (why)
+          (if why
+              (funcall callback why)
+            (aob-gc--submodules-verdict dir callback))))))))
 
 (defun aob-gc--locked (project fn &optional on-error)
   "Call FN with a release function if PROJECT's repository is free, else with nil.
@@ -411,6 +440,7 @@ EXCEPT's sessions are spared."
                                     (funcall next))
                            (funcall keep "not merged"))))))))))
          (cond
+          ((plist-get c :locked) (funcall keep "locked"))
           ((and dir (aob-gc--in-use-p dir except)) (funcall keep "in use"))
           ((and dir (aob-gc--visited-p dir)) (funcall keep "open in Emacs"))
           ((and dir here (file-in-directory-p here dir)) (funcall keep "current"))
@@ -420,8 +450,19 @@ EXCEPT's sessions are spared."
           (t (funcall check-merged)))))
      (lambda () (funcall done (nreverse items))))))
 
-(defun aob-gc--candidates (wts branches default mode)
-  "The worktrees and branches in WTS and BRANCHES a MODE sweep may remove."
+(defun aob-gc--locked-dirs (text)
+  "The worktrees git worktree list --porcelain TEXT marks locked."
+  (let (found)
+    (dolist (block (split-string text "\n\n" t))
+      (let ((lines (split-string block "\n" t)))
+        (when (seq-some (lambda (l) (or (equal l "locked") (string-prefix-p "locked " l)))
+                        lines)
+          (push (file-name-as-directory (substring (car lines) 9)) found))))
+    found))
+
+(defun aob-gc--candidates (wts branches default mode &optional locked)
+  "The worktrees and branches in WTS and BRANCHES a MODE sweep may remove.
+Those in LOCKED carry :locked."
   (let* ((root (file-name-as-directory (file-truename aob-acp-worktree-root)))
          (local (plist-get default :local))
          (checked (delq nil (mapcar #'cdr wts)))
@@ -435,7 +476,9 @@ EXCEPT's sessions are spared."
                  (or (eq mode 'project)
                      (and (funcall aob (cdr w))
                           (file-in-directory-p (file-truename (car w)) root))))
-        (push (list :dir (car w) :branch (cdr w) :main (caar wts)) found)))
+        (push (append (list :dir (car w) :branch (cdr w) :main (caar wts))
+                      (and (member (car w) locked) '(:locked t)))
+              found)))
     (dolist (b branches)
       (when (and (not (member b checked)) (funcall wanted b))
         (push (list :branch b) found)))
@@ -443,9 +486,10 @@ EXCEPT's sessions are spared."
 
 (defun aob-gc--fetch (project callback)
   "Fetch and prune PROJECT without prompting, then CALLBACK; kill a slow one."
-  (let* ((ssh (or (getenv "GIT_SSH_COMMAND") "ssh"))
-         (process-environment (cons (concat "GIT_SSH_COMMAND=" ssh " -o BatchMode=yes")
-                                    process-environment))
+  (require 'ygg-git-compare)
+  (let* ((process-environment (append (let ((default-directory (file-name-as-directory project)))
+                                        (ygg-git-compare--ssh-environment))
+                                      process-environment))
          (ended nil)
          (proc (aob-gc--git project '("fetch" "--prune" "--quiet")
                             (lambda (&rest _) (setq ended t) (funcall callback)))))
@@ -479,7 +523,7 @@ OFFLINE skips the fetch."
                           (aob-acp--parse-worktrees wout)
                           (mapcar (lambda (r) (string-remove-prefix "refs/heads/" r))
                                   (split-string bout "\n" t))
-                          default mode)
+                          default mode (aob-gc--locked-dirs wout))
                          here nil done))))))))))))
     (if (and aob-gc-fetch (not offline))
         (aob-gc--fetch project go)
@@ -512,7 +556,12 @@ and why."
                             project (list "update-ref" "-d" (concat "refs/heads/" branch) sha)
                             (lambda (_o c)
                               (when (or counted (zerop c)) (push branch removed))
-                              (funcall next))))))))
+                              (if (zerop c)
+                                  (aob-gc--git
+                                   project (list "config" "--remove-section"
+                                                 (concat "branch." branch))
+                                   (lambda (&rest _) (funcall next)))
+                                (funcall next)))))))))
               (unplug (lambda ()
                         (aob-gc--tree-verdict
                          dir branch
@@ -666,26 +715,29 @@ item with :error."
 (defun aob-gc--removed (results)
   "Labels of the items in RESULTS that are being or were removed."
   (mapcar #'aob-gc--label
-          (seq-remove (lambda (i) (plist-get i :skip)) (apply #'append (mapcar #'cdr results)))))
+          (seq-filter (lambda (i) (and (plist-get i :branch)
+                                       (not (plist-get i :skip))
+                                       (not (plist-get i :error))))
+                      (apply #'append (mapcar #'cdr results)))))
 
-(defun aob-gc--refused (results)
-  "Lines for the removals RESULTS shows git refused and the projects that failed."
+(defun aob-gc--refused (results &optional kept)
+  "Lines for failed projects in RESULTS, and with KEPT the removals git refused."
   (let (lines)
     (dolist (r results)
       (dolist (i (cdr r))
         (cond ((plist-get i :error)
                (push (format "failed: %s: %s" (abbreviate-file-name (car r)) (plist-get i :error))
                      lines))
-              ((plist-get i :failed)
+              ((and kept (plist-get i :failed))
                (push (format "kept %s - %s" (aob-gc--label i) (plist-get i :skip)) lines)))))
     (nreverse lines)))
 
 (defun aob-gc--run (report)
-  "Sweep now; one message says what went, and with REPORT also when nothing did."
+  "Sweep now; one message says what went or failed, with REPORT also what stayed."
   (aob-gc--sweep (aob-gc--sweep-mode) nil
                  (lambda (results)
                    (let ((gone (aob-gc--removed results))
-                         (refused (aob-gc--refused results)))
+                         (refused (aob-gc--refused results report)))
                      (cond ((or gone refused)
                             (message "aob-gc: %s"
                                      (string-join

@@ -9,6 +9,7 @@
 (require 'aob-gc)
 
 (defvar gc-tests--base nil)
+(defvar gc-tests--procs nil)
 
 (defun gc-tests--git (dir &rest args)
   "Run git ARGS in DIR and return its output, failing the test on error."
@@ -52,6 +53,7 @@
           (aob-gc--prs (make-hash-table :test #'equal))
           (aob-gc--busy (make-hash-table :test #'equal))
           (aob-acp-persist-file nil)
+          (gc-tests--procs (process-list))
           (messages nil))
      (unwind-protect
          (progn
@@ -68,7 +70,7 @@
                       (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
              ,@body))
        (dolist (p (process-list))
-         (when (string-match-p "\\`\\(gc-tests\\|ygg-git\\|aob-gc-gh\\)" (process-name p))
+         (unless (memq p gc-tests--procs)
            (delete-process p)))
        (delete-directory gc-tests--base t))))
 
@@ -494,34 +496,132 @@
       (should (file-directory-p dir))
       (should (member "aob/pre" (gc-tests--branches proj))))))
 
-(ert-deftest aob-gc-a-worktree-with-a-submodule-is-removed ()
+(defun gc-tests--submodule-worktree (proj dir)
+  "Add a merged worktree DIR of PROJ whose submodule mod is checked out."
+  (let ((inner (expand-file-name "inner" gc-tests--base)))
+    (gc-tests--git gc-tests--base "init" "-q" "-b" "main" inner)
+    (gc-tests--commit inner "i" "i")
+    (gc-tests--git proj "-c" "protocol.file.allow=always" "submodule" "add" "-q" inner "mod")
+    (gc-tests--git proj "commit" "-q" "-m" "sub")
+    (gc-tests--git proj "push" "-q" "origin" "main")
+    (gc-tests--git proj "branch" "aob/sub")
+    (gc-tests--git proj "worktree" "add" "-q" dir "aob/sub")
+    (gc-tests--git dir "-c" "protocol.file.allow=always" "submodule" "update" "-q" "--init")))
+
+(ert-deftest aob-gc-a-worktree-with-a-clean-submodule-is-removed ()
   (gc-tests--with-repo
-    (let ((dir (expand-file-name "sub" root))
-          (inner (expand-file-name "inner" gc-tests--base)))
-      (gc-tests--git gc-tests--base "init" "-q" "-b" "main" inner)
-      (gc-tests--commit inner "i" "i")
-      (gc-tests--git proj "-c" "protocol.file.allow=always" "submodule" "add" "-q" inner "mod")
-      (gc-tests--git proj "commit" "-q" "-m" "sub")
-      (gc-tests--git proj "push" "-q" "origin" "main")
-      (gc-tests--git proj "branch" "aob/sub")
-      (gc-tests--git proj "worktree" "add" "-q" dir "aob/sub")
-      (gc-tests--git dir "-c" "protocol.file.allow=always" "submodule" "update" "-q" "--init")
+    (let ((dir (expand-file-name "sub" root)))
+      (gc-tests--submodule-worktree proj dir)
       (gc-tests--sweep)
       (should-not (file-directory-p dir))
       (should-not (member "aob/sub" (gc-tests--branches proj))))))
 
-(ert-deftest aob-gc-a-refused-removal-is-reported-as-kept ()
+(ert-deftest aob-gc-a-dirty-submodule-keeps-the-worktree ()
+  (gc-tests--with-repo
+    (let ((dir (expand-file-name "sub" root)))
+      (gc-tests--submodule-worktree proj dir)
+      (with-temp-file (expand-file-name "mod/scratch" dir) (insert "x"))
+      (gc-tests--sweep)
+      (should (file-directory-p dir))
+      (should (member "aob/sub" (gc-tests--branches proj))))))
+
+(ert-deftest aob-gc-a-locked-worktree-is-kept-quietly-and-shown-as-locked ()
   (gc-tests--with-repo
     (let ((dir (expand-file-name "ff" root))
           (aob-gc-fetch nil))
       (gc-tests--worktree proj dir "aob/ff" "one")
       (gc-tests--merge-ff proj "aob/ff")
       (gc-tests--git proj "worktree" "lock" dir)
+      (let ((items (cdar (gc-tests--sweep t))))
+        (should (equal "locked" (plist-get (car items) :skip))))
       (aob-gc--run t)
       (gc-tests--wait (lambda () messages))
       (should (file-directory-p dir))
-      (should (string-match-p "kept .*aob/ff.* - " (car messages)))
-      (should-not (string-match-p "removed" (car messages))))))
+      (should (equal '("aob-gc: nothing to remove") messages))
+      (should (member "aob/ff" (gc-tests--branches proj))))))
+
+(ert-deftest aob-gc-background-sweeps-leave-out-refused-removals ()
+  (let ((results '(("p" (:branch "b" :skip "boom" :failed t) (:error "bad")))))
+    (should (equal '("failed: p: bad") (aob-gc--refused results)))
+    (should (= 2 (length (aob-gc--refused results t))))))
+
+(ert-deftest aob-gc-an-errored-project-is-not-counted-as-removed ()
+  (should-not (aob-gc--removed '(("p" (:error "boom")))))
+  (should (equal '("branch b") (aob-gc--removed '(("p" (:error "x") (:branch "b")))))))
+
+(ert-deftest aob-gc-a-deleted-branch-loses-its-config-section ()
+  (gc-tests--with-repo
+    (let ((dir (expand-file-name "ff" root)))
+      (gc-tests--worktree proj dir "aob/ff" "one")
+      (gc-tests--merge-ff proj "aob/ff")
+      (gc-tests--git proj "config" "branch.aob/ff.remote" "origin")
+      (gc-tests--sweep)
+      (should-not (member "aob/ff" (gc-tests--branches proj)))
+      (should-error (gc-tests--git proj "config" "--get" "branch.aob/ff.remote")))))
+
+(ert-deftest aob-gc-dependency-dirs-and-env-templates-are-not-precious ()
+  (gc-tests--with-repo
+    (let ((dir (expand-file-name "dep" root))
+          (tpl (expand-file-name "tpl" root)))
+      (gc-tests--worktree proj dir "aob/dep")
+      (gc-tests--commit dir ".gitignore" "node_modules/\n")
+      (gc-tests--merge-ff proj "aob/dep")
+      (make-directory (expand-file-name "node_modules/@aws-sdk/client-secrets-manager" dir) t)
+      (with-temp-file (expand-file-name "node_modules/@aws-sdk/client-secrets-manager/x.js" dir)
+        (insert "x"))
+      (with-temp-file (expand-file-name "node_modules/.env" dir) (insert "x"))
+      (gc-tests--worktree proj tpl "aob/tpl")
+      (gc-tests--commit tpl ".gitignore" ".env.example\n")
+      (gc-tests--merge-ff proj "aob/tpl")
+      (with-temp-file (expand-file-name ".env.example" tpl) (insert "x"))
+      (gc-tests--sweep)
+      (should-not (file-directory-p dir))
+      (should-not (file-directory-p tpl)))))
+
+(ert-deftest aob-gc-precious-matches-the-base-name-only ()
+  (should (aob-gc--precious-p ".env"))
+  (should (aob-gc--precious-p "data/app.sqlite"))
+  (should (aob-gc--precious-p "cfg/credentials.json"))
+  (should-not (aob-gc--precious-p ".env.example"))
+  (should-not (aob-gc--precious-p "a/.env.template"))
+  (should-not (aob-gc--precious-p "secrets-dir/readme.txt"))
+  (should-not (aob-gc--precious-p "x.env/y.txt")))
+
+(ert-deftest aob-gc-a-modified-buffer-without-a-file-does-not-protect ()
+  (gc-tests--with-repo
+    (let ((dir (expand-file-name "ff" root)))
+      (gc-tests--worktree proj dir "aob/ff" "one")
+      (with-temp-buffer
+        (setq default-directory (file-name-as-directory dir))
+        (insert "x")
+        (should (buffer-modified-p))
+        (should-not (aob-gc--visited-p dir)))
+      (let ((buffer (find-file-noselect (expand-file-name "f.txt" dir))))
+        (unwind-protect
+            (with-current-buffer buffer
+              (insert "x")
+              (should (aob-gc--visited-p dir)))
+          (with-current-buffer buffer (set-buffer-modified-p nil))
+          (kill-buffer buffer))))))
+
+(ert-deftest aob-gc-a-hanging-gh-is-killed-and-the-lock-released ()
+  (gc-tests--with-repo
+    (let* ((aob-gc-fetch nil)
+           (aob-gc-fetch-timeout 1)
+           (dir (gc-tests--diverge proj root "slow"))
+           (bin (gc-tests--fake-gh "exec sleep 30"))
+           (exec-path (cons bin exec-path))
+           (process-environment (cons (concat "PATH=" bin ":" (getenv "PATH"))
+                                      process-environment))
+           (start (float-time)))
+      (gc-tests--git proj "remote" "set-url" "origin" "https://github.com/x/y.git")
+      (gc-tests--sweep)
+      (should (< (- (float-time) start) 15))
+      (should (file-directory-p dir))
+      (should (zerop (hash-table-count aob-gc--busy)))
+      (should-not (seq-some (lambda (p) (and (process-live-p p)
+                                             (string-match-p "forge" (process-name p))))
+                            (process-list))))))
 
 (ert-deftest aob-gc-preview-does-not-fetch-but-a-sweep-does ()
   (gc-tests--with-repo
@@ -545,21 +645,39 @@
       (gc-tests--sweep)
       (should-not (file-directory-p dir)))))
 
+(defun gc-tests--ssh-script ()
+  "A fake ssh that logs its arguments; returns (SCRIPT . LOG)."
+  (let ((log (expand-file-name "ssh.log" gc-tests--base))
+        (script (expand-file-name "ssh.sh" gc-tests--base)))
+    (with-temp-file script (insert (format "#!/bin/sh\necho \"$@\" > %s\nexit 1\n" log)))
+    (set-file-modes script #o755)
+    (cons script log)))
+
+(defun gc-tests--logged (log)
+  "The contents of LOG."
+  (with-temp-buffer (insert-file-contents log) (buffer-string)))
+
 (ert-deftest aob-gc-fetch-ssh-never-asks-and-keeps-the-configured-command ()
   (gc-tests--with-repo
-    (let* ((log (expand-file-name "ssh.log" gc-tests--base))
-           (script (expand-file-name "ssh.sh" gc-tests--base))
-           (process-environment (cons (format "GIT_SSH_COMMAND=%s" script)
+    (let* ((ssh (gc-tests--ssh-script))
+           (process-environment (cons (format "GIT_SSH_COMMAND=%s" (car ssh))
                                       process-environment))
            done)
-      (with-temp-file script (insert (format "#!/bin/sh\necho \"$@\" > %s\nexit 1\n" log)))
-      (set-file-modes script #o755)
       (gc-tests--git proj "remote" "set-url" "origin" "ssh://host/repo.git")
       (aob-gc--fetch proj (lambda () (setq done t)))
       (gc-tests--wait (lambda () done))
-      (should (string-match-p "-o BatchMode=yes" (with-temp-buffer
-                                                   (insert-file-contents log)
-                                                   (buffer-string)))))))
+      (should (string-match-p "-o BatchMode=yes" (gc-tests--logged (cdr ssh)))))))
+
+(ert-deftest aob-gc-fetch-honours-core-ssh-command ()
+  (gc-tests--with-repo
+    (let* ((ssh (gc-tests--ssh-script))
+           (process-environment (cons "GIT_SSH_COMMAND" process-environment))
+           done)
+      (gc-tests--git proj "config" "core.sshCommand" (car ssh))
+      (gc-tests--git proj "remote" "set-url" "origin" "ssh://host/repo.git")
+      (aob-gc--fetch proj (lambda () (setq done t)))
+      (gc-tests--wait (lambda () done))
+      (should (string-match-p "-o BatchMode=yes" (gc-tests--logged (cdr ssh)))))))
 
 (ert-deftest aob-gc-an-entry-under-a-symlink-moves-when-git-reports-the-real-path ()
   (gc-tests--with-repo
