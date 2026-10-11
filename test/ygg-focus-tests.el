@@ -1,5 +1,6 @@
 ;;; ygg-focus-tests.el --- Tests for dimming the unselected windows -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'ygg-focus)
 

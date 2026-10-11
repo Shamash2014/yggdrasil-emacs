@@ -2,6 +2,7 @@
 
 ;;; Code:
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (let* ((here (file-name-directory (or load-file-name buffer-file-name)))
        (builds (expand-file-name "../elpaca/builds/" here)))
   (dolist (p '("magit" "magit-section" "compat" "dash" "llama" "cond-let"

@@ -1,5 +1,6 @@
 ;;; aob-compact-reserve-tests.el --- Autocompact by space left, and overflow retry -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'aob)
 (defvar aob-acp-persist-file)

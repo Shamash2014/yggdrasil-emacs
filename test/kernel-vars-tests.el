@@ -8,6 +8,7 @@
 ;; They are written as emacs-jupyter decodes JSON: plists, vectors, :json-false.
 ;; The live fixtures were captured from the kernel, as decoded.
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'json)
 (require 'ygg-kernel-vars)

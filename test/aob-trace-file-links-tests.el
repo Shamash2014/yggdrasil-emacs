@@ -1,5 +1,6 @@
 ;;; aob-trace-file-links-tests.el --- Files the agent names open on RET -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)
 (require 'cl-lib)

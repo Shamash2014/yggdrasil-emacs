@@ -1,5 +1,6 @@
 ;;; ygg-mode-keys-tests.el --- State-scoped mode keymaps -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)
 (require 'yggdrasil)

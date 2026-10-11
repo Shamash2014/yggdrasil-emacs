@@ -1,5 +1,6 @@
 ;;; ygg-treesit-objects-tests.el --- Treesit text objects through the match dispatcher -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'treesit)
 (require 'cl-lib)

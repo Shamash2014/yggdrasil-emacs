@@ -1,5 +1,6 @@
 ;;; ygg-session-lsp-defer-tests.el --- eglot waits for version control on restored buffers -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)
 (require 'cl-lib)

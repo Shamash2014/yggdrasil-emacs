@@ -1,5 +1,6 @@
 ;;; dap-lldb-tests.el --- Tests for lldb-dap debug configs -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (load (expand-file-name "test-elpaca" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)

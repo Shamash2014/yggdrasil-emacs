@@ -1,5 +1,6 @@
 ;;; aob-bang-tests.el --- Tests for aob-bang -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (defvar aob-acp-persist-file)

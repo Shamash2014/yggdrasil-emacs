@@ -1,5 +1,6 @@
 ;;; ice-commit-gate-tests.el --- Tests for the ledger commit gate -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'ygg-ice)
 

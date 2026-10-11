@@ -1,5 +1,6 @@
 ;;; call-graph-tests.el --- The call graph over a fake call hierarchy -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (require 'subr-x)

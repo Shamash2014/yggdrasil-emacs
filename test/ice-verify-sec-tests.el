@@ -1,5 +1,6 @@
 ;;; ice-verify-sec-tests.el --- Tests for the sec_cmd lane in etc/ice/ice-verify -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'ygg-ice)
 

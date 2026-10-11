@@ -1,5 +1,6 @@
 ;;; ygg-dart-sdk-tests.el --- Dart resolves onto the Flutter SDK's Dart -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (load (expand-file-name "test-elpaca" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)

@@ -1,5 +1,6 @@
 ;;; aob-rebind-tests.el --- rebinding saved sessions whose folder is gone  -*- lexical-binding: t -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'aob-acp)
 (require 'aob-transcript)

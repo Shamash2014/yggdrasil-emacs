@@ -1,5 +1,6 @@
 ;;; aob-transcript-search-tests.el --- picking a past conversation by date and by what was said -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (require 'json)

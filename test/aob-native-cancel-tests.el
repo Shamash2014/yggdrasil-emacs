@@ -1,5 +1,6 @@
 ;;; aob-native-cancel-tests.el --- stopping a subagent stops its agent -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (require 'aob)

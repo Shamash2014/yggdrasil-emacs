@@ -1,5 +1,6 @@
 ;;; ts-server-tests.el --- Tests for the TypeScript server choice -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (require 'eglot)

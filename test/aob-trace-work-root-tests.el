@@ -1,5 +1,6 @@
 ;;; aob-trace-work-root-tests.el --- Work root of remote and local sessions -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)
 (require 'cl-lib)

@@ -1,5 +1,6 @@
 ;;; ygg-steal-windows-tests.el --- winner keys and popup rules -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)
 (require 'cl-lib)

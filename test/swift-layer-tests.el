@@ -1,5 +1,6 @@
 ;;; swift-layer-tests.el --- Tests for layer-swift -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (require 'layer-swift)

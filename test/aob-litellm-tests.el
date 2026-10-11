@@ -1,5 +1,6 @@
 ;;; aob-litellm-tests.el --- tests for the overall LiteLLM usage line -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'aob)
 (require 'aob-litellm)

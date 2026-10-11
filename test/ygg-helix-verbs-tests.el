@@ -1,5 +1,6 @@
 ;;; ygg-helix-verbs-tests.el --- Helix verb bindings -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)
 (require 'yggdrasil)

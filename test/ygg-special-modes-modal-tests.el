@@ -1,5 +1,6 @@
 ;;; ygg-special-modes-modal-tests.el --- Special-mode buffers that gain the modal layer -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)
 (require 'cl-lib)

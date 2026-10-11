@@ -1,5 +1,6 @@
 ;;; ygg-selection-history-tests.el --- Tests for M-u / M-U selection history -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'yggdrasil)
 (require 'yggdrasil-selection)

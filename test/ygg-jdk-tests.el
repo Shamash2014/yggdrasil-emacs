@@ -1,5 +1,6 @@
 ;;; ygg-jdk-tests.el --- Tests for the pinned JDK and per-project overrides -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (require 'ygg-jdk)

@@ -1,5 +1,6 @@
 ;;; skills-description-tests.el --- Every shipped SKILL.md lists cheaply -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (require 'ygg-preset)

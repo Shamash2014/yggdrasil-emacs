@@ -1,5 +1,6 @@
 ;;; ygg-motions-tests.el --- Tests for yggdrasil motion fixes -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'yggdrasil-motions)
 (require 'yggdrasil-selection)

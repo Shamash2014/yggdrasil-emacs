@@ -1,5 +1,6 @@
 ;;; ygg-steal-modal-tests.el --- Comment-continuing o/O, url object, mode surrounds, g P / g y -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)
 (require 'yggdrasil)

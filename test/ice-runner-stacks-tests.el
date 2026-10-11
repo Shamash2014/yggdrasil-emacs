@@ -1,5 +1,6 @@
 ;;; ice-runner-stacks-tests.el --- Flutter/Dart, Kotlin/Gradle, Swift detection in ice-runner -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'json)
 (require 'cl-lib)

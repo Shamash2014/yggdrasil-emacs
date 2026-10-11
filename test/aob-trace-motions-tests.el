@@ -1,5 +1,6 @@
 ;;; aob-trace-motions-tests.el --- Turn, tool and hunk motions and objects in the trace -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)
 (require 'cl-lib)

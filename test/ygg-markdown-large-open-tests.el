@@ -1,5 +1,6 @@
 ;;; ygg-markdown-large-open-tests.el --- Big markdown files open without a full propertize -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (load (expand-file-name "test-elpaca" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (setq load-prefer-newer t)
 (require 'ert)

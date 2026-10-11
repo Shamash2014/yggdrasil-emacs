@@ -1,5 +1,6 @@
 ;;; ice-layer-tests.el --- Tests for the ICE layer: lat.md, OpenSpec, C4 and the Context row -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (require 'yggdrasil-leader)

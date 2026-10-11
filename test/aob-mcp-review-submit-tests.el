@@ -2,6 +2,7 @@
 
 ;;; Code:
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (with-suppressed-warnings ((lexical features)) (defvar features))
 (require 'ert)
 (require 'cl-lib)

@@ -4,6 +4,7 @@
 
 ;;; Code:
 
+(load (expand-file-name "../../test/test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'aob)
 (require 'aob-acp)

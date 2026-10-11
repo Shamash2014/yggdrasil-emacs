@@ -1,5 +1,6 @@
 ;;; ygg-aob-kill-all-tests.el --- closing every agent in a space -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (defvar ygg-space-state-functions nil)
