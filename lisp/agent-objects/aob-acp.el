@@ -4879,6 +4879,7 @@ there is no load; resume asks for the history with replayFrom instead."
           :limits (aob-session-ref s :limits)
           :named-by-user (aob-session-ref s :named-by-user)
           :auto-named (aob-session-ref s :auto-named)
+          :pinned (aob-session-ref s :pinned)
           :unread (aob-session-ref s :unread))))
 
 (defun aob-acp--persist (&optional removed &rest _)
@@ -5280,6 +5281,8 @@ holds no turn, question or connection for a session no one reads."
                     (list :auto-named auto))
                   (when (plist-get e :unread)
                     (list :unread t))
+                  (when (plist-get e :pinned)
+                    (list :pinned t))
                   (plist-get e :limits)
                   ;; a conversation reloaded onto another model is a
                   ;; different conversation from the second turn on
