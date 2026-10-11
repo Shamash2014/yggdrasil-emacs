@@ -1007,8 +1007,12 @@ keeps writing into the trace it was already writing into."
 (defun aob-kill-session (s)
   "Kill S's process and drop it from the registry."
   (interactive (list (aob-target)))
-  (when (y-or-n-p (format "Kill %s? " (aob-session-name s)))
-    (aob--call s :kill)))
+  (let ((queued (length (aob-session-ref s :queued))))
+    (when (y-or-n-p (format "Kill %s%s? " (aob-session-name s)
+                            (if (zerop queued) ""
+                              (format " and drop %d queued prompt(s)" queued))))
+      (aob-session-put s :queued nil)
+      (aob--call s :kill))))
 
 (defun aob-focus (s)
   "Show S's primary surface (terminal or trace)."
