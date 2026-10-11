@@ -20,6 +20,7 @@
 (declare-function agent-shell-markdown-reconstruct "agent-shell-markdown" (beg end &optional deepen))
 (defvar agent-shell-markdown-table-max-width-fraction)
 (declare-function aob-session-model-now "aob" (s))
+(declare-function aob-queue-remove "aob" (s entry))
 (defvar ygg-modeline-name)
 (declare-function ygg-diagram-fence-at-point "ygg-diagram" ())
 (declare-function ygg-diagram-toggle-at-point "ygg-diagram" ())
