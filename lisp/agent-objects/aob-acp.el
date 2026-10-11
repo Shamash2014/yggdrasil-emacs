@@ -4923,13 +4923,17 @@ there is no load; resume asks for the history with replayFrom instead."
           :auto-named (aob-session-ref s :auto-named)
           :pinned (aob-session-ref s :pinned)
           :unread (aob-session-ref s :unread)
-          :queue-paused (and (or (aob-session-ref s :queued)
-                                 (plist-get (aob-session-ref s :asleep) :queued))
-                             (aob-session-queue-paused-p s))
-          :queued (if (and (aob-session-ref s :asleep)
-                           (null (aob-session-ref s :queued)))
-                      (plist-get (aob-session-ref s :asleep) :queued)
-                    (aob-acp--queued-prompts s)))))
+          :queue-paused (plist-get (aob-acp--queue-state s) :queue-paused)
+          :queued (plist-get (aob-acp--queue-state s) :queued))))
+
+(defun aob-acp--queue-state (s)
+  "The queue and pause of S the persist file keeps, asleep or live."
+  (let ((queued (if (and (aob-session-ref s :asleep)
+                         (null (aob-session-ref s :queued)))
+                    (plist-get (aob-session-ref s :asleep) :queued)
+                  (aob-acp--queued-prompts s))))
+    (list :queued queued
+          :queue-paused (and queued (aob-session-queue-paused-p s) t))))
 
 (defun aob-acp--queued-prompts (s)
   "S's queued prompts as (TEXT ATTACHMENTS), the event left behind.
@@ -5011,14 +5015,16 @@ killing it must not be what makes it unreachable."
 (defconst aob-acp--queued-write-delay 0.75)
 
 (defun aob-acp--write-queued (s)
-  (when-let* ((acp-id (aob-session-ref s :acp-id)))
-    (unless (aob-acp--rewrite acp-id
-                              (lambda (entry)
-                                (plist-put
-                                 (plist-put (copy-sequence entry) :queued
-                                            (aob-acp--queued-prompts s))
-                                 :queue-paused (aob-session-queue-paused-p s))))
-      (aob-acp--persist))))
+  (when-let* ((acp-id (aob-session-ref s :acp-id))
+              ((eq s (gethash (aob-session-id s) aob--sessions))))
+    (let ((state (aob-acp--queue-state s)))
+      (unless (aob-acp--rewrite acp-id
+                                (lambda (entry)
+                                  (plist-put
+                                   (plist-put (copy-sequence entry) :queued
+                                              (plist-get state :queued))
+                                   :queue-paused (plist-get state :queue-paused))))
+        (aob-acp--persist)))))
 
 (defun aob-acp--flush-queued-writes ()
   (when (timerp aob-acp--queued-timer)
@@ -5038,6 +5044,10 @@ killing it must not be what makes it unreachable."
             (run-with-idle-timer aob-acp--queued-write-delay nil
                                  #'aob-acp--flush-queued-writes)))))
 
+(defun aob-acp--forget-queued-write (s)
+  (setq aob-acp--queued-writes (delq s aob-acp--queued-writes)))
+
+(add-hook 'aob-session-removed-hook #'aob-acp--forget-queued-write)
 (add-hook 'aob-queue-change-hook #'aob-acp--persist-queued)
 (add-hook 'kill-emacs-hook #'aob-acp--flush-queued-writes -50)
 

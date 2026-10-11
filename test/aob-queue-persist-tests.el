@@ -125,3 +125,61 @@
       (should (= 5 (length (plist-get (aob-queue-persist-tests--entry "acp-a") :queued)))))))
 
 (provide 'aob-queue-persist-tests)
+
+(defun aob-queue-persist-tests--register (s)
+  (puthash (aob-session-id s) s aob--sessions)
+  (push (aob-session-id s) aob--order))
+
+(ert-deftest aob-queue-persist-removed-session-leaves-no-pending-write ()
+  (aob-queue-persist-tests--with
+    (let ((s (aob-queue-persist-tests--session "a")))
+      (aob-queue-persist-tests--register s)
+      (aob-acp--persist)
+      (aob-acp--queue s "p1" nil)
+      (aob-acp--queue s "p2" nil)
+      (aob-remove-session s)
+      (should-not (memq s aob-acp--queued-writes))
+      (aob-acp--flush-queued-writes)
+      (should (= 2 (length (plist-get (aob-queue-persist-tests--entry "acp-a")
+                                      :queued)))))))
+
+(ert-deftest aob-queue-persist-flush-skips-unregistered-session ()
+  (aob-queue-persist-tests--with
+    (let ((s (aob-queue-persist-tests--session "a")))
+      (aob-queue-persist-tests--register s)
+      (aob-acp--persist)
+      (aob-acp--queue s "p1" nil)
+      (aob-acp--flush-queued-writes)
+      (aob-acp--queue s "p2" nil)
+      (remhash (aob-session-id s) aob--sessions)
+      (aob-acp--flush-queued-writes)
+      (should (= 1 (length (plist-get (aob-queue-persist-tests--entry "acp-a")
+                                      :queued)))))))
+
+(ert-deftest aob-queue-persist-asleep-session-keeps-its-queue-on-direct-write ()
+  (aob-queue-persist-tests--with
+    (cl-letf (((symbol-function 'aob-transcript-turns) (lambda (&rest _) nil)))
+      (let ((s (aob-transcript--session
+                (list :agent "claude" :acp-id "gone" :name "n"
+                      :project temporary-file-directory
+                      :dir temporary-file-directory
+                      :queue-paused t :queued '(("kept" nil)))
+                nil)))
+        (aob-queue-persist-tests--register s)
+        (aob-acp--persist)
+        (aob-acp--persist-queued s)
+        (aob-acp--flush-queued-writes)
+        (let ((e (aob-queue-persist-tests--entry "gone")))
+          (should (equal '(("kept" nil)) (plist-get e :queued)))
+          (should (plist-get e :queue-paused)))))))
+
+(ert-deftest aob-queue-persist-pause-on-empty-queue-is-not-written ()
+  (aob-queue-persist-tests--with
+    (let ((s (aob-queue-persist-tests--session "a")))
+      (aob-queue-persist-tests--register s)
+      (aob-acp--persist)
+      (aob-session-put s :queue-paused t)
+      (run-hook-with-args 'aob-queue-change-hook s)
+      (aob-acp--flush-queued-writes)
+      (should-not (plist-get (aob-queue-persist-tests--entry "acp-a")
+                             :queue-paused)))))
