@@ -837,24 +837,107 @@ Asleep: it carries the id its agent answers to, and no process."
                          :typed (equal (car turn) "user"))))
           s))))
 
+(defun aob-transcript--past-entries ()
+  "Conversations on disk that are not running, newest first."
+  (let ((rows (delq nil
+                    (mapcar (lambda (e)
+                              (when-let* ((file (aob-transcript-file e)))
+                                (cons (aob-transcript--mtime file) e)))
+                            (append (and (fboundp 'aob-acp-resumable-entries)
+                                         (aob-acp-resumable-entries))
+                                    (and (fboundp 'aob-acp-archived-entries)
+                                         (aob-acp-archived-entries)))))))
+    (mapcar #'cdr (sort rows (lambda (a b) (> (car a) (car b)))))))
+
+(defun aob-transcript--label (entry)
+  "ENTRY as \"date  name · folder\" for a picker."
+  (format "%s  %s · %s"
+          (format-time-string "%m-%d %H:%M"
+                              (aob-transcript--mtime (aob-transcript-file entry)))
+          (or (plist-get entry :name) "session")
+          (abbreviate-file-name (or (plist-get entry :dir) ""))))
+
+(defun aob-transcript--candidate-lines (query files)
+  "Each (FILE . LINE) of FILES whose raw line holds QUERY, any case."
+  (if (executable-find "rg")
+      (let (out)
+        (with-temp-buffer
+          (when (zerop (apply #'call-process "rg" nil t nil
+                              "--null" "--no-heading" "--with-filename"
+                              "-i" "-F" "-e" query "--" files))
+            (goto-char (point-min))
+            (while (re-search-forward "\\([^\0\n]+\\)\0\\(.*\\)$" nil t)
+              (push (cons (match-string 1) (match-string 2)) out))))
+        (nreverse out))
+    (let ((case-fold-search t) out)
+      (dolist (file files)
+        (with-temp-buffer
+          (insert-file-contents file)
+          (goto-char (point-min))
+          (while (search-forward query nil t)
+            (push (cons file (buffer-substring (line-beginning-position)
+                                               (line-end-position)))
+                  out)
+            (forward-line 1))))
+      (nreverse out))))
+
+(defun aob-transcript--snippet (line query)
+  "Around QUERY in what the record on LINE said, or nil when it said none."
+  (when-let* ((rec (ignore-errors
+                     (json-parse-string line :object-type 'alist
+                                        :null-object nil :false-object nil)))
+              ((listp rec))
+              (turn (aob-transcript--turn rec))
+              (text (replace-regexp-in-string "[ \t\n]+" " " (cdr turn)))
+              (at (string-search (downcase query) (downcase text))))
+    (concat (and (> at 30) "…")
+            (substring text (max 0 (- at 30)) (min (length text) (+ at (length query) 50))))))
+
+(defun aob-transcript--search (query)
+  "Past conversations whose user or agent text holds QUERY, as (ENTRY . SNIPPET)."
+  (let* ((entries (aob-transcript--past-entries))
+         (files (mapcar #'aob-transcript-file entries))
+         (hits (aob-transcript--candidate-lines query files))
+         (snippets (make-hash-table :test 'equal)))
+    (pcase-dolist (`(,file . ,line) hits)
+      (unless (gethash file snippets)
+        (when-let* ((snippet (aob-transcript--snippet line query)))
+          (puthash file snippet snippets))))
+    (delq nil (mapcar (lambda (e)
+                        (when-let* ((snippet (gethash (aob-transcript-file e) snippets)))
+                          (cons e snippet)))
+                      entries))))
+
+;;;###autoload
+(defun aob-transcript-search (query)
+  "Open the past conversation in which someone said QUERY."
+  (interactive (list (read-string "Search conversations: ")))
+  (when (string-empty-p query) (user-error "aob: nothing to search for"))
+  (let* ((rows (mapcar (lambda (hit)
+                         (cons (format "%s — %s" (aob-transcript--label (car hit)) (cdr hit))
+                               (car hit)))
+                       (aob-transcript--search query))))
+    (unless rows (user-error "aob: no conversation mentions %s" query))
+    (aob-transcript-view
+     (cdr (assoc (completing-read (format "Open (%s): " query) (mapcar #'car rows) nil t)
+                 rows)))))
+
 ;;;###autoload
 (defun aob-transcript-view (entry)
   "Open ENTRY's conversation as the session it was.
 Nothing is started: writing to it is what brings its agent back."
   (interactive
-   (list (let* ((entries (append (and (fboundp 'aob-acp-resumable-entries)
-                                      (aob-acp-resumable-entries))
-                                 (and (fboundp 'aob-acp-archived-entries)
-                                      (aob-acp-archived-entries))))
-                (rows (mapcar (lambda (e)
-                                (cons (format "%s · %s"
-                                              (or (plist-get e :name) "session")
-                                              (abbreviate-file-name
-                                               (or (plist-get e :dir) "")))
-                                      e))
-                              entries)))
+   (list (let ((rows (mapcar (lambda (e) (cons (aob-transcript--label e) e))
+                             (aob-transcript--past-entries))))
            (unless rows (user-error "aob: no past conversations"))
-           (cdr (assoc (completing-read "Open: " (mapcar #'car rows) nil t) rows)))))
+           (cdr (assoc (completing-read
+                        "Open: "
+                        (lambda (string pred action)
+                          (if (eq action 'metadata)
+                              '(metadata (display-sort-function . identity))
+                            (complete-with-action action (mapcar #'car rows) string pred)))
+                        nil t)
+                       rows)))))
   (let* ((file (or (aob-transcript-file entry)
                    (user-error "aob: no transcript on disk for %s"
                                (or (plist-get entry :name) "that session"))))
