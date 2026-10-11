@@ -239,7 +239,8 @@ Return a line saying how it went."
       (error (format "%s would not take it: %s" name (error-message-string err))))))
 
 (defvar aob-mcp-host--asks nil
-  "Questions awaiting an answer, as (ASKER-ID TARGET-ID SENT-TEXT).")
+  "Questions awaiting an answer, as (ASKER-ID TARGET-ID SENT-TEXT EARLIER).
+EARLIER is the target's prompt events that already carried SENT-TEXT.")
 
 (defun aob-mcp-host--ask-for (asker target)
   (seq-find (lambda (ask) (and (equal (car ask) (aob-session-id asker))
@@ -258,7 +259,8 @@ Return a line saying how it went."
    (t
     (let* ((sent (format "Question from %s (your reply to this turn goes back to them on its own, so answer here):\n\n%s"
                          (aob-session-name asker) question))
-           (ask (list (aob-session-id asker) (aob-session-id target) sent)))
+           (ask (list (aob-session-id asker) (aob-session-id target) sent
+                      (aob-mcp-host--prompts target sent))))
       (push ask aob-mcp-host--asks)
       (let ((said (aob-mcp-host-say target sent)))
         (if (string-search "would not take it" said)
@@ -267,8 +269,14 @@ Return a line saying how it went."
           (format "asked %s; its reply will arrive as a message, so end your turn instead of polling"
                   (aob-session-name target))))))))
 
-(defun aob-mcp-host--answer (target sent)
-  "The last thing TARGET said in the turn that took SENT, or nil before it began."
+(defun aob-mcp-host--prompts (target text)
+  (seq-filter (lambda (ev) (and (eq (plist-get ev :type) 'prompt)
+                                (equal (plist-get ev :text) text)))
+              (aob-session-events target)))
+
+(defun aob-mcp-host--answer (target sent earlier)
+  "The last thing TARGET said in the turn that took SENT, or nil before it began.
+Prompts in EARLIER were there before SENT was, so they are other turns."
   (let ((answer nil)
         (began nil))
     (catch 'done
@@ -276,6 +284,7 @@ Return a line saying how it went."
         (cond
          ((and (eq (plist-get ev :type) 'prompt)
                (equal (plist-get ev :text) sent)
+               (not (memq ev earlier))
                (not (equal (plist-get ev :status) "queued")))
           (setq began t)
           (throw 'done nil))
@@ -299,10 +308,11 @@ Return a line saying how it went."
                            aob-mcp-host--asks))
     (let ((name (aob-session-name session)))
       (cond
-       ((memq new '(dead failed))
+       ((and (memq new '(dead failed))
+             (not (aob-session-ref session :restarting)))
         (aob-mcp-host--deliver ask (format "No reply from %s: it ended before answering." name)))
        ((eq new 'idle)
-        (when-let* ((answer (aob-mcp-host--answer session (nth 2 ask))))
+        (when-let* ((answer (aob-mcp-host--answer session (nth 2 ask) (nth 3 ask))))
           (aob-mcp-host--deliver
            ask (format "Reply from %s:\n\n%s" name
                        (if (string-empty-p answer) "(it finished without a message)" answer)))))))))
