@@ -139,6 +139,7 @@
 (declare-function aob-acp-model "aob-acp")
 (declare-function aob-acp-backend "aob-acp")
 (declare-function aob-acp-goal "aob-acp")
+(declare-function aob-acp-approve-all "aob-acp")
 (declare-function aob-transcript-wake "aob-transcript" (s))
 (declare-function aob-acp-cycle-mode "aob-acp")
 (declare-function aob-mode-prev "aob-acp")
@@ -179,6 +180,7 @@ BINDINGS is a list of (KEY COMMAND LABEL)."
      ("w" aob-acp-worker-effort "worker effort")
      ("c" aob-acp-mcp "mcp servers")
      ("g" aob-acp-goal "goal")
+     ("a" aob-acp-approve-all "approve all permissions (toggle)")
      ("r" aob-transcript-wake "wake (resume acp)")
      ("f" aob-acp-add-folder "add a folder")))
   (ygg-aob--localleader-group

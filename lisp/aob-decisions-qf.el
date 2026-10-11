@@ -13,6 +13,7 @@
 (declare-function aob-subagents--goto "aob-trace")
 (declare-function ygg-qf-kind-at-point "layer-quickfix")
 (declare-function aob-ask-reject-reason "aob")
+(declare-function aob-acp-approve-all "aob-acp")
 (defvar aob-trace--session-id)
 (declare-function yggdrasil-define-local-keys "yggdrasil-core")
 (declare-function aob-trace--pending "aob-trace")
@@ -67,6 +68,13 @@ reject always.  An always option asks first."
     (pcase-let ((`(,s . ,d) (ygg-aob--decision-of (cdr at))))
       (ygg-aob--pick s d (ygg-aob--key-spec)))))
 
+(defun ygg-aob-decision-approve-all ()
+  "Toggle approving every permission of the session on this quickfix row."
+  (interactive)
+  (let ((at (ygg-qf-kind-at-point)))
+    (unless (eq (car at) 'decisions) (user-error "aob: no decision here"))
+    (aob-acp-approve-all (car (ygg-aob--decision-of (cdr at))))))
+
 (defun ygg-aob--decision-key-filter (command)
   "COMMAND on a decision row of the quickfix, else nil to fall through."
   (and (eq (car (ygg-qf-kind-at-point)) 'decisions) command))
@@ -118,8 +126,12 @@ An always option asks first."
            append (mapcar
                    (lambda (d)
                      (list (cons (aob-session-id s) (plist-get d :seq))
-                           (format "%s · %s%s%s"
+                           (format "%s · %s · %d/%d · %s%s%s"
                                    (aob-session-name s)
+                                   (or (aob-session-cwd s) "")
+                                   (- (length (aob-session-decisions s))
+                                      (seq-position (aob-session-decisions s) d #'eq))
+                                   (length (aob-session-decisions s))
                                    (or (plist-get d :title) "decision")
                                    (if-let* ((det (plist-get d :detail)))
                                        (format "  [%s]" det)
@@ -182,9 +194,12 @@ An always option asks first."
     (add-hook 'aob-session-removed-hook hook)
     (with-current-buffer buf
       (apply #'yggdrasil-define-local-keys 'normal
-             (cl-loop for k in '("1" "2" "3" "4" "5" "6" "7" "8" "9" "y" "Y" "n" "N")
-                      append (list k '(menu-item "" ygg-aob-decision-key
-                                                 :filter ygg-aob--decision-key-filter)))))
+             (append
+              (cl-loop for k in '("1" "2" "3" "4" "5" "6" "7" "8" "9" "y" "Y" "n" "N")
+                       append (list k '(menu-item "" ygg-aob-decision-key
+                                                  :filter ygg-aob--decision-key-filter)))
+              (list "A" '(menu-item "" ygg-aob-decision-approve-all
+                                    :filter ygg-aob--decision-key-filter)))))
     (aob-register-view buf render)
     disarm))
 

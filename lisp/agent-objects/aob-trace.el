@@ -4050,6 +4050,8 @@ The full account is \\ i u; the header carries only what is looked at."
                         (when-let* ((warning (aob-session-ref s :stop-warning)))
                           (propertize warning 'face 'warning))
                         (aob-session-quiet s)
+                        (when (aob-session-ref s :approve-all)
+                          (propertize "approve-all" 'face 'warning))
                         (and mode (not (member mode aob-trace-quiet-modes)) mode)
                         clock cost ctx todo goal wf
                         (ignore-errors

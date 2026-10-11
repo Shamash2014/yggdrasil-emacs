@@ -743,6 +743,45 @@ it is dead, and a reply would carry it back to idle."
   "Abnormal hook run with (SESSION DECISION TOOLCALL) for every permission
 request, after its decision is pushed and its event recorded.")
 
+(defun aob-acp--approve-once (s d)
+  "Answer S's permission D with its allow-once option; nil when it has none.
+Plans, questions and logins are never answered here."
+  (when-let* (((null (plist-get d :kind)))
+              (o (seq-find (lambda (o) (equal (plist-get o :kind) "allow_once"))
+                           (plist-get d :options))))
+    (aob--call s :resolve d (plist-get o :optionId))
+    t))
+
+(defun aob-acp--approving (s fn &rest args)
+  "Apply FN to ARGS, withdrawing S's approve-all if that signals."
+  (condition-case err
+      (apply fn args)
+    (error (aob-session-put s :approve-all nil)
+           (signal (car err) (cdr err)))))
+
+(defun aob-acp--approve-arrival (s d _toolcall)
+  "Answer the permission D that just reached S when S approves everything."
+  (when (aob-session-ref s :approve-all)
+    (aob-acp--approving s #'aob-acp--approve-once s d)))
+
+(add-hook 'aob-acp-request-functions #'aob-acp--approve-arrival)
+
+;;;###autoload
+(defun aob-acp-approve-all (s)
+  "Toggle S answering every permission with allow once, now and as they come.
+Turning it on asks first.  Plans, questions and logins still wait for you."
+  (interactive (list (aob-target)))
+  (if (aob-session-ref s :approve-all)
+      (progn (aob-session-put s :approve-all nil)
+             (aob-event s 'state :title "approve-all off"))
+    (unless (yes-or-no-p (format "Allow once every permission of %s, until turned off? "
+                                 (aob-session-name s)))
+      (user-error "aob: not approving"))
+    (aob-session-put s :approve-all t)
+    (aob-event s 'state :warning t :title "approve-all on")
+    (dolist (d (reverse (aob-session-decisions s)))
+      (aob-acp--approving s #'aob-acp--approve-once s d))))
+
 (defun aob-acp--on-request (s id method params)
   (pcase method
     ("session/request_permission"

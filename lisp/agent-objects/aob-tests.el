@@ -9263,3 +9263,70 @@ nothing, TAB opens one whole and back, and copying passes over them."
         (aob-trace-comment (line-beginning-position) (line-end-position))
         (should (eq (aob-tests--comment-draft) draft))
         (should (equal (with-current-buffer draft (buffer-string)) "fix this more"))))))
+
+(defconst aob-tests--approve-options
+  (list :toolCall (list :title "Bash")
+        :options [(:optionId "allow" :name "Allow" :kind "allow_once")
+                  (:optionId "reject" :name "Reject" :kind "reject_once")]))
+
+(defun aob-tests--answered-ids (sent)
+  (mapcar (lambda (m) (plist-get (plist-get (plist-get m :result) :outcome) :optionId))
+          (reverse (seq-filter (lambda (m) (plist-member m :result)) sent))))
+
+(ert-deftest aob-approve-all-answers-pending-permissions-only ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--request s 1 "session/request_permission" aob-tests--approve-options)
+    (aob-tests--request s 2 "session/request_permission"
+                        (list :toolCall (list :title "Edit")
+                              :options [(:optionId "no" :name "No" :kind "reject_once")]))
+    (aob-tests--request s 3 "elicitation/create"
+                        (list :mode "form" :message "Which?"
+                              :requestedSchema (list :type "object" :properties (list :a (list :type "string")))))
+    (aob-tests--capturing sent
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+        (aob-acp-approve-all s))
+      (should (equal (aob-tests--answered-ids sent) '("allow")))
+      (should (= (length (aob-session-decisions s)) 2))
+      (should (aob-session-ref s :approve-all)))))
+
+(ert-deftest aob-approve-all-answers-later-arrivals-until-turned-off ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--capturing sent
+      (cl-letf (((symbol-function 'yes-or-no-p) (lambda (&rest _) t)))
+        (aob-acp-approve-all s))
+      (aob-tests--request s 4 "session/request_permission" aob-tests--approve-options)
+      (should (equal (aob-tests--answered-ids sent) '("allow")))
+      (should-not (aob-session-decisions s))
+      (aob-acp-approve-all s)
+      (should-not (aob-session-ref s :approve-all))
+      (aob-tests--request s 5 "session/request_permission" aob-tests--approve-options)
+      (should (equal (aob-tests--answered-ids sent) '("allow")))
+      (should (= (length (aob-session-decisions s)) 1)))))
+
+(ert-deftest aob-approve-all-is-withdrawn-when-answering-fails ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-session-put s :approve-all t)
+    (cl-letf (((symbol-function 'aob--call) (lambda (&rest _) (error "boom"))))
+      (aob-tests--request s 6 "session/request_permission" aob-tests--approve-options))
+    (should-not (aob-session-ref s :approve-all))
+    (should (= (length (aob-session-decisions s)) 1))))
+
+(declare-function ygg-aob--decisions-collect "aob-decisions-qf")
+
+(ert-deftest aob-decisions-rows-show-cwd-and-position ()
+  (require 'aob-decisions-qf)
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-tests--request s 7 "session/request_permission" aob-tests--approve-options)
+    (aob-tests--request s 8 "session/request_permission" aob-tests--approve-options)
+    (let ((texts (mapcar #'cadr (ygg-aob--decisions-collect))))
+      (should (cl-every (lambda (x) (string-match-p " · proj · " x))
+                        texts))
+      (should (equal (sort (mapcar (lambda (x) (and (string-match " · \\([0-9]/[0-9]\\) · " x)
+                                                    (match-string 1 x)))
+                                   texts)
+                           #'string<)
+                     '("1/2" "2/2"))))))
