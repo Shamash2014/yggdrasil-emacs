@@ -422,11 +422,14 @@ FOUND is the form answering once it is found, with it bound to s."
                                          (or (aob-session-dir x) "")))
                      by-name)))
       ((null s) (list (format "no session called %s" who)))
+      ((and (fboundp 'aob-mcp-host-target-allowed-p)
+            (not (aob-mcp-host-target-allowed-p s)))
+       (list (format "%s is not a session you are allowed to reach" (aob-session-name s))))
       (t ,found))))
 
 (aob-mcp-deftool
  :name "session_say"
- :description "Send text to another conversation: into its running turn if it takes steering, else queued for its next."
+ :description "Send text to another conversation: into its running turn if it takes steering, else queued for its next. For an answer back, use session_ask."
  :args '((:name "id" :type string
           :description "Id or name from session_list.")
          (:name "text" :type string
@@ -445,28 +448,34 @@ FOUND is the form answering once it is found, with it bound to s."
         conn id
         (aob-mcp-tools--session-form
          who
-         `(cond
-           ((not (fboundp 'aob-prompt)) (list "no way to talk to it here"))
-           ((and (eq (aob-session-state s) 'working)
-                 (fboundp 'aob-acp--steers-p)
-                 (ignore-errors (aob-acp--steers-p s))
-                 (fboundp 'aob-interject))
-            (condition-case err (progn (aob-interject s ,text)
-                                       (list (format "said to %s, into the turn it is running"
-                                                     (aob-session-name s))))
-              (error (list (format "%s would not take it: %s"
-                                   (aob-session-name s)
-                                   (error-message-string err))))))
-           (t
-            ;; a conversation with no process behind it cannot be told
-            ;; anything, and saying so beats saying nothing
-            (condition-case err (progn (aob-prompt s ,text nil)
-                                       (list (format "said to %s (%s)"
-                                                     (aob-session-name s)
-                                                     (aob-session-state s))))
-              (error (list (format "%s would not take it: %s"
-                                   (aob-session-name s)
-                                   (error-message-string err))))))))))))))
+         `(if (fboundp 'aob-mcp-host-say)
+              (list (aob-mcp-host-say s ,text))
+            (list "no way to talk to it here")))))))))
+
+(aob-mcp-deftool
+ :name "session_ask"
+ :description "Ask another conversation a question. Returns at once; its answer arrives later as a message to you, so end your turn rather than polling session_read."
+ :args '((:name "id" :type string
+          :description "Id or name from session_list.")
+         (:name "text" :type string
+          :description "The question."))
+ :handler
+ (lambda (args conn id)
+   (let ((text (plist-get args :text))
+         (who (plist-get args :id)))
+     (cond
+      ((or (null who) (string-empty-p (string-trim who)))
+       "which session? pass id")
+      ((or (null text) (string-empty-p (string-trim text)))
+       "nothing to ask: pass text")
+      (t
+       (aob-mcp-relay
+        conn id
+        (aob-mcp-tools--session-form
+         who
+         `(if (fboundp 'aob-mcp-host-ask)
+              (list (aob-mcp-host-ask ,(aob-mcp-tools--parent-form aob-mcp-session) s ,text))
+            (list "no way to ask it here")))))))))
 
 (aob-mcp-deftool
  :name "session_read"

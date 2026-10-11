@@ -15,6 +15,7 @@
   '(("diagnostics" ("file" "checker") ("file"))
     ("imenu_symbols" ("file") ("file"))
     ("review_submit" ("dir" "branch" "comments" "verdict" "codex_review" "author") ("dir" "branch"))
+    ("session_ask" ("id" "text") ("id" "text"))
     ("session_list" () ())
     ("session_read" ("id") ("id"))
     ("session_say" ("id" "text") ("id" "text"))

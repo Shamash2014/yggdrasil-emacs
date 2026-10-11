@@ -199,5 +199,128 @@ says whose skills a search covers: a worktree\='s, not its main checkout\='s."
     (advice-remove 'aob-acp--open #'aob-mcp-host--around-spawn)
     (aob-mcp-host-stop)))
 
+;;; Talking to another session
+
+(declare-function aob-session-id "aob")
+(declare-function aob-session-ref "aob")
+(declare-function aob-session-name "aob")
+(declare-function aob-session-state "aob")
+(declare-function aob-session-events "aob")
+(declare-function aob-session-get "aob")
+(declare-function aob-sessions "aob")
+(declare-function aob-prompt "aob")
+(declare-function aob-interject "aob")
+(declare-function aob-acp--steers-p "aob-acp")
+
+(defcustom aob-mcp-host-session-targets nil
+  "Regexps matching the names of sessions an agent may say to, read or ask.
+Nil leaves every session reachable."
+  :type '(repeat regexp) :group 'aob-mcp)
+
+(defun aob-mcp-host-target-allowed-p (session)
+  "Non-nil when an agent may reach SESSION by `aob-mcp-host-session-targets'."
+  (or (null aob-mcp-host-session-targets)
+      (let ((name (aob-session-name session)))
+        (seq-some (lambda (re) (string-match-p re name))
+                  aob-mcp-host-session-targets))))
+
+(defun aob-mcp-host-say (session text)
+  "Say TEXT to SESSION, into its running turn if it takes steering, else queued.
+Return a line saying how it went."
+  (let ((name (aob-session-name session)))
+    (condition-case err
+        (if (and (eq (aob-session-state session) 'working)
+                 (fboundp 'aob-acp--steers-p)
+                 (ignore-errors (aob-acp--steers-p session)))
+            (progn (aob-interject session text)
+                   (format "said to %s, into the turn it is running" name))
+          (aob-prompt session text nil)
+          (format "said to %s (%s)" name (aob-session-state session)))
+      (error (format "%s would not take it: %s" name (error-message-string err))))))
+
+(defvar aob-mcp-host--asks nil
+  "Questions awaiting an answer, as (ASKER-ID TARGET-ID SENT-TEXT).")
+
+(defun aob-mcp-host--ask-for (asker target)
+  (seq-find (lambda (ask) (and (equal (car ask) (aob-session-id asker))
+                               (equal (cadr ask) (aob-session-id target))))
+            aob-mcp-host--asks))
+
+(defun aob-mcp-host-ask (asker target question)
+  "Put QUESTION from ASKER to TARGET; its answer comes back to ASKER as a message.
+Return a line saying how it went."
+  (cond
+   ((null asker) "cannot tell which session is asking")
+   ((eq asker target) "that is you: ask another session")
+   ((aob-mcp-host--ask-for asker target)
+    (format "%s has not answered your last question yet; its reply will arrive as a message"
+            (aob-session-name target)))
+   (t
+    (let* ((sent (format "Question from %s (your reply to this turn goes back to them on its own, so answer here):\n\n%s"
+                         (aob-session-name asker) question))
+           (ask (list (aob-session-id asker) (aob-session-id target) sent)))
+      (push ask aob-mcp-host--asks)
+      (let ((said (aob-mcp-host-say target sent)))
+        (if (string-search "would not take it" said)
+            (progn (setq aob-mcp-host--asks (delq ask aob-mcp-host--asks))
+                   said)
+          (format "asked %s; its reply will arrive as a message, so end your turn instead of polling"
+                  (aob-session-name target))))))))
+
+(defun aob-mcp-host--answer (target sent)
+  "The last thing TARGET said in the turn that took SENT, or nil before it began."
+  (let ((answer nil)
+        (began nil))
+    (catch 'done
+      (dolist (ev (aob-session-events target))
+        (cond
+         ((and (eq (plist-get ev :type) 'prompt)
+               (equal (plist-get ev :text) sent)
+               (not (equal (plist-get ev :status) "queued")))
+          (setq began t)
+          (throw 'done nil))
+         ((and (null answer) (eq (plist-get ev :type) 'message)
+               (null (plist-get ev :parent)))
+          (setq answer (string-trim
+                        (substring-no-properties
+                         (concat (or (plist-get ev :text) "")
+                                 (apply #'concat (reverse (plist-get ev :parts)))))))))))
+    (and began (or answer ""))))
+
+(defun aob-mcp-host--deliver (ask body)
+  "Tell ASK's asker BODY, unless it is gone, and stop waiting on ASK."
+  (setq aob-mcp-host--asks (delq ask aob-mcp-host--asks))
+  (when-let* ((asker (aob-session-get (car ask))))
+    (aob-mcp-host-say asker body)))
+
+(defun aob-mcp-host--on-state (session _old new)
+  "Return answers when SESSION's turn ends, and say so when it ends for good."
+  (dolist (ask (seq-filter (lambda (ask) (equal (cadr ask) (aob-session-id session)))
+                           aob-mcp-host--asks))
+    (let ((name (aob-session-name session)))
+      (cond
+       ((memq new '(dead failed))
+        (aob-mcp-host--deliver ask (format "No reply from %s: it ended before answering." name)))
+       ((eq new 'idle)
+        (when-let* ((answer (aob-mcp-host--answer session (nth 2 ask))))
+          (aob-mcp-host--deliver
+           ask (format "Reply from %s:\n\n%s" name
+                       (if (string-empty-p answer) "(it finished without a message)" answer)))))))))
+
+(defun aob-mcp-host--on-removed (session)
+  "Forget what SESSION was asked or was waiting on."
+  (let ((id (aob-session-id session)))
+    (dolist (ask (copy-sequence aob-mcp-host--asks))
+      (cond
+       ((equal (car ask) id) (setq aob-mcp-host--asks (delq ask aob-mcp-host--asks)))
+       ((equal (cadr ask) id)
+        (aob-mcp-host--deliver
+         ask (format "No reply from %s: it ended before answering." (aob-session-name session))))))))
+
+(with-eval-after-load 'aob
+  (add-hook 'aob-state-change-hook #'aob-mcp-host--on-state)
+  (add-hook 'aob-session-removed-hook #'aob-mcp-host--on-removed))
+
 (provide 'aob-mcp-host)
+
 ;;; aob-mcp-host.el ends here
