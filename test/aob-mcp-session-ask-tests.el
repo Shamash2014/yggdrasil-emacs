@@ -76,6 +76,28 @@
     (should (string-match-p "\\`No reply from target" (cdr (assoc "asker" aob-mcp-session-ask-tests--told))))
     (should-not aob-mcp-host--asks)))
 
+(ert-deftest aob-mcp-session-ask-survives-the-target-being-succeeded ()
+  (aob-mcp-session-ask-tests--with (asker target)
+    (aob-mcp-session-ask-tests--call "session_ask" '(:id "target" :text "q"))
+    (let ((heir (aob-succeed target
+                             (lambda ()
+                               (aob-create-session :id "acp:target" :backend 'acp :name "target"
+                                                   :project "/tmp/t/" :dir "/tmp/t/" :state 'idle)))))
+      (should (= (length aob-mcp-host--asks) 1))
+      (should-not (assoc "asker" aob-mcp-session-ask-tests--told))
+      (aob-event heir 'prompt :text (nth 2 (car aob-mcp-host--asks)))
+      (aob-mcp-session-ask-tests--finish-turn heir "the real answer")
+      (should (string-match-p "\\`Reply from target:\n\nthe real answer\\'"
+                              (cdr (assoc "asker" aob-mcp-session-ask-tests--told))))
+      (should-not aob-mcp-host--asks))))
+
+(ert-deftest aob-mcp-session-ask-says-so-when-the-target-is-removed-without-an-heir ()
+  (aob-mcp-session-ask-tests--with (asker target)
+    (aob-mcp-session-ask-tests--call "session_ask" '(:id "target" :text "q"))
+    (aob-remove-session target)
+    (should (string-match-p "\\`No reply from target" (cdr (assoc "asker" aob-mcp-session-ask-tests--told))))
+    (should-not aob-mcp-host--asks)))
+
 (ert-deftest aob-mcp-session-ask-drops-quietly-when-the-asker-is-gone ()
   (aob-mcp-session-ask-tests--with (asker target)
     (aob-mcp-session-ask-tests--call "session_ask" '(:id "target" :text "q"))
