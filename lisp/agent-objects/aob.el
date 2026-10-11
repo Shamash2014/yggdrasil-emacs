@@ -1728,9 +1728,71 @@ tokens, then what the host weighs the whole turn at."
                       (propertize aob-compose-placeholder
                                   'face 'shadow 'cursor t)))))
 
+(defconst aob-compose--list-item-re
+  "\\([ \t]*\\)\\(?:\\([-*+]\\)\\|\\([0-9]+\\)\\([.)]\\)\\)[ \t]+\\(\\[[ xX]\\][ \t]+\\)?"
+  "A markdown list item prefix: indent, bullet or number and delimiter, checkbox.")
+
+(defconst aob-compose--list-indent-step 2
+  "Columns TAB and S-TAB shift a list item by.")
+
+(defun aob-compose--list-prefix ()
+  "This line's list prefix as (INDENT NEXT-MARKER CHECKBOX END), or nil."
+  (save-excursion
+    (beginning-of-line)
+    (when (looking-at aob-compose--list-item-re)
+      (list (match-string-no-properties 1)
+            (or (match-string-no-properties 2)
+                (format "%d%s"
+                        (1+ (string-to-number (match-string-no-properties 3)))
+                        (match-string-no-properties 4)))
+            (and (match-beginning 5) "[ ] ")
+            (match-end 0)))))
+
+(defun aob-compose-list-newline ()
+  "Newline that continues the list item on this line; an empty item ends the list."
+  (interactive)
+  (pcase (aob-compose--list-prefix)
+    (`(,indent ,marker ,checkbox ,end)
+     (if (string-blank-p (buffer-substring end (line-end-position)))
+         (delete-region (line-beginning-position) (line-end-position))
+       (newline)
+       (insert indent marker " " (or checkbox ""))))
+    (_ (newline))))
+
+(defun aob-compose-list-indent ()
+  "Indent a list item line; elsewhere TAB does what it did."
+  (interactive)
+  (if (aob-compose--list-prefix)
+      (save-excursion
+        (beginning-of-line)
+        (insert (make-string aob-compose--list-indent-step ?\s)))
+    (indent-for-tab-command)))
+
+(defun aob-compose-list-outdent ()
+  "Outdent a list item line."
+  (interactive)
+  (when-let* ((prefix (aob-compose--list-prefix))
+              ((>= (length (car prefix)) aob-compose--list-indent-step)))
+    (save-excursion
+      (beginning-of-line)
+      (delete-char aob-compose--list-indent-step))))
+
+(defvar aob-compose-list-mode-map
+  (let ((map (make-sparse-keymap)))
+    (define-key map (kbd "RET") #'aob-compose-list-newline)
+    (define-key map (kbd "TAB") #'aob-compose-list-indent)
+    (define-key map (kbd "<backtab>") #'aob-compose-list-outdent)
+    map)
+  "Keys that continue and shift markdown lists in the compose buffer.")
+
+(define-minor-mode aob-compose-list-mode
+  "Continue markdown list items on RET; TAB and S-TAB shift them."
+  :keymap aob-compose-list-mode-map)
+
 (define-derived-mode aob-compose-mode text-mode "aob-compose"
   "Write a multi-line prompt; send with `aob-compose-send'."
   (ygg-ui-plain-layout)
+  (aob-compose-list-mode)
   ;; ordered ahead of the global tail so the clamped dabbrev wins over the
   ;; unclamped one; commands/@file still take precedence over both
   (add-hook 'post-command-hook #'aob-compose--autogrow nil t)
