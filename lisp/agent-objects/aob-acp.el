@@ -4879,7 +4879,18 @@ there is no load; resume asks for the history with replayFrom instead."
           :limits (aob-session-ref s :limits)
           :named-by-user (aob-session-ref s :named-by-user)
           :auto-named (aob-session-ref s :auto-named)
-          :unread (aob-session-ref s :unread))))
+          :unread (aob-session-ref s :unread)
+          :queued (aob-acp--queued-prompts s))))
+
+(defun aob-acp--queued-prompts (s)
+  "S's queued prompts as (TEXT ATTACHMENTS), the event left behind.
+Attachments are image file paths, so they survive the file as they are."
+  (mapcar (lambda (q) (list (nth 0 q) (nth 1 q))) (aob-session-ref s :queued)))
+
+(defun aob-acp--restore-queued (s prompts)
+  "Queue PROMPTS on S again, attachments whose file is gone dropped."
+  (pcase-dolist (`(,text ,atts) prompts)
+    (aob-acp--queue s text (seq-filter #'file-exists-p atts))))
 
 (defun aob-acp--persist (&optional removed &rest _)
   "Write every conversation this Emacs can still resume, REMOVED included.
@@ -4934,6 +4945,34 @@ killing it must not be what makes it unreachable."
       (aob-acp--persist))))
 
 (add-hook 'aob-unread-change-hook #'aob-acp--persist-unread)
+
+(defun aob-acp--persist-queued (s)
+  (when-let* (((eq (aob-session-backend s) 'acp))
+              (acp-id (aob-session-ref s :acp-id)))
+    (aob-acp--rewrite acp-id
+                      (lambda (entry)
+                        (plist-put (copy-sequence entry) :queued
+                                   (aob-acp--queued-prompts s))))))
+
+(add-hook 'aob-queue-change-hook #'aob-acp--persist-queued)
+
+(defun aob-acp--unsaved-queues ()
+  "Names of live sessions whose queued prompts the persist file cannot keep."
+  (mapcar #'aob-session-name
+          (seq-filter (lambda (s)
+                        (and (aob-session-ref s :queued)
+                             (not (eq (aob-session-state s) 'dead))
+                             (not (and aob-acp-persist-file (aob-acp--entry s)))))
+                      (aob-sessions))))
+
+(defun aob-acp--confirm-exit ()
+  "Ask before Emacs exits while queued prompts have nowhere to be kept."
+  (let ((names (aob-acp--unsaved-queues)))
+    (or (null names)
+        (y-or-n-p (format "Queued prompts in %s will be lost; exit anyway? "
+                          (string-join names ", "))))))
+
+(add-hook 'kill-emacs-query-functions #'aob-acp--confirm-exit)
 
 (defun aob-acp--shutdown-all ()
   "Kill every agent this Emacs opened, whole process tree and all.
@@ -5329,6 +5368,8 @@ holds no turn, question or connection for a session no one reads."
     ;; in for it hands back whatever it likes
     (when (and (aob-session-p s) (not (eq (car verb) 'load)))
       (aob-acp--seed-history s e))
+    (when (aob-session-p s)
+      (aob-acp--restore-queued s (plist-get e :queued)))
     s))
 
 (defun aob-acp--restore-target ()
