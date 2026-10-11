@@ -59,6 +59,15 @@
         (file-name-as-directory (expand-file-name dir))
       default-directory)))
 
+(defun aob-bang--shell-command (command)
+  "The argv running COMMAND in the shell of `default-directory'."
+  (if (file-remote-p default-directory)
+      (with-connection-local-variables
+        (list (or shell-file-name "/bin/sh")
+              (or shell-command-switch "-c")
+              command))
+    (list shell-file-name shell-command-switch command)))
+
 (defun aob-bang--run (command dir)
   "Run COMMAND with the shell in DIR, as (OUTPUT . STATUS).
 STATUS is the exit code, (signal . N) when a signal ended it, or timeout."
@@ -66,8 +75,7 @@ STATUS is the exit code, (signal . N) when a signal ended it, or timeout."
     (let* ((default-directory dir)
            (deadline (+ (float-time) aob-bang-timeout))
            (proc (make-process :name "aob-bang" :buffer (current-buffer)
-                               :command (list shell-file-name
-                                              shell-command-switch command)
+                               :command (aob-bang--shell-command command)
                                :connection-type 'pipe :file-handler t
                                :noquery t :sentinel #'ignore)))
       (process-send-eof proc)
