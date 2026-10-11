@@ -1,6 +1,8 @@
 ;;; ygg-combobulate-tests.el --- Combobulate activation is idempotent and reaches open buffers -*- lexical-binding: t; -*-
 
 (setq load-prefer-newer t)
+(load (expand-file-name "test-elpaca" (file-name-directory (or load-file-name buffer-file-name))) nil t)
+(add-to-list 'treesit-extra-load-path (expand-file-name "tree-sitter/" "~/.emacs.d/"))
 (require 'ert)
 (require 'cl-lib)
 (require 'layer-lsp)
