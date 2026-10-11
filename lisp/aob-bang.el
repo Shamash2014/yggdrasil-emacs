@@ -55,7 +55,7 @@
                  (aob-session-get aob-compose--target)))
          (dir (or (and s (or (aob-session-dir s) (aob-session-project s)))
                   aob-compose--dir)))
-    (if (and dir (file-directory-p dir))
+    (if (and dir (or (file-remote-p dir) (file-directory-p dir)))
         (file-name-as-directory (expand-file-name dir))
       default-directory)))
 
@@ -68,7 +68,7 @@ STATUS is the exit code, (signal . N) when a signal ended it, or timeout."
            (proc (make-process :name "aob-bang" :buffer (current-buffer)
                                :command (list shell-file-name
                                               shell-command-switch command)
-                               :connection-type 'pipe
+                               :connection-type 'pipe :file-handler t
                                :noquery t :sentinel #'ignore)))
       (process-send-eof proc)
       (while (and (process-live-p proc) (< (float-time) deadline))
