@@ -86,6 +86,7 @@
       (should (= (length aob-mcp-host--asks) 1))
       (should-not (assoc "asker" aob-mcp-session-ask-tests--told))
       (aob-event heir 'prompt :text (nth 2 (car aob-mcp-host--asks)))
+      (aob-set-state heir 'working)
       (aob-mcp-session-ask-tests--finish-turn heir "the real answer")
       (should (string-match-p "\\`Reply from target:\n\nthe real answer\\'"
                               (cdr (assoc "asker" aob-mcp-session-ask-tests--told))))
