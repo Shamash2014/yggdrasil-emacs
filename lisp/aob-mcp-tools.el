@@ -107,11 +107,11 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "xref_references"
- :description "References to a symbol across the project, as file:line:text."
+ :description "References to a symbol, as file:line:text."
  :args '((:name "file" :type string
-          :description "Absolute path of a file the symbol belongs to; its mode picks the backend.")
+          :description "Absolute path of a file using the symbol.")
          (:name "symbol" :type string
-          :description "Identifier as spelled in the code."))
+          :description "Identifier."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
@@ -122,11 +122,11 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "xref_apropos"
- :description "Definitions across the project whose names match a pattern, as file:line:text."
+ :description "Definitions matching a pattern, as file:line:text."
  :args '((:name "file" :type string
-          :description "Absolute path of a project file; its mode picks the backend.")
+          :description "Absolute path of a project file.")
          (:name "pattern" :type string
-          :description "Words matched against definition names."))
+          :description "Words in names."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
@@ -139,7 +139,7 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "imenu_symbols"
- :description "A file's symbol outline from imenu, one \"kind: name:line\" per line."
+ :description "imenu symbols, one \"kind: name:line\" per line."
  :args '((:name "file" :type string
           :description "Absolute path."))
  :handler
@@ -235,13 +235,13 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "treesit_info"
- :description "Tree-sitter parse of a file: without line, parsers and top-level nodes; with line, the node there, its ancestors and children."
+ :description "Tree-sitter parse: top-level nodes, or with line the node there, its ancestors, children."
  :args '((:name "file" :type string
           :description "Absolute path.")
          (:name "line" :type integer :optional t
-          :description "1-based line.")
+          :description "1-based.")
          (:name "column" :type integer :optional t
-          :description "0-based column in characters; default 0."))
+          :description "0-based column; default 0."))
  :handler
  (lambda (args conn id)
    (let ((line (aob-mcp-tools--int (plist-get args :line)))
@@ -261,11 +261,11 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "diagnostics"
- :description "Flymake or flycheck diagnostics for a file open in the editor, one \"severity line:column message\" per line."
+ :description "Flymake or flycheck diagnostics of an open file, one \"severity line:column message\" per line."
  :args '((:name "file" :type string
-          :description "Absolute path of an open file.")
+          :description "Absolute path.")
          (:name "checker" :type string :optional t
-          :description "auto takes whichever is on."
+          :description "auto picks the active one."
           :enum ["auto" "flymake" "flycheck"]))
  :handler
  (lambda (args conn id)
@@ -309,9 +309,9 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "tool_names"
- :description "Names of this server's tools, one per line."
+ :description "Tool names."
  :args '((:name "prefix" :type string :optional t
-          :description "Only names starting with this."))
+          :description "Prefix."))
  :handler
  (lambda (args _conn _id)
    (let ((names (aob-mcp-tool-names (plist-get args :prefix))))
@@ -326,11 +326,11 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "skill_search"
- :description "Rank the skills this agent can use against a task; best first."
+ :description "Rank skills for a task."
  :args '((:name "query" :type string
-          :description "The task in your own words: goal, domain, tools involved.")
+          :description "The task.")
          (:name "k" :type integer :optional t
-          :description "How many results; 5 if omitted."))
+          :description "Result count; default 5."))
  :meta aob-mcp-tools-always-load
  :instructions "Before starting any non-trivial task, call skill_search with a query written from the task. When a result fits, use it before anything else: call the Skill tool with its name if you have one, otherwise call skill_load with the name and follow what it returns."
  :handler
@@ -343,9 +343,9 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "skill_load"
- :description "A skill's instructions and the names of the files beside them."
+ :description "A skill's instructions and file names."
  :args '((:name "name" :type string
-          :description "Skill name as skill_search gave it."))
+          :description "Name from skill_search."))
  :meta aob-mcp-tools-always-load
  :handler
  (lambda (args _conn _id)
@@ -377,7 +377,7 @@ open is refused rather than read."
 
 (aob-mcp-deftool
  :name "session_list"
- :description "Every conversation open in this editor: id, state, name, folder."
+ :description "Open conversations: id, state, name, folder."
  :args nil
  :handler
  (lambda (_args conn id)
@@ -429,9 +429,9 @@ FOUND is the form answering once it is found, with it bound to s."
 
 (aob-mcp-deftool
  :name "session_say"
- :description "Send text to another conversation: into its running turn if it takes steering, else queued for its next. For an answer back, use session_ask."
+ :description "Send text to another conversation: steers its running turn, else queued. For an answer use session_ask."
  :args '((:name "id" :type string
-          :description "Id or name from session_list.")
+          :description "Id or name.")
          (:name "text" :type string
           :description "What to say."))
  :handler
@@ -454,9 +454,9 @@ FOUND is the form answering once it is found, with it bound to s."
 
 (aob-mcp-deftool
  :name "session_ask"
- :description "Ask another conversation a question. Returns at once; its answer arrives later as a message to you, so end your turn rather than polling session_read."
+ :description "Ask another conversation a question. Returns at once; the answer arrives as a message, so end your turn, don't poll."
  :args '((:name "id" :type string
-          :description "Id or name from session_list.")
+          :description "Id or name.")
          (:name "text" :type string
           :description "The question."))
  :handler
@@ -479,9 +479,9 @@ FOUND is the form answering once it is found, with it bound to s."
 
 (aob-mcp-deftool
  :name "session_read"
- :description "Tail of another conversation, newest last, to diagnose one stuck or wrong. Not for polling: to wait, end your turn."
+ :description "Tail of another conversation, newest last. Not for polling; to wait, end your turn."
  :args '((:name "id" :type string
-          :description "Id or name from session_list."))
+          :description "Id or name."))
  :handler
  (lambda (args conn id)
    (let ((who (plist-get args :id)))
@@ -652,19 +652,19 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
 
 (aob-mcp-deftool
  :name "review_submit"
- :description "After reviewing a branch's diff, submit your comments; the user checks them as pending drafts, nothing is posted anywhere."
+ :description "Submit review comments on a branch as pending drafts."
  :args '((:name "dir" :type string
-          :description "Absolute path of the repository.")
+          :description "Repository path.")
          (:name "branch" :type string
-          :description "Branch reviewed.")
+          :description "Branch.")
          (:name "comments" :type array :items (:type "object") :optional t
-          :description "[{file, line (end), side: new|old, start_line, level: line|range|file|review, type: issue|nit|question|todo|fix (todo and fix go back to the agent, not the PR), title, priority: 0-3, confidence: 0-1, text}]; only text required for a review-level comment.")
+          :description "[{file, line (end), side: new|old, start_line, level: line|range|file|review, type: issue|nit|question|todo|fix (last two go to the agent), title, priority: 0-3, confidence: 0-1, text}]; review level needs text only.")
          (:name "verdict" :type object :optional t
-          :description "{correctness: \"patch is correct\"|\"patch is incorrect\", explanation, confidence}.")
+          :description "{correctness: \"patch is correct\"|\"patch is incorrect\", explanation, confidence}")
          (:name "codex_review" :type object :optional t
-          :description "A Codex review output as-is, instead of or beside comments.")
+          :description "Codex review output.")
          (:name "author" :type string :optional t
-          :description "Who reviewed; your session's name if omitted."))
+          :description "Reviewer; default your session name."))
  :handler
  (lambda (args conn id)
    (let* ((dir (plist-get args :dir))
@@ -762,15 +762,15 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
 
 (aob-mcp-deftool
  :name "review_tour"
- :description "After reading a branch's diff, hand back the order a reviewer should walk it in: steps grouped by behaviour, each naming the hunks it covers. The compare shows one step at a time; nothing is posted anywhere."
+ :description "Hand back the order to walk a branch's diff: steps by behaviour, each naming hunks."
  :args '((:name "dir" :type string
-          :description "Absolute path of the repository.")
+          :description "Repository path.")
          (:name "branch" :type string
-          :description "Branch toured.")
+          :description "Branch.")
          (:name "steps" :type array :items (:type "object")
-          :description "[{title, check (what the reviewer must confirm), risk: low|medium|high, hunks: [{file, start, end (lines of the hunk on that side), side: new|old}]}], in the order to read them; every step needs title, check and at least one hunk.  Notes only: send comments with review_submit.")
+          :description "[{title, check (what to confirm), risk: low|medium|high, hunks: [{file, start, end, side: new|old}]}] in reading order; comments go to review_submit.")
          (:name "author" :type string :optional t
-          :description "Who ordered the tour; your session's name if omitted."))
+          :description "Author; default your session name."))
  :handler
  (lambda (args conn id)
    (let* ((dir (plist-get args :dir))
@@ -810,15 +810,15 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
 
 (aob-mcp-deftool
  :name "todo_write"
- :description "Set this session's todo list and return it: a new tasks.md, or an existing one given file."
+ :description "Set this session's todo list: new, or an existing tasks.md given file."
  :args '((:name "file" :type string :optional t
-          :description "Existing tasks.md in the project to bind; title, slug and sections are then ignored.")
+          :description "Existing tasks.md; rest ignored.")
          (:name "title" :type string :optional t
-          :description "List title.")
+          :description "Title.")
          (:name "slug" :type string :optional t
-          :description "Path name; defaults from the title.")
+          :description "Path name; default from title.")
          (:name "sections" :type string :optional t
-          :description "JSON [{\"name\": \"Now\", \"items\": [\"text\"]}]."))
+          :description "JSON [{\"name\": \"Now\", \"items\": [\"text\"]}]"))
  :handler
  (lambda (args conn id)
    (let* ((title (let ((v (plist-get args :title))) (and v (not (string-empty-p v)) v)))
@@ -864,11 +864,11 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
 
 (aob-mcp-deftool
  :name "todo_list"
- :description "This session's todo list with item ids, sections and states; read it before changing items."
+ :description "This session's todo list with ids and states; read before changing."
  :args '((:name "file" :type string :optional t
-          :description "Absolute path of another list.")
+          :description "Another list's path.")
          (:name "all" :type string :optional t
-          :description "\"true\" to show finished items' text."))
+          :description "\"true\" shows finished items' text."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
@@ -885,13 +885,13 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
 
 (aob-mcp-deftool
  :name "todo_add"
- :description "Add an item to a todo list; returns its id."
+ :description "Add a todo item; returns its id."
  :args '((:name "text" :type string
           :description "Item text.")
          (:name "section" :type string :optional t
-          :description "Section name; default section if omitted.")
+          :description "Section name.")
          (:name "file" :type string :optional t
-          :description "List path; the session's list if omitted."))
+          :description "List path; default the session's list."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
@@ -911,17 +911,17 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
 
 (aob-mcp-deftool
  :name "todo_update"
- :description "Mark a todo item done or undone, or rewrite it; pass done or text."
+ :description "Mark a todo item done or undone, or rewrite it."
  :args '((:name "id" :type string
-          :description "Item id, e.g. S.1.")
+          :description "Item id.")
          (:name "done" :type string :optional t
           :description "\"true\" or \"false\".")
          (:name "text" :type string :optional t
           :description "New item text.")
          (:name "expect" :type string :optional t
-          :description "Item text you last saw; finds the item if ids moved.")
+          :description "Last seen text; finds the item if ids moved.")
          (:name "file" :type string :optional t
-          :description "List path; the session's list if omitted."))
+          :description "List path; default the session's list."))
  :handler
  (lambda (args conn id)
    (let ((done-str (plist-get args :done))
@@ -951,11 +951,11 @@ GOOD are compare-view plists; BAD are lines naming each rejected entry."
  :name "todo_remove"
  :description "Remove a todo item."
  :args '((:name "id" :type string
-          :description "Item id, e.g. S.1.")
+          :description "Item id.")
          (:name "expect" :type string :optional t
-          :description "Item text you last saw; finds the item if ids moved.")
+          :description "Last seen text; finds the item if ids moved.")
          (:name "file" :type string :optional t
-          :description "List path; the session's list if omitted."))
+          :description "List path; default the session's list."))
  :handler
  (lambda (args conn id)
    (aob-mcp-relay
