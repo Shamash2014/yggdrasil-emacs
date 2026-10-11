@@ -7,6 +7,7 @@
 (require 'aob)
 (require 'aob-mcp)
 (require 'aob-mcp-tools)
+(require 'aob-acp)
 (require 'aob-mcp-host)
 
 (defvar aob-mcp-session-ask-tests--told nil
@@ -174,6 +175,20 @@
     (should-not aob-mcp-host-session-targets)
     (should (string-match-p "said to target"
                             (car (aob-mcp-session-ask-tests--call "session_say" '(:id "target" :text "hi")))))))
+
+(ert-deftest aob-mcp-session-ask-ends-when-a-restart-fails-after-the-kill ()
+  (aob-mcp-session-ask-tests--with (asker target)
+    (aob-mcp-session-ask-tests--call "session_ask" '(:id "target" :text "q?"))
+    (cl-letf (((symbol-function 'aob-acp--holder) (lambda (_) target))
+              ((symbol-function 'process-live-p) (lambda (_) t))
+              ((symbol-function 'aob--call)
+               (lambda (s _op) (aob-set-state s 'dead)))
+              ((symbol-function 'aob-acp--resume-entry)
+               (lambda (&rest _) (error "resume failed"))))
+      (should-error (aob-acp-resume-entry (list :dir "/tmp/" :acp-id "x"))))
+    (should (string-match-p "No reply from target"
+                            (cdr (assoc "asker" aob-mcp-session-ask-tests--told))))
+    (should-not aob-mcp-host--asks)))
 
 (provide 'aob-mcp-session-ask-tests)
 
