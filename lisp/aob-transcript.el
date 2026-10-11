@@ -859,16 +859,20 @@ Asleep: it carries the id its agent answers to, and no process."
 
 (defun aob-transcript--candidate-lines (query files)
   "Each (FILE . LINE) of FILES whose raw line holds QUERY, any case."
-  (if (executable-find "rg")
-      (let (out)
-        (with-temp-buffer
-          (when (zerop (apply #'call-process "rg" nil t nil
-                              "--null" "--no-heading" "--with-filename"
-                              "-i" "-F" "-e" query "--" files))
+  (cond
+   ((null files) nil)
+   ((executable-find "rg")
+    (let (out)
+      (with-temp-buffer
+        (let ((status (apply #'call-process "rg" nil t nil
+                             "--null" "--no-heading" "--with-filename"
+                             "-i" "-F" "-e" query "--" files)))
+          (when (and (memq status '(0 2)) (> (buffer-size) 0))
             (goto-char (point-min))
             (while (re-search-forward "\\([^\0\n]+\\)\0\\(.*\\)$" nil t)
-              (push (cons (match-string 1) (match-string 2)) out))))
-        (nreverse out))
+              (push (cons (match-string 1) (match-string 2)) out)))))
+      (nreverse out)))
+   (t
     (let ((case-fold-search t) out)
       (dolist (file files)
         (with-temp-buffer
@@ -879,7 +883,7 @@ Asleep: it carries the id its agent answers to, and no process."
                                                (line-end-position)))
                   out)
             (forward-line 1))))
-      (nreverse out))))
+      (nreverse out)))))
 
 (defun aob-transcript--snippet (line query)
   "Around QUERY in what the record on LINE said, or nil when it said none."
