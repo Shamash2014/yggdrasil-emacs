@@ -1987,6 +1987,7 @@ carries, and the files it names that are pictures here."
   '((display-buffer-reuse-window
      aob-trace--window-beside
      display-buffer-pop-up-window
+     aob-trace--split-beside
      display-buffer-use-some-window
      aob-trace--window-last)
     (inhibit-same-window . t)
@@ -2019,9 +2020,17 @@ Never a new frame: the last step takes a window of this one.")
                                     (not (window-dedicated-p w))
                                     (not (window-parameter w 'window-side))
                                     (not (buffer-local-value 'aob-buffer-session-id
-                                                             (window-buffer w)))))
+                                                             (window-buffer w)))
+                                    (not (provided-mode-derived-p
+                                          (buffer-local-value 'major-mode (window-buffer w))
+                                          'aob-compose-mode))))
                              (window-list nil 'no-minibuf))))
     (window--display-buffer buffer win 'reuse alist)))
+
+(defun aob-trace--split-beside (buffer alist)
+  "Show BUFFER in a new window split off the selected one, size limits aside."
+  (when-let* ((win (ignore-errors (split-window (selected-window) nil 'right))))
+    (window--display-buffer buffer win 'window alist)))
 
 (defun aob-trace--pop-beside (buffer)
   "Select BUFFER in a window beside the trace, leaving the trace where it is."

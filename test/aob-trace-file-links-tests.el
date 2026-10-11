@@ -78,6 +78,24 @@
    (should-not (text-property-not-all 0 21 'aob-link nil (aob-trace--md "see sub/target.el now" t)))
    (should (get-text-property 4 'aob-link (aob-trace--md "see sub/target.el now")))))
 
+(ert-deftest aob-trace-file-links-open-beside-leaves-compose-window ()
+  (aob-trace-file-links-tests--in-dir
+   (pcase-let ((`(,twin . ,tbuf) (aob-trace-file-links-tests--trace-window)))
+     (let* ((cbuf (with-current-buffer (get-buffer-create " *aob-links-compose*")
+                    (aob-compose-mode)
+                    (insert "draft")
+                    (current-buffer)))
+            (cwin (split-window twin -10 'below))
+            (frames (length (frame-list))))
+       (set-window-buffer cwin cbuf)
+       (select-window twin)
+       (aob-trace--visit (list file 1 nil))
+       (should (eq (window-buffer twin) tbuf))
+       (should (eq (window-buffer cwin) cbuf))
+       (should (= frames (length (frame-list))))
+       (should (equal (buffer-file-name (current-buffer)) file))
+       (should-not (memq (selected-window) (list twin cwin)))))))
+
 (provide 'aob-trace-file-links-tests)
 
 (defun aob-trace-file-links-tests--trace-window ()
