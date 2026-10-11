@@ -57,4 +57,21 @@
         (aob-transcript-search "boiler"))
       (should (equal (plist-get opened :acp-id) "new-2")))))
 
+(ert-deftest aob-transcript-search-no-files-runs-no-process ()
+  (dolist (rg '(t nil))
+    (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) rg))
+              ((symbol-function 'call-process) (lambda (&rest _) (error "ran")))
+              ((symbol-function 'make-process) (lambda (&rest _) (error "ran"))))
+      (should-not (aob-transcript--candidate-lines "x" nil)))))
+
+(ert-deftest aob-transcript-search-keeps-hits-when-rg-exits-2 ()
+  (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) t))
+            ((symbol-function 'call-process)
+             (lambda (&rest _) (insert "a.jsonl\0some line\n") 2)))
+    (should (equal (aob-transcript--candidate-lines "line" '("a.jsonl" "b.jsonl"))
+                   '(("a.jsonl" . "some line")))))
+  (cl-letf (((symbol-function 'executable-find) (lambda (&rest _) t))
+            ((symbol-function 'call-process) (lambda (&rest _) 1)))
+    (should-not (aob-transcript--candidate-lines "line" '("a.jsonl")))))
+
 (provide 'aob-transcript-search-tests)
