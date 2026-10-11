@@ -9419,6 +9419,51 @@ nothing, TAB opens one whole and back, and copying passes over them."
       (delete-file img)
       (delete-directory dir t))))
 
+(ert-deftest aob-paused-queue-round-trips-and-stays-held-on-open ()
+  (aob-tests--with-session live
+    (aob-set-state live 'working)
+    (aob-acp--prompt live "held" nil)
+    (aob-session-put live :queue-paused t)
+    (let ((e (read (prin1-to-string (aob-acp--entry live)))))
+      (should (eq (plist-get e :queue-paused) t))
+      (aob-tests--with-session s
+        (aob-acp--restore-queued s (plist-get e :queued) (plist-get e :queue-paused))
+        (should (aob-session-queue-paused-p s))
+        (should (= (length (aob-session-ref s :queued)) 1))
+        (let ((sent nil))
+          (cl-letf (((symbol-function 'aob-acp--prompt-1)
+                     (lambda (_s text &rest _) (push text sent))))
+            (aob-set-state s 'idle)
+            (aob-acp--flush-queue s))
+          (should-not sent)
+          (should (= (length (aob-session-ref s :queued)) 1)))))
+    (aob-session-put live :queued nil)
+    (should-not (plist-get (aob-acp--entry live) :queue-paused))))
+
+(ert-deftest aob-dropping-the-last-queued-prompt-clears-the-pause ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-acp--prompt s "one" nil)
+    (aob-acp--prompt s "two" nil)
+    (aob-session-put s :queue-paused t)
+    (cl-letf (((symbol-function 'aob-session-get) (lambda (_id) s))
+              ((symbol-function 'aob-trace--queued-at-point)
+               (lambda () (car (aob-session-ref s :queued)))))
+      (with-temp-buffer
+        (aob-trace-queue-drop)
+        (should (aob-session-queue-paused-p s))
+        (aob-trace-queue-drop)))
+    (should-not (aob-session-ref s :queued))
+    (should-not (aob-session-queue-paused-p s))))
+
+(ert-deftest aob-cancel-dropping-the-queue-clears-the-pause ()
+  (aob-tests--with-session s
+    (aob-set-state s 'working)
+    (aob-acp--prompt s "one" nil)
+    (aob-session-put s :queue-paused t)
+    (aob-acp--drop-queue s)
+    (should-not (aob-session-queue-paused-p s))))
+
 (ert-deftest aob-kill-session-asks-about-queued-prompts ()
   (aob-tests--with-session s
     (aob-set-state s 'working)
