@@ -945,6 +945,22 @@ already produced always survives."
     (message "aob: %s %s" (aob-session-name s)
              (if full "fully cancelled — queue dropped" "cancelled (again to drop queue)"))))
 
+(defun aob-cancel-all ()
+  "Cancel the running turn of every working or blocked agent, after asking.
+A subagent is left to its lead: stopping the lead stops it, and stopping
+it directly would stop its lead's agent a second time.  Queues survive."
+  (interactive)
+  (let ((running (seq-filter (lambda (s)
+                               (and (memq (aob-session-state s) '(working blocked))
+                                    (not (aob-session-ref s :parent-session))))
+                             (aob-live-sessions))))
+    (unless running (user-error "aob: no agent is working"))
+    (when (y-or-n-p (format "Cancel the turn of %d agent%s? "
+                            (length running) (if (cdr running) "s" "")))
+      (dolist (s running) (aob--call s :cancel nil))
+      (message "aob: cancelled %d turn%s (queues kept)"
+               (length running) (if (cdr running) "s" "")))))
+
 (defun aob-interject (s text &optional atts)
   "Say TEXT to S now, into the turn it is running when it takes one.
 ATTS are image files that go with it."
@@ -1009,6 +1025,14 @@ keeps writing into the trace it was already writing into."
   (interactive (list (aob-target)))
   (when (y-or-n-p (format "Kill %s? " (aob-session-name s)))
     (aob--call s :kill)))
+
+(defun aob-kill-sessions (sessions)
+  "Kill every session in SESSIONS after one yes-or-no-p listing their names."
+  (when (yes-or-no-p (format "Kill %d agent%s (%s)? "
+                             (length sessions) (if (cdr sessions) "s" "")
+                             (mapconcat #'aob-session-name sessions ", ")))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+      (mapc #'aob-kill-session sessions))))
 
 (defun aob-focus (s)
   "Show S's primary surface (terminal or trace)."

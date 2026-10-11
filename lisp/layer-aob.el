@@ -2144,6 +2144,18 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   (yggdrasil-define-keys 'ygg-leader-buffer-map
     "D" #'ygg-aob-force-kill-or-delete :label "force kill · delete agent"))
 
+(defun ygg-aob-kill-all ()
+  "Kill every live agent in this space, after listing them.
+A space is where an agent works and a tree of them is read; all of every
+space is a bigger sweep than closing what is in front of you."
+  (interactive)
+  (let ((space (and (fboundp 'ygg-space--current-id) (ygg-space--current-id))))
+    (if-let* ((here (seq-filter (lambda (s) (and (not (aob-session-ref s :parent-session))
+                                                 (eql (ygg-aob-session-space s) space)))
+                                (aob-live-sessions))))
+        (aob-kill-sessions here)
+      (user-error "aob: no agent in this space"))))
+
 (defvar ygg-leader-acp-map (make-sparse-keymap) "The a c prefix: ACP sessions.")
 
 ;; Starting, reaching and ending an agent.  Fork, restart, config, prompt
@@ -2156,7 +2168,9 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "B" #'aob-acp-rebind-persisted :label "rebind a lost folder"
   "o" #'ygg-aob-pick :label "go to"
   "r" #'ygg-aob-resolve-next :label "resolve"
-  "q" #'aob-kill-session :label "kill")
+  "q" #'aob-kill-session :label "kill"
+  "Q" #'ygg-aob-kill-all :label "kill all in this space"
+  "T" #'aob-cancel-all :label "stop every working turn")
 
 (defvar ygg-leader-agent-map (make-sparse-keymap) "The a prefix: AI agents.")
 (yggdrasil-leader-def "a" ygg-leader-agent-map "agents")
