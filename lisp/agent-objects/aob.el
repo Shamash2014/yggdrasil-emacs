@@ -2213,6 +2213,15 @@ knows about whatever languages your Emacs does and nothing more."
                       "[^[:alnum:]]+" "-" (car (split-string text "\n"))))))
     (string-trim (substring s 0 (min 40 (length s))) "-" "-")))
 
+(defun aob-session-path (dir path)
+  "PATH as Emacs names it for a session working in DIR.
+An agent on a TRAMP host reports absolute paths of its own filesystem;
+those take DIR's remote prefix so they stay on that host."
+  (if (and dir (file-remote-p dir) (file-name-absolute-p path)
+           (not (file-remote-p path)))
+      (concat (file-remote-p dir) path)
+    (expand-file-name path dir)))
+
 (defun aob-artifact-notice (s path)
   "Tag PATH as S's reviewable artifact when it lands in the artifact dir.
 This is the whole artifact mechanism: no special send, no keyword — ask
@@ -2220,7 +2229,7 @@ for a spec/plan/report in your own words; any file the agent writes
 under `aob-artifact-directory' becomes the reviewable artifact."
   (let ((root (file-name-as-directory
                (expand-file-name aob-artifact-directory (aob-session-dir s))))
-        (abs (expand-file-name path (aob-session-dir s))))
+        (abs (aob-session-path (aob-session-dir s) path)))
     (when (and (string-prefix-p root abs)
                (not (and (equal (aob-session-ref s :artifact-file) abs)
                          (eq (aob-session-ref s :artifact-stage) 'approved))))
