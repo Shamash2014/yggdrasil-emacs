@@ -4142,7 +4142,11 @@ under it included, and not for any other."
 alone; a buried trace is only marked, and drawn whole when it is shown."
   (let* ((s (aob-create-session :id "trace:meter" :backend 'acp :name "meter" :state 'idle))
          (buf (aob-trace-buffer s))
-         (header (lambda () (buffer-local-value 'header-line-format buf))))
+         (header (lambda ()
+                   (with-current-buffer buf
+                     (or (and (overlayp aob-trace--meter-overlay)
+                              (overlay-get aob-trace--meter-overlay 'before-string))
+                         "")))))
     (unwind-protect
         (let ((tick (aob-session-ref s :tick)))
           (should (memq #'aob-trace--meter-changed aob-meter-change-hook))
@@ -4237,15 +4241,14 @@ alone; a buried trace is only marked, and drawn whole when it is shown."
       (aob-trace--render t)
       (should (string-match-p "done (end_turn) · 7.4M ctx · [0-9]+s · 17.5k out · \\$1.25"
                               (buffer-string)))
-      (should (string-match-p "\\` test:1 · idle · [0-9]+s · \\$1.25 · 434k ctx\\'"
-                              header-line-format))
+      (should (string-match-p "\\` test:1 · idle\\'" header-line-format))
       (should-not (string-match-p "out\\|/proj\\|%" header-line-format))
       (should-not (get-text-property 1 'face header-line-format))
-      (should (eq (get-text-property (string-search "434k" header-line-format) 'face
-                                     header-line-format)
-                  'warning))
-      (should (eq (get-text-property (1- (length header-line-format)) 'face header-line-format)
-                  'shadow)))))
+      (let ((meter (overlay-get aob-trace--meter-overlay 'before-string)))
+        (should (string-match-p "\\` 434k/1.0M ctx · \\$1.25 · [0-9]+s\n\\'" meter))
+        (should (eq (get-text-property (string-search "434k" meter) 'face meter) 'warning))
+        (should (eq (get-text-property (string-search "$1.25" meter) 'face meter)
+                    'shadow))))))
 
 (defmacro aob-tests--with-trace-session (var &rest body)
   "Bind VAR to a wired session and run BODY in its rendered trace."
@@ -5067,16 +5070,17 @@ is not the one a session runs in anyway; no folder or token count out."
     (aob-session-put s :model-name "opus")
     (aob-session-put s :ctx-used 213400)
     (aob-trace--render t)
-    (should (string-match-p "\\` test:1 · opus · working · .*213k ctx\\'" header-line-format))
+    (should (string-match-p "\\` test:1 · opus · working\\'" header-line-format))
     (should-not (string-match-p "default\\|/tmp/proj" header-line-format))
-    (should (eq 'warning (get-text-property (string-search "213k" header-line-format)
-                                            'face header-line-format)))
+    (let ((meter (overlay-get aob-trace--meter-overlay 'before-string)))
+      (should (string-match-p "213k ctx" meter))
+      (should (eq 'warning (get-text-property (string-search "213k" meter) 'face meter))))
     (aob-session-put s :mode-id "plan")
     (aob-session-put s :ctx-used 1000)
     (aob-trace--render t)
-    (should (string-match-p " · working · plan · " header-line-format))
-    (should (eq 'shadow (get-text-property (string-search "1k" header-line-format)
-                                           'face header-line-format)))))
+    (should (string-match-p " · working · plan\\'" header-line-format))
+    (let ((meter (overlay-get aob-trace--meter-overlay 'before-string)))
+      (should (eq 'shadow (get-text-property (string-search "1k" meter) 'face meter))))))
 
 (ert-deftest aob-trace-a-shut-run-shows-every-call-still-running ()
   "Parallel calls finish in any order: a run is running while any call

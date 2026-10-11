@@ -4005,10 +4005,12 @@ event did.  A buried trace is only marked, to be drawn whole when shown."
   (dolist (buf (aob-trace--buffers-of s))
     (with-current-buffer buf
       (if (get-buffer-window buf 'visible)
-          (let ((header (ignore-errors (aob-trace--header s))))
-            (unless (or (null header)
-                        (equal-including-properties header header-line-format))
-              (setq header-line-format header)
+          (let ((header (ignore-errors (aob-trace--header s)))
+                (meter-changed (ignore-errors (aob-trace--show-meter-line s))))
+            (when (or meter-changed
+                      (not (or (null header)
+                               (equal-including-properties header header-line-format))))
+              (when header (setq header-line-format header))
               (force-mode-line-update)))
         (setq aob--rendered-tick -1
               aob-trace--tick nil)))))
@@ -4074,26 +4076,15 @@ the model behind it is named quietly beside it."
 (declare-function aob-overall-usage-parts "aob-litellm")
 
 (defun aob-trace--header (s)
-  "S's header: name, model, login, state, clock, cost, context and todo.
+  "S's header line: name, model, login, state, quiet, mode, todo and goal.
 All but the name are grey.
-A subagent's names the agent it works for instead of cost and context.
-The full account is \\ i u; the header carries only what is looked at."
+A subagent's names the agent it works for instead of the model's login.
+Clock, cost and context are the second line, `aob-trace--meter-line'."
   (let* ((grey (lambda (str) (propertize (string-replace "%" "%%" str) 'face 'shadow)))
          (model (aob-trace--model s))
          (mode (aob-session-ref s :mode-id))
          (parent (and aob-trace--own-parent
                       (aob-session-get (aob-session-ref s :native-root))))
-         (clock (aob-session-clock s))
-         (cost (let ((c (aob-session-cost s)))
-                 (and c (> c 0) (aob-cost-short c (aob-session-ref s :cost-currency)))))
-         (used (or (aob-session-ref s :ctx-used)
-                   (plist-get (aob-session-ref s :usage) :totalTokens)))
-         (ctx (and (numberp used) (> used 0)
-                   (concat (propertize (aob-trace--tokens-round used)
-                                       'face (if (and (> aob-trace-rot-window 0)
-                                                      (> used aob-trace-rot-window))
-                                                 'warning 'shadow))
-                           (funcall grey " ctx"))))
          (todo (when-let* (((fboundp 'ygg-todo-session-file))
                            (file (ygg-todo-session-file s))
                            (progress (ygg-todo-progress file))
@@ -4109,8 +4100,7 @@ The full account is \\ i u; the header carries only what is looked at."
                           (aob-trace--kid-model s)
                           (aob-trace--tokens-string (aob-trace--spend s))
                           "read-only"
-                          (format "%s" (aob-session-state s))
-                          clock)
+                          (format "%s" (aob-session-state s)))
                   (list model (aob-session-ref s :auth-label)
                         (format "%s" (aob-session-state s))
                         (when-let* ((warning (aob-session-ref s :stop-warning)))
@@ -4119,7 +4109,7 @@ The full account is \\ i u; the header carries only what is looked at."
                         (when (aob-session-ref s :approve-all)
                           (propertize "approve-all" 'face 'warning))
                         (and mode (not (member mode aob-trace-quiet-modes)) mode)
-                        clock cost ctx todo goal wf
+                        todo goal wf
                         (ignore-errors
                           (and (fboundp 'aob-overall-usage-parts)
                                (car (aob-overall-usage-parts s))))))))
@@ -4129,6 +4119,49 @@ The full account is \\ i u; the header carries only what is looked at."
                                                p
                                              (funcall grey p))))
                        (delq nil parts) ""))))
+
+(defun aob-trace--meter-line (s)
+  "S's second line: context used/size, cost and runtime, each when known.
+Sized to its content and ended by a newline; a dash when nothing is known."
+  (let* ((used (or (aob-session-ref s :ctx-used)
+                   (plist-get (aob-session-ref s :usage) :totalTokens)))
+         (size (aob-session-ref s :ctx-size))
+         (ctx (and (numberp used) (> used 0)
+                   (concat (propertize (aob-trace--tokens-round used)
+                                       'face (if (and (> aob-trace-rot-window 0)
+                                                      (> used aob-trace-rot-window))
+                                                 'warning 'shadow))
+                           (and (numberp size) (> size 0)
+                                (propertize (concat "/" (aob-trace--tokens-round size))
+                                            'face 'shadow))
+                           (propertize " ctx" 'face 'shadow))))
+         (cost (let ((c (aob-session-cost s)))
+                 (and c (> c 0) (aob-cost-short c (aob-session-ref s :cost-currency)))))
+         (parts (delq nil (list ctx
+                                (and cost (propertize cost 'face 'shadow))
+                                (when-let* ((clock (aob-session-clock s)))
+                                  (propertize clock 'face 'shadow))))))
+    (concat " "
+            (if parts
+                (mapconcat #'identity parts (propertize " · " 'face 'shadow))
+              (propertize "—" 'face 'shadow))
+            "\n")))
+
+(defvar-local aob-trace--meter-overlay nil
+  "The empty overlay at the top of the trace whose before-string is the second
+header line.")
+
+(defun aob-trace--show-meter-line (s)
+  "Put S's second header line above the first line of the buffer.
+Return non-nil when it changed."
+  (let ((line (aob-trace--meter-line s)))
+    (unless (overlayp aob-trace--meter-overlay)
+      (setq aob-trace--meter-overlay (make-overlay (point-min) (point-min))))
+    (move-overlay aob-trace--meter-overlay (point-min) (point-min))
+    (unless (equal-including-properties
+             line (overlay-get aob-trace--meter-overlay 'before-string))
+      (overlay-put aob-trace--meter-overlay 'before-string line)
+      t)))
 
 (defun aob-trace--tool-paths (ev)
   "The absolute paths tool EV names: its locations, its file, a cd it ran."
@@ -4287,6 +4320,7 @@ A call folded into a run since is found by the item it became."
                                   (aob-session-events s))
                         :seq)))
   (setq header-line-format (aob-trace--header s))
+  (aob-trace--show-meter-line s)
   (let* ((blocks (aob-trace--blocks-of s))
          (new blocks)
          (old aob-trace--blocks)
