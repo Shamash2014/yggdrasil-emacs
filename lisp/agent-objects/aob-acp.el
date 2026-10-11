@@ -4921,7 +4921,11 @@ there is no load; resume asks for the history with replayFrom instead."
           :auto-named (aob-session-ref s :auto-named)
           :pinned (aob-session-ref s :pinned)
           :unread (aob-session-ref s :unread)
-          :queued (aob-acp--queued-prompts s))))
+          :queue-paused (aob-session-queue-paused-p s)
+          :queued (if (and (aob-session-ref s :asleep)
+                           (null (aob-session-ref s :queued)))
+                      (plist-get (aob-session-ref s :asleep) :queued)
+                    (aob-acp--queued-prompts s)))))
 
 (defun aob-acp--queued-prompts (s)
   "S's queued prompts as (TEXT ATTACHMENTS), the event left behind.
@@ -4930,6 +4934,12 @@ Attachments are image file paths, so they survive the file as they are."
 
 (defun aob-acp--restore-queued (s prompts)
   "Queue PROMPTS on S again, attachments whose file is gone dropped."
+  (let ((kept (seq-remove (lambda (ev)
+                            (and (plist-get ev :seeded)
+                                 (equal (plist-get ev :status) "queued")))
+                          (aob-session-events s))))
+    (setf (aob-session-events s) kept
+          (aob-session-nevents s) (length kept)))
   (pcase-dolist (`(,text ,atts) prompts)
     (aob-acp--queue s text (seq-filter #'file-exists-p atts))))
 
@@ -4987,15 +4997,42 @@ killing it must not be what makes it unreachable."
 
 (add-hook 'aob-unread-change-hook #'aob-acp--persist-unread)
 
+(defvar aob-acp--queued-writes nil)
+
+(defvar aob-acp--queued-timer nil)
+
+(defconst aob-acp--queued-write-delay 0.75)
+
+(defun aob-acp--write-queued (s)
+  (when-let* ((acp-id (aob-session-ref s :acp-id)))
+    (unless (aob-acp--rewrite acp-id
+                              (lambda (entry)
+                                (plist-put
+                                 (plist-put (copy-sequence entry) :queued
+                                            (aob-acp--queued-prompts s))
+                                 :queue-paused (aob-session-queue-paused-p s))))
+      (aob-acp--persist))))
+
+(defun aob-acp--flush-queued-writes ()
+  (when (timerp aob-acp--queued-timer)
+    (cancel-timer aob-acp--queued-timer))
+  (setq aob-acp--queued-timer nil)
+  (let ((pending (nreverse aob-acp--queued-writes)))
+    (setq aob-acp--queued-writes nil)
+    (mapc #'aob-acp--write-queued pending)))
+
 (defun aob-acp--persist-queued (s)
-  (when-let* (((eq (aob-session-backend s) 'acp))
-              (acp-id (aob-session-ref s :acp-id)))
-    (aob-acp--rewrite acp-id
-                      (lambda (entry)
-                        (plist-put (copy-sequence entry) :queued
-                                   (aob-acp--queued-prompts s))))))
+  (when (and (eq (aob-session-backend s) 'acp)
+             (aob-session-ref s :acp-id))
+    (unless (memq s aob-acp--queued-writes)
+      (push s aob-acp--queued-writes))
+    (unless aob-acp--queued-timer
+      (setq aob-acp--queued-timer
+            (run-with-idle-timer aob-acp--queued-write-delay nil
+                                 #'aob-acp--flush-queued-writes)))))
 
 (add-hook 'aob-queue-change-hook #'aob-acp--persist-queued)
+(add-hook 'kill-emacs-hook #'aob-acp--flush-queued-writes -50)
 
 (defun aob-acp--unsaved-queues ()
   "Names of live sessions whose queued prompts the persist file cannot keep."
@@ -5362,6 +5399,8 @@ holds no turn, question or connection for a session no one reads."
                     (list :unread t))
                   (when (plist-get e :pinned)
                     (list :pinned t))
+                  (when (plist-get e :queue-paused)
+                    (list :queue-paused t))
                   (plist-get e :limits)
                   ;; a conversation reloaded onto another model is a
                   ;; different conversation from the second turn on
