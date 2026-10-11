@@ -149,7 +149,7 @@ whose process was seen and is no longer there has ended."
   "Show the trace row of the command TARGET, a row id or a session and its event."
   (interactive (list (ygg-qf-kind-target-id)))
   (let ((pair (aob-shells--pair target)))
-    (pop-to-buffer (aob-trace-buffer (car pair)))
+    (aob-trace--pop (aob-trace-buffer (car pair)))
     (if-let* ((at (aob-trace--event-bounds (plist-get (cdr pair) :seq))))
         (goto-char (car at))
       (message "aob: that command is not drawn in the trace"))))
@@ -163,7 +163,7 @@ Its output file, followed as it grows, when it has one."
     (if (and file (file-readable-p file))
         (with-current-buffer (find-file-noselect file)
           (auto-revert-tail-mode 1)
-          (pop-to-buffer (current-buffer)))
+          (aob-trace--pop (current-buffer)))
       (with-current-buffer (get-buffer-create
                             (format "*aob shell: %s*"
                                     (truncate-string-to-width
@@ -173,7 +173,7 @@ Its output file, followed as it grows, when it has one."
           (erase-buffer)
           (insert (string-join (aob-trace--shell-output ev) "\n"))
           (special-mode))
-        (pop-to-buffer (current-buffer))))))
+        (aob-trace--pop (current-buffer))))))
 
 (defun aob-shells-kill (s ev)
   "End the process running EV's command for S, and what it started, once asked.

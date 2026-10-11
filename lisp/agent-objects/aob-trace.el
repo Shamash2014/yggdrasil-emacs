@@ -1987,9 +1987,30 @@ carries, and the files it names that are pictures here."
   '((display-buffer-reuse-window
      aob-trace--window-beside
      display-buffer-pop-up-window
-     display-buffer-use-some-window)
-    (inhibit-same-window . t))
-  "How a file or picture opened from a trace is put on screen: not in it.")
+     display-buffer-use-some-window
+     aob-trace--window-last)
+    (inhibit-same-window . t)
+    (inhibit-switch-frame . t)
+    (reusable-frames . nil))
+  "How a file or picture opened from a trace is put on screen: not in it.
+Never a new frame: the last step takes a window of this one.")
+
+(defconst aob-trace--here-action
+  '((display-buffer-reuse-window
+     display-buffer-pop-up-window
+     display-buffer-use-some-window
+     aob-trace--window-last)
+    (inhibit-switch-frame . t)
+    (reusable-frames . nil))
+  "How a buffer opened from a trace or its lists is put on screen, on this frame.")
+
+(defun aob-trace--window-last (buffer alist)
+  "Show BUFFER in the largest window of the selected frame that is not on a side."
+  (when-let* ((win (car (sort (seq-remove (lambda (w) (window-parameter w 'window-side))
+                                          (window-list nil 'no-minibuf))
+                              (lambda (a b) (> (* (window-total-width a) (window-total-height a))
+                                               (* (window-total-width b) (window-total-height b))))))))
+    (window--display-buffer buffer win 'reuse alist)))
 
 (defun aob-trace--window-beside (buffer alist)
   "Show BUFFER in a window that is not the selected one and holds no conversation."
@@ -2004,7 +2025,13 @@ carries, and the files it names that are pictures here."
 
 (defun aob-trace--pop-beside (buffer)
   "Select BUFFER in a window beside the trace, leaving the trace where it is."
-  (pop-to-buffer buffer aob-trace--beside-action))
+  (aob-trace--pop buffer aob-trace--beside-action))
+
+(defun aob-trace--pop (buffer &optional action)
+  "Select BUFFER by ACTION or `aob-trace--here-action', never on a new frame."
+  (let ((pop-up-frames nil)
+        (pop-up-frame-function nil))
+    (pop-to-buffer buffer (or action aob-trace--here-action))))
 
 (defun aob-trace--view-image-data (block)
   "Open the picture the image BLOCK carries in a buffer of its own."
@@ -2720,9 +2747,13 @@ TAIL is its model and tokens."
   "Show S's trace in a window other than this one, at the event SEQ."
   (let* ((buf (aob-trace-buffer s))
          (win (or (get-buffer-window buf)
-                  (display-buffer buf '((display-buffer-reuse-window
-                                         display-buffer-use-some-window)
-                                        (inhibit-same-window . t))))))
+                  (let ((pop-up-frames nil))
+                    (display-buffer buf '((display-buffer-reuse-window
+                                           display-buffer-use-some-window
+                                           aob-trace--window-last)
+                                          (inhibit-same-window . t)
+                                          (inhibit-switch-frame . t)
+                                          (reusable-frames . nil)))))))
     (with-current-buffer buf
       (when-let* ((at (aob-trace--event-bounds seq)))
         (goto-char (car at))
