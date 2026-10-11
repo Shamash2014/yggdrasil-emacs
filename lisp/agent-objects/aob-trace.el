@@ -1087,7 +1087,7 @@ command run reads apart from a file read at a glance."
 (defun aob-trace--chip (path &optional line)
   "PATH as a chip: its icon and name, with LINE; the whole path is its help."
   (let* ((root (aob-trace--root))
-         (abs (expand-file-name path root))
+         (abs (aob-session-path root path))
          (name (file-name-nondirectory (directory-file-name path)))
          (dir (string-suffix-p "/" path))
          (icon (and aob-trace-icons
