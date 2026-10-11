@@ -3111,6 +3111,8 @@ Idle with the queue held, it goes out straight away."
                     (user-error "aob: no queued message on this line")))
          (ev (nth 2 entry)))
     (aob-session-put s :queued (delq entry (aob-session-ref s :queued)))
+    (unless (aob-session-ref s :queued)
+      (aob-session-put s :queue-paused nil))
     (setf (aob-session-events s) (delq ev (aob-session-events s)))
     (run-hook-with-args 'aob-queue-change-hook s)
     (aob--dirty s)

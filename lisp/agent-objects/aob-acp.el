@@ -1954,6 +1954,7 @@ S's todo list; its event rides with the subagent's other steps."
   (when-let* ((q (and (not (aob-session-queue-paused-p s))
                       (aob-session-ref s :queued))))
     (aob-session-put s :queued nil)
+    (aob-session-put s :queue-paused nil)
     ;; a queued prompt is written before the session is open; a restored
     ;; one then replays its history on top of it, so the words you just
     ;; typed would sit above a conversation from hours earlier.  They go
@@ -2646,6 +2647,7 @@ file keeps it resumable."
   "Drop S's pending prompts so a cancel leaves nothing to flush back in."
   (when-let* ((q (aob-session-ref s :queued)))
     (aob-session-put s :queued nil)
+    (aob-session-put s :queue-paused nil)
     (dolist (e q)
       (when-let* ((ev (nth 2 e)))
         (plist-put ev :status "cancelled")
@@ -4921,15 +4923,20 @@ there is no load; resume asks for the history with replayFrom instead."
           :auto-named (aob-session-ref s :auto-named)
           :pinned (aob-session-ref s :pinned)
           :unread (aob-session-ref s :unread)
-          :queued (aob-acp--queued-prompts s))))
+          :queued (aob-acp--queued-prompts s)
+          :queue-paused (and (aob-session-ref s :queued)
+                             (aob-session-queue-paused-p s)))))
 
 (defun aob-acp--queued-prompts (s)
   "S's queued prompts as (TEXT ATTACHMENTS), the event left behind.
 Attachments are image file paths, so they survive the file as they are."
   (mapcar (lambda (q) (list (nth 0 q) (nth 1 q))) (aob-session-ref s :queued)))
 
-(defun aob-acp--restore-queued (s prompts)
-  "Queue PROMPTS on S again, attachments whose file is gone dropped."
+(defun aob-acp--restore-queued (s prompts &optional paused)
+  "Queue PROMPTS on S again, attachments whose file is gone dropped.
+PAUSED holds them as they were left."
+  (when (and prompts paused)
+    (aob-session-put s :queue-paused t))
   (pcase-dolist (`(,text ,atts) prompts)
     (aob-acp--queue s text (seq-filter #'file-exists-p atts))))
 
@@ -5412,7 +5419,7 @@ holds no turn, question or connection for a session no one reads."
     (when (and (aob-session-p s) (not (eq (car verb) 'load)))
       (aob-acp--seed-history s e))
     (when (aob-session-p s)
-      (aob-acp--restore-queued s (plist-get e :queued)))
+      (aob-acp--restore-queued s (plist-get e :queued) (plist-get e :queue-paused)))
     s))
 
 (defun aob-acp--restore-target ()
