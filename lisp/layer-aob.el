@@ -28,6 +28,7 @@
 (require 'aob-edits-qf)
 (require 'aob-workflow)
 (require 'aob-awake)
+(require 'aob-gc)
 (require 'ygg-ui)
 
 (declare-function ygg-notify "layer-ui" (msg &optional level))
@@ -2193,9 +2194,14 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   "S" #'aob-schedule-list :label "schedules"
   "p" #'aob-shells :label "running commands"
   "e" #'aob-edits :label "files edited"
-  "k" #'aob-keep-awake-mode :label "keep awake while working")
+  "k" #'aob-keep-awake-mode :label "keep awake while working"
+  "g" #'aob-gc-now :label "clean merged worktrees"
+  "G" #'aob-gc-preview :label "preview the clean-up"
+  "P" #'aob-gc-project :label "clean this project's merged branches")
 
 (unless noninteractive (aob-keep-awake-mode 1))
+
+(unless noninteractive (aob-gc-mode 1))
 
 (unless noninteractive (aob-schedule-start))
 

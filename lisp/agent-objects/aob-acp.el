@@ -22,6 +22,8 @@
 (require 'ygg-git)
 (require 'ygg-ui)
 
+(autoload 'aob-gc-reap "aob-gc")
+
 (defcustom aob-acp-agents
   ;; deliberately npx-pinned, not `executable-find': a stale adapter on
   ;; PATH silently lacks methods like session/load — pin your own
@@ -2915,8 +2917,9 @@ A login offer is answered with the method to run, which replies to nothing."
 
 (defun aob-acp--reap-worktree (s)
   "Remove S's worktree and branch when they hold nothing the project lacks:
-a clean tree whose branch is merged into (or still at) the project HEAD.
-Runs entirely in the background — the kill that triggers it never waits."
+a clean, unused tree whose branch is merged into the project's default
+branch or checked-out HEAD.  Runs entirely in the background — the kill
+that triggers it never waits."
   (let* ((dir (aob-session-dir s))
          (project (aob-session-project s))
          (branch (and dir (concat "aob/" (file-name-nondirectory
@@ -2930,19 +2933,7 @@ Runs entirely in the background — the kill that triggers it never waits."
                (string-prefix-p (file-truename aob-acp-worktree-root)
                                 (file-truename dir))
                (file-directory-p dir))
-      (ygg-git-async
-       dir (list "status" "--porcelain")
-       (lambda (status _c1)
-         (ygg-git-async
-          project (list "branch" "--merged" "HEAD" "--list" branch)
-          (lambda (merged _c2)
-            (if (or (> (length status) 0) (zerop (length merged)))
-                (message "aob: kept %s — it has work the project lacks" dir)
-              (ygg-git-async
-               project (list "worktree" "remove" "--force" dir)
-               (lambda (_o _c3)
-                 (ygg-git-async project (list "branch" "-D" branch)
-                                #'ignore)))))))))))
+      (aob-gc-reap project dir branch s))))
 
 (defun aob-acp--kill (s)
   (let* ((proc (aob-session-conn s))

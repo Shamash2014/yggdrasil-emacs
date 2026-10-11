@@ -780,6 +780,8 @@ LABEL is the worktree's name, branch and path."
 
 (defvar ygg-leader-git-map (make-sparse-keymap) "The g prefix: git.")
 
+(autoload 'aob-gc-project "aob-gc" nil t)
+
 (yggdrasil-define-keys 'ygg-leader-git-map
   "g" #'magit-status :label "status"
   "b" #'magit-checkout :label "branches"
@@ -799,7 +801,8 @@ LABEL is the worktree's name, branch and path."
   "y" #'ygg-git-yank-branch :label "yank branch"
   "M" #'lab-list-project-merge-requests :label "lab MRs"
   "R" #'lab-act-on-last-project-pipeline :label "lab last pipeline"
-  "A" #'lab-approve-merge-request :label "lab approve MR")
+  "A" #'lab-approve-merge-request :label "lab approve MR"
+  "G" #'aob-gc-project :label "clean merged branches")
 
 (yggdrasil-leader-def "g" ygg-leader-git-map "git")
 
