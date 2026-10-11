@@ -1,5 +1,6 @@
 ;;; debugpy-tests.el --- Tests for Python debug configs -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-elpaca" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
 (require 'dape)

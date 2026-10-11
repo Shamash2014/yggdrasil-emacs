@@ -1,5 +1,6 @@
 ;;; aob-resolve-ret-tests.el --- RET on a permission option -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-elpaca" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'ert-x)
 (require 'aob-tests)

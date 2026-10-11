@@ -427,7 +427,8 @@ text is what the line says, not what its gutter or a thumbnail drew."
          (text (buffer-substring lo hi)))
     (with-temp-buffer
       (insert text)
-      (let ((from (copy-marker (1+ (- beg lo))))
+      (let ((inhibit-read-only t)
+            (from (copy-marker (1+ (- beg lo))))
             (to (copy-marker (1+ (- end lo))))
             (pos (point-min)))
         (while (< pos (point-max))
@@ -438,13 +439,25 @@ text is what the line says, not what its gutter or a thumbnail drew."
               (setq pos next))))
         (agent-shell-markdown-reconstruct from to)))))
 
+(defun aob-trace--whole-run-p (beg end prop)
+  "Whether BEG to END is exactly one run of text carrying PROP."
+  (and (get-text-property beg prop)
+       (or (= beg (point-min)) (not (get-text-property (1- beg) prop)))
+       (= end (or (next-single-property-change beg prop nil (point-max)) (point-max)))))
+
 (defun aob-trace--filter-substring (orig beg end &optional delete)
   "Copy BEG to END through ORIG, as the markdown it was drawn from when it was."
-  (if (and (fboundp 'agent-shell-markdown-reconstruct)
-           (text-property-not-all beg end 'agent-shell-markdown-source nil))
-      (prog1 (aob-trace--copy-markdown beg end)
-        (when delete (funcall orig beg end delete)))
-    (aob-trace--unmarked (funcall orig beg end delete))))
+  (cond
+   ((aob-trace--whole-run-p beg end 'agent-shell-markdown-source-block-body)
+    (funcall orig beg end delete))
+   ((and (fboundp 'agent-shell-markdown-reconstruct)
+         (text-property-not-all beg end 'agent-shell-markdown-source nil))
+    (prog1 (let ((text (aob-trace--copy-markdown beg end)))
+             (if (aob-trace--whole-run-p beg end 'agent-shell-markdown-source-block-rendered)
+                 (string-remove-suffix "\n" text)
+               text))
+      (when delete (funcall orig beg end delete))))
+   (t (aob-trace--unmarked (funcall orig beg end delete)))))
 
 (defun aob-trace-shell-live-p (ev)
   "Non-nil while the command tool call EV ran is still running.
@@ -2958,8 +2971,21 @@ An entry is (TEXT ATTACHMENTS EVENT), as the session keeps it."
           (end-of-line)
           (and (< (1+ (point)) (cadr b)) (cons (1+ (point)) (cadr b))))))))
 
+(defun aob-trace--rendered-fence-bounds (which)
+  "The drawn code block at point: code for `inside', whole panel for `around'."
+  (let ((prop (if (eq which 'around)
+                  'agent-shell-markdown-source-block-rendered
+                'agent-shell-markdown-source-block-body)))
+    (when (get-text-property (point) prop)
+      (cons (or (previous-single-property-change (1+ (point)) prop nil (point-min)) (point-min))
+            (or (next-single-property-change (point) prop nil (point-max)) (point-max))))))
+
 (defun aob-trace--fence-bounds (which)
   "The fenced code block at point: the code for `inside', fences too for `around'."
+  (or (aob-trace--rendered-fence-bounds which)
+      (aob-trace--written-fence-bounds which)))
+
+(defun aob-trace--written-fence-bounds (which)
   (let ((b (let ((b (aob-trace--block-containing (point)))) (and b (not (eq (nth 2 b) 'tool)) b)))
         (pt (point))
         found)
@@ -4122,18 +4148,32 @@ The full account is \\ i u; the header carries only what is looked at."
            (setq start (match-end 0)))
          out)))))
 
+(defun aob-trace--remote-work-root (home path)
+  "HOME, a remote folder, when PATH lies inside it, else nil.  Does no I/O."
+  (let ((prefix (file-remote-p home))
+        (local (file-local-name home))
+        (path-local (file-local-name path)))
+    (when (and (or (not (file-remote-p path)) (equal (file-remote-p path) prefix))
+               (string-prefix-p (file-name-as-directory local) path-local))
+      (file-name-as-directory home))))
+
 (defun aob-trace--work-root (s)
-  "The repository S's agent was last seen working in, or nil."
-  (seq-some
-   (lambda (ev)
-     (and (eq (plist-get ev :type) 'tool)
-          (seq-some (lambda (path)
-                      (and (stringp path) (file-name-absolute-p path)
-                           (when-let* ((root (locate-dominating-file
-                                              (expand-file-name path) ".git")))
-                             (file-name-as-directory (expand-file-name root)))))
-                    (aob-trace--tool-paths ev))))
-   (seq-take (aob-session-events s) 40)))
+  "The repository S's agent was last seen working in, or nil.
+A remote session is never walked: its own folder stands for the root
+when the path is inside it."
+  (let ((home (or (aob-session-dir s) (aob-session-project s))))
+    (seq-some
+     (lambda (ev)
+       (and (eq (plist-get ev :type) 'tool)
+            (seq-some (lambda (path)
+                        (and (stringp path) (file-name-absolute-p path)
+                             (if (and home (file-remote-p home))
+                                 (aob-trace--remote-work-root home path)
+                               (when-let* ((root (locate-dominating-file
+                                                  (expand-file-name path) ".git")))
+                                 (file-name-as-directory (expand-file-name root))))))
+                      (aob-trace--tool-paths ev))))
+     (seq-take (aob-session-events s) 40))))
 
 (defvar-local aob-trace--root-seq nil
   "The newest tool event the trace's folder was last worked out from.")
@@ -4149,7 +4189,8 @@ not in a folder no command of it runs in."
     (unless (equal newest aob-trace--root-seq)
       (setq aob-trace--root-seq newest)
       (let ((home (or (aob-session-dir s) (aob-session-project s))))
-        (unless (and home (locate-dominating-file home ".git"))
+        (unless (and home (or (file-remote-p home)
+                              (locate-dominating-file home ".git")))
           (when-let* ((root (aob-trace--work-root s)))
             (setq default-directory root)))))))
 

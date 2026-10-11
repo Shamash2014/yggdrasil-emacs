@@ -244,7 +244,8 @@ A child process, so the glue's advice and keys never reach the other tests."
     (let ((ev (car (aob-session-events s))))
       (should (eq (plist-get ev :type) 'prompt))
       (should (equal (plist-get ev :status) "queued"))
-      (aob--modeline-refresh)
+      (cl-letf (((symbol-function 'nerd-icons-mdicon) #'ignore))
+        (aob--modeline-refresh))
       (should (string-match-p "»\\s-*1" aob-modeline-string))
       (with-current-buffer (aob-trace-buffer s)
         ;; words carry a speaker line rather than a glyph behind a clock —
@@ -2375,6 +2376,7 @@ its own: the decision closes, the trace says so, and a late answer is not sent."
 (ert-deftest aob-plan-view-and-todo-edits ()
   "Plan updates carry the current task; the view splits doing/queued/done."
   (aob-tests--with-session s
+   (cl-letf (((symbol-function 'nerd-icons-mdicon) #'ignore))
     (aob-tests--feed s "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"plan\",\"entries\":[{\"content\":\"scaffold module\",\"status\":\"completed\",\"priority\":\"high\"},{\"content\":\"implement parser\",\"status\":\"in_progress\",\"priority\":\"high\"},{\"content\":\"write tests\",\"status\":\"pending\",\"priority\":\"medium\"}]}}}")
     (let ((ev (aob-session-ref s :plan-ev)))
       (should (equal (plist-get ev :title) "plan 1/3 · implement parser"))
@@ -2392,7 +2394,7 @@ its own: the decision closes, the trace says so, and a late answer is not sent."
       (should (string-match-p "◉ write tests" (buffer-string)))
       (should (string-match-p "── done 2" (buffer-string)))
       (should (equal (plist-get (aob-session-ref s :plan-ev) :title)
-                     "plan 2/3 · write tests")))))
+                     "plan 2/3 · write tests"))))))
 
 (defun aob-tests--plan-json (entries)
   (format "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"update\":{\"sessionUpdate\":\"plan\",\"entries\":%s}}}"

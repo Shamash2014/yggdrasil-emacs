@@ -1,5 +1,6 @@
 ;;; ygg-session-startup-tests.el --- Startup loads a session -*- lexical-binding: t; -*-
 
+(load (expand-file-name "test-elpaca" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'layer-sessions)
 (require 'easysession)

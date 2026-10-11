@@ -276,12 +276,13 @@
 
 (ert-deftest aob-transcript-pi-resuming-a-put-away-session-moves-it-back-before-loading ()
   (aob-transcript-pi-tests--with-world
-    (let* ((project aob-transcript-pi-tests--project)
+    (let* ((project (expand-file-name "proj/" root))
            (file (aob-transcript-pi-tests--write
                   conf project "beadfeed-7777" (list aob-transcript-pi-tests--user-a)))
            (other (aob-transcript-pi-tests--write
                    conf project "beadfeed-8888" (list aob-transcript-pi-tests--user-a)))
            (seen nil))
+      (make-directory project t)
       (aob-transcript-move (list :agent "pi" :acp-id "beadfeed-7777" :dir project) "archive")
       (aob-transcript-move (list :agent "pi" :acp-id "beadfeed-8888" :dir project) "discarded")
       (should-not (file-exists-p file))
@@ -458,7 +459,7 @@
                 ((symbol-function 'aob-transcript-file) (lambda (_) "/x/f.jsonl"))
                 ((symbol-function 'aob-acp--resume-entry) (lambda (&rest _) (setq loaded t))))
         (let ((err (should-error
-                    (aob-acp-resume-entry (list :agent "pi" :acp-id "z" :dir "/x/"))
+                    (aob-acp-resume-entry (list :agent "pi" :acp-id "z" :dir root))
                     :type 'user-error)))
           (should (string-match-p "/x/f\\.jsonl" (cadr err))))
         (should-not loaded)))))
