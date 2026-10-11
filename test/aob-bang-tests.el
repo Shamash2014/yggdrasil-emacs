@@ -133,3 +133,19 @@
     (setq aob-compose--target nil
           aob-compose--dir "/ssh:host:/tmp")
     (should (equal (aob-bang--dir) "/ssh:host:/tmp/"))))
+
+(ert-deftest aob-bang-remote-uses-connection-local-shell ()
+  (let (argv)
+    (connection-local-set-profile-variables
+     'aob-bang-tests-profile
+     '((shell-file-name . "/remote/bin/sh") (shell-command-switch . "-c")))
+    (connection-local-set-profiles
+     '(:application tramp :protocol "ssh" :user nil :machine "aobhost")
+     'aob-bang-tests-profile)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest args)
+                 (setq argv (plist-get args :command))
+                 (error "stop"))))
+      (let ((shell-file-name "/local/bin/zsh"))
+        (ignore-errors (aob-bang--run "echo hi" "/ssh:aobhost:/tmp/"))))
+    (should (equal argv '("/remote/bin/sh" "-c" "echo hi")))))
