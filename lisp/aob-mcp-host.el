@@ -309,13 +309,15 @@ Return a line saying how it went."
 
 (defun aob-mcp-host--on-removed (session)
   "Forget what SESSION was asked or was waiting on."
-  (let ((id (aob-session-id session)))
-    (dolist (ask (copy-sequence aob-mcp-host--asks))
-      (cond
-       ((equal (car ask) id) (setq aob-mcp-host--asks (delq ask aob-mcp-host--asks)))
-       ((equal (cadr ask) id)
-        (aob-mcp-host--deliver
-         ask (format "No reply from %s: it ended before answering." (aob-session-name session))))))))
+  (let* ((id (aob-session-id session))
+         (heir (aob-session-get id)))
+    (unless (and heir (not (eq heir session)))
+      (dolist (ask (copy-sequence aob-mcp-host--asks))
+        (cond
+         ((equal (car ask) id) (setq aob-mcp-host--asks (delq ask aob-mcp-host--asks)))
+         ((equal (cadr ask) id)
+          (aob-mcp-host--deliver
+           ask (format "No reply from %s: it ended before answering." (aob-session-name session)))))))))
 
 (with-eval-after-load 'aob
   (add-hook 'aob-state-change-hook #'aob-mcp-host--on-state)
