@@ -1968,6 +1968,29 @@ carries, and the files it names that are pictures here."
                 (setq pos next)))))
       (setq aob-trace--full-images was))))
 
+(defconst aob-trace--beside-action
+  '((display-buffer-reuse-window
+     aob-trace--window-beside
+     display-buffer-pop-up-window
+     display-buffer-use-some-window)
+    (inhibit-same-window . t))
+  "How a file or picture opened from a trace is put on screen: not in it.")
+
+(defun aob-trace--window-beside (buffer alist)
+  "Show BUFFER in a window that is not the selected one and holds no conversation."
+  (when-let* ((win (seq-find (lambda (w)
+                               (and (not (eq w (selected-window)))
+                                    (not (window-dedicated-p w))
+                                    (not (window-parameter w 'window-side))
+                                    (not (buffer-local-value 'aob-buffer-session-id
+                                                             (window-buffer w)))))
+                             (window-list nil 'no-minibuf))))
+    (window--display-buffer buffer win 'reuse alist)))
+
+(defun aob-trace--pop-beside (buffer)
+  "Select BUFFER in a window beside the trace, leaving the trace where it is."
+  (pop-to-buffer buffer aob-trace--beside-action))
+
 (defun aob-trace--view-image-data (block)
   "Open the picture the image BLOCK carries in a buffer of its own."
   (let ((buf (get-buffer-create "*aob image*")))
@@ -1978,8 +2001,7 @@ carries, and the files it names that are pictures here."
         (set-buffer-multibyte nil)
         (insert (base64-decode-string (plist-get block :data)))
         (image-mode)))
-    (pop-to-buffer buf '((display-buffer-reuse-window display-buffer-use-some-window)
-                         (inhibit-same-window . t)))))
+    (aob-trace--pop-beside buf)))
 
 (defun aob-trace--hang (ev str)
   "STR with the agent\='s mark beside its first line when EV opens a turn.
@@ -4433,9 +4455,7 @@ LINE is where to land; without one, SEARCH is text to land on."
   (pcase-let ((`(,file ,line ,search . ,rest) spec))
     (unless (file-exists-p file)
       (user-error "aob: %s is not there" (abbreviate-file-name file)))
-    (pop-to-buffer (find-file-noselect file)
-                   '((display-buffer-reuse-window display-buffer-use-some-window)
-                     (inhibit-same-window . t)))
+    (aob-trace--pop-beside (find-file-noselect file))
     (widen)
     (goto-char (point-min))
     (cond ((and line (> line 0))
