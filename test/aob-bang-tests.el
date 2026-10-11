@@ -115,3 +115,21 @@
                             seen))))
 
 ;;; aob-bang-tests.el ends here
+
+(ert-deftest aob-bang-run-passes-file-handler-and-remote-dir ()
+  (let (args dir)
+    (cl-letf (((symbol-function 'make-process)
+               (lambda (&rest a) (setq args a dir default-directory) nil))
+              ((symbol-function 'process-send-eof) #'ignore)
+              ((symbol-function 'process-live-p) #'ignore)
+              ((symbol-function 'process-status) (lambda (_) 'exit))
+              ((symbol-function 'process-exit-status) (lambda (_) 0)))
+      (aob-bang--run "true" "/ssh:host:/tmp/")
+      (should (eq (plist-get args :file-handler) t))
+      (should (equal dir "/ssh:host:/tmp/")))))
+
+(ert-deftest aob-bang-dir-keeps-remote-dir ()
+  (with-temp-buffer
+    (setq aob-compose--target nil
+          aob-compose--dir "/ssh:host:/tmp")
+    (should (equal (aob-bang--dir) "/ssh:host:/tmp/"))))
