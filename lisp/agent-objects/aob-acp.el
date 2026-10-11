@@ -5382,7 +5382,13 @@ holds no turn, question or connection for a session no one reads."
           (aob-session-put old :restarting t)
           (unwind-protect (aob--call old :kill)
             (aob-session-put old :restarting nil)))
-        (aob-succeed old (lambda () (aob-acp--resume-entry e pref))))
+        (condition-case err
+            (aob-succeed old (lambda () (aob-acp--resume-entry e pref)))
+          (error
+           (let ((state (aob-session-state old)))
+             (when (memq state '(dead failed))
+               (run-hook-with-args 'aob-state-change-hook old state state)))
+           (signal (car err) (cdr err)))))
     (aob-acp--resume-entry e pref)))
 
 (defun aob-acp--resume-entry (e pref)

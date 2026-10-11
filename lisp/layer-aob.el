@@ -38,6 +38,9 @@
 (declare-function ygg-jump-back "yggdrasil-motions")
 (declare-function ygg-jump-forward "yggdrasil-motions")
 (declare-function aob-session-awaiting-answer "aob" ())
+(declare-function aob-compose-list-newline "aob" ())
+(declare-function aob-compose-list-indent "aob" ())
+(declare-function aob-compose-list-outdent "aob" ())
 
 ;; jumplist nav works in agent buffers too; Tab keeps expanding via the
 ;; distinct <tab> event while C-i (the TAB character) jumps forward
