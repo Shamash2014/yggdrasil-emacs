@@ -632,6 +632,11 @@ and the leader must not answer a space typed into it."
 
 (yggdrasil-define-mode-keys 'aob-compose-mode 'normal ygg-aob--compose-normal-map)
 
+(yggdrasil-define-mode-keys 'aob-compose-list-mode 'insert
+                            "RET" #'aob-compose-list-newline
+                            "TAB" #'aob-compose-list-indent
+                            "<backtab>" #'aob-compose-list-outdent)
+
 ;;; corfu under the word, not over the box
 
 (defun ygg-aob--corfu-lift (x y height lh yb child top-height)
