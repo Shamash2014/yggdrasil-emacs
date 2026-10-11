@@ -1777,17 +1777,9 @@ tokens, then what the host weighs the whole turn at."
       (beginning-of-line)
       (delete-char aob-compose--list-indent-step))))
 
-(defvar aob-compose-list-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "RET") #'aob-compose-list-newline)
-    (define-key map (kbd "TAB") #'aob-compose-list-indent)
-    (define-key map (kbd "<backtab>") #'aob-compose-list-outdent)
-    map)
-  "Keys that continue and shift markdown lists in the compose buffer.")
-
 (define-minor-mode aob-compose-list-mode
-  "Continue markdown list items on RET; TAB and S-TAB shift them."
-  :keymap aob-compose-list-mode-map)
+  "Continue markdown list items on RET; TAB and S-TAB shift them.
+The keys are bound in insert state by layer-aob.")
 
 (define-derived-mode aob-compose-mode text-mode "aob-compose"
   "Write a multi-line prompt; send with `aob-compose-send'."
