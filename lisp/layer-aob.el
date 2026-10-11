@@ -30,6 +30,7 @@
 (require 'aob-awake)
 (require 'aob-gc)
 (require 'aob-link)
+(require 'aob-sleep)
 (require 'ygg-ui)
 
 (declare-function ygg-notify "layer-ui" (msg &optional level))
@@ -2215,6 +2216,8 @@ space is a bigger sweep than closing what is in front of you."
   "p" #'aob-shells :label "running commands"
   "e" #'aob-edits :label "files edited"
   "k" #'aob-keep-awake-mode :label "keep awake while working"
+  "i" #'aob-pin-session :label "pin awake / unpin"
+  "z" #'aob-sleep-now :label "put to sleep"
   "g" #'aob-gc-now :label "clean merged worktrees"
   "G" #'aob-gc-preview :label "preview the clean-up"
   "P" #'aob-gc-project :label "clean this project's merged branches")
@@ -2222,6 +2225,8 @@ space is a bigger sweep than closing what is in front of you."
 (unless noninteractive (aob-keep-awake-mode 1))
 
 (unless noninteractive (aob-gc-mode 1))
+
+(unless noninteractive (aob-sleep-mode 1))
 
 (unless noninteractive (aob-schedule-start))
 

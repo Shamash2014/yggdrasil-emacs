@@ -1278,6 +1278,8 @@ A folder's badge is its own, `ygg-projects--folder-badge'."
                          (list (and (fboundp 'aob-session-quiet)
                                     (aob-session-quiet payload))
                                'shadow 3.5)
+                         (list (and (aob-session-ref payload :pinned) "pin")
+                               'shadow 3.2)
                          (list clock 'ygg-projects-count 2)
                          (list spend 'ygg-projects-count 1)
                          (list (ygg-projects--session-progress payload)
