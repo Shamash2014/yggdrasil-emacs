@@ -29,6 +29,7 @@
 (require 'aob-workflow)
 (require 'aob-awake)
 (require 'aob-gc)
+(require 'aob-link)
 (require 'ygg-ui)
 
 (declare-function ygg-notify "layer-ui" (msg &optional level))
