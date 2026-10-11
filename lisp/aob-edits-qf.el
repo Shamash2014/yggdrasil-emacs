@@ -11,6 +11,7 @@
 (require 'seq)
 (require 'subr-x)
 (require 'aob)
+(require 'aob-trace)
 
 (declare-function ygg-qf-define-kind "layer-quickfix")
 (declare-function ygg-qf-show-kind "layer-quickfix")
@@ -149,7 +150,7 @@ Each holds :file, :edits (diffs oldest first), :line, :status and :calls."
             (insert (aob-edits--diff-text rel (plist-get d :oldText) (plist-get d :newText))))
           (diff-mode)
           (goto-char (point-min))))
-      (pop-to-buffer buf))))
+      (aob-trace--pop buf))))
 
 (defun aob-edits-accept (id)
   "Mark the edits of the file of row ID as reviewed."
@@ -277,7 +278,8 @@ Each holds :file, :edits (diffs oldest first), :line, :status and :calls."
           (insert head "\n\n" (string-join lines "\n") "\n")
           (special-mode)
           (goto-char (point-min)))
-        (display-buffer (current-buffer)))
+        (let ((pop-up-frames nil))
+          (display-buffer (current-buffer) aob-trace--here-action)))
       (message "%s" head))))
 
 (defun aob-edits-revert-all (id)
