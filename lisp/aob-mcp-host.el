@@ -308,14 +308,15 @@ Return a line saying how it went."
                        (if (string-empty-p answer) "(it finished without a message)" answer)))))))))
 
 (defun aob-mcp-host--on-removed (session)
-  "Forget what SESSION was asked or was waiting on."
+  "Forget what SESSION was asked or was waiting on, unless its id lives on."
   (let ((id (aob-session-id session)))
-    (dolist (ask (copy-sequence aob-mcp-host--asks))
-      (cond
-       ((equal (car ask) id) (setq aob-mcp-host--asks (delq ask aob-mcp-host--asks)))
-       ((equal (cadr ask) id)
-        (aob-mcp-host--deliver
-         ask (format "No reply from %s: it ended before answering." (aob-session-name session))))))))
+    (unless (aob-session-get id)
+      (dolist (ask (copy-sequence aob-mcp-host--asks))
+        (cond
+         ((equal (car ask) id) (setq aob-mcp-host--asks (delq ask aob-mcp-host--asks)))
+         ((equal (cadr ask) id)
+          (aob-mcp-host--deliver
+           ask (format "No reply from %s: it ended before answering." (aob-session-name session)))))))))
 
 (with-eval-after-load 'aob
   (add-hook 'aob-state-change-hook #'aob-mcp-host--on-state)

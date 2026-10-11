@@ -91,6 +91,24 @@
       (should (string-match-p "has not answered" (car again)))
       (should (= (length aob-mcp-session-ask-tests--told) 1)))))
 
+(ert-deftest aob-mcp-session-ask-rollback-after-heir-creation-keeps-the-ask-and-delivers-olds-answer ()
+  "rollback after heir creation keeps the ask and delivers old's answer"
+  (aob-mcp-session-ask-tests--with (asker target)
+    (aob-mcp-session-ask-tests--call "session_ask" '(:id "target" :text "q"))
+    (ignore-errors
+      (aob-succeed target
+                   (lambda ()
+                     (aob-create-session :id (aob-session-id target) :backend 'acp :name "target"
+                                         :project "/tmp/t/" :dir "/tmp/t/" :state 'idle)
+                     (error "wake failed"))))
+    (should (eq (aob-session-get "acp:target") target))
+    (should (= (length aob-mcp-host--asks) 1))
+    (should-not (assoc "asker" aob-mcp-session-ask-tests--told))
+    (aob-mcp-session-ask-tests--finish-turn target "four")
+    (should (string-match-p "\\`Reply from target:\n\nfour\\'"
+                            (cdr (assoc "asker" aob-mcp-session-ask-tests--told))))
+    (should-not aob-mcp-host--asks)))
+
 (ert-deftest aob-mcp-session-targets-block-a-name-no-pattern-matches ()
   (aob-mcp-session-ask-tests--with (asker target)
     (setq aob-mcp-host-session-targets '("\\`worker-"))
