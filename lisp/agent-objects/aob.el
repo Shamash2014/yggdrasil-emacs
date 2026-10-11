@@ -1024,23 +1024,31 @@ keeps writing into the trace it was already writing into."
   (aob--dirty s)
   name)
 
-(defun aob-kill-session (s)
-  "Kill S's process and drop it from the registry."
+(defun aob-kill-session (s &optional confirmed)
+  "Kill S's process and drop it from the registry.
+CONFIRMED skips the prompt, for callers that already asked."
   (interactive (list (aob-target)))
   (let ((queued (length (aob-session-ref s :queued))))
-    (when (y-or-n-p (format "Kill %s%s? " (aob-session-name s)
-                            (if (zerop queued) ""
-                              (format " and drop %d queued prompt(s)" queued))))
+    (when (or confirmed
+              (y-or-n-p (format "Kill %s%s? " (aob-session-name s)
+                                (if (zerop queued) ""
+                                  (format " and drop %d queued prompt(s)" queued)))))
       (aob-session-put s :queued nil)
       (aob--call s :kill))))
 
 (defun aob-kill-sessions (sessions)
-  "Kill every session in SESSIONS after one yes-or-no-p listing their names."
-  (when (yes-or-no-p (format "Kill %d agent%s (%s)? "
-                             (length sessions) (if (cdr sessions) "s" "")
-                             (mapconcat #'aob-session-name sessions ", ")))
-    (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
-      (mapc #'aob-kill-session sessions))))
+  "Kill every session in SESSIONS after one yes-or-no-p listing their names.
+The prompt also counts the queued prompts that die with them."
+  (let ((queued (apply #'+ (mapcar (lambda (s) (length (aob-session-ref s :queued)))
+                                   sessions))))
+    (when (yes-or-no-p (format "Kill %d agent%s (%s)%s? "
+                               (length sessions) (if (cdr sessions) "s" "")
+                               (mapconcat #'aob-session-name sessions ", ")
+                               (if (zerop queued) ""
+                                 (format " and drop %d queued prompt%s"
+                                         queued (if (= queued 1) "" "s")))))
+      (dolist (s sessions)
+        (aob-kill-session s t)))))
 
 (defun aob-focus (s)
   "Show S's primary surface (terminal or trace)."

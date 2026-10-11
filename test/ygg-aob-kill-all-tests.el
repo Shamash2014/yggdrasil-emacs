@@ -41,4 +41,19 @@
         (ygg-aob-kill-all))
       (should-not killed))))
 
+(ert-deftest ygg-aob-kill-all-prompt-counts-queued-prompts ()
+  (let (prompt reasked)
+    (aob-register-backend 'kill-all-test (list :kill #'ignore))
+    (ygg-aob-kill-all-tests--with ss '(1 1)
+      (aob-session-put (car ss) :queued '("a" "b" "c"))
+      (aob-session-put (cadr ss) :queued '("d"))
+      (cl-letf (((symbol-function 'ygg-space--current-id) (lambda () 1))
+                ((symbol-function 'ygg-aob--space-live-p) (lambda (_) t))
+                ((symbol-function 'y-or-n-p) (lambda (&rest _) (setq reasked t)))
+                ((symbol-function 'yes-or-no-p) (lambda (p) (setq prompt p) t)))
+        (ygg-aob-kill-all))
+      (should (string-match-p "drop 4 queued prompts" prompt))
+      (should-not reasked)
+      (should-not (aob-session-ref (car ss) :queued)))))
+
 ;;; ygg-aob-kill-all-tests.el ends here
