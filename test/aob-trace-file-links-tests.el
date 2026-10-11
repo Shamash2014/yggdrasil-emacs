@@ -79,3 +79,63 @@
    (should (get-text-property 4 'aob-link (aob-trace--md "see sub/target.el now")))))
 
 (provide 'aob-trace-file-links-tests)
+
+(defun aob-trace-file-links-tests--trace-window ()
+  (delete-other-windows)
+  (let ((buf (get-buffer-create " *aob-links-trace*")))
+    (with-current-buffer buf (setq-local aob-buffer-session-id "s"))
+    (set-window-buffer (selected-window) buf)
+    (cons (selected-window) buf)))
+
+(ert-deftest aob-trace-file-links-open-beside-single-window ()
+  (aob-trace-file-links-tests--in-dir
+   (pcase-let ((`(,twin . ,tbuf) (aob-trace-file-links-tests--trace-window)))
+     (aob-trace--visit (list file 3 nil))
+     (should (eq (window-buffer twin) tbuf))
+     (should (= 2 (length (window-list))))
+     (should-not (eq (selected-window) twin))
+     (should (equal (buffer-file-name (window-buffer (selected-window))) file))
+     (should (= 3 (line-number-at-pos))))))
+
+(ert-deftest aob-trace-file-links-open-beside-reuses-other-window ()
+  (aob-trace-file-links-tests--in-dir
+   (pcase-let ((`(,twin . ,tbuf) (aob-trace-file-links-tests--trace-window)))
+     (let ((other (split-window twin nil 'right)))
+       (set-window-buffer other (get-buffer-create " *aob-links-other*"))
+       (aob-trace--visit (list file 1 nil))
+       (should (eq (window-buffer twin) tbuf))
+       (should (= 2 (length (window-list))))
+       (should (eq (selected-window) other))
+       (should (equal (buffer-file-name (window-buffer other)) file))))))
+
+(ert-deftest aob-trace-file-links-open-beside-skips-other-conversation ()
+  (aob-trace-file-links-tests--in-dir
+   (pcase-let ((`(,twin . ,tbuf) (aob-trace-file-links-tests--trace-window))
+               (split-height-threshold 4)
+               (split-width-threshold 20))
+     (let ((peer (split-window twin nil 'right))
+           (peer-buf (with-current-buffer (get-buffer-create " *aob-links-peer*")
+                       (setq-local aob-buffer-session-id "t")
+                       (current-buffer))))
+       (set-window-buffer peer peer-buf)
+       (aob-trace--visit (list file 1 nil))
+       (should (eq (window-buffer twin) tbuf))
+       (should (eq (window-buffer peer) peer-buf))
+       (should (= 3 (length (window-list))))))))
+
+(ert-deftest aob-trace-file-links-image-file-opens-beside ()
+  (aob-trace-file-links-tests--in-dir
+   (let ((img (expand-file-name "pic.png" dir)))
+     (with-temp-file img (insert "x"))
+     (pcase-let ((`(,twin . ,tbuf) (aob-trace-file-links-tests--trace-window)))
+       (aob-trace--visit (list img nil nil))
+       (should (eq (window-buffer twin) tbuf))
+       (should (equal (buffer-file-name (window-buffer (selected-window))) img))))))
+
+(ert-deftest aob-trace-file-links-image-data-opens-beside ()
+  (pcase-let ((`(,twin . ,tbuf) (aob-trace-file-links-tests--trace-window)))
+    (cl-letf (((symbol-function 'image-mode) #'fundamental-mode))
+      (aob-trace--view-image-data (list :data (base64-encode-string "x"))))
+    (should (eq (window-buffer twin) tbuf))
+    (should (equal (buffer-name (window-buffer (selected-window))) "*aob image*"))
+    (should-not (eq (selected-window) twin))))
