@@ -1988,7 +1988,6 @@ carries, and the files it names that are pictures here."
      aob-trace--window-beside
      display-buffer-pop-up-window
      aob-trace--split-beside
-     display-buffer-use-some-window
      aob-trace--window-last)
     (inhibit-same-window . t)
     (inhibit-switch-frame . t)
