@@ -143,6 +143,7 @@ list still has it."
         (when-let* ((heir aob--successor))
           (run-hook-with-args 'aob-session-succession-functions heir old)
           (remhash (aob-session-id heir) aob--sessions)
+          (puthash id old aob--sessions)
           (aob--retire heir old))
         (puthash id old aob--sessions)
         (aob--order-before id next)))
