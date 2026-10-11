@@ -1951,7 +1951,8 @@ S's todo list; its event rides with the subagent's other steps."
   (run-hook-with-args 'aob-queue-change-hook s))
 
 (defun aob-acp--flush-queue (s)
-  (when-let* ((q (aob-session-ref s :queued)))
+  (when-let* ((q (and (not (aob-session-queue-paused-p s))
+                      (aob-session-ref s :queued))))
     (aob-session-put s :queued nil)
     ;; a queued prompt is written before the session is open; a restored
     ;; one then replays its history on top of it, so the words you just

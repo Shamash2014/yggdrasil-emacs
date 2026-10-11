@@ -217,6 +217,10 @@ flushes as soon as the turn ends, and two prompts cannot be in flight at
 once, so the work that would follow waits for the queued turn instead."
   (and (aob-session-ref s :queued) t))
 
+(defun aob-session-queue-paused-p (s)
+  "Non-nil when S\='s queue is paused: a turn ending does not send it."
+  (and (aob-session-ref s :queue-paused) t))
+
 (defun aob-queue-move (s entry by)
   "Move ENTRY, queued for S, BY places: negative goes earlier, positive later.
 Queued prompts go out as one message in queue order, so the order is the
@@ -2418,10 +2422,12 @@ Proceed based on it."
    'local-map aob-modeline--map))
 
 (defun aob--modeline-refresh (&rest _)
-  (let ((blocked 0) (working 0) (queued 0) (subs 0) (quietest nil)
+  (let ((blocked 0) (working 0) (queued 0) (paused 0) (subs 0) (quietest nil)
         (unread (length (aob-unread-sessions))))
     (dolist (s (seq-remove (lambda (s) (aob-session-ref s :hidden)) (aob-sessions)))
-      (cl-incf queued (length (aob-session-ref s :queued)))
+      (if (aob-session-queue-paused-p s)
+          (cl-incf paused (length (aob-session-ref s :queued)))
+        (cl-incf queued (length (aob-session-ref s :queued))))
       (when-let* ((label (aob-session-quiet s))
                   ((or (null quietest)
                        (< (aob-session-ref s :progress-at) (car quietest)))))
@@ -2452,7 +2458,10 @@ Proceed based on it."
            (when (> queued 0)
              (aob--modeline-pill "nf-md-tray_full" "»" queued
                                  'aob-modeline-queued "messages queued"))
-           (when (> (+ blocked unread working subs queued) 0) "  ")))
+           (when (> paused 0)
+             (aob--modeline-pill "nf-md-pause" "⏸" paused
+                                 'aob-modeline-queued "messages queued, paused"))
+           (when (> (+ blocked unread working subs queued paused) 0) "  ")))
     (force-mode-line-update t)))
 
 (define-minor-mode aob-modeline-mode
