@@ -9447,3 +9447,34 @@ nothing, TAB opens one whole and back, and copying passes over them."
         (let ((aob-acp-persist-file nil))
           (should-not (aob-acp--confirm-exit))
           (should (string-match-p (aob-session-name s) asked)))))))
+
+(defmacro aob-tests--with-states (var states &rest body)
+  (declare (indent 2))
+  `(let ((,var (cl-loop for st in ,states for i from 0
+                        collect (aob-create-session
+                                 :id (format "cancel-all:%d" i) :backend 'cancel-all-test
+                                 :name (format "ca%d" i) :state st))))
+     (unwind-protect (progn ,@body)
+       (mapc #'aob-remove-session ,var))))
+
+(ert-deftest aob-cancel-all-cancels-only-working-and-blocked ()
+  (let (stopped)
+    (aob-register-backend 'cancel-all-test
+                          (list :cancel (lambda (s &rest args)
+                                          (push (cons (aob-session-name s) args) stopped))))
+    (aob-tests--with-states ss '(working blocked idle)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (aob-cancel-all))
+      (should (equal (sort (mapcar #'car stopped) #'string<) '("ca0" "ca1")))
+      (should (equal (mapcar #'cdr stopped) '((nil) (nil)))))))
+
+(ert-deftest aob-cancel-all-declines-when-asked-no ()
+  (let (stopped prompt)
+    (aob-register-backend 'cancel-all-test
+                          (list :cancel (lambda (s &rest _) (push s stopped))))
+    (aob-tests--with-states ss '(working working)
+      (cl-letf (((symbol-function 'y-or-n-p)
+                 (lambda (p) (setq prompt p) nil)))
+        (aob-cancel-all))
+      (should-not stopped)
+      (should (string-match-p "2 agents" prompt)))))
