@@ -2167,6 +2167,7 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
 (declare-function ygg-projects-toggle-archived "ygg-projects" ())
 (declare-function ygg-projects-toggle-past "ygg-projects" ())
 (declare-function ygg-conversations "ygg-projects" (&optional all))
+(declare-function aob-transcript-search "aob-transcript" (query))
 
 (yggdrasil-define-keys 'ygg-leader-agent-map
   "d" #'ygg-projects-sidebar :label "projects"
@@ -2174,6 +2175,7 @@ for good: killed, forgotten by the resume list, every buffer of it closed."
   ;; a command reachable only by a key in one buffer is a command you
   ;; have to already know about
   "v" #'ygg-conversations :label "conversations"
+  "/" #'aob-transcript-search :label "search conversations"
   "z" #'ygg-projects-toggle-past :label "old sessions on/off"
   "Z" #'ygg-projects-toggle-archived :label "archived on/off")
 
