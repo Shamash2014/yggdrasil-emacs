@@ -136,6 +136,8 @@ window as following and pulls the page back down."
   (ygg-ui-plain-layout)
   (setq-local ygg-modeline-name "trace")
   (setq truncate-lines nil)
+  (face-remap-set-base 'header-line :inherit 'default :box nil
+                       :underline nil :overline nil)
   (setq-local char-property-alias-alist '((face font-lock-face)))
   (visual-line-mode 1)
   (require 'agent-shell-markdown nil t)

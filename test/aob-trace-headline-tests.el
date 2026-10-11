@@ -93,4 +93,13 @@
     (should (= (point-min) (overlay-start aob-trace--meter-overlay)))
     (should (string-match-p "\\$4\\.00" (aob-trace-headline-tests--meter)))))
 
+(ert-deftest aob-trace-headline-has-no-bar-of-its-own ()
+  (aob-trace-headline-tests--with s
+    (let ((spec (cadr (assq 'header-line face-remapping-alist))))
+      (should (eq 'default (plist-get spec :inherit)))
+      (should-not (plist-member spec :background))
+      (should-not (plist-get spec :box))
+      (should-not (plist-get spec :underline))
+      (should-not (plist-get spec :overline)))))
+
 (provide 'aob-trace-headline-tests)
