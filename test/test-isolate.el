@@ -8,12 +8,13 @@
   (let* ((repo (expand-file-name "../" (file-name-directory (or load-file-name buffer-file-name))))
          (root (file-name-as-directory (make-temp-file "test-isolate-" t))))
     (setq test-isolate-root root)
-    (dolist (name (directory-files repo nil "\\`[^.]"))
-      (unless (member name '("var" "test" "transient" "history" "projects.eld" "recentf.eld"
-                             "places.eld" "bookmarks" "custom.el" "easysession"))
+    (dolist (name '("lisp" "etc" "templates" "skills" "tree-sitter" "presets" "doc"
+                    "tutor" "lat.md" "init.el" "early-init.el"))
+      (when (file-exists-p (expand-file-name name repo))
         (make-symbolic-link (expand-file-name name repo) (expand-file-name name root))))
-    (unless (file-exists-p (expand-file-name "elpaca" root))
-      (make-symbolic-link (expand-file-name "elpaca" "~/.emacs.d/") (expand-file-name "elpaca" root)))
+    (dolist (name '("elpaca" "tree-sitter"))
+      (unless (file-exists-p (expand-file-name name root))
+        (make-symbolic-link (expand-file-name name "~/.emacs.d/") (expand-file-name name root))))
     (make-directory (expand-file-name "var/" root) t)
     (make-directory (expand-file-name "transient/" root) t)
     (setq user-emacs-directory root
