@@ -240,13 +240,28 @@ whichever completes last re-modes the stragglers."
 (declare-function combobulate-cursor-edit-node-type-dwim "combobulate")
 (declare-function combobulate-transpose-sexps "combobulate")
 
+(defvar combobulate-registered-languages-alist)
+
+(defun ygg--combobulate-active-p ()
+  (seq-some (lambda (language)
+              (let ((minor-mode-fn (nth 2 language)))
+                (and (boundp minor-mode-fn) (symbol-value minor-mode-fn))))
+            (bound-and-true-p combobulate-registered-languages-alist)))
+
 (defun ygg--maybe-combobulate ()
-  "Enable combobulate only where a tree-sitter parser is live."
-  (when (treesit-parser-list) (combobulate-mode 1)))
+  "Enable combobulate once where a tree-sitter parser is live.
+`combobulate-mode' toggles, so a second call would switch it off."
+  (when (and (treesit-parser-list) (not (ygg--combobulate-active-p)))
+    (ignore-errors (combobulate-mode 1))))
+
+(defun ygg--combobulate-enable-open-buffers ()
+  (dolist (buffer (buffer-list))
+    (with-current-buffer buffer (ygg--maybe-combobulate))))
 
 (when (fboundp 'elpaca)
   (elpaca (combobulate :host github :repo "mickeynp/combobulate")
-    (add-hook 'prog-mode-hook #'ygg--maybe-combobulate)))
+    (add-hook 'after-change-major-mode-hook #'ygg--maybe-combobulate)
+    (ygg--combobulate-enable-open-buffers)))
 
 ;;; dumb-jump — xref definitions everywhere eglot isn't
 
