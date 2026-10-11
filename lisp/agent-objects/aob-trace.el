@@ -2599,13 +2599,15 @@ them, grouped and in order, or in their own trace."
 (defun aob-trace--queue-footer (s n)
   "The muted line under N messages queued for S: when they go, how to move them."
   (let* ((held (not (memq (aob-session-state s) '(working blocked starting))))
-         (key (list n held)))
+         (paused (aob-session-queue-paused-p s))
+         (key (list n held paused)))
     (if (equal (car aob-trace--footer) key)
         (cdr aob-trace--footer)
       (let ((line (propertize
                    (format "» %d %s · %s · \\ q k/j reorder · \\ q d drop"
-                           n (if held "held" "queued")
-                           (cond (held "\\ q s sends now")
+                           n (cond (paused "paused") (held "held") (t "queued"))
+                           (cond (paused "\\ q p resumes")
+                                 (held "\\ q s sends now")
                                  ((> n 1) "sent as one when this turn ends")
                                  (t "sent when this turn ends")))
                    'font-lock-face 'aob-trace-done)))
@@ -2969,6 +2971,20 @@ An entry is (TEXT ATTACHMENTS EVENT), as the session keeps it."
 (with-eval-after-load 'yggdrasil-match
   (advice-add 'ygg-match--textobject-bounds :around #'aob-trace--textobject-bounds))
 
+(defun aob-trace-queue-pause-toggle ()
+  "Pause this session's queue, or resume it.
+Paused, a turn ending leaves the queue where it is.  Resuming sends it
+at once when the session is idle, and otherwise when the running turn ends."
+  (interactive)
+  (let ((s (or (aob-session-get aob-trace--session-id) (user-error "aob: no session here"))))
+    (aob-session-put s :queue-paused (not (aob-session-queue-paused-p s)))
+    (run-hook-with-args 'aob-queue-change-hook s)
+    (if (aob-session-queue-paused-p s)
+        (message "aob: %s: queue paused" (aob-session-name s))
+      (when (eq (aob-session-state s) 'idle)
+        (aob--call s :flush))
+      (message "aob: %s: queue resumed" (aob-session-name s)))))
+
 (defun aob-trace-queue-steer ()
   "Say the queued prompt on this line now, into the turn that is running.
 The first one queued when point is on none of them.  Between turns, when
@@ -2977,7 +2993,8 @@ a failed turn has left the queue held, the whole queue goes out now."
   (let ((s (or (aob-session-get aob-trace--session-id) (user-error "aob: no session here"))))
     (if (and (aob-session-ref s :queued)
              (eq (aob-session-state s) 'idle))
-        (aob--call s :flush)
+        (progn (aob-session-put s :queue-paused nil)
+               (aob--call s :flush))
       (aob-trace--queue-steer-1 s))))
 
 (defun aob-trace-queue-send-now ()
@@ -2989,6 +3006,7 @@ Idle with the queue held, it goes out straight away."
          (q (or (aob-session-ref s :queued) (user-error "aob: nothing is queued"))))
     (when-let* ((entry (aob-trace--queued-at-point)))
       (aob-queue-move s entry (- (length q))))
+    (aob-session-put s :queue-paused nil)
     (if (memq (aob-session-state s) '(working blocked))
         (aob--call s :cancel)
       (aob--call s :flush))

@@ -201,6 +201,7 @@ BINDINGS is a list of (KEY COMMAND LABEL)."
  'aob-trace-mode "q" "queued"
  '(("e" aob-trace-queue-edit "rewrite")
    ("d" aob-trace-queue-drop "drop")
+   ("p" aob-trace-queue-pause-toggle "pause / resume")
    ("s" aob-trace-queue-steer "say it now (idle: send held)")
    ("RET" aob-trace-queue-send-now "send now (stops the turn)")
    ("k" aob-trace-queue-earlier "move earlier")

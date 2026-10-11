@@ -3323,6 +3323,56 @@ not the ones the repository says its work needs."
       (aob-remove-session s)
       (delete-directory live t))))
 
+(ert-deftest aob-a-paused-queue-is-not-flushed-at-turn-end ()
+  (aob-tests--with-session s
+    (aob-session-put s :agent-caps '(:promptCapabilities (:image t)))
+    (let (cb (sent nil))
+      (cl-letf (((symbol-function 'aob-acp--request)
+                 (lambda (_s _method _params callback) (setq cb callback))))
+        (aob-acp--prompt-1 s "first")
+        (aob-acp--prompt s "second")
+        (aob-session-put s :queue-paused t)
+        (cl-letf (((symbol-function 'aob-acp--prompt-1)
+                   (lambda (_s text &rest _) (push text sent))))
+          (funcall cb '(:stopReason "end_turn") nil))
+        (should-not sent)
+        (should (eq (aob-session-state s) 'idle))
+        (should (= (length (aob-session-ref s :queued)) 1))))))
+
+(ert-deftest aob-a-resumed-queue-flushes-when-idle ()
+  (aob-tests--with-session s
+    (aob-acp--queue s "later" nil)
+    (aob-session-put s :queue-paused t)
+    (aob-set-state s 'idle)
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'aob-acp--prompt-1)
+                 (lambda (_s text &rest _) (push text sent)))
+                ((symbol-function 'aob-session-get) (lambda (_id) s))
+                ((symbol-function 'aob--call)
+                 (lambda (s key &rest _) (when (eq key :flush) (aob-acp--flush-queue s)))))
+        (with-temp-buffer
+          (aob-trace-queue-pause-toggle)))
+      (should-not (aob-session-queue-paused-p s))
+      (should (equal sent '("later")))
+      (should-not (aob-session-ref s :queued)))))
+
+(ert-deftest aob-a-resuming-while-working-does-not-send ()
+  (aob-tests--with-session s
+    (aob-acp--queue s "later" nil)
+    (aob-session-put s :queue-paused t)
+    (aob-set-state s 'working)
+    (let ((sent nil))
+      (cl-letf (((symbol-function 'aob-acp--prompt-1)
+                 (lambda (_s text &rest _) (push text sent)))
+                ((symbol-function 'aob-session-get) (lambda (_id) s)))
+        (with-temp-buffer
+          (aob-trace-queue-pause-toggle))
+        (should-not sent)
+        (should (= (length (aob-session-ref s :queued)) 1))
+        (aob-set-state s 'idle)
+        (aob-acp--flush-queue s)
+        (should (equal sent '("later")))))))
+
 (provide 'aob-tests)
 ;;; aob-tests.el ends here
 
