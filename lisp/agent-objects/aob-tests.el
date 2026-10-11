@@ -3341,6 +3341,28 @@ not the ones the repository says its work needs."
         (should (eq (aob-session-state s) 'idle))
         (should (= (length (aob-session-ref s :queued)) 1))))))
 
+(ert-deftest aob-a-steering-the-last-held-prompt-clears-the-pause ()
+  (aob-tests--with-session s
+    (aob-session-put s :agent-caps '(:promptCapabilities (:image t)))
+    (let (cb (sent nil))
+      (cl-letf (((symbol-function 'aob-acp--request)
+                 (lambda (_s _method _params callback) (setq cb callback)))
+                ((symbol-function 'aob-acp--steers-p) (lambda (_s) t))
+                ((symbol-function 'aob-interject) #'ignore)
+                ((symbol-function 'aob-session-get) (lambda (_id) s)))
+        (aob-acp--prompt-1 s "first")
+        (aob-acp--prompt s "second")
+        (aob-session-put s :queue-paused t)
+        (with-temp-buffer
+          (aob-trace-queue-steer))
+        (should-not (aob-session-ref s :queued))
+        (should-not (aob-session-queue-paused-p s))
+        (aob-acp--prompt s "third")
+        (cl-letf (((symbol-function 'aob-acp--prompt-1)
+                   (lambda (_s text &rest _) (push text sent))))
+          (funcall cb '(:stopReason "end_turn") nil))
+        (should (equal sent '("third")))))))
+
 (ert-deftest aob-a-resumed-queue-flushes-when-idle ()
   (aob-tests--with-session s
     (aob-acp--queue s "later" nil)

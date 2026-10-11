@@ -106,6 +106,7 @@ id in the order and every view that answers to it."
     (setf (aob-session-events s) nil)
     (setf (aob-session-decisions s) nil)
     (aob-session-put s :queued nil)
+    (aob-session-put s :queue-paused nil)
     (aob--dirty)))
 
 (defvar aob-session-succession-functions nil
@@ -220,6 +221,12 @@ once, so the work that would follow waits for the queued turn instead."
 (defun aob-session-queue-paused-p (s)
   "Non-nil when S\='s queue is paused: a turn ending does not send it."
   (and (aob-session-ref s :queue-paused) t))
+
+(defun aob-queue-remove (s entry)
+  "Take ENTRY out of S's queue; an emptied queue is no longer held."
+  (let ((rest (delq entry (aob-session-ref s :queued))))
+    (aob-session-put s :queued rest)
+    (unless rest (aob-session-put s :queue-paused nil))))
 
 (defun aob-queue-move (s entry by)
   "Move ENTRY, queued for S, BY places: negative goes earlier, positive later.
