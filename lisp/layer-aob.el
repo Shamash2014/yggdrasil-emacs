@@ -1031,6 +1031,20 @@ frame again until the sidebar is squeezed out of it."
                    (buffer-local-value 'aob-buffer-session-id (window-buffer w))))
             (window-list nil 'no-minibuf)))
 
+(defun ygg-aob--landing-window (s)
+  "A window still on the folder listing a new space opened on, S's folder."
+  (let ((dirs (mapcar (lambda (d) (and d (file-name-as-directory (expand-file-name d))))
+                      (list (aob-session-dir s) (aob-session-project s)))))
+    (seq-find (lambda (w)
+                (and (not (window-parameter w 'window-side))
+                     (not (window-dedicated-p w))
+                     (with-current-buffer (window-buffer w)
+                       (and (derived-mode-p 'dired-mode)
+                            (member (file-name-as-directory
+                                     (expand-file-name default-directory))
+                                    dirs)))))
+              (window-list nil 'no-minibuf))))
+
 (defcustom ygg-aob-subagent-action
   '((display-buffer-reuse-window
      ygg-aob--beside-conversation
@@ -1080,7 +1094,8 @@ the one you were reading."
                               (ignore-errors
                                 (display-buffer buf ygg-aob-subagent-action)))
                          (when-let* ((w (and (not (ygg-aob--subagent-p s))
-                                             (ygg-aob--conversation-window))))
+                                             (or (ygg-aob--conversation-window)
+                                                 (ygg-aob--landing-window s)))))
                            (unless (eq (window-buffer w) buf)
                              (set-window-buffer w buf))
                            w)
