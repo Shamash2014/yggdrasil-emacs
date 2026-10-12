@@ -991,3 +991,13 @@ and adds b.txt; main stays checked out."
 
 (ert-deftest ygg-git-compare-comments-flip-refuses-a-comment-on-the-pr ()
   (should-error (ygg-git-compare--flip-comment '(:id "remote:1" :type nit)) :type 'user-error))
+
+(ert-deftest ygg-git-compare-comments-box-keys-are-modal ()
+  (require 'yggdrasil-localleader)
+  (should-not (where-is-internal #'ygg-git-compare-draft-flip ygg-git-compare-box-mode-map))
+  (should-not (where-is-internal #'ygg-git-compare-draft-cycle-type ygg-git-compare-box-mode-map))
+  (should (eq #'ygg-git-compare-draft-flip
+              (let ((b (lookup-key (ygg-localleader--get-map 'aob-compose-mode) "d")))
+                (if (consp b) (cdr b) b))))
+  (with-temp-buffer
+    (should-error (ygg-git-compare-draft-flip) :type 'user-error)))

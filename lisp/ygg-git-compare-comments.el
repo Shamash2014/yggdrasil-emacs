@@ -284,12 +284,10 @@ changed line to its last, a line when it changed only one."
 (defvar-local ygg-git-compare--draft-list nil "The compare the draft is kept on.")
 (defvar-local ygg-git-compare--draft-existing nil "Whether the draft edits a comment already kept.")
 
-(defvar-keymap ygg-git-compare-box-mode-map
-  "C-c C-t" #'ygg-git-compare-draft-cycle-type
-  "C-c C-d" #'ygg-git-compare-draft-flip)
+(defvar-keymap ygg-git-compare-box-mode-map)
 
 (define-minor-mode ygg-git-compare-box-mode
-  "A comment box that writes a review comment, typed with TAB or \\[ygg-git-compare-draft-cycle-type]."
+  "A comment box that writes a review comment, typed with TAB in normal state; \\ d sends it to the PR or the agent."
   :lighter nil)
 
 (defvar-local ygg-git-compare--draft-files nil "The compare's changed files, once read.")
@@ -387,10 +385,13 @@ changed line to its last, a line when it changed only one."
 
 (with-eval-after-load 'yggdrasil-core
   (yggdrasil-define-mode-keys 'ygg-git-compare-box-mode 'normal
-                              "C-c C-d" #'ygg-git-compare-draft-flip
                               "TAB" #'ygg-git-compare-draft-cycle-type
                               "<tab>" #'ygg-git-compare-draft-cycle-type
                               "<backtab>" #'ygg-git-compare-draft-cycle-type-back))
+
+(with-eval-after-load 'yggdrasil-localleader
+  (yggdrasil-localleader-def 'aob-compose-mode "d" #'ygg-git-compare-draft-flip
+                             "comment: PR ⇄ agent"))
 
 (defun ygg-git-compare--type-face (type)
   (pcase type
@@ -490,6 +491,8 @@ Saving keeps the comment on the compare; saving nothing drops it."
 (defun ygg-git-compare-draft-flip ()
   "Send the comment to the other of the pull request and the agent."
   (interactive)
+  (unless (bound-and-true-p ygg-git-compare-box-mode)
+    (user-error "Not a review comment"))
   (ygg-git-compare--draft-put (ygg-git-compare--flipped ygg-git-compare--draft)))
 
 (defun ygg-git-compare-draft-cycle-type-back ()
