@@ -298,7 +298,7 @@ changed line to its last, a line when it changed only one."
 
 (defun ygg-git-compare--draft-set-type (name status)
   "Give the draft the type NAME, completed at its start, in place of the word."
-  (when (eq status 'finished)
+  (when (memq status '(finished exact sole))
     (save-excursion
       (goto-char (point-min))
       (when (looking-at (concat (regexp-quote name) "[[:blank:]]*"))
@@ -306,6 +306,19 @@ changed line to its last, a line when it changed only one."
     (setq ygg-git-compare--draft (plist-put ygg-git-compare--draft :type (intern name)))
     (setq aob-compose--tags (ygg-git-compare--box-tags))
     (force-mode-line-update)))
+
+(defun ygg-git-compare--draft-lead-type (text)
+  "TEXT without the type word it starts with, which types an untyped draft."
+  (if (and (not (plist-get ygg-git-compare--draft :type))
+           (string-match (concat "\\`" (regexp-opt (mapcar #'symbol-name (ygg-git-compare-comment-types)) t)
+                                 "\\(?::[[:blank:]]*\\|[[:blank:]]+\\)")
+                         text))
+      (prog1 (substring text (match-end 0))
+        (setq ygg-git-compare--draft
+              (plist-put ygg-git-compare--draft :type (intern (downcase (match-string 1 text)))))
+        (setq aob-compose--tags (ygg-git-compare--box-tags))
+        (force-mode-line-update))
+    text))
 
 (defun ygg-git-compare-draft-type-capf ()
   "Complete the comment's type in the word the draft starts with."
@@ -430,9 +443,10 @@ Saving keeps the comment on the compare; saving nothing drops it."
                name
                (concat "comment on: " (ygg-git-compare--where comment))
                (lambda (text)
-                 (ygg-git-compare--keep ygg-git-compare--draft
-                                        ygg-git-compare--draft-list text
-                                        ygg-git-compare--draft-existing))
+                 (let ((text (ygg-git-compare--draft-lead-type text)))
+                   (ygg-git-compare--keep ygg-git-compare--draft
+                                          ygg-git-compare--draft-list text
+                                          ygg-git-compare--draft-existing)))
                :initial (plist-get comment :text)
                :placeholder "Write the comment; saving it empty drops it")))
     (when fresh

@@ -563,6 +563,42 @@ and adds b.txt; main stays checked out."
             (imenu (assoc "▎ on two" (cdr (cadr (car index)))))
             (should (looking-at-p "\\+two"))))))))
 
+(defun ygg-git-compare-comments-tests--send (text &optional type)
+  (ygg-git-compare-comments-tests--goto "+two")
+  (with-current-buffer (ygg-git-compare-comment)
+    (when type (setq ygg-git-compare--draft (plist-put ygg-git-compare--draft :type type)))
+    (insert text)
+    (aob-compose-send))
+  (car (ygg-git-compare-comments-list)))
+
+(ert-deftest ygg-git-compare-comments-leading-type-word-types-the-comment ()
+  (dolist (case '(("todo fix the null check" todo "fix the null check")
+                  ("fix: rename x" fix "rename x")
+                  ("TODO later" todo "later")))
+    (ygg-git-compare-comments-tests--with-repo root
+      (ygg-git-compare-comments-tests--with-compare root
+        (let ((comment (ygg-git-compare-comments-tests--send (car case))))
+          (should (eq (plist-get comment :type) (nth 1 case)))
+          (should (equal (plist-get comment :text) (nth 2 case))))))))
+
+(ert-deftest ygg-git-compare-comments-leading-type-word-keeps-an-explicit-type ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (let ((comment (ygg-git-compare-comments-tests--send "todo later" 'nit)))
+        (should (eq (plist-get comment :type) 'nit))
+        (should (equal (plist-get comment :text) "todo later"))))))
+
+(ert-deftest ygg-git-compare-comments-type-completion-exits-on-exact ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (with-current-buffer (ygg-git-compare-comment)
+        (insert "todo")
+        (ygg-git-compare--draft-set-type "todo" 'exact)
+        (should (eq (plist-get ygg-git-compare--draft :type) 'todo))
+        (should (equal (buffer-string) ""))
+        (aob-compose-abort)))))
+
 (ert-deftest ygg-git-compare-comments-draft-completes-types-paths-and-words ()
   (ygg-git-compare-comments-tests--with-repo root
     (ygg-git-compare-comments-tests--with-compare root
