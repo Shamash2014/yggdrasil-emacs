@@ -170,6 +170,7 @@ stopped following.")
   "The embark target a verb of a kind is running on.")
 
 (declare-function ygg-embark-add-map "ygg-embark")
+(autoload 'ygg-embark-act-here "ygg-embark" nil t)
 (defvar embark-around-action-hooks)
 
 (defun ygg-qf-kind-type (kind)
@@ -443,6 +444,7 @@ A row of a kind opens no path."
     (define-key m "g g" #'ygg-qf-first)
     (define-key m "G" #'ygg-qf-last)
     (define-key m "d" #'ygg-qf-drop)
+    (define-key m "," #'ygg-embark-act-here)
     (define-key m "f" #'ygg-qf-filter)
     (define-key m "F" #'ygg-qf-filter-pop)
     (define-key m "/" #'isearch-forward)
@@ -464,6 +466,7 @@ Without lifting these, normal state answers j and k with line motion and
 the panel stops behaving like a list.")
 
 (yggdrasil-define-mode-keys 'grep-mode 'normal ygg-qf-panel-map)
+(yggdrasil-define-mode-keys 'grep-mode 'visual "," #'ygg-embark-act-here)
 
 (defun ygg-qf--enable-preview ()
   (when (derived-mode-p 'grep-mode 'compilation-mode)

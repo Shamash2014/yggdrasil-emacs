@@ -15,6 +15,11 @@
 
 (defvar embark-general-map)
 (defvar embark-target-finders)
+(defvar embark-candidate-collectors)
+(defvar ygg--visual-p)
+(declare-function embark-act "embark")
+(declare-function embark-act-all "embark")
+(declare-function ygg-qf--selection-lines "layer-quickfix" ())
 (defvar embark-keymap-alist)
 (defvar embark-target-injection-hooks)
 (defvar embark-indicators)
@@ -137,6 +142,31 @@ than stopping where the path does.")
   "Tell embark point stands on a mention in a draft."
   (when-let* ((mention (ygg-embark--mention)))
     (ygg-embark--target 'ygg-mention (car mention) (cdr mention))))
+
+(defun ygg-embark-collect-qf-rows ()
+  "The quickfix rows the selection covers, as embark collects candidates."
+  (when (and (derived-mode-p 'compilation-mode)
+             (or (use-region-p) (bound-and-true-p ygg--visual-p)))
+    (let* ((bounds (ygg-qf--selection-lines))
+           (stop (cadr bounds))
+           type cands)
+      (save-excursion
+        (goto-char (car bounds))
+        (while (and (<= (point) stop)
+                    (progn
+                      (when-let* ((hit (or (ygg-embark-target-qf-kind)
+                                           (ygg-embark-target-qf-row))))
+                        (setq type (or type (car hit)))
+                        (when (eq type (car hit)) (push (cdr hit) cands)))
+                      (zerop (forward-line 1))))))
+      (when cands (cons type (nreverse cands))))))
+
+(defun ygg-embark-act-here ()
+  "Act on the row at point, or on every row the selection covers."
+  (interactive)
+  (if (ygg-embark-collect-qf-rows)
+      (embark-act-all)
+    (embark-act)))
 
 (defconst ygg-embark-target-finders
   '(ygg-embark-target-space
@@ -355,6 +385,7 @@ as input, so one that prompts keeps its own prompt."
 
 (defun ygg-embark-install ()
   "Let embark know every thing, every keymap and every verb here."
+  (add-hook 'embark-candidate-collectors #'ygg-embark-collect-qf-rows)
   (dolist (finder (reverse ygg-embark-target-finders))
     (add-to-list 'embark-target-finders finder))
   (dolist (cell ygg-embark-keymaps)
