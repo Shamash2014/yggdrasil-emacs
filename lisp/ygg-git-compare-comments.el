@@ -156,6 +156,15 @@ with INCLUDE-PENDING."
   "Where COMMENT goes: \"PR\" or \"agent\"."
   (if (ygg-git-compare--forge-p comment) "PR" "agent"))
 
+(defun ygg-git-compare--flipped (comment)
+  "COMMENT sent to the other of the pull request and the agent, the type it had
+for the pull request kept to give back."
+  (if (ygg-git-compare--forge-p comment)
+      (plist-put (plist-put (copy-sequence comment) :pr-type (plist-get comment :type))
+                 :type (car ygg-git-compare-agent-types))
+    (plist-put (plist-put (copy-sequence comment) :type (plist-get comment :pr-type))
+               :pr-type nil)))
+
 (defun ygg-git-compare--new-comment (level anchor)
   (append (list :id (ygg-git-compare--new-id) :level level :type nil :text nil)
           anchor
@@ -276,7 +285,8 @@ changed line to its last, a line when it changed only one."
 (defvar-local ygg-git-compare--draft-existing nil "Whether the draft edits a comment already kept.")
 
 (defvar-keymap ygg-git-compare-box-mode-map
-  "C-c C-t" #'ygg-git-compare-draft-cycle-type)
+  "C-c C-t" #'ygg-git-compare-draft-cycle-type
+  "C-c C-d" #'ygg-git-compare-draft-flip)
 
 (define-minor-mode ygg-git-compare-box-mode
   "A comment box that writes a review comment, typed with TAB or \\[ygg-git-compare-draft-cycle-type]."
@@ -296,6 +306,12 @@ changed line to its last, a line when it changed only one."
                                            list))
                            (buffer-list)))))
 
+(defun ygg-git-compare--draft-put (draft)
+  "Make DRAFT the comment this box writes and say so in its tags."
+  (setq ygg-git-compare--draft draft)
+  (setq aob-compose--tags (ygg-git-compare--box-tags))
+  (force-mode-line-update))
+
 (defun ygg-git-compare--draft-set-type (name status)
   "Give the draft the type NAME, completed at its start, in place of the word."
   (when (memq status '(finished exact sole))
@@ -303,9 +319,7 @@ changed line to its last, a line when it changed only one."
       (goto-char (point-min))
       (when (looking-at (concat (regexp-quote name) "[[:blank:]]*"))
         (delete-region (match-beginning 0) (match-end 0))))
-    (setq ygg-git-compare--draft (plist-put ygg-git-compare--draft :type (intern name)))
-    (setq aob-compose--tags (ygg-git-compare--box-tags))
-    (force-mode-line-update)))
+    (ygg-git-compare--draft-put (plist-put ygg-git-compare--draft :type (intern name)))))
 
 (defun ygg-git-compare--draft-lead-type (text)
   "TEXT without the type word it starts with, which types an untyped draft."
@@ -314,10 +328,8 @@ changed line to its last, a line when it changed only one."
                                  "\\(?::[[:blank:]]*\\|[[:blank:]]+\\)")
                          text))
       (prog1 (substring text (match-end 0))
-        (setq ygg-git-compare--draft
-              (plist-put ygg-git-compare--draft :type (intern (downcase (match-string 1 text)))))
-        (setq aob-compose--tags (ygg-git-compare--box-tags))
-        (force-mode-line-update))
+        (ygg-git-compare--draft-put
+         (plist-put ygg-git-compare--draft :type (intern (downcase (match-string 1 text))))))
     text))
 
 (defun ygg-git-compare-draft-type-capf ()
@@ -375,6 +387,7 @@ changed line to its last, a line when it changed only one."
 
 (with-eval-after-load 'yggdrasil-core
   (yggdrasil-define-mode-keys 'ygg-git-compare-box-mode 'normal
+                              "C-c C-d" #'ygg-git-compare-draft-flip
                               "TAB" #'ygg-git-compare-draft-cycle-type
                               "<tab>" #'ygg-git-compare-draft-cycle-type
                               "<backtab>" #'ygg-git-compare-draft-cycle-type-back))
@@ -393,7 +406,7 @@ changed line to its last, a line when it changed only one."
   (list (if-let* ((type (plist-get ygg-git-compare--draft :type)))
             (format "[%s]" type)
           "untyped")
-        (concat "to " (ygg-git-compare--audience ygg-git-compare--draft))
+        (concat "→ " (ygg-git-compare--audience ygg-git-compare--draft))
         "TAB type" "ZZ saves" "empty drops it"))
 
 (defun ygg-git-compare--keep (comment list text &optional existing)
@@ -469,12 +482,15 @@ Saving keeps the comment on the compare; saving nothing drops it."
 (defun ygg-git-compare-draft-cycle-type (&optional step)
   "Give the comment the next type, or STEP types on; untyped comes between."
   (interactive)
-  (setq ygg-git-compare--draft
-        (plist-put ygg-git-compare--draft :type
-                   (ygg-git-compare--next-type (plist-get ygg-git-compare--draft :type)
-                                               (or step 1))))
-  (setq aob-compose--tags (ygg-git-compare--box-tags))
-  (force-mode-line-update))
+  (ygg-git-compare--draft-put
+   (plist-put ygg-git-compare--draft :type
+              (ygg-git-compare--next-type (plist-get ygg-git-compare--draft :type)
+                                          (or step 1)))))
+
+(defun ygg-git-compare-draft-flip ()
+  "Send the comment to the other of the pull request and the agent."
+  (interactive)
+  (ygg-git-compare--draft-put (ygg-git-compare--flipped ygg-git-compare--draft)))
 
 (defun ygg-git-compare-draft-cycle-type-back ()
   "Give the comment the type before."
@@ -912,6 +928,17 @@ it was made on none."
   "Accept COMMENT that an agent proposed."
   (ygg-git-compare--put (ygg-git-compare--accepted comment)))
 
+(defun ygg-git-compare--flip-comment (comment)
+  "Send COMMENT to the other of the pull request and the agent."
+  (when (ygg-git-compare--remote-id-p (plist-get comment :id))
+    (user-error "That comment is already on the pull request"))
+  (ygg-git-compare--put (ygg-git-compare--flipped comment)))
+
+(defun ygg-git-compare-comment-flip ()
+  "Send the comment at point to the other of the pull request and the agent."
+  (interactive)
+  (ygg-git-compare--flip-comment (ygg-git-compare--comment-at-point)))
+
 (defun ygg-git-compare-comment-delete ()
   "Delete the comment at point, asking first unless it is pending a check."
   (interactive)
@@ -986,6 +1013,7 @@ past the last."
   "C" #'ygg-git-compare-comment
   "d" (cons "delete" ygg-git-compare-delete-map)
   "a" #'ygg-git-compare-comment-accept
+  "D" #'ygg-git-compare-comment-flip
   "Y" #'ygg-git-compare-comment-copy
   "f" #'ygg-git-compare-comments-filter
   "A" #'ygg-git-compare-comments-accept-all)
@@ -1142,6 +1170,13 @@ it lists."
     (with-current-buffer (car id)
       (ygg-git-compare--accept-comment comment))))
 
+(defun ygg-git-compare-comments-qf-flip (id)
+  "Send the comment ID, a row id, to the other of the pull request and the agent."
+  (interactive (list (ygg-qf-kind-target-id)))
+  (let ((comment (ygg-git-compare-comments-qf--find id)))
+    (with-current-buffer (car id)
+      (ygg-git-compare--flip-comment comment))))
+
 (defun ygg-git-compare-comments-qf-open (id)
   "Open the forge's comment ID, a row id, in the browser."
   (interactive (list (ygg-qf-kind-target-id)))
@@ -1164,6 +1199,7 @@ it lists."
     (define-key m "a" #'ygg-git-compare-comments-qf-accept)
     (define-key m "o" #'ygg-git-compare-comments-qf-open)
     (define-key m "d" #'ygg-git-compare-comments-qf-drop)
+    (define-key m "D" #'ygg-git-compare-comments-qf-flip)
     m)
   "What embark offers on a comment row of the quickfix.")
 
@@ -1278,6 +1314,7 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
     ("f" "on the file" ygg-git-compare-comment-file)
     ("L""list them" ygg-git-compare-comments-summary)
     ("Q" "list in quickfix" ygg-git-compare-comments-qf)
+    ("D" "flip between PR and agent" ygg-git-compare-comment-flip)
     ("A" "accept all pending" ygg-git-compare-comments-accept-all)
     ("X" "dismiss all pending" ygg-git-compare-comments-dismiss-all)]
    ["Navigate"

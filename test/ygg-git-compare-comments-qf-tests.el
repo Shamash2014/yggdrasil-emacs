@@ -181,3 +181,15 @@
 
 (provide 'ygg-git-compare-comments-qf-tests)
 ;;; ygg-git-compare-comments-qf-tests.el ends here
+
+(ert-deftest ygg-git-compare-comments-qf-flip-flips-every-row ()
+  (ygg-git-compare-comments-qf-tests--with-compare list
+    (ygg-git-compare-comments-qf-tests--add list "+two" "first" 'nit)
+    (ygg-git-compare-comments-qf-tests--add list "+three" "other" 'fix)
+    (dolist (c (ygg-git-compare-comments-qf-tests--comments list))
+      (ygg-git-compare-comments-qf-flip (cons list (plist-get c :id))))
+    (should (equal (mapcar (lambda (c) (plist-get c :type))
+                           (ygg-git-compare-comments-qf-tests--comments list))
+                   '(todo nil)))
+    (should (eq (lookup-key ygg-git-compare-comments-qf-map "D")
+                #'ygg-git-compare-comments-qf-flip))))
