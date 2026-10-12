@@ -62,27 +62,45 @@ exit 0
 (defvar ygg-git-pr-merge-tests--asked nil)
 (defvar ygg-git-pr-merge-tests--messages nil)
 (defvar ygg-git-pr-merge-tests--confirm nil)
-(defvar ygg-git-pr-merge-tests--answers nil)
 (defvar ygg-git-pr-merge-tests--refetched nil)
+(defvar ygg-git-pr-merge-tests--scope nil)
 (defvar ygg-git-pr-merge-tests--defaults nil)
+(defvar ygg-git-pr-merge-tests--header nil)
 (defvar ygg-git-pr-merge-tests--after-start nil)
 
+(defun ygg-git-pr-merge-tests--set (args prefix value)
+  (let ((rest (seq-remove (lambda (a) (string-prefix-p prefix a)) args)))
+    (if value (cons (concat prefix value) rest) rest)))
+
+(defun ygg-git-pr-merge-tests--args (answers)
+  (let ((args ygg-git-pr-merge-tests--defaults))
+    (dolist (answer answers)
+      (pcase (car answer)
+        ("target" (setq args (ygg-git-pr-merge-tests--set args "--target=" (cdr answer))))
+        ("method" (setq args (ygg-git-pr-merge-tests--set args "--method=" (cdr answer))))
+        ("auto" (setq args (ygg-git-pr-merge-tests--set args "--auto" (and (equal (cdr answer) "yes") ""))))
+        ("delete" (setq args (ygg-git-pr-merge-tests--set args "--delete" (and (equal (cdr answer) "yes") ""))))))
+    args))
+
 (defun ygg-git-pr-merge-tests--run (repo number &rest answers)
-  "Drive the merge of NUMBER in REPO with ANSWERS, an alist of prompt prefix
-to the reply; return once it says its last word."
+  "Drive the merge of NUMBER in REPO by setting the menu's arguments from
+ANSWERS, an alist of argument name to value, then invoking Merge; return
+once it says its last word."
   (ignore-errors (delete-file (expand-file-name "did-merge" ygg-git-pr-merge-tests--dir)))
   (setq ygg-git-pr-merge-tests--asked nil
         ygg-git-pr-merge-tests--messages nil
         ygg-git-pr-merge-tests--refetched nil
+        ygg-git-pr-merge-tests--scope nil
         ygg-git-pr-merge-tests--defaults nil
-        ygg-git-pr-merge-tests--answers answers)
-  (cl-letf (((symbol-function 'completing-read)
-             (lambda (prompt choices _pred _req _init _hist def)
-               (let ((hit (seq-find (lambda (a) (string-prefix-p (car a) prompt))
-                                    ygg-git-pr-merge-tests--answers)))
-                 (push (cons (car hit) choices) ygg-git-pr-merge-tests--asked)
-                 (push (cons (car hit) def) ygg-git-pr-merge-tests--defaults)
-                 (if (eq (cdr hit) 'quit) (signal 'quit nil) (cdr hit)))))
+        ygg-git-pr-merge-tests--header nil)
+  (cl-letf (((symbol-function 'ygg-git-pr-merge--present)
+             (lambda (scope)
+               (setq ygg-git-pr-merge-tests--scope scope
+                     ygg-git-pr-merge-tests--defaults (ygg-git-pr-merge--default-args scope))
+               (unless (assq 'quit answers)
+                 (let ((args (ygg-git-pr-merge-tests--args answers)))
+                   (setq ygg-git-pr-merge-tests--header (ygg-git-pr-merge--header scope args))
+                   (run-at-time 0 nil #'ygg-git-pr-merge--submit scope args)))))
             ((symbol-function 'y-or-n-p)
              (lambda (prompt)
                (push (cons 'confirm prompt) ygg-git-pr-merge-tests--asked)
@@ -102,6 +120,7 @@ to the reply; return once it says its last word."
       (condition-case nil
           (let ((deadline (+ (float-time) 10)))
             (while (and (< (float-time) deadline)
+                        (not (and (assq 'quit answers) ygg-git-pr-merge-tests--scope))
                         (not (seq-find (lambda (m) (string-match-p "\\`\\(Merged\\|Auto-merge\\|Queued\\|Merge of\\|Merge cancelled\\|Cannot\\|#[0-9]+ \\|The repo\\|The forge\\|Another\\)" m))
                                        ygg-git-pr-merge-tests--messages)))
               (accept-process-output nil 0.05)))
@@ -119,7 +138,6 @@ to the reply; return once it says its last word."
             (ygg-git-pr-merge-tests--confirm t)
             (ygg-git-pr-merge-retry-delay 0)
             (ygg-git-pr-merge--active nil)
-            (ygg-git-pr-merge--asking nil)
             (ygg-git-pr-merge-tests--after-start nil))
        (unwind-protect
            (progn
@@ -148,11 +166,10 @@ to the reply; return once it says its last word."
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-default-target-is-the-base
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "main") '("Merge method" . "squash") '("Delete" . "yes"))
+                               '("target" . "main") '("method" . "squash") '("delete" . "yes"))
   (should (equal (ygg-git-pr-merge-tests--merge-calls)
                  '("gh pr merge 5 --repo github.com/o/r --squash --match-head-commit abc1234567890def")))
-  (should (equal (car (alist-get "Merge #" ygg-git-pr-merge-tests--asked nil nil #'equal))
-                 "main"))
+  (should (member "--target=main" ygg-git-pr-merge-tests--defaults))
   (should (member "Merged #5 into main (squash); remote branch feat deleted"
                   ygg-git-pr-merge-tests--messages))
   (should (equal (ygg-git-pr-merge-tests--deletes)
@@ -160,34 +177,92 @@ to the reply; return once it says its last word."
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-default-branch-retargets-first
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "develop") '("Merge method" . "merge") '("Delete" . "no"))
+                               '("target" . "develop") '("method" . "merge") '("delete" . "no"))
   (should (equal (ygg-git-pr-merge-tests--merge-calls)
                  '("gh pr edit 5 --repo github.com/o/r --base develop"
                    "gh pr merge 5 --repo github.com/o/r --merge --match-head-commit abc1234567890def")))
-  (should (string-match-p "retargeted from main"
-                          (cdr (assq 'confirm ygg-git-pr-merge-tests--asked)))))
+  (should (string-match-p "feat -> develop (retargeted from main first)"
+                          ygg-git-pr-merge-tests--header)))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-specific-branch-retargets-first
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "release") '("Merge method" . "squash") '("Delete" . "no"))
+                               '("target" . "release") '("method" . "squash") '("delete" . "no"))
   (should (equal (seq-take (ygg-git-pr-merge-tests--merge-calls) 1)
                  '("gh pr edit 5 --repo github.com/o/r --base release")))
-  (should (equal (cdr (assoc "Merge #" ygg-git-pr-merge-tests--asked))
+  (should (equal (ygg-git-pr-merge--target-choices
+                  (plist-get ygg-git-pr-merge-tests--scope :info)
+                  (plist-get ygg-git-pr-merge-tests--scope :remotes))
                  '("main" "develop" "release"))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-offers-only-allowed-methods
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "main") '("Merge method" . "squash") '("Delete" . "yes"))
-  (should (equal (cdr (assoc "Merge method" ygg-git-pr-merge-tests--asked))
+                               '("target" . "main") '("method" . "squash") '("delete" . "yes"))
+  (should (equal (ygg-git-pr-merge--method-choices (plist-get ygg-git-pr-merge-tests--scope :info))
                  '("squash" "merge"))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-delete-defaults-from-the-repository
-  (let (default)
-    (cl-letf (((symbol-function 'ygg-git-pr-merge--read-delete)
-               (lambda (info) (setq default (plist-get info :delete)) nil)))
-      (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                                   '("Merge #" . "main") '("Merge method" . "squash")))
-    (should (eq default t))))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5)
+  (should (member "--delete" ygg-git-pr-merge-tests--defaults))
+  (ygg-git-pr-merge-tests--put "repoview.json"
+                               (replace-regexp-in-string "\"deleteBranchOnMerge\":true" "\"deleteBranchOnMerge\":false"
+                                                         ygg-git-pr-merge-tests--gh-repo))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5)
+  (should-not (member "--delete" ygg-git-pr-merge-tests--defaults))
+  (should (ygg-git-pr-merge--delete-offered-p
+           ygg-git-pr-merge-tests--gh (plist-get ygg-git-pr-merge-tests--scope :info) nil)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-menu-defaults-are-base-squash-and-checks
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5)
+  (should (equal ygg-git-pr-merge-tests--defaults
+                 '("--target=main" "--method=squash" "--delete")))
+  (ygg-git-pr-merge-tests--put "prview.json"
+                               (replace-regexp-in-string "\"conclusion\":\"SUCCESS\",\"status\":\"COMPLETED\""
+                                                         "\"status\":\"IN_PROGRESS\"" ygg-git-pr-merge-tests--gh-pr))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5)
+  (should (equal ygg-git-pr-merge-tests--defaults
+                 '("--target=main" "--method=squash" "--auto")))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7)
+  (should (equal ygg-git-pr-merge-tests--defaults '("--target=main" "--method=squash")))
+  (should (equal (ygg-git-pr-merge--method-choices (plist-get ygg-git-pr-merge-tests--scope :info))
+                 '("squash" "merge"))))
+
+(defun ygg-git-pr-merge-tests--open-menu ()
+  (let ((scope ygg-git-pr-merge-tests--scope))
+    (ygg-git-pr-merge--present scope)
+    (prog1 (list (oref transient--prefix scope)
+                 (transient-get-value)
+                 (ygg-git-pr-merge--describe)
+                 (delq nil (mapcar (lambda (o) (and (not (oref o inactive)) (ignore-errors (oref o argument))))
+                                   transient--suffixes)))
+      (transient--emergency-exit))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-menu-opens-scoped-with-its-defaults
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '(quit))
+  (pcase-let ((`(,scope ,value ,header ,arguments) (ygg-git-pr-merge-tests--open-menu)))
+    (should (equal scope ygg-git-pr-merge-tests--scope))
+    (should (equal (sort value #'string<) '("--delete" "--method=squash" "--target=main")))
+    (should (string-match-p "\\`Merge PR #5 \"Add thing\" at abc12345  feat -> main\n" header))
+    (should (equal (sort arguments #'string<) '("--auto" "--delete" "--method=" "--target="))))
+  (ygg-git-pr-merge-tests--put "prview.json"
+                               (replace-regexp-in-string "\"conclusion\":\"SUCCESS\",\"status\":\"COMPLETED\""
+                                                         "\"status\":\"IN_PROGRESS\"" ygg-git-pr-merge-tests--gh-pr))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '(quit))
+  (ygg-git-pr-merge--present ygg-git-pr-merge-tests--scope)
+  (should (string-search "the repository's setting decides"
+                         (ygg-git-pr-merge--delete-description)))
+  (transient--emergency-exit)
+  (pcase-let ((`(,_ ,value ,_ ,arguments) (ygg-git-pr-merge-tests--open-menu)))
+    (should (equal (sort value #'string<) '("--auto" "--method=squash" "--target=main")))
+    (should (equal (sort arguments #'string<) '("--auto" "--delete" "--method=" "--target=")))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-choice-is-read-from-the-menu-arguments
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '(quit))
+  (let ((scope ygg-git-pr-merge-tests--scope))
+    (should (equal (ygg-git-pr-merge--choice scope '("--target=release" "--method=merge" "--auto" "--delete"))
+                   '(:target "release" :method merge :auto t :delete nil)))
+    (should (equal (ygg-git-pr-merge--choice scope '("--target=main" "--method=squash" "--delete"))
+                   '(:target "main" :method squash :auto nil :delete t)))
+    (should-not (ygg-git-pr-merge--choice scope '("--target=main" "--method=rebase")))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-refuses-a-draft
   (ygg-git-pr-merge-tests--put "prview.json"
@@ -195,7 +270,7 @@ to the reply; return once it says its last word."
                                                          ygg-git-pr-merge-tests--gh-pr))
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5)
   (should-not (ygg-git-pr-merge-tests--merge-calls))
-  (should-not ygg-git-pr-merge-tests--asked)
+  (should-not ygg-git-pr-merge-tests--scope)
   (should (string-match-p "draft" (car ygg-git-pr-merge-tests--messages))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-refuses-a-conflict
@@ -210,23 +285,26 @@ to the reply; return once it says its last word."
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-declined-confirm-merges-nothing
   (let ((ygg-git-pr-merge-tests--confirm nil))
     (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                                 '("Merge #" . "develop") '("Merge method" . "squash") '("Delete" . "no")))
+                                 '("target" . "develop") '("method" . "squash") '("delete" . "no")))
   (should-not (ygg-git-pr-merge-tests--merge-calls))
   (should-not ygg-git-pr-merge-tests--refetched)
   (should (member "Merge cancelled" ygg-git-pr-merge-tests--messages)))
 
-(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-confirm-summarises-the-merge
+(defun ygg-git-pr-merge-tests--confirm-text ()
+  (cdr (assq 'confirm ygg-git-pr-merge-tests--asked)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-header-and-confirm-describe-the-merge
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "main") '("Merge method" . "squash") '("Delete" . "yes"))
-  (let ((text (cdr (assq 'confirm ygg-git-pr-merge-tests--asked))))
-    (dolist (part '("#5" "Add thing" "abc12345" "feat -> main" "method: squash" "delete remote branch: yes"
-                    "auto-merge: no" "checks: passing" "review: approved" "mergeable: mergeable"))
-      (should (string-match-p (regexp-quote part) text)))))
+                               '("target" . "main") '("method" . "squash") '("delete" . "yes"))
+  (dolist (part '("Merge PR #5 \"Add thing\" at abc12345  feat -> main" "checks: passing"
+                  "review: approved" "mergeable: mergeable"))
+    (should (string-match-p (regexp-quote part) ygg-git-pr-merge-tests--header)))
+  (should (equal (ygg-git-pr-merge-tests--confirm-text) "Squash-merge #5 into main? ")))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-failure-surfaces-the-forge-text
   (ygg-git-pr-merge-tests--put "failmerge" "X Pull request is not mergeable: ghp_abcDEF123 base branch policy prohibits the merge\n")
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "main") '("Merge method" . "squash") '("Delete" . "no"))
+                               '("target" . "main") '("method" . "squash") '("delete" . "no"))
   (let ((said (car ygg-git-pr-merge-tests--messages)))
     (should (string-match-p "base branch policy prohibits the merge" said))
     (should-not (string-match-p "ghp_" said)))
@@ -235,30 +313,31 @@ to the reply; return once it says its last word."
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-failed-retarget-stops-before-merge
   (ygg-git-pr-merge-tests--put "fail" "no such branch\n")
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "release") '("Merge method" . "squash") '("Delete" . "no"))
+                               '("target" . "release") '("method" . "squash") '("delete" . "no"))
   (should (equal (length (ygg-git-pr-merge-tests--merge-calls)) 1))
   (should (string-match-p "no such branch" (car ygg-git-pr-merge-tests--messages))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-success-refetches-the-requests
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "main") '("Merge method" . "squash") '("Delete" . "no"))
+                               '("target" . "main") '("method" . "squash") '("delete" . "no"))
   (should (equal ygg-git-pr-merge-tests--refetched
                  (list (list ygg-git-pr-merge-tests--gh t)))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-merges-and-retargets
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
-                               '("Merge #" . "develop") '("Merge method" . "squash") '("Delete" . "yes"))
+                               '("target" . "develop") '("method" . "squash") '("delete" . "yes"))
   (should (equal (ygg-git-pr-merge-tests--merge-calls)
                  '("glab mr update 7 -R gl.example/o/r --target-branch develop"
                    "glab mr merge 7 -R gl.example/o/r --squash --sha def4567890123abc --auto-merge=false --yes --remove-source-branch")))
-  (should (string-match-p "checks: failing" (cdr (assq 'confirm ygg-git-pr-merge-tests--asked))))
-  (should (equal (cdr (assoc "Merge method" ygg-git-pr-merge-tests--asked))
+  (should (string-match-p "checks: failing" ygg-git-pr-merge-tests--header))
+  (should (string-match-p "\\`Merge MR #7 " ygg-git-pr-merge-tests--header))
+  (should (equal (ygg-git-pr-merge--method-choices (plist-get ygg-git-pr-merge-tests--scope :info))
                  '("squash" "merge")))
   (should ygg-git-pr-merge-tests--refetched))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-plain-merge-has-no-method-flag
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
-                               '("Merge #" . "main") '("Merge method" . "merge") '("Delete" . "no"))
+                               '("target" . "main") '("method" . "merge") '("delete" . "no"))
   (should (equal (ygg-git-pr-merge-tests--merge-calls)
                  '("glab mr merge 7 -R gl.example/o/r --sha def4567890123abc --auto-merge=false --yes"))))
 
@@ -273,20 +352,20 @@ to the reply; return once it says its last word."
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-failure-surfaces-the-forge-text
   (ygg-git-pr-merge-tests--put "failmerge" "{\"message\":\"405 Method Not Allowed\"}")
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
-                               '("Merge #" . "main") '("Merge method" . "merge") '("Delete" . "no"))
+                               '("target" . "main") '("method" . "merge") '("delete" . "no"))
   (should (string-match-p "glab: \\|Method Not Allowed" (car ygg-git-pr-merge-tests--messages))))
 
 (defun ygg-git-pr-merge-tests--answers (&rest extra)
-  (append extra '(("Merge #" . "main") ("Merge method" . "squash") ("Delete" . "no"))))
+  (append extra '(("target" . "main") ("method" . "squash") ("delete" . "no"))))
 
 (defun ygg-git-pr-merge-tests--summary ()
-  (cdr (assq 'confirm ygg-git-pr-merge-tests--asked)))
+  ygg-git-pr-merge-tests--header)
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-every-write-names-its-repository
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "release") '("Merge method" . "squash") '("Delete" . "no"))
+                               '("target" . "release") '("method" . "squash") '("delete" . "no"))
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
-                               '("Merge #" . "release") '("Merge method" . "squash") '("Delete" . "no"))
+                               '("target" . "release") '("method" . "squash") '("delete" . "no"))
   (let ((calls (ygg-git-pr-merge-tests--merge-calls)))
     (should (= (length calls) 4))
     (dolist (call calls)
@@ -297,11 +376,11 @@ to the reply; return once it says its last word."
          (ygg-git-pr-merge-tests--answers))
   (should (string-match-p "--match-head-commit abc1234567890def"
                           (car (ygg-git-pr-merge-tests--merge-calls))))
-  (should (string-match-p "at abc12345\n" (ygg-git-pr-merge-tests--summary)))
+  (should (string-match-p "at abc12345  feat" (ygg-git-pr-merge-tests--summary)))
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
-                               '("Merge #" . "main") '("Merge method" . "merge"))
+                               '("target" . "main") '("method" . "merge"))
   (should (string-match-p "--sha def4567890123abc" (cadr (ygg-git-pr-merge-tests--merge-calls))))
-  (should (string-match-p "at def45678\n" (ygg-git-pr-merge-tests--summary))))
+  (should (string-match-p "at def45678  fix" (ygg-git-pr-merge-tests--summary))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-refuses-without-a-head-commit
   (ygg-git-pr-merge-tests--put "prview.json"
@@ -313,42 +392,45 @@ to the reply; return once it says its last word."
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-auto-merge-is-always-explicit
   (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
-         (ygg-git-pr-merge-tests--answers '("Auto-merge" . "yes")))
+         (ygg-git-pr-merge-tests--answers '("auto" . "yes")))
   (should (string-match-p " --auto-merge=true " (car (ygg-git-pr-merge-tests--merge-calls))))
-  (should (string-match-p "auto-merge: yes" (ygg-git-pr-merge-tests--summary)))
+  (should (string-match-p "when the pipeline passes" (ygg-git-pr-merge-tests--confirm-text)))
   (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
-         (ygg-git-pr-merge-tests--answers '("Auto-merge" . "no")))
+         (ygg-git-pr-merge-tests--answers '("auto" . "no")))
   (should (string-match-p " --auto-merge=false " (cadr (ygg-git-pr-merge-tests--merge-calls))))
-  (should (string-match-p "auto-merge: no" (ygg-git-pr-merge-tests--summary))))
+  (should-not (string-match-p "when the pipeline passes" (ygg-git-pr-merge-tests--confirm-text))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-github-auto-passes-auto
   (ygg-git-pr-merge-tests--put "post.json" "{\"state\":\"OPEN\",\"autoMergeRequest\":{\"enabledAt\":\"now\"}}")
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "main") '("Merge method" . "squash")
-                               '("Auto-merge" . "yes") '("Delete" . "yes"))
+                               '("target" . "main") '("method" . "squash")
+                               '("auto" . "yes") '("delete" . "yes"))
   (should (string-match-p " --auto$" (car (ygg-git-pr-merge-tests--merge-calls))))
   (should (member "Auto-merge enabled for #5 (merges when the checks pass)"
                   ygg-git-pr-merge-tests--messages))
-  (should-not (assoc "Delete" ygg-git-pr-merge-tests--asked))
+  (should-not (ygg-git-pr-merge--delete-offered-p
+               ygg-git-pr-merge-tests--gh (plist-get ygg-git-pr-merge-tests--scope :info) t))
   (should-not (ygg-git-pr-merge-tests--deletes))
-  (should (string-match-p "delete-branch-on-merge setting" (ygg-git-pr-merge-tests--summary))))
+  (should (string-match-p "when the checks pass" (ygg-git-pr-merge-tests--confirm-text))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-github-merge-now-has-no-auto-flag
   (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-         (ygg-git-pr-merge-tests--answers '("Auto-merge" . "no")))
+         (ygg-git-pr-merge-tests--answers '("auto" . "no")))
   (should-not (string-match-p "--auto" (car (ygg-git-pr-merge-tests--merge-calls)))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-auto-merge-defaults-follow-the-checks
   (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-         (ygg-git-pr-merge-tests--answers '("Auto-merge" . "no")))
-  (should (equal (cdr (assoc "Auto-merge" ygg-git-pr-merge-tests--defaults)) "no"))
+         (ygg-git-pr-merge-tests--answers '("auto" . "no")))
+  (should-not (member "--auto" ygg-git-pr-merge-tests--defaults))
   (ygg-git-pr-merge-tests--put "prview.json"
                                (replace-regexp-in-string "\"conclusion\":\"SUCCESS\",\"status\":\"COMPLETED\""
                                                          "\"status\":\"IN_PROGRESS\"" ygg-git-pr-merge-tests--gh-pr))
   (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-         (ygg-git-pr-merge-tests--answers '("Auto-merge" . "no")))
-  (should (equal (cdr (assoc "Auto-merge" ygg-git-pr-merge-tests--defaults)) "yes"))
-  (should (string-match-p "merging now will be queued or refused" (ygg-git-pr-merge-tests--summary))))
+         (ygg-git-pr-merge-tests--answers '("auto" . "no")))
+  (should (member "--auto" ygg-git-pr-merge-tests--defaults))
+  (should (string-match-p "merging now will be queued or refused"
+                          (ygg-git-pr-merge--header ygg-git-pr-merge-tests--scope
+                                                    '("--target=main" "--method=squash")))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-says-merge-now-is-refused-when-a-pipeline-is-required
   (ygg-git-pr-merge-tests--put "project.json"
@@ -366,7 +448,7 @@ to the reply; return once it says its last word."
   (should (equal (car ygg-git-pr-merge-tests--messages) "Queued #5"))
   (ygg-git-pr-merge-tests--put "post-mr.json" "{\"state\":\"opened\",\"merge_when_pipeline_succeeds\":true}")
   (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
-         (ygg-git-pr-merge-tests--answers '("Auto-merge" . "yes")))
+         (ygg-git-pr-merge-tests--answers '("auto" . "yes")))
   (should (equal (car ygg-git-pr-merge-tests--messages)
                  "Auto-merge enabled for #7 (merges when the pipeline passes)")))
 
@@ -381,11 +463,30 @@ to the reply; return once it says its last word."
     (should-not ygg-git-pr-merge--active)
     (should (string-match-p "\\`Merged" (car ygg-git-pr-merge-tests--messages)))))
 
-(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-guard-clears-after-quit
-  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '("Merge #" . quit))
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-guard-clears-when-the-menu-is-closed
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '(quit))
+  (should ygg-git-pr-merge-tests--scope)
   (should-not ygg-git-pr-merge--active)
-  (should-not ygg-git-pr-merge--asking)
   (should-not (ygg-git-pr-merge-tests--merge-calls)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-guard-refuses-a-second-submit
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '(quit))
+  (let ((scope ygg-git-pr-merge-tests--scope)
+        (args ygg-git-pr-merge-tests--defaults))
+    (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
+              ((symbol-function 'message)
+               (lambda (fmt &rest rest)
+                 (push (apply #'format fmt rest) ygg-git-pr-merge-tests--messages)))
+              ((symbol-function 'ygg-git-review-requests--ensure) #'ignore))
+      (setq ygg-git-pr-merge-tests--messages nil)
+      (ygg-git-pr-merge--submit scope args)
+      (ygg-git-pr-merge--submit scope args)
+      (should (member "A merge of #5 is already in progress" ygg-git-pr-merge-tests--messages))
+      (let ((deadline (+ (float-time) 10)))
+        (while (and ygg-git-pr-merge--active (< (float-time) deadline))
+          (accept-process-output nil 0.05))))
+    (should (= 1 (length (seq-filter (lambda (l) (string-match-p "^gh pr merge " l))
+                                     (ygg-git-pr-merge-tests--log)))))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-guard-clears-after-a-refusal-and-a-failed-read
   (ygg-git-pr-merge-tests--put "prview.json"
@@ -429,7 +530,7 @@ to the reply; return once it says its last word."
   (ygg-git-pr-merge-tests--put "prview.json"
                                (replace-regexp-in-string "\"CLEAN\"" "\"BLOCKED\"" ygg-git-pr-merge-tests--gh-pr))
   (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 (ygg-git-pr-merge-tests--answers))
-  (should (string-match-p "^  state: blocked$" (ygg-git-pr-merge-tests--summary)))
+  (should (string-match-p "  state: blocked" (ygg-git-pr-merge-tests--summary)))
   (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 (ygg-git-pr-merge-tests--answers))
   (ygg-git-pr-merge-tests--put "prview.json" ygg-git-pr-merge-tests--gh-pr)
   (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 (ygg-git-pr-merge-tests--answers))
@@ -446,39 +547,38 @@ to the reply; return once it says its last word."
   (ygg-git-pr-merge-tests--put
    "project.json"
    (format "{\"default_branch\":\"develop\",\"merge_method\":\"%s\",\"squash_option\":\"%s\"}" method squash))
-  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
-                               '("Merge #" . "main") '("Merge method" . "squash"))
-  (cdr (assoc "Merge method" ygg-git-pr-merge-tests--asked)))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7 '("target" . "main"))
+  (ygg-git-pr-merge--method-choices (plist-get ygg-git-pr-merge-tests--scope :info)))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-ff-offers-only-rebase
-  (should-not (ygg-git-pr-merge-tests--gl-methods "ff" "never"))
-  (should (string-match-p "method: fast-forward" (ygg-git-pr-merge-tests--summary)))
+  (should (equal (ygg-git-pr-merge-tests--gl-methods "ff" "never") '("fast-forward")))
+  (should (member "--method=fast-forward" ygg-git-pr-merge-tests--defaults))
   (should (string-match-p " --rebase " (car (ygg-git-pr-merge-tests--merge-calls))))
   (should-not (string-match-p "--squash" (car (ygg-git-pr-merge-tests--merge-calls)))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-rebase-merge-is-semi-linear
-  (should-not (ygg-git-pr-merge-tests--gl-methods "rebase_merge" "never"))
-  (should (string-match-p "method: semi-linear merge" (ygg-git-pr-merge-tests--summary)))
+  (should (equal (ygg-git-pr-merge-tests--gl-methods "rebase_merge" "never") '("semi-linear merge")))
+  (should (member "--method=semi-linear merge" ygg-git-pr-merge-tests--defaults))
   (should-not (string-match-p "--rebase\\|--squash" (car (ygg-git-pr-merge-tests--merge-calls)))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-merge-method-and-squash-options
-  (should-not (ygg-git-pr-merge-tests--gl-methods "merge" "never"))
-  (should (string-match-p "method: merge" (ygg-git-pr-merge-tests--summary)))
+  (should (equal (ygg-git-pr-merge-tests--gl-methods "merge" "never") '("merge")))
+  (should (member "--method=merge" ygg-git-pr-merge-tests--defaults))
   (should (equal (ygg-git-pr-merge-tests--gl-methods "merge" "default_off") '("squash" "merge")))
-  (should-not (ygg-git-pr-merge-tests--gl-methods "merge" "always"))
+  (should (equal (ygg-git-pr-merge-tests--gl-methods "merge" "always") '("squash")))
   (should (string-match-p " --squash " (car (last (ygg-git-pr-merge-tests--merge-calls))))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-remote-branch-is-deleted-only-after-the-merge
   (ygg-git-pr-merge-tests--put "failmerge" "no\n")
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "main") '("Merge method" . "squash") '("Delete" . "yes"))
+                               '("target" . "main") '("method" . "squash") '("delete" . "yes"))
   (should-not (ygg-git-pr-merge-tests--deletes))
   (should-not (seq-find (lambda (l) (string-match-p "--delete-branch" l)) (ygg-git-pr-merge-tests--log))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-remote-branch-delete-failure-is-reported
   (ygg-git-pr-merge-tests--put "failrm" "Reference does not exist\n")
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "main") '("Merge method" . "squash") '("Delete" . "yes"))
+                               '("target" . "main") '("method" . "squash") '("delete" . "yes"))
   (should (string-match-p "\\`Merged #5.*deleting remote branch feat failed: .*Reference does not exist"
                           (car ygg-git-pr-merge-tests--messages))))
 
@@ -487,14 +587,15 @@ to the reply; return once it says its last word."
                                (replace-regexp-in-string "\"isCrossRepository\":false" "\"isCrossRepository\":true"
                                                          ygg-git-pr-merge-tests--gh-pr))
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "main") '("Merge method" . "squash") '("Delete" . "yes"))
-  (should-not (assoc "Delete" ygg-git-pr-merge-tests--asked))
+                               '("target" . "main") '("method" . "squash") '("delete" . "yes"))
+  (should-not (ygg-git-pr-merge--delete-offered-p
+               ygg-git-pr-merge-tests--gh (plist-get ygg-git-pr-merge-tests--scope :info) nil))
   (should-not (ygg-git-pr-merge-tests--deletes)))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-merge-failure-after-retarget-says-so
   (ygg-git-pr-merge-tests--put "failmerge" "not mergeable\n")
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                               '("Merge #" . "release") '("Merge method" . "squash") '("Delete" . "no"))
+                               '("target" . "release") '("method" . "squash") '("delete" . "no"))
   (should (= 2 (length (ygg-git-pr-merge-tests--merge-calls))))
   (should (string-match-p "failed after retargeting it to release (its base is now release): .*not mergeable"
                           (car ygg-git-pr-merge-tests--messages))))
@@ -502,12 +603,15 @@ to the reply; return once it says its last word."
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-target-must-be-an-offered-branch
   (dolist (target '("" "nowhere" "feat" nil))
     (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
-                                 (cons "Merge #" target) '("Merge method" . "squash"))
+                                 (cons "target" target) '("method" . "squash"))
     (should-not (ygg-git-pr-merge-tests--merge-calls))
     (should-not (assq 'confirm ygg-git-pr-merge-tests--asked))
     (should (string-match-p "Merge cancelled" (car ygg-git-pr-merge-tests--messages)))
     (should-not ygg-git-pr-merge--active))
-  (should (equal (cdr (assoc "Merge #" ygg-git-pr-merge-tests--asked)) '("main" "develop" "release"))))
+  (should (equal (ygg-git-pr-merge--target-choices
+                  (plist-get ygg-git-pr-merge-tests--scope :info)
+                  (plist-get ygg-git-pr-merge-tests--scope :remotes))
+                 '("main" "develop" "release"))))
 
 (ert-deftest ygg-git-pr-merge-scrub-removes-forge-tokens ()
   (dolist (token '("ghp_abc123" "github_pat_AB12_cd" "glpat-abc_DEF-1" "gloas-abc123" "glptt-0123abcd"

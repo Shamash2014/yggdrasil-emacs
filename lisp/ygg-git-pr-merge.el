@@ -3,8 +3,8 @@
 ;;; Commentary:
 ;; Merge the request at point, from its row in the status section or from
 ;; its compare: the forge is asked in the background for the request and the
-;; repository's settings, then the target, the method and the branch's fate
-;; are chosen and one question confirms the lot.
+;; repository's settings, then a transient sets the target, the method,
+;; auto-merge and the branch's fate and one question confirms the merge.
 
 ;;; Code:
 
@@ -12,6 +12,7 @@
 (require 'subr-x)
 (require 'seq)
 (require 'magit)
+(require 'transient)
 (require 'ygg-git-review-requests)
 
 (declare-function ygg-git-compare--forge-repo "ygg-git-compare" (&optional remote))
@@ -43,7 +44,6 @@
 (defvar ygg-git-pr-merge-merged-hook nil
   "Run with (REPO INFO CHOICE ORIGIN) once a request is merged for certain.")
 (defvar ygg-git-pr-merge--active nil)
-(defvar ygg-git-pr-merge--asking nil)
 
 (defun ygg-git-pr-merge--key (repo number)
   (format "%s#%s" (ygg-git-pr-merge--slug repo) number))
@@ -307,92 +307,157 @@ the failure's words, the last command's output and the command that failed."
       (with-current-buffer origin
         (ignore-errors (ygg-git-compare-refresh))))))
 
-(defun ygg-git-pr-merge--read-target (info remotes)
-  (let* ((base (plist-get info :base))
-         (default (plist-get info :default))
-         (choices (delete (plist-get info :head)
-                          (delete-dups (delq nil (append (list base default) remotes)))))
-         (target (completing-read
-                  (format "Merge #%s into (%s is its base, %s the default): "
-                          (plist-get info :number) base default)
-                  choices nil t nil nil base)))
-    (and (stringp target) (member target choices) target)))
-
 (defun ygg-git-pr-merge--method-label (info method)
   (or (alist-get method (plist-get info :labels)) (symbol-name method)))
-
-(defun ygg-git-pr-merge--read-method (info)
-  (let* ((allowed (plist-get info :methods))
-         (labels (mapcar (lambda (m) (cons (ygg-git-pr-merge--method-label info m) m)) allowed)))
-    (if (cdr labels)
-        (let ((choice (completing-read "Merge method: " (mapcar #'car labels) nil t nil nil
-                                       (ygg-git-pr-merge--method-label
-                                        info (if (memq 'squash allowed) 'squash (car allowed))))))
-          (cdr (assoc choice labels)))
-      (cdar labels))))
 
 (defun ygg-git-pr-merge--passes (repo)
   (if (eq (car repo) 'github) "the checks pass" "the pipeline passes"))
 
-(defun ygg-git-pr-merge--read-auto (repo info)
-  (let ((pending (eq (plist-get info :checks) 'pending)))
-    (equal "yes" (completing-read
-                  (format "Auto-merge #%s when %s instead of merging now (%s)? "
-                          (plist-get info :number) (ygg-git-pr-merge--passes repo)
-                          (if pending "default yes, they are still running" "default no, merge now"))
-                  '("yes" "no") nil t nil nil (if pending "yes" "no")))))
-
-(defun ygg-git-pr-merge--read-delete (info)
-  (equal "yes" (completing-read (format "Delete remote branch %s after merging? " (plist-get info :head))
-                                '("yes" "no") nil t nil nil
-                                (if (plist-get info :delete) "yes" "no"))))
-
 (defun ygg-git-pr-merge--short (sha)
   (substring sha 0 (min 8 (length sha))))
 
-(defun ygg-git-pr-merge--summary (repo info target method auto delete)
-  (let* ((github (eq (car repo) 'github))
-         (checks (plist-get info :checks))
-         (required (plist-get info :pipeline-required)))
-    (concat
-     (format "Merge %s #%s \"%s\" at %s\n  %s -> %s%s\n  method: %s, delete remote branch: %s\n  auto-merge: %s\n  checks: %s, review: %s, mergeable: %s\n"
-             (if github "PR" "MR")
-             (plist-get info :number) (plist-get info :title)
-             (ygg-git-pr-merge--short (plist-get info :sha))
-             (plist-get info :head) target
-             (if (equal target (plist-get info :base)) ""
-               (format " (retargeted from %s first)" (plist-get info :base)))
-             (ygg-git-pr-merge--method-label info method)
-             (cond (delete "yes")
-                   ((and github auto) "no (the repository's delete-branch-on-merge setting decides)")
-                   (t "no"))
-             (if auto "yes" "no")
-             checks (plist-get info :review) (plist-get info :merge-state))
-     (and (plist-get info :state) (format "  state: %s\n" (plist-get info :state)))
-     (and (not github) (format "  pipeline must succeed: %s\n" (if required "yes" "no")))
-     (cond (auto nil)
-           ((and required (not (eq checks 'passing)))
-            "  merging now will be refused until the pipeline passes\n")
-           ((and github (eq checks 'pending))
-            "  merging now will be queued or refused until required checks pass\n"))
-     "Proceed? ")))
+(defun ygg-git-pr-merge--target-choices (info remotes)
+  (delete (plist-get info :head)
+          (delete-dups (delq nil (append (list (plist-get info :base) (plist-get info :default))
+                                         remotes)))))
 
-(defun ygg-git-pr-merge--ask (repo info remotes)
-  "Ask for the target, method, auto-merge and branch fate, then confirm;
-return them as a plist, or nil after saying why not."
-  (let* ((github (eq (car repo) 'github))
-         (target (ygg-git-pr-merge--read-target info remotes))
-         (method (and target (ygg-git-pr-merge--read-method info)))
-         (auto (and method (ygg-git-pr-merge--read-auto repo info)))
-         (delete (and method
-                      (plist-get info :deletable)
-                      (not (and github auto))
-                      (ygg-git-pr-merge--read-delete info))))
-    (cond ((null target) (message "Merge cancelled: pick one of the offered branches") nil)
+(defun ygg-git-pr-merge--method-choices (info)
+  (mapcar (lambda (m) (ygg-git-pr-merge--method-label info m)) (plist-get info :methods)))
+
+(defun ygg-git-pr-merge--default-method (info)
+  (let ((allowed (plist-get info :methods)))
+    (ygg-git-pr-merge--method-label info (if (memq 'squash allowed) 'squash (car allowed)))))
+
+(defun ygg-git-pr-merge--delete-offered-p (repo info auto)
+  (and (plist-get info :deletable)
+       (not (and (eq (car repo) 'github) auto))))
+
+(defun ygg-git-pr-merge--default-args (scope)
+  (let* ((repo (plist-get scope :repo))
+         (info (plist-get scope :info))
+         (auto (eq (plist-get info :checks) 'pending)))
+    (delq nil (list (concat "--target=" (plist-get info :base))
+                    (concat "--method=" (ygg-git-pr-merge--default-method info))
+                    (and auto "--auto")
+                    (and (plist-get info :delete)
+                         (ygg-git-pr-merge--delete-offered-p repo info auto)
+                         "--delete")))))
+
+(defun ygg-git-pr-merge--header (scope args)
+  (let* ((repo (plist-get scope :repo))
+         (info (plist-get scope :info))
+         (github (eq (car repo) 'github))
+         (checks (plist-get info :checks))
+         (required (plist-get info :pipeline-required))
+         (auto (and (member "--auto" args) t))
+         (target (transient-arg-value "--target=" args))
+         (base (plist-get info :base))
+         (warning (cond (auto nil)
+                        ((and required (not (eq checks 'passing)))
+                         "merging now will be refused until the pipeline passes")
+                        ((and github (eq checks 'pending))
+                         "merging now will be queued or refused until required checks pass"))))
+    (concat
+     (format "Merge %s #%s \"%s\" at %s  %s -> %s%s\n"
+             (if github "PR" "MR") (plist-get info :number) (plist-get info :title)
+             (ygg-git-pr-merge--short (plist-get info :sha))
+             (plist-get info :head) (or target base)
+             (if (or (null target) (equal target base)) ""
+               (format " (retargeted from %s first)" base)))
+     (format "checks: %s  review: %s  mergeable: %s"
+             checks (plist-get info :review) (plist-get info :merge-state))
+     (and (plist-get info :state) (format "  state: %s" (plist-get info :state)))
+     (and (not github) (format "  pipeline must succeed: %s" (if required "yes" "no")))
+     (and warning (concat "\n" (propertize warning 'face 'warning))))))
+
+(defun ygg-git-pr-merge--choice (scope args)
+  "ARGS as a plist of :target, :method, :auto and :delete, or nil and why not."
+  (let* ((repo (plist-get scope :repo))
+         (info (plist-get scope :info))
+         (target (transient-arg-value "--target=" args))
+         (label (transient-arg-value "--method=" args))
+         (method (car (rassoc label (mapcar (lambda (m) (cons m (ygg-git-pr-merge--method-label info m)))
+                                            (plist-get info :methods)))))
+         (auto (and (member "--auto" args) t)))
+    (cond ((not (member target (ygg-git-pr-merge--target-choices info (plist-get scope :remotes))))
+           (message "Merge cancelled: pick one of the offered branches") nil)
           ((null method) (message "Merge cancelled: no merge method chosen") nil)
-          ((not (y-or-n-p (ygg-git-pr-merge--summary repo info target method auto delete)))
-           (message "Merge cancelled") nil)
-          (t (list :target target :method method :auto auto :delete delete)))))
+          (t (list :target target :method method :auto auto
+                   :delete (and (member "--delete" args)
+                                (ygg-git-pr-merge--delete-offered-p repo info auto)
+                                t))))))
+
+(defun ygg-git-pr-merge--question (repo info choice)
+  (format "%s #%s into %s%s? "
+          (pcase (plist-get choice :method)
+            ('squash "Squash-merge") ('rebase "Rebase-merge") (_ "Merge"))
+          (plist-get info :number) (plist-get choice :target)
+          (if (plist-get choice :auto)
+              (format " when %s" (ygg-git-pr-merge--passes repo))
+            "")))
+
+(defun ygg-git-pr-merge--submit (scope args)
+  (let* ((repo (plist-get scope :repo))
+         (info (plist-get scope :info))
+         (key (ygg-git-pr-merge--key repo (plist-get info :number)))
+         (choice (ygg-git-pr-merge--choice scope args)))
+    (cond ((null choice))
+          ((member key ygg-git-pr-merge--active)
+           (message "A merge of #%s is already in progress" (plist-get info :number)))
+          ((not (y-or-n-p (ygg-git-pr-merge--question repo info choice)))
+           (message "Merge cancelled"))
+          (t
+           (push key ygg-git-pr-merge--active)
+           (let ((default-directory (plist-get scope :dir)))
+             (ygg-git-pr-merge--execute repo info choice (plist-get scope :origin) key))))))
+
+(defun ygg-git-pr-merge--scope-args ()
+  (transient-args 'ygg-git-pr-merge-menu))
+
+(defun ygg-git-pr-merge--describe ()
+  (ygg-git-pr-merge--header (transient-scope) (transient-get-value)))
+
+(defun ygg-git-pr-merge--offered-targets ()
+  (let ((scope (transient-scope)))
+    (ygg-git-pr-merge--target-choices (plist-get scope :info) (plist-get scope :remotes))))
+
+(defun ygg-git-pr-merge--offered-methods ()
+  (ygg-git-pr-merge--method-choices (plist-get (transient-scope) :info)))
+
+(defun ygg-git-pr-merge--auto-description ()
+  (format "Auto-merge when %s" (ygg-git-pr-merge--passes (plist-get (transient-scope) :repo))))
+
+(defun ygg-git-pr-merge--delete-description ()
+  (let ((scope (transient-scope)))
+    (concat (format "Delete remote branch %s" (plist-get (plist-get scope :info) :head))
+            (unless (ygg-git-pr-merge--delete-offered-p
+                     (plist-get scope :repo) (plist-get scope :info)
+                     (and (member "--auto" (transient-get-value)) t))
+              (propertize " (the repository's setting decides with auto-merge)" 'face 'shadow)))))
+
+(defun ygg-git-pr-merge--deletable-p ()
+  (plist-get (plist-get (transient-scope) :info) :deletable))
+
+(transient-define-prefix ygg-git-pr-merge-menu ()
+  "Merge the pull or merge request held in the transient's scope."
+  [:description ygg-git-pr-merge--describe
+   ("-t" "Target branch" "--target=" :class transient-option :always-read t
+    :choices ygg-git-pr-merge--offered-targets)
+   ("-s" "Merge method" "--method=" :class transient-option :always-read t
+    :choices ygg-git-pr-merge--offered-methods)
+   ("-a" ygg-git-pr-merge--auto-description "--auto")
+   ("-d" ygg-git-pr-merge--delete-description "--delete" :if ygg-git-pr-merge--deletable-p)]
+  ["Actions"
+   ("m" "Merge" ygg-git-pr-merge-menu-merge)])
+
+(defun ygg-git-pr-merge-menu-merge (args)
+  (interactive (list (ygg-git-pr-merge--scope-args)))
+  (ygg-git-pr-merge--submit (transient-scope) args))
+
+(defun ygg-git-pr-merge--present (scope)
+  (let ((default-directory (plist-get scope :dir)))
+    (transient-setup 'ygg-git-pr-merge-menu nil nil
+                     :scope scope :value (ygg-git-pr-merge--default-args scope))))
 
 (defun ygg-git-pr-merge--report (repo info choice origin outcome note)
   (let ((number (plist-get info :number)))
@@ -441,9 +506,8 @@ return them as a plist, or nil after saying why not."
               (ygg-git-pr-merge--clear key)
               (ygg-git-pr-merge--report repo info choice origin outcome nil)))))))))
 
-(defun ygg-git-pr-merge--decide (repo info origin remotes key)
-  (let ((handed nil)
-        (number (plist-get info :number)))
+(defun ygg-git-pr-merge--decide (repo info origin remotes dir key)
+  (let ((number (plist-get info :number)))
     (unwind-protect
         (cond ((not (plist-get info :open))
                (message "#%s is not open" number))
@@ -455,16 +519,10 @@ return them as a plist, or nil after saying why not."
                (message "The repository allows no merge method"))
               ((not (plist-get info :sha))
                (message "The forge gave no head commit for #%s" number))
-              (ygg-git-pr-merge--asking
-               (message "Another merge question is open; answer it first"))
               (t
-               (let ((choice (let ((ygg-git-pr-merge--asking t))
-                               (ygg-git-pr-merge--ask repo info remotes))))
-                 (when choice
-                   (setq handed t)
-                   (ygg-git-pr-merge--execute repo info choice origin key)))))
-      (unless handed
-        (ygg-git-pr-merge--clear key)))))
+               (ygg-git-pr-merge--present
+                (list :repo repo :info info :origin origin :remotes remotes :dir dir))))
+      (ygg-git-pr-merge--clear key))))
 
 (defun ygg-git-pr-merge--remote-branches ()
   (ignore-errors
@@ -495,10 +553,7 @@ return them as a plist, or nil after saying why not."
            (progn
              (ygg-git-pr-merge--clear key)
              (message "Cannot read #%s: %s" number failure))
-         (run-at-time 0 nil
-                      (lambda ()
-                        (let ((default-directory dir))
-                          (ygg-git-pr-merge--decide repo info origin remotes key)))))))))
+         (run-at-time 0 nil #'ygg-git-pr-merge--decide repo info origin remotes dir key))))))
 
 (defun ygg-git-pr-merge--context ()
   "The request here as (REPO . NUMBER), from a status row or a compare."
@@ -528,7 +583,7 @@ return them as a plist, or nil after saying why not."
 
 ;;;###autoload
 (defun ygg-git-pr-merge ()
-  "Merge the pull or merge request at point, after one confirmation."
+  "Open the merge menu for the pull or merge request at point."
   (interactive)
   (pcase-let ((`(,repo . ,number) (ygg-git-pr-merge--context)))
     (ygg-git-pr-merge--start repo number)))
