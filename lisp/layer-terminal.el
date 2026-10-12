@@ -126,6 +126,12 @@ resolved PATH.  Needs the `mise' binary; a no-op without it."
 (defvar-local ygg-term--toggle-root nil
   "The project root this terminal is the toggle terminal of.")
 
+(defvar-local ygg-term--space nil
+  "The id of the space this terminal was opened in.")
+
+(defvar-local ygg-term--toggle-space nil
+  "The id of the space this terminal is the toggle terminal of.")
+
 (defconst ygg-term--ssh-methods '("ssh" "scp" "sshx" "scpx")
   "TRAMP methods whose host an ssh login shell can be opened on.")
 
@@ -184,10 +190,13 @@ lookups."
             (buf (save-window-excursion
                   (let ((ghostel-buffer-name name))
                     (ghostel '(4))))))
+       (when (and (ygg-term--space-id) (fboundp 'ygg-space-claim-buffer))
+         (ygg-space-claim-buffer buf (ygg-term--space-id) t))
        (with-current-buffer buf
          (setq-local ghostel-buffer-name-function nil)
          (setq-local mode-line-format nil)
-         (setq ygg-term--buffer-root root)
+         (setq ygg-term--buffer-root root
+               ygg-term--space (ygg-term--space-id))
          (add-hook 'kill-buffer-hook #'ygg--term-delete-window nil t)
          (unless (equal (buffer-name) name)
            (rename-buffer name t)))
@@ -209,6 +218,9 @@ connection on a keypress."
   (and (fboundp 'ygg-space--current)
        (ygg-space--dir-of (ygg-space--current))))
 
+(defun ygg-term--space-id ()
+  (and (fboundp 'ygg-space--current-id) (ygg-space--current-id)))
+
 (defun ygg-term--normalize (dir)
   "DIR as an absolute folder name, by its true path when it is local."
   (file-name-as-directory
@@ -227,59 +239,67 @@ project would cost a connection."
 (defun ygg-term--root ()
   "Where a terminal opened from this buffer starts.
 Inside a terminal, the project it belongs to, whatever folder its shell
-has moved to.  Otherwise the current project's root; outside a project
-the space's folder, then `default-directory'."
+has moved to.  Otherwise the space's folder; without one the current
+project's root, then `default-directory'."
   (or ygg-term--buffer-root
       ygg-term--toggle-root
-      (let ((proj (project-current)))
-        (ygg-term--normalize (cond (proj (project-root proj))
-                                   ((ygg-term--space-dir))
+      (let ((proj (and (not (ygg-term--space-dir)) (project-current))))
+        (ygg-term--normalize (cond ((ygg-term--space-dir))
+                                   (proj (project-root proj))
                                    (t default-directory))))))
 
 (defun ygg-term--label (root)
   (let ((leaf (file-name-nondirectory (directory-file-name root))))
     (if (string-empty-p leaf) "root" leaf)))
 
-(defun ygg-term--toggle-buffer (root)
-  "The live toggle terminal of the project at ROOT, or nil."
+(defun ygg-term--toggle-buffer (root &optional space)
+  "The live toggle terminal of SPACE, or of the project at ROOT, or nil."
   (seq-find (lambda (b)
               (and (buffer-live-p b)
-                   (equal (buffer-local-value 'ygg-term--toggle-root b) root)))
+                   (if space
+                       (equal (buffer-local-value 'ygg-term--toggle-space b) space)
+                     (equal (buffer-local-value 'ygg-term--toggle-root b) root))))
             (buffer-list)))
 
-(defun ygg-term--live-toggle-buffer (root)
-  "The toggle terminal of ROOT, with a dead one killed first."
-  (let ((buf (ygg-term--toggle-buffer root)))
+(defun ygg-term--live-toggle-buffer (root &optional space)
+  "The toggle terminal of SPACE or ROOT, with a dead one killed first."
+  (let ((buf (ygg-term--toggle-buffer root space)))
     (if (and buf (not (process-live-p (get-buffer-process buf))))
         (progn (kill-buffer buf) nil)
       buf)))
 
-(defun ygg-term-open-in (root)
-  "Show the toggle terminal of the project at ROOT, creating it when absent."
-  (let* ((buf (ygg-term--live-toggle-buffer root))
+(defun ygg-term-open-in (root &optional space)
+  "Show the toggle terminal of SPACE, or of the project at ROOT, creating it
+at ROOT when absent."
+  (let* ((buf (ygg-term--live-toggle-buffer root space))
          (b (or buf (ygg--ghostel-shell
                      (format "*ygg-term:%s*" (ygg-term--label root)) root)))
          (win (or (get-buffer-window b) (ygg--term-split-window))))
-    (with-current-buffer b (setq ygg-term--toggle-root root))
-    (when (and (fboundp 'ygg-space-claim-buffer)
-               (fboundp 'ygg-space--current-id))
-      (ygg-space-claim-buffer b (ygg-space--current-id) t))
+    (with-current-buffer b
+      (if space
+          (setq ygg-term--toggle-space space)
+        (setq ygg-term--toggle-root root)))
+    (when-let* ((id (or space (ygg-term--space-id)))
+                ((fboundp 'ygg-space-claim-buffer)))
+      (ygg-space-claim-buffer b id t))
     (set-window-buffer win b)
     (select-window win)
     (ghostel-semi-char-mode)
     b))
 
 (defun ygg-terminal-toggle ()
-  "Toggle the current project's terminal split, toggleterm.nvim-style.
-Shows or creates the terminal that belongs to this buffer's project,
-starting at its root, and hides it when already visible."
+  "Toggle the current space's terminal split, toggleterm.nvim-style.
+Shows or creates the space's terminal, starting in the space's folder,
+and hides it when already visible.  Outside any space, the terminal of
+this buffer's project."
   (interactive)
-  (let* ((root (ygg-term--root))
-         (buf (ygg-term--live-toggle-buffer root))
+  (let* ((space (ygg-term--space-id))
+         (root (ygg-term--root))
+         (buf (ygg-term--live-toggle-buffer root space))
          (shown (and buf (get-buffer-window buf))))
     (if shown
         (delete-window shown)
-      (ygg-term-open-in root))))
+      (ygg-term-open-in root space))))
 
 ;;; Named terminals + jobs (tmux-window feel; everything async)
 
@@ -307,14 +327,18 @@ DIR is where it starts, instead of the root of the current buffer."
   (ygg--term-display (ygg--ghostel-shell (format "*ygg-term:%s*" name) (or dir (ygg-term--root)))))
 
 (defun ygg-term-pick ()
-  "Pick one of the current project's terminals and show it in a split."
+  "Pick one of the current space's terminals and show it in a split.
+Outside any space, one of the current project's."
   (interactive)
-  (let* ((root (ygg-term--root))
+  (let* ((space (ygg-term--space-id))
+         (root (ygg-term--root))
          (bufs (mapcar #'buffer-name
                        (seq-filter (lambda (b)
-                                     (equal (buffer-local-value 'ygg-term--buffer-root b) root))
+                                     (if space
+                                         (equal (buffer-local-value 'ygg-term--space b) space)
+                                       (equal (buffer-local-value 'ygg-term--buffer-root b) root)))
                                    (ygg--term-buffers)))))
-    (unless bufs (user-error "No terminals for this project; SPC o t or SPC o n"))
+    (unless bufs (user-error "No terminals here; SPC o t or SPC o n"))
     (ygg--term-display (get-buffer (completing-read "Terminal: " bufs nil t)))))
 
 (defun ygg--job-candidates ()

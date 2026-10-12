@@ -28,6 +28,8 @@
   `(ygg-term-tests--with
      (let ((project--list nil))
        (cl-letf (((symbol-function 'ghostel-semi-char-mode) #'ignore)
+                 ((symbol-function 'ygg-term--space-id) #'ignore)
+                 ((symbol-function 'ygg-term--space-dir) #'ignore)
                  ((symbol-function 'ghostel)
                   (let ((orig (symbol-function 'ghostel)))
                     (lambda (&rest args)
@@ -116,14 +118,57 @@
           (ygg-term-new "sp-d")))
       (should (equal (ygg-term-ptests--cwd "*ygg-term:sp-d*") plain)))))
 
-(ert-deftest ygg-term-project-beats-the-space-dir ()
+(ert-deftest ygg-term-space-dir-beats-the-project ()
   (ygg-term-ptests--with
     (let* ((root (ygg-term-ptests--proj "p"))
            (file (ygg-term-ptests--file root))
            (space (ygg-term-tests--dir "space")))
       (cl-letf (((symbol-function 'ygg-term--space-dir) (lambda () space)))
         (ygg-term-ptests--in file #'ygg-term-new "sp-n")
-        (should (equal (ygg-term-ptests--cwd "*ygg-term:sp-n*") root))))))
+        (should (equal (ygg-term-ptests--cwd "*ygg-term:sp-n*") space))))))
+
+(defmacro ygg-term-ptests--in-space (id dir &rest body)
+  (declare (indent 2))
+  `(cl-letf (((symbol-function 'ygg-term--space-id) (lambda () ,id))
+             ((symbol-function 'ygg-term--space-dir) (lambda () ,dir)))
+     ,@body))
+
+(ert-deftest ygg-term-toggle-is-per-space-even-on-one-project ()
+  (ygg-term-ptests--with
+    (let* ((p (ygg-term-ptests--proj "p"))
+           (fp (ygg-term-ptests--file p))
+           (wt (ygg-term-ptests--proj "wt"))
+           a b)
+      (ygg-term-ptests--in-space "one-s1" p
+        (ygg-term-ptests--in fp #'ygg-terminal-toggle)
+        (setq a (ygg-term-ptests--toggle-buffer)))
+      (ygg-term-ptests--in-space "one-s2" wt
+        (ygg-term-ptests--in fp #'ygg-terminal-toggle)
+        (setq b (ygg-term-ptests--toggle-buffer)))
+      (should-not (eq a b))
+      (should (equal (buffer-local-value 'default-directory a) p))
+      (should (equal (buffer-local-value 'default-directory b) wt))
+      (ygg-term-ptests--in-space "one-s1" p
+        (ygg-term-ptests--in fp #'ygg-terminal-toggle)
+        (should (eq (ygg-term-ptests--toggle-buffer) a))))))
+
+(ert-deftest ygg-term-a-space-holds-many-terminals-and-picks-only-its-own ()
+  (ygg-term-ptests--with
+    (let* ((p (ygg-term-ptests--proj "p"))
+           (fp (ygg-term-ptests--file p))
+           offered)
+      (ygg-term-ptests--in-space "many-s1" p
+        (ygg-term-ptests--in fp #'ygg-terminal-toggle)
+        (ygg-term-ptests--in fp #'ygg-term-new "one")
+        (ygg-term-ptests--in fp #'ygg-term-new "two"))
+      (ygg-term-ptests--in-space "many-s2" p
+        (ygg-term-ptests--in fp #'ygg-term-new "other"))
+      (ygg-term-ptests--in-space "many-s1" p
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_ cands &rest _) (setq offered cands) (car cands))))
+          (ygg-term-ptests--in fp #'ygg-term-pick)))
+      (should (equal (sort offered #'string<)
+                     '("*ygg-term:one*" "*ygg-term:p*" "*ygg-term:two*"))))))
 
 (ert-deftest ygg-term-dired-here-stays-here ()
   (ygg-term-ptests--with
