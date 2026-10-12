@@ -771,7 +771,8 @@ out findings less urgent than it."
     ("c" "Comment" ygg-git-compare-submit-comment)
     ("a" "Approve" ygg-git-compare-submit-approve)
     ("r" "Request changes" ygg-git-compare-submit-request-changes)
-    ("d" "Draft" ygg-git-compare-submit-draft)]
+    ("d" "Draft" ygg-git-compare-submit-draft)
+    ("m" "Merge…" ygg-git-pr-merge)]
    ["Agent"
     ("@" "Send to agent" ygg-git-compare-submit-to-agent)]
    ["Markdown"

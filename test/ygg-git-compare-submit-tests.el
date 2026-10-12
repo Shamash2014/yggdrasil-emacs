@@ -729,4 +729,12 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                      (cadr (should-error (ygg-git-compare-submit-agent)
                                          :type 'user-error)))))))
 
+(ert-deftest ygg-git-compare-submit-approve-without-comments-posts-an-approval ()
+  (ygg-git-compare-submit-tests--with nil ygg-git-compare-submit-tests--gitlab-pr
+      (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'approve)
+    (should (equal (mapcar #'ygg-git-compare-submit-tests--endpoint
+                           (ygg-git-compare-submit-tests--posts))
+                   '("projects/grp%2Fproj/merge_requests/7/approve")))))
+
 ;;; ygg-git-compare-submit-tests.el ends here
