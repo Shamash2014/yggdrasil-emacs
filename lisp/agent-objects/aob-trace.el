@@ -137,8 +137,8 @@ window as following and pulls the page back down."
   (ygg-ui-plain-layout)
   (setq-local ygg-modeline-name "trace")
   (setq truncate-lines nil)
-  (face-remap-set-base 'header-line :inherit 'default :box nil
-                       :underline nil :overline nil)
+  (dolist (face '(tab-line header-line))
+    (face-remap-set-base face :inherit 'default :box nil :underline nil :overline nil))
   (setq-local char-property-alias-alist '((face font-lock-face)))
   (visual-line-mode 1)
   (require 'agent-shell-markdown nil t)
@@ -4047,12 +4047,12 @@ event did.  A buried trace is only marked, to be drawn whole when shown."
   (dolist (buf (aob-trace--buffers-of s))
     (with-current-buffer buf
       (if (get-buffer-window buf 'visible)
-          (let ((header (ignore-errors (aob-trace--header s)))
-                (meter-changed (ignore-errors (aob-trace--show-meter-line s))))
-            (when (or meter-changed
-                      (not (or (null header)
-                               (equal-including-properties header header-line-format))))
-              (when header (setq header-line-format header))
+          (let ((title (ignore-errors (aob-trace--header s)))
+                (meter (ignore-errors (aob-trace--meter-line s))))
+            (when (or (and title (not (equal-including-properties title tab-line-format)))
+                      (and meter (not (equal-including-properties meter header-line-format))))
+              (when title (setq tab-line-format title))
+              (when meter (setq header-line-format meter))
               (force-mode-line-update)))
         (setq aob--rendered-tick -1
               aob-trace--tick nil)))))
@@ -4118,7 +4118,7 @@ the model behind it is named quietly beside it."
 (declare-function aob-overall-usage-parts "aob-litellm")
 
 (defun aob-trace--header (s)
-  "S's header line: name, model, login, state, quiet, mode, todo and goal.
+  "S's first header line: name, model, login, state, quiet, mode, todo and goal.
 All but the name are grey.
 A subagent's names the agent it works for instead of the model's login.
 Clock, cost and context are the second line, `aob-trace--meter-line'."
@@ -4164,7 +4164,7 @@ Clock, cost and context are the second line, `aob-trace--meter-line'."
 
 (defun aob-trace--meter-line (s)
   "S's second line: context used/size, cost and runtime, each when known.
-Sized to its content and ended by a newline; a dash when nothing is known."
+Sized to its content; a dash when nothing is known."
   (let* ((used (or (aob-session-ref s :ctx-used)
                    (plist-get (aob-session-ref s :usage) :totalTokens)))
          (size (aob-session-ref s :ctx-size))
@@ -4186,24 +4186,7 @@ Sized to its content and ended by a newline; a dash when nothing is known."
     (concat " "
             (if parts
                 (mapconcat #'identity parts (propertize " · " 'face 'shadow))
-              (propertize "—" 'face 'shadow))
-            "\n")))
-
-(defvar-local aob-trace--meter-overlay nil
-  "The empty overlay at the top of the trace whose before-string is the second
-header line.")
-
-(defun aob-trace--show-meter-line (s)
-  "Put S's second header line above the first line of the buffer.
-Return non-nil when it changed."
-  (let ((line (aob-trace--meter-line s)))
-    (unless (overlayp aob-trace--meter-overlay)
-      (setq aob-trace--meter-overlay (make-overlay (point-min) (point-min))))
-    (move-overlay aob-trace--meter-overlay (point-min) (point-min))
-    (unless (equal-including-properties
-             line (overlay-get aob-trace--meter-overlay 'before-string))
-      (overlay-put aob-trace--meter-overlay 'before-string line)
-      t)))
+              (propertize "—" 'face 'shadow)))))
 
 (defun aob-trace--tool-paths (ev)
   "The absolute paths tool EV names: its locations, its file, a cd it ran."
@@ -4361,8 +4344,8 @@ A call folded into a run since is found by the item it became."
              (plist-get (seq-find (lambda (e) (not (aob-trace--sub-p e)))
                                   (aob-session-events s))
                         :seq)))
-  (setq header-line-format (aob-trace--header s))
-  (aob-trace--show-meter-line s)
+  (setq tab-line-format (aob-trace--header s)
+        header-line-format (aob-trace--meter-line s))
   (let* ((blocks (aob-trace--blocks-of s))
          (new blocks)
          (old aob-trace--blocks)
