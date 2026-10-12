@@ -502,7 +502,11 @@ actions keep their tool title.  The short path stays the clickable target."
 ;; env inside a login shell
 (setq aob-acp-environment-function #'ygg-agent-acp-environment)
 
-(setq aob-acp-session-env-function #'ygg-pi-session-env)
+(setq aob-acp-session-env-function
+      (lambda (s)
+        (append (ygg-agent-profile-env (aob-session-ref s :profile)
+                                       (aob-session-ref s :agent))
+                (ygg-pi-session-env s))))
 
 (setq aob-acp-prepare-function
       (lambda (agent project &optional _isolate)
@@ -519,11 +523,16 @@ actions keep their tool title.  The short path stays the clickable target."
 ;; resolver rather than freezing whatever buffer it was opened from
 (setq aob-compose-spawn-function
       (lambda (text &optional agent atts)
-        (let ((aob-acp-start-dir aob-compose--dir)
-              (aob-acp-start-worktree ygg-aob--draft-tree)
-              (aob-acp-session-refs (append (ygg-aob--preset-limits text)
-                                            (bound-and-true-p aob-acp-session-refs))))
-          (aob-acp-spawn (or agent aob-acp-default-agent) text atts))))
+        (let* ((agent (or agent aob-acp-default-agent))
+               (profile (unless (or noninteractive
+                                    (plist-get (bound-and-true-p aob-acp-session-refs) :profile))
+                          (ygg-agent-read-profile agent)))
+               (aob-acp-start-dir aob-compose--dir)
+               (aob-acp-start-worktree ygg-aob--draft-tree)
+               (aob-acp-session-refs (append (and profile (list :profile profile))
+                                             (ygg-aob--preset-limits text)
+                                             (bound-and-true-p aob-acp-session-refs))))
+          (aob-acp-spawn agent text atts))))
 
 ;; an agent belongs to the work it was started on: the task in front of the
 ;; owner, else the checkout the buffer is in, else the space — a space pinned

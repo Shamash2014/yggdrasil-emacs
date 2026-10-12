@@ -829,6 +829,44 @@ ISOLATE names a worker whose home sits beside the repository\='s own."
            kind)
    ygg-agent-conf-root))
 
+(defun ygg-agent-profiles ()
+  "Names of the profiles under `ygg-agent-conf-root\='."
+  (when ygg-agent-conf-root
+    (let ((dir (expand-file-name "profiles" ygg-agent-conf-root)))
+      (when (file-directory-p dir)
+        (seq-filter (lambda (name) (file-directory-p (expand-file-name name dir)))
+                    (directory-files dir nil "\\`[^.]"))))))
+
+(defun ygg-agent--profile-home (profile kind)
+  "PROFILE\='s home for KIND, made and seeded like a project home when absent."
+  (unless (string-match-p "\\`[A-Za-z0-9_][A-Za-z0-9_.-]*\\'" profile)
+    (user-error "Bad profile name: %s" profile))
+  (let ((dir (expand-file-name (format "profiles/%s/%s" profile kind)
+                               ygg-agent-conf-root)))
+    (unless (file-directory-p dir)
+      (ygg-agent--bootstrap-share (cdr (assoc kind ygg-agent--config-homes)) dir))
+    dir))
+
+(defun ygg-agent-read-profile (agent)
+  "Ask which profile a new AGENT session runs under; nil keeps the project home.
+A name that is not listed makes that profile."
+  (when-let* ((ygg-agent-conf-root)
+              (kind (ygg-agent--kind agent agent))
+              (name (completing-read "Profile: "
+                                     (cons "default" (ygg-agent-profiles))
+                                     nil nil nil nil "default"))
+              ((not (member name '("" "default")))))
+    (ygg-agent--profile-home name kind)
+    name))
+
+(defun ygg-agent-profile-env (profile agent)
+  "The \"VAR=DIR\" putting AGENT in PROFILE\='s home, as a list; nil without PROFILE."
+  (when-let* ((profile)
+              ygg-agent-conf-root
+              (kind (ygg-agent--kind agent agent)))
+    (list (format "%s=%s" (plist-get (cdr (assoc kind ygg-agent--config-homes)) :var)
+                  (directory-file-name (ygg-agent--profile-home profile kind))))))
+
 (defun ygg-agent--config-dir (kind spec project &optional peek isolate)
   "Config home for KIND in PROJECT, made ready unless PEEK.
 Naming a path is not asking for one: the task panels show the config
@@ -954,8 +992,8 @@ names the one that was."
 (declare-function term-char-mode "term" ())
 
 ;;;###autoload
-(defun ygg-agent-login-config-home (project)
-  "Log PROJECT\='s own config home in, instead of borrowing the shared one.
+(defun ygg-agent-login-config-home (project &optional profile)
+  "Log PROJECT\='s config home, or PROFILE\='s, in, not the shared one.
 The CLI keys its credentials on the home it is pointed at, so a home no
 one has logged into answers every prompt with \"Authentication
 required\".  Such a home is passed over when a session starts — this is
@@ -966,13 +1004,17 @@ where it earns its place back."
           (or (when (fboundp 'project-current)
                 (when-let* ((pr (project-current nil)))
                   (project-root pr)))
-              default-directory))))
+              default-directory))
+         (and ygg-agent-conf-root
+              (ygg-agent-read-profile "claude"))))
   (unless ygg-agent-conf-root (user-error "No agent config root"))
   (require 'term)
   (let* ((kind "claude")
          (spec (cdr (assoc kind ygg-agent--config-homes)))
-         (home (ygg-agent--own-home kind (ygg-agent--repo-home
-                                          (expand-file-name project))))
+         (home (if profile
+                   (ygg-agent--profile-home profile kind)
+                 (ygg-agent--own-home kind (ygg-agent--repo-home
+                                            (expand-file-name project)))))
          (exe (or (executable-find "claude") "claude")))
     (ygg-agent--bootstrap-share spec home)
     (remhash home ygg-agent--login-cache)
