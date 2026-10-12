@@ -275,6 +275,82 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
         (should-not (oref (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks)
                           hidden))))))
 
+(defun ygg-git-compare-pr-info-tests--github-status (state draft review)
+  (ygg-git-compare--checks-parse-github
+   (format "{\"statusCheckRollup\":[],\"state\":\"%s\",\"isDraft\":%s,\"reviewDecision\":\"%s\"}"
+           state (if draft "true" "false") review)))
+
+(ert-deftest ygg-git-compare-pr-info-github-status-is-parsed ()
+  (dolist (case '(("OPEN" nil "" open nil)
+                  ("OPEN" t "" draft nil)
+                  ("MERGED" nil "" merged nil)
+                  ("CLOSED" nil "" closed nil)
+                  ("OPEN" nil "APPROVED" open approved)
+                  ("OPEN" nil "CHANGES_REQUESTED" open changes-requested)
+                  ("OPEN" nil "REVIEW_REQUIRED" open review-required)))
+    (should (equal (plist-get (ygg-git-compare-pr-info-tests--github-status
+                               (nth 0 case) (nth 1 case) (nth 2 case))
+                              :status)
+                   (list :state (nth 3 case) :review (nth 4 case))))))
+
+(ert-deftest ygg-git-compare-pr-info-github-without-a-state-has-no-status ()
+  (should-not (plist-get (ygg-git-compare--checks-parse-github "{\"statusCheckRollup\":[]}")
+                         :status)))
+
+(ert-deftest ygg-git-compare-pr-info-gitlab-state-is-mapped ()
+  (dolist (case '(("opened" nil open) ("opened" t draft) ("merged" nil merged)
+                  ("closed" nil closed) ("locked" nil closed)))
+    (should (equal (ygg-git-compare--pr-status-gitlab
+                    (list :state (nth 0 case) :draft (nth 1 case)))
+                   (list :state (nth 2 case)))))
+  (should (eq (plist-get (ygg-git-compare--pr-status-gitlab
+                          (list :state "opened" :work_in_progress t))
+                         :state)
+              'draft))
+  (should-not (ygg-git-compare--pr-status-gitlab (list :state "weird"))))
+
+(ert-deftest ygg-git-compare-pr-info-header-shows-the-github-status-before-ci ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "checks.json"
+     (concat "{\"state\":\"OPEN\",\"isDraft\":false,\"reviewDecision\":\"APPROVED\","
+             "\"statusCheckRollup\":" (ygg-git-compare-pr-info-tests--rollup t) "}"))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (with-current-buffer buffer
+        (let ((header (ygg-git-compare-pr-info-tests--header)))
+          (should (string-search "PR #12 open approved" header))
+          (should (< (string-search "PR #12" header) (string-search "CI " header))))))))
+
+(ert-deftest ygg-git-compare-pr-info-header-shows-a-merged-pull-request ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "checks.json" "{\"state\":\"MERGED\",\"isDraft\":false,\"reviewDecision\":\"APPROVED\",\"statusCheckRollup\":[]}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (with-current-buffer buffer
+        (let ((header (ygg-git-compare-pr-info-tests--header)))
+          (should (string-search "PR #12 merged" header))
+          (should-not (string-search "approved" header))
+          (should (eq (get-text-property 0 'face (ygg-git-compare--pr-badge)) 'success)))))))
+
+(ert-deftest ygg-git-compare-pr-info-header-shows-the-gitlab-status ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put "mr.json" "{\"iid\":12,\"state\":\"opened\",\"draft\":true,\"head_pipeline\":null}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'gitlab head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (with-current-buffer buffer
+        (should (string-search "PR #12 draft" (ygg-git-compare-pr-info-tests--header)))))))
+
+(ert-deftest ygg-git-compare-pr-info-header-has-no-status-when-b-is-not-a-pull-request ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ignore head)
+    (let ((buffer (ygg-git-compare-buffer default-directory '(rev . "main") '(rev . "feature"))))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (with-current-buffer buffer
+        (should-not (string-search "PR #" (ygg-git-compare-pr-info-tests--header)))
+        (should-not (ygg-git-compare--pr-badge))))))
+
 (ert-deftest ygg-git-compare-pr-info-all-passed-folds-the-checks ()
   (ygg-git-compare-pr-info-tests--with-repo head
     (ygg-git-compare-pr-info-tests--put "checks.json"
@@ -500,7 +576,7 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
 (ert-deftest ygg-git-compare-pr-info-gitlab-pipeline-jobs ()
   (ygg-git-compare-pr-info-tests--with-repo head
     (ygg-git-compare-pr-info-tests--put
-     "mr.json" (json-serialize (list :iid 12 :head_pipeline
+     "mr.json" (json-serialize (list :iid 12 :state "merged" :head_pipeline
                                      (list :id 99 :status "failed"
                                            :web_url "https://gitlab.com/o/r/-/pipelines/99"))))
     (ygg-git-compare-pr-info-tests--put
@@ -522,7 +598,7 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
           (should (< (string-search " integration " text) (string-search " unit " text)))
           (should (string-search "1m 30s" text))
           (should (string-search "10m 00s" text)))
-        (should (string-search "CI ✓ 1 · ✗ 1 · ● 1" (ygg-git-compare-pr-info-tests--header)))
+        (should (string-search "PR #12 merged  CI ✓ 1 · ✗ 1 · ● 1" (ygg-git-compare-pr-info-tests--header)))
         (ygg-git-compare-pr-info-tests--goto-row "integration")
         (call-interactively (key-binding (kbd "o")))
         (should (equal ygg-git-compare-pr-info-tests--browsed "https://gitlab.com/o/r/-/jobs/2")))

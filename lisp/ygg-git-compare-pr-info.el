@@ -89,10 +89,36 @@
             :where (let ((workflow (plist-get item :workflowName)))
                      (and (not (ygg-git-compare--check-blank-p workflow)) workflow))))))
 
+(defun ygg-git-compare--pr-status-github (pr)
+  "PR, gh's state, isDraft and reviewDecision, as (:state S :review R)."
+  (let ((state (pcase (upcase (or (plist-get pr :state) ""))
+                 ("OPEN" (if (eq (plist-get pr :isDraft) t) 'draft 'open))
+                 ("MERGED" 'merged)
+                 ("CLOSED" 'closed))))
+    (and state
+         (list :state state
+               :review (pcase (upcase (or (plist-get pr :reviewDecision) ""))
+                         ("APPROVED" 'approved)
+                         ("CHANGES_REQUESTED" 'changes-requested)
+                         ("REVIEW_REQUIRED" 'review-required))))))
+
+(defun ygg-git-compare--pr-status-gitlab (mr)
+  "MR, a GitLab merge request, as (:state S)."
+  (let ((state (pcase (plist-get mr :state)
+                 ("opened" (if (or (eq (plist-get mr :draft) t)
+                                   (eq (plist-get mr :work_in_progress) t))
+                               'draft
+                             'open))
+                 ("merged" 'merged)
+                 ((or "closed" "locked") 'closed))))
+    (and state (list :state state))))
+
 (defun ygg-git-compare--checks-parse-github (text)
-  (let ((rollup (plist-get (ygg-git-compare--json text) :statusCheckRollup)))
+  (let* ((pr (ygg-git-compare--json text))
+         (rollup (plist-get pr :statusCheckRollup)))
     (unless (proper-list-p rollup) (error "no rollup"))
-    (list :checks (mapcar #'ygg-git-compare--check-github rollup))))
+    (list :checks (mapcar #'ygg-git-compare--check-github rollup)
+          :status (ygg-git-compare--pr-status-github pr))))
 
 (defun ygg-git-compare--check-gitlab (job)
   (list :name (or (plist-get job :name) "job")
@@ -108,10 +134,11 @@
         :url (plist-get job :web_url)
         :where (plist-get job :stage)))
 
-(defun ygg-git-compare--checks-parse-gitlab-jobs (text pipeline)
+(defun ygg-git-compare--checks-parse-gitlab-jobs (text pipeline &optional status)
   (let ((jobs (ygg-git-compare--remote-json text)))
     (list :checks (mapcar #'ygg-git-compare--check-gitlab jobs)
-          :url (plist-get pipeline :web_url))))
+          :url (plist-get pipeline :web_url)
+          :status status)))
 
 (defun ygg-git-compare--checks-fetch-gitlab (pr done)
   (let ((host (plist-get pr :host))
@@ -121,22 +148,23 @@
                   (format "projects/%s/merge_requests/%s" path (plist-get pr :number)))
      (lambda (status text err)
        (ygg-git-compare--answer
-        (lambda (pipeline &optional failure)
-          (cond (failure (funcall done nil failure))
-                ((null pipeline) (funcall done (list :checks nil)))
-                (t (ygg-git-compare--forge-async
-                    "glab" (list "api" "--hostname" host "--paginate"
-                                 (format "projects/%s/pipelines/%s/jobs?per_page=100"
-                                         path (plist-get pipeline :id)))
-                    (lambda (status text err)
-                      (ygg-git-compare--answer
-                       done "glab" status text err
-                       (lambda (text)
-                         (ygg-git-compare--checks-parse-gitlab-jobs text pipeline))))))))
+        (lambda (mr &optional failure)
+          (let ((pipeline (plist-get mr :head_pipeline))
+                (pr-status (ygg-git-compare--pr-status-gitlab mr)))
+            (cond (failure (funcall done nil failure))
+                  ((not (and pipeline (plist-get pipeline :id)))
+                   (funcall done (list :checks nil :status pr-status)))
+                  (t (ygg-git-compare--forge-async
+                      "glab" (list "api" "--hostname" host "--paginate"
+                                   (format "projects/%s/pipelines/%s/jobs?per_page=100"
+                                           path (plist-get pipeline :id)))
+                      (lambda (status text err)
+                        (ygg-git-compare--answer
+                         done "glab" status text err
+                         (lambda (text)
+                           (ygg-git-compare--checks-parse-gitlab-jobs text pipeline pr-status)))))))))
         "glab" status text err
-        (lambda (text)
-          (let ((pipeline (plist-get (ygg-git-compare--json text) :head_pipeline)))
-            (and pipeline (plist-get pipeline :id) pipeline))))))))
+        #'ygg-git-compare--json)))))
 
 (defun ygg-git-compare--checks-fetch (pr done)
   "Ask the forge for PR's checks, then call DONE with them, or with nil
@@ -146,7 +174,7 @@ and why not."
     (ygg-git-compare--forge-async
      "gh" (list "pr" "view" (format "%s" (plist-get pr :number))
                 "--repo" (format "%s/%s" (plist-get pr :host) (plist-get pr :path))
-                "--json" "statusCheckRollup")
+                "--json" "statusCheckRollup,state,isDraft,reviewDecision")
      (lambda (status text err)
        (ygg-git-compare--answer done "gh" status text err
                                 #'ygg-git-compare--checks-parse-github)))))
@@ -581,6 +609,27 @@ of its diff; nothing for any other compare."
             ((plist-get view :value) nil)
             ((plist-get view :error) (propertize "CI ?" 'face 'error))
             ((plist-get view :fetching) (propertize "CI …" 'face 'shadow))))))
+
+(defconst ygg-git-compare--pr-state-faces
+  '((open . default) (draft . shadow) (merged . success) (closed . error)))
+
+(defconst ygg-git-compare--pr-review-labels
+  '((approved "approved" success)
+    (changes-requested "changes requested" error)
+    (review-required "review required" shadow)))
+
+(defun ygg-git-compare--pr-badge ()
+  "The state of the pull request, and its review when known, for the header
+line, or nil."
+  (when-let* ((pr (ygg-git-compare--pr-info-p))
+              (status (plist-get (plist-get (ygg-git-compare--checks-view) :value) :status))
+              (state (plist-get status :state))
+              (face (cdr (assq state ygg-git-compare--pr-state-faces))))
+    (concat (propertize (format "PR #%s %s" (plist-get pr :number) state) 'face face)
+            (when-let* (((memq state '(open draft)))
+                        (review (assq (plist-get status :review)
+                                      ygg-git-compare--pr-review-labels)))
+              (concat " " (propertize (cadr review) 'face (nth 2 review)))))))
 
 (defun ygg-git-compare--conversation-section ()
   (when-let* ((root (bound-and-true-p magit-root-section)))

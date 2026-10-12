@@ -1071,6 +1071,7 @@ PLAN is too large to wash, since --no-patch cancels what comes before it."
 
 (autoload 'ygg-git-compare--insert-pr-info "ygg-git-compare-pr-info")
 (autoload 'ygg-git-compare--checks-badge "ygg-git-compare-pr-info")
+(autoload 'ygg-git-compare--pr-badge "ygg-git-compare-pr-info")
 
 (defun ygg-git-compare--sections-hook ()
   (append (list #'ygg-git-compare--insert-pr-info)
@@ -1103,8 +1104,9 @@ Nothing is selected and no window layout is remembered for magit's q."
            " ↔ B: " (ygg-git-compare--side-label ygg-git-compare--b)
            (if (equal ygg-git-compare--dots "...") "  A...B" "  A..B")
            (when-let* (((eq (car-safe ygg-git-compare--b-spec) 'pr))
-                       (badge (ygg-git-compare--checks-badge)))
-             (concat "  " badge))
+                       (badges (delq nil (list (ygg-git-compare--pr-badge)
+                                               (ygg-git-compare--checks-badge)))))
+             (concat "  " (string-join badges "  ")))
            (when-let* ((note (or ygg-git-compare--note
                                  (plist-get ygg-git-compare--a :pending)
                                  (plist-get ygg-git-compare--b :pending)
