@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "hire-on-upwork": {
+      "source": "upwork/upwork-agent-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/hire-on-upwork/SKILL.md",
+      "computedHash": "5e8d0ac431417e837de5367487773d38ba7548116d7f48763f88961e6273a864"
+    },
+    "upwork-workflows": {
+      "source": "upwork/upwork-agent-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/upwork-workflows/SKILL.md",
+      "computedHash": "68160365bd7f809722163f0c61f4315811f6375c97eb914d560df4bc9708433b"
+    },
+    "write-job-post": {
+      "source": "upwork/upwork-agent-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/write-job-post/SKILL.md",
+      "computedHash": "c04f459dbad8aa2c485af30113122a287eb4d4e6c1825c9491983a83a8bc2e35"
+    },
+    "write-proposal": {
+      "source": "upwork/upwork-agent-plugin",
+      "sourceType": "github",
+      "skillPath": "skills/write-proposal/SKILL.md",
+      "computedHash": "1f9fbcf4092a3f20e671ad43b087baa17d3394e05aabd7b4ed0cdf2d455322d0"
+    }
+  }
+}
