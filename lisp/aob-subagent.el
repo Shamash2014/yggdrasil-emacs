@@ -403,12 +403,27 @@ the last the adapter says of a subagent sent in the background."
 (add-hook 'aob-state-change-hook #'aob-subagent--native-settle)
 
 (defun aob-subagent--native-drop (s)
-  "Take S's subagents out of the registry with it."
-  (dolist (c (aob-subagent-children s))
-    (when (aob-subagent-native-p c)
-      (aob-remove-session c))))
+  "Take S's subagents out of the registry with it, unless an heir keeps them."
+  (unless (let ((cur (aob-session-get (aob-session-id s))))
+            (and cur (not (eq cur s))))
+    (dolist (c (aob-subagent-children s))
+      (when (aob-subagent-native-p c)
+        (aob-remove-session c)))))
 
 (add-hook 'aob-session-removed-hook #'aob-subagent--native-drop)
+
+(defun aob-subagent--native-hand-on (old new)
+  "Give NEW the subagents of OLD, whose events NEW took, so their rows open."
+  (when-let* ((kids (aob-session-ref old :native-kids)))
+    (maphash (lambda (_ id)
+               (when-let* ((kid (aob-session-get id)))
+                 (aob-session-put kid :parent-session (aob-session-id new))
+                 (aob-session-put kid :native-root (aob-session-id new))))
+             kids)
+    (aob-session-put new :native-kids kids)
+    (aob-session-put old :native-kids nil)))
+
+(add-hook 'aob-session-succession-functions #'aob-subagent--native-hand-on)
 
 (defun aob-subagent--native-refuse (s &rest _)
   (user-error "aob: %s is a subagent its agent runs and takes no messages; talk to %s"

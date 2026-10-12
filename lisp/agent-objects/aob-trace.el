@@ -2748,9 +2748,10 @@ TAIL is its model and tokens."
                subs (mapcar (lambda (e) (aob-trace--sub-tail s e)) subs))))
 
 (defun aob-subagents--open (s seq)
-  "Open the trace of the subagent S called at SEQ."
-  (aob-trace (or (aob-trace--child-at s seq)
-                 (user-error "aob: that subagent kept no trace"))))
+  "Open the trace of the subagent S called at SEQ, else show its call in S's."
+  (if-let* ((kid (aob-trace--child-at s seq)))
+      (aob-trace kid)
+    (aob-subagents--goto s seq)))
 
 (defun aob-subagents--goto (s seq)
   "Show S's trace in a window other than this one, at the event SEQ."

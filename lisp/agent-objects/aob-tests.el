@@ -1599,6 +1599,41 @@ it cannot hold never blocks the queue, and steering falls back to cancel."
     (when (string-match-p "\\`\\(subs\\|trace\\):" (buffer-name b))
       (kill-buffer b))))
 
+(ert-deftest aob-subagent-trace-survives-its-lead-being-succeeded ()
+  "A lead brought back by a resume or wake still opens the trace of each
+subagent it called: the rows it was handed are not left without kids."
+  (aob-tests--with-session s
+    (unwind-protect
+        (progn
+          (aob-tests--feed s aob-tests--agent-call)
+          (aob-tests--agent-child s "k1" "find src | wc -l" "completed")
+          (aob-tests--agent-done s "completed")
+          (let* ((heir (aob-succeed s (lambda ()
+                                        (aob-create-session :id "acp:test:2" :backend 'acp
+                                                            :name "test:2" :project "/tmp/proj/"
+                                                            :dir "/tmp/proj/" :state 'idle))))
+                 (call (car (aob-session-subagents heir)))
+                 (kid (aob-trace--child-at heir (plist-get call :seq))))
+            (should call)
+            (should kid)
+            (should (equal "Count files" (aob-session-name kid)))
+            (with-current-buffer (aob-trace-buffer kid)
+              (aob-trace--render t)
+              (should (string-match-p "find src | wc -l" (buffer-string))))))
+      (aob-tests--kill-views)
+      (dolist (x (aob-sessions))
+        (when (equal (aob-session-project x) "/tmp/proj/") (aob-remove-session x))))))
+
+(ert-deftest aob-subagent-row-without-a-trace-shows-its-call ()
+  (aob-tests--with-session s
+    (unwind-protect
+        (let ((ev (aob-event s 'tool :tool-id "T9" :title "Orphan" :children 1
+                             :status "completed")))
+          (should-not (aob-trace--child-at s (plist-get ev :seq)))
+          (should (eq (aob-trace-buffer s)
+                      (aob-subagents--open s (plist-get ev :seq)))))
+      (aob-tests--kill-views))))
+
 (ert-deftest aob-native-subagent-is-a-session-with-its-own-trace ()
   "A claude Agent call becomes a read-only session under its sender; its
 steps are its own trace, one row in the list, and folded in the parent."
