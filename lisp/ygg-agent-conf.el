@@ -1039,7 +1039,7 @@ where it earns its place back."
 (defvar ygg-skill-index-agents-dir)
 
 (defcustom ygg-agent-skill-core
-  '("code-review" "claiming-a-device" "100czk-pr-format" "cog2" "cog3"
+  '("code-review" "claiming-a-device" "100czk-pr-format"
     "debug-mantra" "show-me" "figma-build-design" "create-pr" "grill-me"
     "unslop" "explain-architecture" "scrutinize" "differential-review"
     "agent-browser" "daemon")

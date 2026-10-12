@@ -36,7 +36,7 @@ Two laws:
 
 - Greenfield feature with known steps -> `superpowers:writing-plans` or `gsd:plan-phase`
 - A bug with an identified root cause -> `superpowers:systematic-debugging`
-- Mechanical find-and-replace with a green suite -> `refactor` or `tcr`
+- Mechanical find-and-replace with a green suite -> `refactor`
 - Single-file edits
 
 ## Law 1: revert, never repair
