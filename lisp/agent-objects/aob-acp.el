@@ -1567,6 +1567,30 @@ never learns there was more than one."
                                      (string-match-p "\\`#*[ \t]*[A-Z]+:?\\'" l))))
                 (mapcar #'string-trim (split-string text "\n"))))))
 
+(defconst aob-acp-subagent-tools '("Agent" "Task" "subagent")
+  "Tool names, or titles, an adapter gives the call that spawns a subagent.")
+
+(defun aob-acp--delegation-brief (raw)
+  "What the delegation call with raw input RAW sent its agents to do, or nil.
+A single run names its agent and task; parallel and chain runs count
+their steps."
+  (when (listp raw)
+    (let* ((agent (plist-get raw :agent))
+           (task (plist-get raw :task))
+           (steps (seq-find (lambda (v) (and v (not (stringp v)) (seqp v)))
+                            (list (plist-get raw :tasks) (plist-get raw :chain))))
+           (kind (if (eq steps (plist-get raw :tasks)) "%d tasks" "%d-step chain")))
+      (cond ((and steps (> (length steps) 1))
+             (format kind (length steps)))
+            (steps
+             (let ((only (seq-first steps)))
+               (aob-acp--delegation-brief
+                (list :agent (plist-get only :agent) :task (plist-get only :task)))))
+            ((and (stringp agent) (stringp task))
+             (aob--first-line (format "%s: %s" agent task) 110))
+            ((stringp agent) agent)
+            ((stringp task) (aob--first-line task 110))))))
+
 (defun aob-acp--tool-name (u)
   "The tool U calls: the spec's name field, else claude's older _meta key."
   (let ((name (plist-get u :name)))
@@ -1589,9 +1613,9 @@ never learns there was more than one."
          (codex (aob-acp--codex-subagent s u id))
          (spawn (aob-acp--codex-spawn-p u))
          ;; an Agent call is titled by its description once its input streams in
-         (task (or (equal (plist-get u :title) "Task")
+         (task (or (member (plist-get u :title) aob-acp-subagent-tools)
                    (eq (plist-get meta :subagent) t)
-                   (member (aob-acp--tool-name u) '("Agent" "Task"))))
+                   (member (aob-acp--tool-name u) aob-acp-subagent-tools)))
          (ev (aob-event s 'tool
                         :tool-id id
                         :kind (plist-get u :kind)
@@ -1599,7 +1623,8 @@ never learns there was more than one."
                         ;; sent to do (claude) or by which agent it is
                         ;; (codex) — never by the bare tool
                         :title (or (and task (or (plist-get raw :description)
-                                                 (plist-get raw :prompt)))
+                                                 (plist-get raw :prompt)
+                                                 (aob-acp--delegation-brief raw)))
                                    (and spawn (or (aob-acp--brief-title (plist-get raw :prompt))
                                                   "subagent"))
                                    (cdr codex)
@@ -1778,16 +1803,18 @@ column of the word bash."
                       ;; updates re-send the bare tool name; a subagent
                       ;; already traded it for what it was sent to do
                       ((not (and (eq key :title) (plist-get ev :subagent)
-                                 (member val '("Task" "spawnAgent"))))))
+                                 (member val '("Task" "subagent" "spawnAgent"))))))
             (plist-put ev key
                        (if (eq key :title)
                            (aob-acp--tool-title u (plist-get ev :raw))
                          val))))
         (when-let* (((plist-get ev :subagent))
-                    ((member (plist-get ev :title) '(nil "Task")))
+                    ((member (plist-get ev :title) '(nil "Task" "subagent")))
                     (raw (plist-get ev :raw))
                     ((listp raw))
-                    (named (or (plist-get raw :description) (plist-get raw :prompt))))
+                    (named (or (plist-get raw :description)
+                               (plist-get raw :prompt)
+                               (aob-acp--delegation-brief raw))))
           (plist-put ev :title named))
         (when-let* (((plist-get ev :codex-spawn))
                     (role (aob-acp--codex-role s (plist-get ev :raw))))
@@ -2247,6 +2274,8 @@ can't parse: the reference survives, and the demotion is said."
                                   (and tk (> tk 0) tk))
                         :usage usage :secs secs
                         :cost cost))
+           (unless (equal (plist-get res :stopReason) "cancelled")
+             (aob-acp--title-ask s text))
            ;; /clear wiped the agent's context — the trace history before it
            ;; now belongs to a conversation that no longer exists, so drop it
            ;; to a single marker (before the queue flushes new work in)
@@ -3269,7 +3298,8 @@ name you gave it, by renaming or at spawn, is never touched."
   :type 'boolean
   :group 'aob)
 
-(defconst aob-acp--auto-name-ranks '((prompt . 1) (goal . 2) (title . 3)))
+(defconst aob-acp--auto-name-ranks
+  '((prompt . 1) (goal . 2) (generated . 3) (title . 4)))
 
 (defun aob-acp--default-name-p (s)
   "Non-nil when S is still called what it was numbered at birth."
@@ -3330,7 +3360,7 @@ name you gave it, by renaming or at spawn, is never touched."
     try))
 
 (defun aob-acp--auto-name (s source text)
-  "Name S from TEXT, which came from SOURCE: prompt, goal or title."
+  "Name S from TEXT, which came from SOURCE: prompt, goal, generated or title."
   (let ((rank (alist-get source aob-acp--auto-name-ranks))
         (had (alist-get (aob-session-ref s :auto-named) aob-acp--auto-name-ranks)))
     (when-let* ((aob-auto-name)
@@ -3346,6 +3376,113 @@ name you gave it, by renaming or at spawn, is never touched."
       (aob-session-put s :auto-named source)
       (unless (equal name (aob-session-name s))
         (aob--set-name s name)))))
+
+(defcustom aob-acp-title-model "haiku"
+  "Model name asked for a title when an agent never sends one.
+Resolved against the models the session's agent offers; the session's own
+model answers when none matches.  Nil never asks."
+  :type '(choice (const :tag "off" nil) string)
+  :group 'aob)
+
+(defcustom aob-acp-titled-agents '("pi")
+  "Agents whose adapter sends no title, so one is asked for."
+  :type '(repeat string) :group 'aob)
+
+(defcustom aob-acp-title-commands
+  '(("pi" "pi" "-p" "--no-session" "--no-tools" "--no-skills"
+     "--no-prompt-templates" "--no-themes" "--no-context-files" "--no-mcp"
+     "--model" "%m" "--" "%p"))
+  "One-shot title command per agent: a function (SESSION MODEL REQUEST)
+returning an argv, or an argv template.  In a template \"%p\" is the
+request and \"%m\" the model, which drops itself and the argument before
+it when the session offers none."
+  :type '(alist :key-type string :value-type sexp)
+  :group 'aob)
+
+(defcustom aob-acp-title-timeout 30
+  "Seconds the title command may run before it is killed."
+  :type 'natnum
+  :group 'aob)
+
+(defconst aob-acp--title-request
+  "Reply with only a 3-6 word title for this coding session, no quotes or punctuation at the end:\n\n")
+
+(defun aob-acp--title-model-for (s)
+  "The model id the title command should name for S, or nil to omit it."
+  (when-let* ((info (aob-acp--model-info s)))
+    (let ((hits (aob-acp--model-hits info aob-acp-title-model)))
+      (if (and hits (null (cdr hits)))
+          (car hits)
+        (car info)))))
+
+(defun aob-acp--title-argv (s request)
+  "The argv for S's agent to answer REQUEST once, or nil."
+  (when-let* ((entry (cdr (assoc (aob-acp-preset-agent (or (aob-session-ref s :agent) ""))
+                                 aob-acp-title-commands))))
+    (let ((model (aob-acp--title-model-for s)))
+      (if (functionp entry)
+          (funcall entry s model request)
+        (let (argv)
+          (dolist (arg entry)
+            (cond ((equal arg "%p") (push request argv))
+                  ((equal arg "%m") (if model (push model argv) (pop argv)))
+                  (t (push arg argv))))
+          (nreverse argv))))))
+
+(defun aob-acp--title-run (s argv done)
+  "Run ARGV in S's directory with its agent's environment.
+DONE gets the first line of output, or nil."
+  (let* ((default-directory (file-name-as-directory (expand-file-name (aob-session-dir s))))
+         (process-environment (append (aob-acp--conn-env (aob-session-ref s :agent)
+                                                         (aob-session-project s))
+                                      process-environment))
+         (out (generate-new-buffer " *aob-title*"))
+         (err (generate-new-buffer " *aob-title-err*"))
+         (timer nil)
+         (finish (lambda (proc)
+                   (let ((text (and (zerop (process-exit-status proc))
+                                    (with-current-buffer out
+                                      (string-trim (buffer-string))))))
+                     (when timer (cancel-timer timer))
+                     (kill-buffer out)
+                     (kill-buffer err)
+                     (funcall done (and text (car (split-string text "\n" t))))))))
+    (condition-case nil
+        (let ((proc (make-process
+                     :name "aob-title" :buffer out :stderr err :noquery t
+                     :connection-type 'pipe :command argv
+                     :sentinel (lambda (proc _event)
+                                 (unless (process-live-p proc)
+                                   (funcall finish proc))))))
+          (setq timer (run-at-time aob-acp-title-timeout nil
+                                   (lambda () (when (process-live-p proc)
+                                                (kill-process proc)))))
+          (process-send-eof proc))
+      (error (kill-buffer out)
+             (kill-buffer err)
+             (funcall done nil)))))
+
+(defun aob-acp--title-ask (s text)
+  "Once per session S, ask its agent for a name from its first prompt TEXT."
+  (when-let* ((aob-acp-title-model)
+              (aob-auto-name)
+              ((stringp text))
+              ((member (aob-acp-preset-agent (or (aob-session-ref s :agent) ""))
+                       aob-acp-titled-agents))
+              ((not (aob-session-ref s :title-asked)))
+              ((not (aob-session-ref s :named-by-user)))
+              ((not (eq (aob-session-ref s :auto-named) 'title)))
+              ((aob-session-dir s))
+              ((not (file-remote-p (aob-session-dir s))))
+              (argv (aob-acp--title-argv
+                     s (concat aob-acp--title-request
+                               (substring text 0 (min (length text) 2000)))))
+              ((executable-find (car argv))))
+    (aob-session-put s :title-asked t)
+    (aob-acp--title-run
+     s argv
+     (lambda (title)
+       (when title (aob-acp--auto-name s 'generated title))))))
 
 (defun aob-acp--want-mode (s want)
   "Switch S to the mode id WANT its definition pinned, if advertised.
