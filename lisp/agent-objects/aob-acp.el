@@ -4248,6 +4248,7 @@ older `terminal-auth' extension names the whole command itself."
     (nreverse out)))
 
 (declare-function term-char-mode "term" ())
+(declare-function term-line-mode "term" ())
 
 (defun aob-acp--auth-terminal (s method done)
   "Run S's agent's terminal login METHOD in a terminal buffer.
@@ -4269,6 +4270,13 @@ this connection never reads."
                   (lambda (p _event)
                     (unless (or told (process-live-p p))
                       (setq told t)
+                      (when (buffer-live-p buf)
+                        (with-current-buffer buf (term-line-mode)))
+                      (when (and (eql (process-exit-status p) 0)
+                                 (buffer-live-p buf))
+                        (if-let* ((w (get-buffer-window buf t)))
+                            (quit-window t w)
+                          (kill-buffer buf)))
                       (funcall done (eql (process-exit-status p) 0)))))
     (with-current-buffer buf (term-char-mode))
     (unless noninteractive (pop-to-buffer buf))
