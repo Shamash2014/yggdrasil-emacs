@@ -251,8 +251,13 @@ string, or (STATUS . WHAT-IT-SAID)."
   (concat (ygg-git-compare-threads-tests--conversation) (ygg-git-compare-threads-tests--top)))
 
 (defun ygg-git-compare-threads-tests--top ()
-  (mapconcat (lambda (ov) (or (overlay-get ov 'before-string) ""))
-             (overlays-in (point-min) (1+ (point-min))) ""))
+  (let ((start (or (seq-some (lambda (section)
+                               (and (not (memq (oref section type) ygg-git-compare--pr-info-order))
+                                    (marker-position (oref section start))))
+                             (oref magit-root-section children))
+                   (point-min))))
+    (mapconcat (lambda (ov) (or (overlay-get ov 'before-string) ""))
+               (overlays-in start (1+ start)) "")))
 
 (defun ygg-git-compare-threads-tests--goto-plain ()
   (goto-char (point-min))

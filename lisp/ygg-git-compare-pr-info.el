@@ -559,26 +559,31 @@ being fetched; with FORCE, whatever their age."
          (failed (plist-get view :error))
          (width (min 48 (apply #'max 8 (mapcar (lambda (c) (string-width (plist-get c :name)))
                                                checks)))))
-    (when (or checks failed)
-      (magit-insert-section (ygg-git-compare-checks nil
-                                                    (and checks (not failed)
-                                                         (not (seq-some (lambda (c)
-                                                                          (not (eq (plist-get c :state)
-                                                                                   'passed)))
-                                                                        checks))))
-        (magit-insert-heading
-          (concat (propertize (if checks (format "Checks (%d)" (length checks)) "Checks")
-                              'font-lock-face 'magit-section-heading)
-                  (and checks (concat "  " (ygg-git-compare--checks-summary checks)))))
-        (dolist (check checks)
-          (magit-insert-section (ygg-git-compare-check check)
-            (insert (ygg-git-compare--check-line check width) "\n")))
-        (when failed
-          (insert (propertize (format "  checks: %s%s" failed
-                                      (if value " (showing the last fetch)" ""))
-                              'font-lock-face 'error)
-                  "\n"))
-        (insert "\n")))))
+    (magit-insert-section (ygg-git-compare-checks (and (null checks) 'empty)
+                                                  (and checks (not failed)
+                                                       (not (seq-some (lambda (c)
+                                                                        (not (eq (plist-get c :state)
+                                                                                 'passed)))
+                                                                      checks))))
+      (magit-insert-heading
+        (concat (propertize (if checks (format "Checks (%d)" (length checks)) "Checks")
+                            'font-lock-face 'magit-section-heading)
+                (and checks (concat "  " (ygg-git-compare--checks-summary checks)))))
+      (dolist (check checks)
+        (magit-insert-section (ygg-git-compare-check check)
+          (insert (ygg-git-compare--check-line check width) "\n")))
+      (unless (or checks failed)
+        (insert (propertize (cond ((plist-get view :fetching) "  fetching…")
+                                  (value "  no checks")
+                                  (t "  not fetched"))
+                            'font-lock-face 'shadow)
+                "\n"))
+      (when failed
+        (insert (propertize (format "  checks: %s%s" failed
+                                    (if value " (showing the last fetch)" ""))
+                            'font-lock-face 'error)
+                "\n"))
+      (insert "\n"))))
 
 (defun ygg-git-compare--insert-pr-info ()
   "The Conversation and Checks of the pull request this compare shows, ahead

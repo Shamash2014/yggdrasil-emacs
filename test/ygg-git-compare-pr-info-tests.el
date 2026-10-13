@@ -370,14 +370,21 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
         (should (oref (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks) hidden))
         (should (string-search "CI ✓ 1" (ygg-git-compare-pr-info-tests--header)))))))
 
-(ert-deftest ygg-git-compare-pr-info-no-checks-draws-no-section ()
+(ert-deftest ygg-git-compare-pr-info-no-checks-still-draws-the-section ()
   (ygg-git-compare-pr-info-tests--with-repo head
     (ygg-git-compare-pr-info-tests--put "checks.json" "{\"statusCheckRollup\":[]}")
     (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
       (ygg-git-compare-pr-info-tests--settle buffer)
       (with-current-buffer buffer
-        (should-not (string-search "Checks" (ygg-git-compare-pr-info-tests--text)))
+        (let ((text (ygg-git-compare-pr-info-tests--text)))
+          (should (string-search "Checks\n  no checks" text))
+          (should (< (string-search "Checks" text) (string-search "a.txt" text))))
         (should-not (string-search "CI" (ygg-git-compare-pr-info-tests--header)))))))
+
+(ert-deftest ygg-git-compare-pr-info-checks-being-fetched-draw-the-section ()
+  (with-temp-buffer
+    (ygg-git-compare--insert-checks '(:fetching t))
+    (should (string-search "Checks\n  fetching…" (buffer-string)))))
 
 (ert-deftest ygg-git-compare-pr-info-check-keys-open-and-copy-its-url ()
   (ygg-git-compare-pr-info-tests--with-repo head
@@ -607,13 +614,13 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
                                      (ygg-git-compare-pr-info-tests--log)))
                  1)))))
 
-(ert-deftest ygg-git-compare-pr-info-gitlab-without-a-pipeline-shows-nothing ()
+(ert-deftest ygg-git-compare-pr-info-gitlab-without-a-pipeline-says-no-checks ()
   (ygg-git-compare-pr-info-tests--with-repo head
     (ygg-git-compare-pr-info-tests--put "mr.json" "{\"iid\":12,\"head_pipeline\":null}")
     (let ((buffer (ygg-git-compare-pr-info-tests--open 'gitlab head)))
       (ygg-git-compare-pr-info-tests--settle buffer)
       (with-current-buffer buffer
-        (should-not (string-search "Checks" (ygg-git-compare-pr-info-tests--text)))
+        (should (string-search "Checks\n  no checks" (ygg-git-compare-pr-info-tests--text)))
         (should (= (ygg-git-compare-pr-info-tests--calls "jobs") 0))))))
 
 (ert-deftest ygg-git-compare-pr-info-gitlab-failure-is-an-error-row ()
