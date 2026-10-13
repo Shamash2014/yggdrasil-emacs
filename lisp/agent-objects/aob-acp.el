@@ -3966,30 +3966,53 @@ pass either and old configuration keeps working."
                                             nil nil nil nil aob-acp-default-agent))))
     (cond ((string-empty-p name) (user-error "aob: no preset"))
           ((member name (aob-acp-names)) name)
-          (t (let ((agent (completing-read (format "New preset %s runs on: " name)
-                                           (mapcar #'car aob-acp-agents) nil t nil nil
-                                           (aob-acp-preset-agent aob-acp-default-agent))))
-               (when (string-empty-p agent) (user-error "aob: no agent"))
-               (customize-save-variable
-                'aob-acp-presets
-                (append aob-acp-presets
-                        (list (cons name (funcall aob-acp-new-preset-function
-                                                  name agent)))))
-               name)))))
+          (t (aob-acp-create-preset name)))))
+
+(defun aob-acp--save-presets (presets)
+  (customize-save-variable 'aob-acp-presets presets))
 
 ;;;###autoload
-(defun aob-acp-remove-preset (name)
-  "Remove preset NAME from `aob-acp-presets' and save the rest.
+(defun aob-acp-create-preset (name &optional agent)
+  "Make preset NAME running on AGENT, save it, and return NAME."
+  (interactive (list (string-trim (read-string "New preset: "))))
+  (when (string-empty-p name) (user-error "aob: no preset"))
+  (when (member name (aob-acp-names)) (user-error "aob: %s already exists" name))
+  (let ((agent (or agent
+                   (completing-read (format "New preset %s runs on: " name)
+                                    (mapcar #'car aob-acp-agents) nil t nil nil
+                                    (aob-acp-preset-agent aob-acp-default-agent)))))
+    (when (string-empty-p agent) (user-error "aob: no agent"))
+    (aob-acp--save-presets
+     (append aob-acp-presets
+             (list (cons name (funcall aob-acp-new-preset-function name agent)))))
+    name))
+
+;;;###autoload
+(defun aob-acp-edit-preset (name spec)
+  "Replace preset NAME's plist with SPEC and save."
+  (interactive
+   (let ((name (completing-read "Edit preset: " (mapcar #'car aob-acp-presets) nil t)))
+     (list name (read--expression (format "Preset %s: " name)
+                                  (prin1-to-string (cdr (assoc name aob-acp-presets)))))))
+  (unless (assoc name aob-acp-presets) (user-error "aob: no preset %s" name))
+  (unless (and (plistp spec) (assoc (plist-get spec :agent) aob-acp-agents))
+    (user-error "aob: a preset is a plist whose :agent is one of %s"
+                (mapconcat #'car aob-acp-agents ", ")))
+  (aob-acp--save-presets
+   (mapcar (lambda (p) (if (equal (car p) name) (cons name spec) p)) aob-acp-presets)))
+
+;;;###autoload
+(defun aob-acp-delete-preset (name)
+  "Delete preset NAME from `aob-acp-presets' and save the rest.
 A profile it ran under keeps its home: conversations live there."
-  (interactive (list (completing-read "Remove preset: " (mapcar #'car aob-acp-presets)
+  (interactive (list (completing-read "Delete preset: " (mapcar #'car aob-acp-presets)
                                       nil t)))
   (let ((spec (cdr (or (assoc name aob-acp-presets)
                        (user-error "aob: no preset %s" name)))))
-    (when (or noninteractive (yes-or-no-p (format "Remove preset %s? " name)))
-      (customize-save-variable
-       'aob-acp-presets
+    (when (or noninteractive (yes-or-no-p (format "Delete preset %s? " name)))
+      (aob-acp--save-presets
        (seq-remove (lambda (p) (equal (car p) name)) aob-acp-presets))
-      (message "aob: removed preset %s%s" name
+      (message "aob: deleted preset %s%s" name
                (if-let* ((profile (plist-get spec :profile)))
                    (format "; profile %s kept" profile)
                  "")))))
