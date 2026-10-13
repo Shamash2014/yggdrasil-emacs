@@ -213,5 +213,38 @@ A profile without a home of its own has nowhere but SPEC to keep them."
         spec)
     (aob-acp--edit-profile-plist name spec)))
 
+;;;###autoload
+(defun ygg-pi-set-api-key (profile provider key)
+  "Keep KEY as PROVIDER's API key in pi PROFILE's home, as pi's /login does."
+  (interactive
+   (list (completing-read "pi profile: "
+                          (delq nil (mapcar (lambda (p)
+                                              (and (ygg-pi-agent-p (plist-get (cdr p) :agent))
+                                                   (plist-get (cdr p) :profile)))
+                                            (bound-and-true-p aob-acp-profiles)))
+                          nil t)
+         (string-trim (completing-read "Provider: " '("anthropic" "openai" "google" "openrouter"
+                                                      "groq" "xai" "mistral" "deepseek")))
+         (read-passwd "API key: ")))
+  (when (or (string-empty-p provider) (string-empty-p key))
+    (user-error "pi: a provider and a key, both"))
+  (let* ((file (expand-file-name "auth.json" (ygg-agent--profile-home profile "pi")))
+         (auth (if (file-exists-p file)
+                   (condition-case nil
+                       (json-parse-string
+                        (with-temp-buffer (insert-file-contents file) (buffer-string)))
+                     (error (user-error "pi: %s does not parse; fix it before adding a key"
+                                        (abbreviate-file-name file))))
+                 (make-hash-table :test #'equal)))
+         (entry (make-hash-table :test #'equal)))
+    (puthash "type" "api_key" entry)
+    (puthash "key" key entry)
+    (puthash provider entry auth)
+    (unless (file-exists-p file)
+      (with-temp-file file (insert "{}"))
+      (set-file-modes file #o600))
+    (ygg-agent--replace-json file auth)
+    (message "pi: %s key kept for profile %s" provider profile)))
+
 (provide 'ygg-pi)
 ;;; ygg-pi.el ends here

@@ -300,5 +300,18 @@
       (delete-process proc)
       (aob-remove-session s))))
 
+(ert-deftest ygg-agent-profiles-pi-keeps-a-pasted-key-in-the-profile ()
+  (ygg-agent-profiles-tests--with
+    (ygg-pi-set-api-key "work" "anthropic" "sk-test")
+    (let* ((file (expand-file-name "profiles/work/pi/auth.json" ygg-agent-conf-root))
+           (auth (json-parse-string (with-temp-buffer (insert-file-contents file)
+                                                      (buffer-string)))))
+      (should (equal (gethash "key" (gethash "anthropic" auth)) "sk-test"))
+      (should (equal (gethash "type" (gethash "anthropic" auth)) "api_key"))
+      (should (= (file-modes file) #o600))
+      (with-temp-file file (insert "{broken"))
+      (should-error (ygg-pi-set-api-key "work" "openai" "sk-2") :type 'user-error)
+      (should (equal (with-temp-buffer (insert-file-contents file) (buffer-string)) "{broken")))))
+
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here
