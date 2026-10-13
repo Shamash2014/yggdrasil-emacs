@@ -8041,7 +8041,7 @@ line, so no shell, version manager or buffer between drops it."
           (aob-acp-agents
            '(("fake" :command ("sh" "-c" "test \"$AOB_CONF\" = /probe" "sh")))))
       (aob-tests--auth-conn s)
-      (process-put (aob-session-conn s) 'aob-own-env '("AOB_CONF=/probe"))
+      (process-put (aob-session-conn s) 'aob-own-env '("AOB_CONF=/probe" "AOB_CONF=/project"))
       (unwind-protect
           (aob-tests--capturing sent
             (aob-tests--auth-open s)
@@ -8121,7 +8121,8 @@ login restarts it and the prompt it refused goes again."
             (aob-tests--auth-refuse s (plist-get (car sent) :id))
             (aob-acp--resolve s (car (aob-session-decisions s)) "sub-login")
             (should (equal (car ran) "*login fake*"))
-            (should (equal (seq-take (nth 1 ran) 2) '("env" "CONF=/p")))
+            (should (equal (car (nth 1 ran)) "env"))
+            (should (member "CONF=/p" (nth 1 ran)))
             (should (= 2 (length (aob-tests--sent-method sent "session/new")))))
         (ignore-errors (kill-buffer "*login fake*"))))))
 

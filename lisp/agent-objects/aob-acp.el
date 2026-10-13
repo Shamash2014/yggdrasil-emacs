@@ -4476,6 +4476,13 @@ Called with the buffer NAME, ARGV, the DIR it runs in and DONE, inside
 the login's environment; returns the buffer, and calls DONE once with
 whether the login exited 0.")
 
+(defun aob-acp--env-first-wins (env)
+  "ENV with each variable once, as its first entry has it.
+That is how the connection's own process reads it; `env' on a command
+line takes the last, so a later entry must not be left to override."
+  (seq-uniq env (lambda (a b)
+                  (equal (car (split-string a "=")) (car (split-string b "="))))))
+
 (defun aob-acp--auth-terminal (s method done)
   "Run S's agent's terminal login METHOD in a terminal buffer.
 DONE is called once with whether it exited 0.  It runs where and with
@@ -4486,8 +4493,9 @@ this connection never reads."
   (let* ((proc (aob-acp--proc-of s))
          (argv (funcall aob-acp-command-function
                         (append (list "env")
-                                (process-get proc 'aob-own-env)
-                                (aob-acp--auth-env method)
+                                (aob-acp--env-first-wins
+                                 (append (aob-acp--auth-env method)
+                                         (process-get proc 'aob-own-env)))
                                 (aob-acp--auth-argv s method))))
          (process-environment (append (aob-acp--auth-env method)
                                       (or (process-get proc 'aob-env)
