@@ -1,5 +1,7 @@
 #!/bin/sh
 DIR=$(cd "$(dirname "$0")" && pwd)
+PATH="$DIR/bin:$PATH"
+export PATH
 set -- -e "$DIR/aob-pi-mcp.js" ${AOB_PI_APPROVE:+--approve} "$@"
 # only the core skills are described; the rest are found through skill_search
 if [ -n "$AOB_PI_SKILL_CORE" ]; then
@@ -12,4 +14,4 @@ if [ -n "$AOB_PI_SKILL_CORE" ]; then
   [ -d .pi/skills ] && set -- "$@" --skill .pi/skills
   while [ "$n" -gt 0 ]; do set -- "$@" "$1"; shift; n=$((n - 1)); done
 fi
-exec pi "$@"
+exec "$DIR/bin/pi" "$@"

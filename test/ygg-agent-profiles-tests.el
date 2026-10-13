@@ -369,5 +369,40 @@
             (should (member "rpc" args))))
       (delete-directory top t))))
 
+(defun ygg-agent-profiles-tests--shim-run (models &rest args)
+  "Run the pi shim with ARGS against a pi whose --list-models prints MODELS."
+  (let* ((top (make-temp-file "pi-shim-" t))
+         (bin (expand-file-name "bin" top))
+         (out (expand-file-name "args" top))
+         (shim (expand-file-name "etc/pi/bin/pi"
+                                 (file-name-directory
+                                  (directory-file-name
+                                   (file-name-directory (locate-library "ygg-pi")))))))
+    (unwind-protect
+        (progn
+          (make-directory bin)
+          (with-temp-file (expand-file-name "pi" bin)
+            (insert "#!/bin/sh\nif [ \"$1\" = --list-models ]; then\n"
+                    "printf 'provider model\\n" models "'\nexit 0\nfi\n"
+                    "for a in \"$@\"; do echo \"$a\"; done > " out "\n"))
+          (set-file-modes (expand-file-name "pi" bin) #o755)
+          (let ((process-environment
+                 (cons (concat "PATH=" (file-name-directory shim) ":" bin ":/usr/bin:/bin")
+                       process-environment)))
+            (apply #'call-process shim nil nil nil args))
+          (split-string (with-temp-buffer (insert-file-contents out) (buffer-string)) "\n" t))
+      (delete-directory top t))))
+
+(ert-deftest ygg-agent-profiles-pi-children-get-a-provider-for-a-bare-model ()
+  (should (equal (ygg-agent-profiles-tests--shim-run
+                  "anthropic claude-opus-5\\n" "--mode" "json" "--model" "claude-opus-5:high" "-p")
+                 '("--mode" "json" "--model" "anthropic/claude-opus-5:high" "-p")))
+  (should (equal (ygg-agent-profiles-tests--shim-run
+                  "anthropic claude-opus-5\\n" "--model" "openai/gpt-x")
+                 '("--model" "openai/gpt-x")))
+  (should (equal (ygg-agent-profiles-tests--shim-run
+                  "anthropic claude-opus-5\\nbedrock claude-opus-5\\n" "--model" "claude-opus-5")
+                 '("--model" "claude-opus-5"))))
+
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here

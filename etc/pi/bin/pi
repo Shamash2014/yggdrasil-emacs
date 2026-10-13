@@ -1,0 +1,27 @@
+#!/bin/sh
+# pi-subagents starts children as "pi" from PATH with a bare --model; pin it to
+# the one logged-in provider that serves it, as pi does for an id with no suffix
+self=$(cd "$(dirname "$0")" && pwd)
+PATH=$(printf '%s' "$PATH" | tr ':' '\n' | grep -vxF -e "$self" -e "$self/" | paste -sd: -)
+export PATH
+n=$#
+model=
+while [ "$n" -gt 0 ]; do
+  arg=$1; shift; n=$((n - 1))
+  if [ -n "$model" ]; then
+    model=
+    case $arg in
+      */*) ;;
+      *)
+        base=${arg%%:*}
+        providers=$(pi --list-models "$base" 2>/dev/null |
+                      awk -v m="$base" 'NR > 1 && $2 == m { print $1 }' | sort -u)
+        [ -n "$providers" ] && [ "$(printf '%s\n' "$providers" | wc -l)" -eq 1 ] &&
+          arg="$providers/$arg"
+        ;;
+    esac
+  fi
+  [ "$arg" = "--model" ] && model=1
+  set -- "$@" "$arg"
+done
+exec pi "$@"
