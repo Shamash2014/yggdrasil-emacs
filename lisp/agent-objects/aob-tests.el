@@ -8032,6 +8032,26 @@ a second refusal fails the session, readably, instead of asking again."
                                     (aob-session-ref s :fail-reason))))
         (ignore-errors (kill-buffer "*login fake*"))))))
 
+(ert-deftest aob-auth-terminal-login-carries-the-connection-config ()
+  "The config a connection was started with rides the login's own command
+line, so no shell, version manager or buffer between drops it."
+  (aob-tests--with-session s
+    (let ((aob-acp-command-function
+           (lambda (argv) (append '("env" "-u" "AOB_CONF") argv)))
+          (aob-acp-agents
+           '(("fake" :command ("sh" "-c" "test \"$AOB_CONF\" = /probe" "sh")))))
+      (aob-tests--auth-conn s)
+      (process-put (aob-session-conn s) 'aob-own-env '("AOB_CONF=/probe"))
+      (unwind-protect
+          (aob-tests--capturing sent
+            (aob-tests--auth-open s)
+            (aob-tests--auth-refuse s (plist-get (car sent) :id))
+            (aob-acp--resolve s (car (aob-session-decisions s)) "sub-login")
+            (aob-tests--await (lambda () (or (cdr (aob-tests--sent-method sent "session/new"))
+                                             (eq (aob-session-state s) 'failed))))
+            (should (= 2 (length (aob-tests--sent-method sent "session/new")))))
+        (ignore-errors (kill-buffer "*login fake*"))))))
+
 (ert-deftest aob-auth-terminal-login-that-fails-sends-nothing ()
   (aob-tests--with-session s
     (let ((aob-acp-command-function #'identity)

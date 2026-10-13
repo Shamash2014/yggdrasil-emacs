@@ -252,13 +252,14 @@ first."
          (_ready (and aob-acp-prepare-function
                       (funcall aob-acp-prepare-function
                                agent project aob-acp-isolate)))
+         (own (append aob-acp--session-env
+                      (and aob-acp-environment-function
+                           (funcall aob-acp-environment-function
+                                    agent project project aob-acp-isolate))))
          ;; a claude spawned with CLAUDECODE set refuses to start (nested
          ;; guard); the append keeps envrc/mise buffer-local env visible
          (process-environment
-          (append aob-acp--session-env
-                  (and aob-acp-environment-function
-                       (funcall aob-acp-environment-function
-                                agent project project aob-acp-isolate))
+          (append own
                   (seq-remove (lambda (v) (string-prefix-p "CLAUDECODE=" v))
                               process-environment)))
          (base (format "%s:%s" agent
@@ -282,6 +283,7 @@ first."
     (process-put proc 'aob-conn-key (aob-acp--conn-key agent project))
     (process-put proc 'aob-remote (file-remote-p default-directory))
     (process-put proc 'aob-env process-environment)
+    (process-put proc 'aob-own-env own)
     (process-put proc 'aob-sessions (make-hash-table :test #'equal))
     (process-put proc 'aob-next-id (list 0))
     (process-put proc 'aob-pending (make-hash-table :test #'eql))
@@ -4416,7 +4418,11 @@ another environment is another config home, and a login there is one
 this connection never reads."
   (require 'term)
   (let* ((proc (aob-acp--proc-of s))
-         (argv (funcall aob-acp-command-function (aob-acp--auth-argv s method)))
+         (argv (funcall aob-acp-command-function
+                        (append (list "env")
+                                (process-get proc 'aob-own-env)
+                                (aob-acp--auth-env method)
+                                (aob-acp--auth-argv s method))))
          (process-environment (append (aob-acp--auth-env method)
                                       (or (process-get proc 'aob-env)
                                           process-environment)))

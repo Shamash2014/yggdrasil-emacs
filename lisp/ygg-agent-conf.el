@@ -1057,12 +1057,14 @@ where it earns its place back."
     (unless profile (ygg-agent--bootstrap-share spec home))
     (remhash home ygg-agent--login-cache)
     (clrhash ygg-agent--config-dirs)
-    (let ((compilation-environment
-           (cons (format "%s=%s" (plist-get spec :var) (directory-file-name home))
-                 compilation-environment))
-          (default-directory (file-name-as-directory (expand-file-name project))))
+    (let* ((config (format "%s=%s" (plist-get spec :var) (directory-file-name home)))
+           (compilation-environment (cons config compilation-environment))
+           (default-directory (file-name-as-directory (expand-file-name project))))
       (pop-to-buffer
-       (ghostel-compile--start (mapconcat #'shell-quote-argument (list exe "auth" "login") " ")
+       (ghostel-compile--start (mapconcat #'shell-quote-argument
+                                          (list "env" config
+                                                exe "auth" "login")
+                                          " ")
                                (format "*login %s*" (abbreviate-file-name home))
                                default-directory nil t)))))
 

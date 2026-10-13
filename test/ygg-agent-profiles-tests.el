@@ -189,6 +189,7 @@
           (ygg-agent-login-config-home project "work")))
       (should (string-suffix-p "/profiles/work/claude" (car call)))
       (should (string-suffix-p "auth login" (nth 1 call)))
+      (should (string-match-p "\\`env CLAUDE_CONFIG_DIR\\\\?=[^ ]*/profiles/work/claude " (nth 1 call)))
       (should (eq (nth 5 call) t)))))
 
 (provide 'ygg-agent-profiles-tests)
