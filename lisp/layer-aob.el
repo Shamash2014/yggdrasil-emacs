@@ -2253,6 +2253,7 @@ space is a bigger sweep than closing what is in front of you."
 (yggdrasil-define-keys 'ygg-leader-acp-map
   ;; c is the way in: agent, project, model, then the first turn
   "c" #'aob-acp-spawn-with :label "spawn: agent, project, model"
+  "C" #'aob-acp-remove-preset :label "remove a preset"
   "W" #'aob-ask-to :label "ask, answer goes…"
   "x" #'aob-context-add :label "context: add region"
   "X" #'aob-context-list :label "context: list"

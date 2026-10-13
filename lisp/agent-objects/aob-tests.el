@@ -8084,6 +8084,16 @@ login restarts it and the prompt it refused goes again."
       (should (eq restarted s))
       (should (equal resent '(fresh "so?" nil))))))
 
+(ert-deftest aob-remove-preset-saves-the-rest ()
+  (let ((aob-acp-presets '(("a" :agent "claude") ("b" :agent "pi" :profile "b")))
+        saved)
+    (cl-letf (((symbol-function 'customize-save-variable)
+               (lambda (var val) (set var val) (setq saved t))))
+      (aob-acp-remove-preset "b"))
+    (should saved)
+    (should (equal aob-acp-presets '(("a" :agent "claude"))))
+    (should-error (aob-acp-remove-preset "nope") :type 'user-error)))
+
 (ert-deftest aob-auth-terminal-login-that-fails-sends-nothing ()
   (aob-tests--with-session s
     (let ((aob-acp-command-function #'identity)

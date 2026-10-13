@@ -3977,6 +3977,23 @@ pass either and old configuration keeps working."
                                                   name agent)))))
                name)))))
 
+;;;###autoload
+(defun aob-acp-remove-preset (name)
+  "Remove preset NAME from `aob-acp-presets' and save the rest.
+A profile it ran under keeps its home: conversations live there."
+  (interactive (list (completing-read "Remove preset: " (mapcar #'car aob-acp-presets)
+                                      nil t)))
+  (let ((spec (cdr (or (assoc name aob-acp-presets)
+                       (user-error "aob: no preset %s" name)))))
+    (when (or noninteractive (yes-or-no-p (format "Remove preset %s? " name)))
+      (customize-save-variable
+       'aob-acp-presets
+       (seq-remove (lambda (p) (equal (car p) name)) aob-acp-presets))
+      (message "aob: removed preset %s%s" name
+               (if-let* ((profile (plist-get spec :profile)))
+                   (format "; profile %s kept" profile)
+                 "")))))
+
 (defcustom aob-acp-project-mcp-file ".mcp.json"
   "Where a checkout declares the MCP servers its work needs.
 The file claude reads when it runs itself.  Over ACP nothing reads it
