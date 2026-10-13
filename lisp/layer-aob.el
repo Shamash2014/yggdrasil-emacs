@@ -537,6 +537,21 @@ actions keep their tool title.  The short path stays the clickable target."
             (list :agent agent :profile name)
           (list :agent agent))))
 
+(setq aob-acp-edit-profile-function #'ygg-pi-edit-profile)
+
+(defun ygg-aob--trash-profile-home (_name spec)
+  "Offer to move the home SPEC's profile kept to the trash, conversations and all."
+  (when-let* ((profile (plist-get spec :profile))
+              (ygg-agent-conf-root)
+              (dir (expand-file-name (concat "profiles/" profile) ygg-agent-conf-root))
+              ((file-directory-p dir))
+              ((not noninteractive))
+              ((y-or-n-p (format "Move profile home %s, its conversations too, to the trash? "
+                                 (abbreviate-file-name dir)))))
+    (move-file-to-trash dir)))
+
+(add-hook 'aob-acp-delete-profile-functions #'ygg-aob--trash-profile-home)
+
 (defun ygg-aob--with-profile (fn agent &rest args)
   "Spawn AGENT under the profile its preset names."
   (let* ((refs (bound-and-true-p aob-acp-session-refs))

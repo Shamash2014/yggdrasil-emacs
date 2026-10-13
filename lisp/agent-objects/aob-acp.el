@@ -3989,13 +3989,28 @@ pass either and old configuration keeps working."
              (list (cons name (funcall aob-acp-new-profile-function name agent)))))
     name))
 
+(defun aob-acp--edit-profile-plist (name spec)
+  "Ask for profile NAME's model and mode over SPEC; an empty answer is the agent's own."
+  (dolist (key '(:model :mode))
+    (let ((value (string-trim
+                  (read-string (format "Profile %s %s (empty = agent default): "
+                                       name (substring (symbol-name key) 1))
+                               (plist-get spec key)))))
+      (setq spec (if (string-empty-p value)
+                     (map-delete (copy-sequence spec) key)
+                   (plist-put (copy-sequence spec) key value)))))
+  spec)
+
+(defvar aob-acp-edit-profile-function #'aob-acp--edit-profile-plist
+  "Called with a profile's NAME and plist; asks what to change, returns the plist.")
+
 ;;;###autoload
 (defun aob-acp-edit-profile (name spec)
   "Replace profile NAME's plist with SPEC and save."
   (interactive
    (let ((name (completing-read "Edit profile: " (mapcar #'car aob-acp-profiles) nil t)))
-     (list name (read--expression (format "Profile %s: " name)
-                                  (prin1-to-string (cdr (assoc name aob-acp-profiles)))))))
+     (list name (funcall aob-acp-edit-profile-function name
+                         (cdr (assoc name aob-acp-profiles))))))
   (unless (assoc name aob-acp-profiles) (user-error "aob: no profile %s" name))
   (unless (and (plistp spec) (assoc (plist-get spec :agent) aob-acp-agents))
     (user-error "aob: a profile is a plist whose :agent is one of %s"
@@ -4003,10 +4018,13 @@ pass either and old configuration keeps working."
   (aob-acp--save-profiles
    (mapcar (lambda (p) (if (equal (car p) name) (cons name spec) p)) aob-acp-profiles)))
 
+(defvar aob-acp-delete-profile-functions nil
+  "Called with a deleted profile's NAME and plist, to clear up what it kept.")
+
 ;;;###autoload
 (defun aob-acp-delete-profile (name)
   "Delete profile NAME from `aob-acp-profiles' and save the rest.
-A profile it ran under keeps its home: conversations live there."
+What it kept elsewhere is offered to `aob-acp-delete-profile-functions'."
   (interactive (list (completing-read "Delete profile: " (mapcar #'car aob-acp-profiles)
                                       nil t)))
   (let ((spec (cdr (or (assoc name aob-acp-profiles)
@@ -4014,10 +4032,8 @@ A profile it ran under keeps its home: conversations live there."
     (when (or noninteractive (yes-or-no-p (format "Delete profile %s? " name)))
       (aob-acp--save-profiles
        (seq-remove (lambda (p) (equal (car p) name)) aob-acp-profiles))
-      (message "aob: deleted profile %s%s" name
-               (if-let* ((profile (plist-get spec :profile)))
-                   (format "; profile %s kept" profile)
-                 "")))))
+      (run-hook-with-args 'aob-acp-delete-profile-functions name spec)
+      (message "aob: deleted profile %s" name))))
 
 (defcustom aob-acp-project-mcp-file ".mcp.json"
   "Where a checkout declares the MCP servers its work needs.

@@ -210,5 +210,43 @@
         (should (gethash "packages" settings))
         (should-not (file-exists-p (expand-file-name "models.json" home)))))))
 
+(ert-deftest ygg-agent-profiles-pi-edit-sets-the-home-engine-and-model ()
+  (ygg-agent-profiles-tests--with
+    (let ((spec '(:agent "pi" :profile "work")))
+      (cl-letf (((symbol-function 'ygg-pi--home-models) (lambda (_) '("anthropic/claude-x")))
+                ((symbol-function 'completing-read) (lambda (&rest _) "anthropic/claude-x")))
+        (should (equal (ygg-pi-edit-profile "work" spec) spec)))
+      (let ((settings (json-parse-string
+                       (with-temp-buffer
+                         (insert-file-contents
+                          (expand-file-name "profiles/work/pi/settings.json" ygg-agent-conf-root))
+                         (buffer-string)))))
+        (should (equal (gethash "defaultProvider" settings) "anthropic"))
+        (should (equal (gethash "defaultModel" settings) "claude-x")))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "")))
+        (ygg-pi-edit-profile "work" spec))
+      (should-not (string-match-p "defaultProvider"
+                                  (with-temp-buffer
+                                    (insert-file-contents
+                                     (expand-file-name "profiles/work/pi/settings.json"
+                                                       ygg-agent-conf-root))
+                                    (buffer-string)))))))
+
+(ert-deftest ygg-agent-profiles-other-agents-edit-their-model-and-mode ()
+  (let ((answers '("opus" "")))
+    (cl-letf (((symbol-function 'read-string) (lambda (&rest _) (pop answers))))
+      (should (equal (ygg-pi-edit-profile "c" '(:agent "claude" :mode "auto"))
+                     '(:agent "claude" :model "opus"))))))
+
+(ert-deftest ygg-agent-profiles-delete-offers-the-home-to-the-trash ()
+  (ygg-agent-profiles-tests--with
+    (let ((home (ygg-agent--profile-home "work" "claude"))
+          trashed)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                ((symbol-function 'move-file-to-trash) (lambda (f) (setq trashed f))))
+        (let ((noninteractive nil))
+          (ygg-aob--trash-profile-home "work" '(:agent "claude" :profile "work"))))
+      (should (equal trashed (directory-file-name (file-name-directory (directory-file-name home))))))))
+
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here

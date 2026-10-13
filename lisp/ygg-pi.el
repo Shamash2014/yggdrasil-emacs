@@ -5,6 +5,8 @@
 (require 'subr-x)
 (require 'ygg-agent-conf)
 
+(declare-function aob-acp--edit-profile-plist "aob-acp" (name spec))
+
 (declare-function aob-session-ref "aob")
 (declare-function aob-session-put "aob")
 (declare-function aob-session-project "aob")
@@ -168,6 +170,48 @@ to the same pi server name are suffixed by the extension, not here."
            (concat "AOB_PI_MCP_SERVERS="
                    (json-serialize (vconcat (ygg-pi-session-servers s)))))
      (and ygg-pi-approve-project (list "AOB_PI_APPROVE=1")))))
+
+;;; A pi profile's engine and model live in its own home's settings
+
+(defun ygg-pi--home-models (home)
+  "The provider/model ids pi can reach from HOME, by its own --list-models."
+  (when-let* ((pi (executable-find "pi")))
+    (let ((process-environment (cons (concat "PI_CODING_AGENT_DIR=" home)
+                                     process-environment)))
+      (with-temp-buffer
+        (when (eql 0 (ignore-errors (call-process pi nil t nil "--list-models")))
+          (let (ids)
+            (dolist (line (cdr (split-string (buffer-string) "\n" t)) (nreverse ids))
+              (pcase (split-string line)
+                (`(,provider ,model . ,_) (push (concat provider "/" model) ids))))))))))
+
+(defun ygg-pi-edit-profile (name spec)
+  "Set profile NAME's provider and model in its pi home, SPEC unchanged.
+A profile without a home of its own has nowhere but SPEC to keep them."
+  (if-let* (((ygg-pi-agent-p (plist-get spec :agent)))
+            (profile (plist-get spec :profile))
+            (home (ygg-agent--profile-home profile "pi")))
+      (let* ((file (expand-file-name "settings.json" home))
+             (settings (or (ignore-errors
+                             (json-parse-string
+                              (with-temp-buffer (insert-file-contents file) (buffer-string))))
+                           (make-hash-table :test #'equal)))
+             (now (when-let* ((p (gethash "defaultProvider" settings))
+                              (m (gethash "defaultModel" settings)))
+                    (concat p "/" m)))
+             (pick (string-trim
+                    (completing-read (format "Profile %s model (provider/model, empty = pi default): " name)
+                                     (ygg-pi--home-models home) nil nil now))))
+        (if (string-empty-p pick)
+            (progn (remhash "defaultProvider" settings) (remhash "defaultModel" settings))
+          (unless (string-match "\\`\\([^/]+\\)/\\(.+\\)\\'" pick)
+            (user-error "pi: give the model as provider/model"))
+          (puthash "defaultProvider" (match-string 1 pick) settings)
+          (puthash "defaultModel" (match-string 2 pick) settings))
+        (unless (file-exists-p file) (with-temp-file file (insert "{}")))
+        (ygg-agent--replace-json file settings)
+        spec)
+    (aob-acp--edit-profile-plist name spec)))
 
 (provide 'ygg-pi)
 ;;; ygg-pi.el ends here
