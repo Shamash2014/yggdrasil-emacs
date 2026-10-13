@@ -4470,6 +4470,12 @@ older `terminal-auth' extension names the whole command itself."
 (declare-function term-char-mode "term" ())
 (declare-function term-line-mode "term" ())
 
+(defvar aob-acp-auth-terminal-function nil
+  "Runs a login in a terminal of the client's choosing, or nil for `term'.
+Called with the buffer NAME, ARGV, the DIR it runs in and DONE, inside
+the login's environment; returns the buffer, and calls DONE once with
+whether the login exited 0.")
+
 (defun aob-acp--auth-terminal (s method done)
   "Run S's agent's terminal login METHOD in a terminal buffer.
 DONE is called once with whether it exited 0.  It runs where and with
@@ -4487,19 +4493,24 @@ this connection never reads."
                                       (or (process-get proc 'aob-env)
                                           process-environment)))
          (default-directory (aob-session-project s))
-         (buf (apply #'make-term (format "login %s" (aob-session-ref s :agent))
-                     (car argv) nil (cdr argv)))
          (told nil))
-    (add-function :after (process-sentinel (get-buffer-process buf))
-                  (lambda (p _event)
-                    (unless (or told (process-live-p p))
-                      (setq told t)
-                      (when (buffer-live-p buf)
-                        (with-current-buffer buf (aob-acp--auth-terminal-ended)))
-                      (funcall done (eql (process-exit-status p) 0)))))
-    (with-current-buffer buf (term-char-mode))
-    (unless noninteractive (pop-to-buffer buf))
-    buf))
+    (if aob-acp-auth-terminal-function
+        (funcall aob-acp-auth-terminal-function
+                 (format "*login %s*" (aob-session-ref s :agent))
+                 argv default-directory
+                 (lambda (ok) (unless told (setq told t) (funcall done ok))))
+      (let ((buf (apply #'make-term (format "login %s" (aob-session-ref s :agent))
+                        (car argv) nil (cdr argv))))
+        (add-function :after (process-sentinel (get-buffer-process buf))
+                      (lambda (p _event)
+                        (unless (or told (process-live-p p))
+                          (setq told t)
+                          (when (buffer-live-p buf)
+                            (with-current-buffer buf (aob-acp--auth-terminal-ended)))
+                          (funcall done (eql (process-exit-status p) 0)))))
+        (with-current-buffer buf (term-char-mode))
+        (unless noninteractive (pop-to-buffer buf))
+        buf))))
 
 (defun aob-acp--auth-terminal-ended ()
   "Keep a finished login's output to read, q to leave it."

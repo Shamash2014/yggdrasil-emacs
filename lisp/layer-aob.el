@@ -537,6 +537,39 @@ actions keep their tool title.  The short path stays the clickable target."
             (list :agent agent :profile name)
           (list :agent agent))))
 
+(declare-function ghostel-compile--start "ghostel-compile"
+                  (command buffer-name dir &optional finished-mode interactive
+                           compilation-args))
+(defvar ghostel-compile-finish-functions)
+
+(defun ygg-aob--auth-in-ghostel (name argv dir done)
+  "Run the login ARGV in a ghostel buffer NAME in DIR, telling DONE how it ended.
+A terminal that takes a pasted key, modal keys and q once it is over."
+  (require 'ghostel-compile)
+  (let (hook)
+    (setq hook (lambda (b status)
+                 (when (equal (buffer-name b) name)
+                   (remove-hook 'ghostel-compile-finish-functions hook)
+                   (funcall done (string-prefix-p "finished" status)))))
+    (add-hook 'ghostel-compile-finish-functions hook)
+    (let ((buf (condition-case err
+                   (ghostel-compile--start (mapconcat #'shell-quote-argument argv " ")
+                                           name dir nil t)
+                 (error (remove-hook 'ghostel-compile-finish-functions hook)
+                        (funcall done nil)
+                        (signal (car err) (cdr err))))))
+      (with-current-buffer buf
+        (add-hook 'kill-buffer-hook
+                  (lambda ()
+                    (when (memq hook ghostel-compile-finish-functions)
+                      (remove-hook 'ghostel-compile-finish-functions hook)
+                      (funcall done nil)))
+                  nil t))
+      (unless noninteractive (pop-to-buffer buf))
+      buf)))
+
+(setq aob-acp-auth-terminal-function #'ygg-aob--auth-in-ghostel)
+
 (setq aob-acp-edit-profile-function #'ygg-pi-edit-profile)
 
 (defun ygg-aob--trash-profile-home (_name spec)

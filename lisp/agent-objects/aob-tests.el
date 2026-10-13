@@ -8102,6 +8102,29 @@ login restarts it and the prompt it refused goes again."
       (should-error (aob-acp-delete-profile "nope") :type 'user-error))
     (should (= saves 3))))
 
+(ert-deftest aob-auth-terminal-login-goes-to-the-client-runner ()
+  (aob-tests--with-session s
+    (let* ((aob-acp-command-function #'identity)
+           (aob-acp-agents '(("fake" :command ("fake-acp"))))
+           ran
+           (aob-acp-auth-terminal-function
+            (lambda (name argv dir done)
+              (setq ran (list name argv dir))
+              (funcall done t)
+              (funcall done nil)
+              (get-buffer-create name))))
+      (aob-tests--auth-conn s)
+      (process-put (aob-session-conn s) 'aob-own-env '("CONF=/p"))
+      (unwind-protect
+          (aob-tests--capturing sent
+            (aob-tests--auth-open s)
+            (aob-tests--auth-refuse s (plist-get (car sent) :id))
+            (aob-acp--resolve s (car (aob-session-decisions s)) "sub-login")
+            (should (equal (car ran) "*login fake*"))
+            (should (equal (seq-take (nth 1 ran) 2) '("env" "CONF=/p")))
+            (should (= 2 (length (aob-tests--sent-method sent "session/new")))))
+        (ignore-errors (kill-buffer "*login fake*"))))))
+
 (ert-deftest aob-auth-terminal-login-that-fails-sends-nothing ()
   (aob-tests--with-session s
     (let ((aob-acp-command-function #'identity)

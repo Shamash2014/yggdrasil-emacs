@@ -248,5 +248,41 @@
           (ygg-aob--trash-profile-home "work" '(:agent "claude" :profile "work"))))
       (should (equal trashed (directory-file-name (file-name-directory (directory-file-name home))))))))
 
+(ert-deftest ygg-agent-profiles-a-session-login-runs-in-ghostel ()
+  (let (started outcome)
+    (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+              ((symbol-function 'pop-to-buffer) #'ignore)
+              ((symbol-function 'ghostel-compile--start)
+               (lambda (command name dir &rest rest)
+                 (setq started (list command name dir (nth 1 rest)))
+                 (get-buffer-create name))))
+      (let ((buf (ygg-aob--auth-in-ghostel "*login pi*" '("env" "A=b" "pi-acp" "--terminal-login")
+                                           "/tmp/" (lambda (ok) (setq outcome (list ok))))))
+        (unwind-protect
+            (progn
+              (should (equal started (list "env A\\=b pi-acp --terminal-login" "*login pi*" "/tmp/" t)))
+              (run-hook-with-args 'ghostel-compile-finish-functions (get-buffer-create "other") "finished\n")
+              (should-not outcome)
+              (run-hook-with-args 'ghostel-compile-finish-functions buf "finished\n")
+              (should (equal outcome '(t)))
+              (should-not ghostel-compile-finish-functions))
+          (kill-buffer buf))))
+    (setq outcome nil)
+    (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+              ((symbol-function 'pop-to-buffer) #'ignore)
+              ((symbol-function 'ghostel-compile--start)
+               (lambda (_command name &rest _) (get-buffer-create name))))
+      (kill-buffer (ygg-aob--auth-in-ghostel "*login pi*" '("pi") "/tmp/"
+                                             (lambda (ok) (setq outcome (list ok)))))
+      (should (equal outcome '(nil)))
+      (should-not ghostel-compile-finish-functions))
+    (setq outcome nil)
+    (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+              ((symbol-function 'ghostel-compile--start) (lambda (&rest _) (error "No pty"))))
+      (should-error (ygg-aob--auth-in-ghostel "*login pi*" '("pi") "/tmp/"
+                                              (lambda (ok) (setq outcome (list ok)))))
+      (should (equal outcome '(nil)))
+      (should-not ghostel-compile-finish-functions))))
+
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here
