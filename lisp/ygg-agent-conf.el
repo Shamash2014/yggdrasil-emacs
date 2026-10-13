@@ -348,7 +348,8 @@ second run replaces ours rather than adding another."
      :settings "settings.json"
      :seed ("packages" "defaultProvider" "defaultModel")
      :seed-files (("models.json" "providers") ("mcp.json" "mcpServers"))
-     :account ("defaultProvider" "defaultModel" "models.json")))
+     :account ("defaultProvider" "defaultModel" "models.json")
+     :login-file "auth.json"))
   "Per-kind config-home spec: env var, marker file, real home, shared subdirs.")
 
 (defcustom ygg-agent-conf-root "~/.agents-conf"

@@ -542,9 +542,42 @@ actions keep their tool title.  The short path stays the clickable target."
                            compilation-args))
 (defvar ghostel-compile-finish-functions)
 
-(defun ygg-aob--auth-in-ghostel (name argv dir done)
+(defun ygg-aob--login-file (env)
+  "The file a login under ENV saves to, for an agent that keeps running after it."
+  (seq-some (pcase-lambda (`(,_ . ,spec))
+              (when-let* ((file (plist-get spec :login-file))
+                          (home (getenv-internal (plist-get spec :var) env)))
+                (expand-file-name file home)))
+            ygg-agent--config-homes))
+
+(defun ygg-aob--holds-login-p (file)
+  "Whether FILE has a credential in it: a JSON object that is not empty."
+  (when-let* ((table (ignore-errors
+                       (json-parse-string
+                        (with-temp-buffer (insert-file-contents file) (buffer-string))))))
+    (and (hash-table-p table) (> (hash-table-count table) 0))))
+
+(defun ygg-aob--watch-login (file buf done)
+  "Call DONE with t once FILE takes a credential while BUF is live; pi
+saves its login and keeps running, so the terminal's end would come
+too late or never."
+  (let* ((before (file-attribute-modification-time (file-attributes file)))
+         (timer nil))
+    (setq timer (run-with-timer
+                 2 2 (lambda ()
+                       (cond ((not (buffer-live-p buf)) (cancel-timer timer))
+                             ((and (not (equal before (file-attribute-modification-time
+                                                       (file-attributes file))))
+                                   (ygg-aob--holds-login-p file))
+                              (cancel-timer timer)
+                              (funcall done t))))))
+    timer))
+
+(defun ygg-aob--auth-in-ghostel (name argv dir env done)
   "Run the login ARGV in a ghostel buffer NAME in DIR, telling DONE how it ended.
-A terminal that takes a pasted key, modal keys and q once it is over."
+A terminal that takes a pasted key, modal keys and q once it is over.
+Where ENV names a home whose agent keeps running after its login, the
+login counts as done once that home has saved it."
   (require 'ghostel-compile)
   (let (hook)
     (setq hook (lambda (b status)
@@ -565,6 +598,8 @@ A terminal that takes a pasted key, modal keys and q once it is over."
                       (remove-hook 'ghostel-compile-finish-functions hook)
                       (funcall done nil)))
                   nil t))
+      (when-let* ((file (ygg-aob--login-file env)))
+        (ygg-aob--watch-login file buf done))
       (unless noninteractive (pop-to-buffer buf))
       buf)))
 

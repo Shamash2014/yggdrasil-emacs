@@ -4472,9 +4472,10 @@ older `terminal-auth' extension names the whole command itself."
 
 (defvar aob-acp-auth-terminal-function nil
   "Runs a login in a terminal of the client's choosing, or nil for `term'.
-Called with the buffer NAME, ARGV, the DIR it runs in and DONE, inside
+Called with the buffer NAME, ARGV, the DIR it runs in, ENV (the config
+the connection was started with, each variable once) and DONE, inside
 the login's environment; returns the buffer, and calls DONE once with
-whether the login exited 0.")
+whether the login went through.")
 
 (defun aob-acp--env-first-wins (env)
   "ENV with each variable once, as its first entry has it.
@@ -4491,12 +4492,11 @@ another environment is another config home, and a login there is one
 this connection never reads."
   (require 'term)
   (let* ((proc (aob-acp--proc-of s))
+         (env (aob-acp--env-first-wins
+               (append (aob-acp--auth-env method)
+                       (process-get proc 'aob-own-env))))
          (argv (funcall aob-acp-command-function
-                        (append (list "env")
-                                (aob-acp--env-first-wins
-                                 (append (aob-acp--auth-env method)
-                                         (process-get proc 'aob-own-env)))
-                                (aob-acp--auth-argv s method))))
+                        (append (list "env") env (aob-acp--auth-argv s method))))
          (process-environment (append (aob-acp--auth-env method)
                                       (or (process-get proc 'aob-env)
                                           process-environment)))
@@ -4505,7 +4505,7 @@ this connection never reads."
     (if aob-acp-auth-terminal-function
         (funcall aob-acp-auth-terminal-function
                  (format "*login %s*" (aob-session-ref s :agent))
-                 argv default-directory
+                 argv default-directory env
                  (lambda (ok) (unless told (setq told t) (funcall done ok))))
       (let ((buf (apply #'make-term (format "login %s" (aob-session-ref s :agent))
                         (car argv) nil (cdr argv))))

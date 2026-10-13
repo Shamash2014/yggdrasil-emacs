@@ -4144,7 +4144,11 @@ Clock, cost and context are the second line, `aob-trace--meter-line'."
                           (aob-trace--tokens-string (aob-trace--spend s))
                           "read-only"
                           (format "%s" (aob-session-state s)))
-                  (list model (aob-session-ref s :auth-label)
+                  (list model
+                        (when-let* ((profile (aob-session-ref s :preset))
+                                    ((not (equal profile (aob-session-ref s :agent)))))
+                          profile)
+                        (aob-session-ref s :auth-label)
                         (format "%s" (aob-session-state s))
                         (when-let* ((warning (aob-session-ref s :stop-warning)))
                           (propertize warning 'face 'warning))

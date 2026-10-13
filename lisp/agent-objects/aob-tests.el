@@ -8108,7 +8108,7 @@ login restarts it and the prompt it refused goes again."
            (aob-acp-agents '(("fake" :command ("fake-acp"))))
            ran
            (aob-acp-auth-terminal-function
-            (lambda (name argv dir done)
+            (lambda (name argv dir _env done)
               (setq ran (list name argv dir))
               (funcall done t)
               (funcall done nil)

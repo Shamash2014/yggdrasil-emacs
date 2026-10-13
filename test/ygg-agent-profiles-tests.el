@@ -257,7 +257,7 @@
                  (setq started (list command name dir (nth 1 rest)))
                  (get-buffer-create name))))
       (let ((buf (ygg-aob--auth-in-ghostel "*login pi*" '("env" "A=b" "pi-acp" "--terminal-login")
-                                           "/tmp/" (lambda (ok) (setq outcome (list ok))))))
+                                           "/tmp/" nil (lambda (ok) (setq outcome (list ok))))))
         (unwind-protect
             (progn
               (should (equal started (list "env A\\=b pi-acp --terminal-login" "*login pi*" "/tmp/" t)))
@@ -272,14 +272,14 @@
               ((symbol-function 'pop-to-buffer) #'ignore)
               ((symbol-function 'ghostel-compile--start)
                (lambda (_command name &rest _) (get-buffer-create name))))
-      (kill-buffer (ygg-aob--auth-in-ghostel "*login pi*" '("pi") "/tmp/"
+      (kill-buffer (ygg-aob--auth-in-ghostel "*login pi*" '("pi") "/tmp/" nil
                                              (lambda (ok) (setq outcome (list ok)))))
       (should (equal outcome '(nil)))
       (should-not ghostel-compile-finish-functions))
     (setq outcome nil)
     (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
               ((symbol-function 'ghostel-compile--start) (lambda (&rest _) (error "No pty"))))
-      (should-error (ygg-aob--auth-in-ghostel "*login pi*" '("pi") "/tmp/"
+      (should-error (ygg-aob--auth-in-ghostel "*login pi*" '("pi") "/tmp/" nil
                                               (lambda (ok) (setq outcome (list ok)))))
       (should (equal outcome '(nil)))
       (should-not ghostel-compile-finish-functions))))
@@ -312,6 +312,29 @@
       (with-temp-file file (insert "{broken"))
       (should-error (ygg-pi-set-api-key "work" "openai" "sk-2") :type 'user-error)
       (should (equal (with-temp-buffer (insert-file-contents file) (buffer-string)) "{broken")))))
+
+(ert-deftest ygg-agent-profiles-a-pi-login-is-done-when-its-home-saves-it ()
+  (ygg-agent-profiles-tests--with
+    (let* ((home (ygg-agent--profile-home "work" "pi"))
+           (file (expand-file-name "auth.json" home))
+           (buf (get-buffer-create " *login probe*"))
+           outcome)
+      (with-temp-file file (insert "{}"))
+      (should (equal (ygg-aob--login-file (list (concat "PI_CODING_AGENT_DIR=" home))) file))
+      (let ((timer (ygg-aob--watch-login file buf (lambda (ok) (setq outcome (list ok))))))
+        (unwind-protect
+            (progn
+              (funcall (timer--function timer))
+              (should-not outcome)
+              (set-file-times file (time-add nil 5))
+              (funcall (timer--function timer))
+              (should-not outcome)
+              (with-temp-file file (insert "{\"anthropic\":{\"type\":\"api_key\",\"key\":\"k\"}}"))
+              (set-file-times file (time-add nil 10))
+              (funcall (timer--function timer))
+              (should (equal outcome '(t))))
+          (cancel-timer timer)
+          (kill-buffer buf))))))
 
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here
