@@ -122,5 +122,18 @@
           (ygg-aob--with-profile #'aob-acp-spawn "work" nil)
           (should (equal (plist-get refs :profile) "kept")))))))
 
+(ert-deftest ygg-agent-profiles-login-runs-where-q-leaves ()
+  (ygg-agent-profiles-tests--with
+    (let (call)
+      (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+                ((symbol-function 'ghostel-compile--start)
+                 (lambda (&rest args)
+                   (setq call (cons (getenv "CLAUDE_CONFIG_DIR") args))
+                   (current-buffer))))
+        (ygg-agent-login-config-home project "work"))
+      (should (string-suffix-p "/profiles/work/claude" (car call)))
+      (should (string-suffix-p "auth login" (nth 1 call)))
+      (should (eq (nth 5 call) t)))))
+
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here

@@ -987,9 +987,9 @@ names the one that was."
            nil)))
 
 (declare-function project-root "project" (project))
-(declare-function make-term "term" (name program &optional startfile &rest switches))
-(declare-function term-mode "term" ())
-(declare-function term-char-mode "term" ())
+(declare-function ghostel-compile--start "ghostel-compile"
+                  (command buffer-name dir &optional finished-mode interactive
+                           compilation-args))
 
 ;;;###autoload
 (defun ygg-agent-login-config-home (project &optional profile)
@@ -1008,7 +1008,7 @@ where it earns its place back."
          (and ygg-agent-conf-root
               (ygg-agent-read-profile "claude"))))
   (unless ygg-agent-conf-root (user-error "No agent config root"))
-  (require 'term)
+  (require 'ghostel-compile)
   (let* ((kind "claude")
          (spec (cdr (assoc kind ygg-agent--config-homes)))
          (home (if profile
@@ -1024,13 +1024,9 @@ where it earns its place back."
                  process-environment))
           (default-directory (file-name-as-directory (expand-file-name project))))
       (pop-to-buffer
-       (save-window-excursion
-         (with-current-buffer
-             (make-term (format "login %s" (abbreviate-file-name home))
-                        exe nil "auth" "login")
-           (term-mode)
-           (term-char-mode)
-           (current-buffer)))))))
+       (ghostel-compile--start (mapconcat #'shell-quote-argument (list exe "auth" "login") " ")
+                               (format "*login %s*" (abbreviate-file-name home))
+                               default-directory nil t)))))
 
 ;;; Skill listing
 
