@@ -8069,6 +8069,21 @@ line, so no shell, version manager or buffer between drops it."
               (should (eq (key-binding "q") #'quit-window))))
         (ignore-errors (kill-buffer "*login fake*"))))))
 
+(ert-deftest aob-auth-login-on-an-open-session-restarts-it-and-resends ()
+  "An open session's CLI keeps the logged-out state it started with, so a
+login restarts it and the prompt it refused goes again."
+  (aob-tests--with-session s
+    (let (restarted resent)
+      (aob-session-put s :acp-id "abc")
+      (aob-session-put s :auth-refused (cons "so?" nil))
+      (cl-letf (((symbol-function 'aob-acp-restart)
+                 (lambda (old &rest _) (setq restarted old) 'fresh))
+                ((symbol-function 'aob-acp--prompt)
+                 (lambda (fresh text atts) (setq resent (list fresh text atts)))))
+        (aob-acp--auth-done s "Console" nil))
+      (should (eq restarted s))
+      (should (equal resent '(fresh "so?" nil))))))
+
 (ert-deftest aob-auth-terminal-login-that-fails-sends-nothing ()
   (aob-tests--with-session s
     (let ((aob-acp-command-function #'identity)

@@ -2212,6 +2212,7 @@ can't parse: the reference survives, and the demotion is said."
     (setq text said atts imgs))
   (aob-session-put s :turn-fails nil)
   (aob-session-put s :turn-error nil)
+  (aob-session-put s :auth-refused nil)
   (aob-session-put s :stop-warning nil)
   ;; codex says nothing when a turn runs on the picked model again
   (aob-session-put s :model-live nil)
@@ -2254,7 +2255,8 @@ can't parse: the reference survives, and the demotion is said."
                (aob-session-settle-subagents s)
                (aob-set-state s 'idle)
                (if (aob-acp--auth-error-p err)
-                   (aob-acp--auth-offer s err nil)
+                   (progn (aob-session-put s :auth-refused (cons text atts))
+                          (aob-acp--auth-offer s err nil))
                  (aob-event s 'error :title (plist-get err :message))))
            ;; a /compact turn reports totalTokens 0 — never clobber the last
            ;; real reading with it
@@ -4529,14 +4531,25 @@ this request rather than a session, finds its way back to S."
            (aob-acp--auth-done s name then)))))))
 
 (defun aob-acp--auth-done (s name then)
-  "Note S's agent logged in with NAME, then run THEN."
+  "Note S's agent logged in with NAME, then run THEN.
+Without THEN S is open, and its CLI kept the logged-out state it
+started with, so S is restarted on the login and the refused prompt
+sent again."
   (aob-event s 'state :title (format "logged in to %s: %s"
                                     (or (aob-session-ref s :agent) "the agent") name))
-  (when then (funcall then)))
+  (cond (then (funcall then))
+        ((and (aob-session-ref s :auth-refused) (aob-session-ref s :acp-id))
+         (let ((refused (aob-session-ref s :auth-refused)))
+           (aob-session-put s :auth-refused nil)
+           (if-let* ((fresh (aob-acp-restart s)))
+               (aob-acp--prompt fresh (car refused) (cdr refused))
+             (message "aob: %s did not restart; send the prompt again"
+                      (aob-session-name s)))))))
 
 (defun aob-acp--auth-failed (s opening err)
   "Say ERR on S.  A session still OPENING fails with it; one already open
 keeps going, since only the turn was refused."
+  (aob-session-put s :auth-refused nil)
   (if opening
       (aob-acp--fail s err)
     (aob-event s 'error :title (if (aob-acp--auth-error-p err)
