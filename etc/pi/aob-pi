@@ -2,6 +2,9 @@
 DIR=$(cd "$(dirname "$0")" && pwd)
 PATH="$DIR/bin:$PATH"
 export PATH
+# a pause past five minutes would otherwise re-write the whole cached context
+PI_CACHE_RETENTION=${PI_CACHE_RETENTION:-long}
+export PI_CACHE_RETENTION
 set -- -e "$DIR/aob-pi-mcp.js" ${AOB_PI_APPROVE:+--approve} "$@"
 # only the core skills are described; the rest are found through skill_search
 if [ -n "$AOB_PI_SKILL_CORE" ]; then
