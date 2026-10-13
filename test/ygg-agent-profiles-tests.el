@@ -5,9 +5,13 @@
 (load (expand-file-name "test-isolate" (file-name-directory (or load-file-name buffer-file-name))) nil t)
 (require 'ert)
 (require 'cl-lib)
+(defvar ygg-space-state-functions nil)
+(defvar ygg-space-detail-functions nil)
+(require 'yggdrasil)
 (require 'ygg-agent-conf)
 (require 'aob)
 (require 'aob-acp)
+(require 'layer-aob)
 
 (defmacro ygg-agent-profiles-tests--with (&rest body)
   (declare (indent 0))
@@ -87,6 +91,22 @@
         (aob-acp--resume-entry entry nil))
       (should-not asked)
       (should (equal (plist-get refs :profile) "work")))))
+
+(ert-deftest ygg-agent-profiles-asked-on-every-typed-spawn ()
+  (ygg-agent-profiles-tests--with
+    (let (refs)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "work"))
+                ((symbol-function 'aob-acp-spawn)
+                 (lambda (&rest _) (setq refs aob-acp-session-refs) nil)))
+        (let ((noninteractive nil))
+          (ygg-aob--with-profile #'aob-acp-spawn "claude" nil)
+          (should-not (plist-get refs :profile))
+          (let ((aob-prompt-typed t))
+            (ygg-aob--with-profile #'aob-acp-spawn "claude" nil)
+            (should (equal (plist-get refs :profile) "work"))
+            (let ((aob-acp-session-refs '(:profile "kept")))
+              (ygg-aob--with-profile #'aob-acp-spawn "claude" nil)
+              (should (equal (plist-get refs :profile) "kept")))))))))
 
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here

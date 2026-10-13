@@ -524,15 +524,25 @@ actions keep their tool title.  The short path stays the clickable target."
 (setq aob-compose-spawn-function
       (lambda (text &optional agent atts)
         (let* ((agent (or agent aob-acp-default-agent))
-               (profile (unless (or noninteractive
-                                    (plist-get (bound-and-true-p aob-acp-session-refs) :profile))
-                          (ygg-agent-read-profile agent)))
                (aob-acp-start-dir aob-compose--dir)
                (aob-acp-start-worktree ygg-aob--draft-tree)
-               (aob-acp-session-refs (append (and profile (list :profile profile))
-                                             (ygg-aob--preset-limits text)
+               (aob-acp-session-refs (append (ygg-aob--preset-limits text)
                                              (bound-and-true-p aob-acp-session-refs))))
           (aob-acp-spawn agent text atts))))
+
+;; on the spawn itself: a preset-and-project spawn sends from its own draft callback
+(defun ygg-aob--with-profile (fn agent &rest args)
+  "Ask which profile the AGENT session being spawned runs under."
+  (let* ((refs (bound-and-true-p aob-acp-session-refs))
+         (profile (and (stringp agent)
+                       (bound-and-true-p aob-prompt-typed)
+                       (not noninteractive)
+                       (not (plist-get refs :profile))
+                       (ygg-agent-read-profile agent)))
+         (aob-acp-session-refs (if profile (append (list :profile profile) refs) refs)))
+    (apply fn agent args)))
+
+(advice-add 'aob-acp-spawn :around #'ygg-aob--with-profile)
 
 ;; an agent belongs to the work it was started on: the task in front of the
 ;; owner, else the checkout the buffer is in, else the space — a space pinned
