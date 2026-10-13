@@ -336,5 +336,38 @@
           (cancel-timer timer)
           (kill-buffer buf))))))
 
+(ert-deftest ygg-agent-profiles-pi-describes-only-the-core-skills ()
+  (let* ((top (make-temp-file "pi-skills-" t))
+         (home (expand-file-name "home" top))
+         (bin (expand-file-name "bin" top))
+         (out (expand-file-name "args" top))
+         (wrapper (expand-file-name "etc/pi/aob-pi"
+                                    (file-name-directory
+                                     (directory-file-name
+                                      (file-name-directory (locate-library "ygg-pi")))))))
+    (unwind-protect
+        (progn
+          (dolist (d '("home/skills/core-one" "home/skills/other" "bin" "proj/.pi/skills"))
+            (make-directory (expand-file-name d top) t))
+          (with-temp-file (expand-file-name "pi" bin)
+            (insert "#!/bin/sh\nfor a in \"$@\"; do echo \"$a\"; done > " out "\n"))
+          (set-file-modes (expand-file-name "pi" bin) #o755)
+          (let ((default-directory (expand-file-name "proj/" top))
+                (process-environment
+                 (append (list (concat "PATH=" bin ":/usr/bin:/bin")
+                               (concat "PI_CODING_AGENT_DIR=" home)
+                               "AOB_PI_SKILL_CORE=core-one missing")
+                         process-environment)))
+            (should (eql 0 (call-process wrapper nil nil nil "--mode" "rpc" "--" "a prompt"))))
+          (let ((args (split-string (with-temp-buffer (insert-file-contents out) (buffer-string))
+                                    "\n" t)))
+            (should (equal (car args) "--no-skills"))
+            (should (equal (last args 2) '("--" "a prompt")))
+            (should (member (expand-file-name "skills/core-one" home) args))
+            (should-not (seq-find (lambda (a) (string-match-p "other\\|missing" a)) args))
+            (should (member ".pi/skills" args))
+            (should (member "rpc" args))))
+      (delete-directory top t))))
+
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here

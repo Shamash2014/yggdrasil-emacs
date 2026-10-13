@@ -169,7 +169,8 @@ to the same pi server name are suffixed by the extension, not here."
      (list (concat "PI_ACP_PI_COMMAND=" ygg-pi--wrapper)
            (concat "AOB_PI_MCP_SERVERS="
                    (json-serialize (vconcat (ygg-pi-session-servers s)))))
-     (and ygg-pi-approve-project (list "AOB_PI_APPROVE=1")))))
+     (and ygg-pi-approve-project (list "AOB_PI_APPROVE=1"))
+     (list (concat "AOB_PI_SKILL_CORE=" (string-join ygg-agent-skill-core " "))))))
 
 ;;; A pi profile's engine and model live in its own home's settings
 

@@ -1,3 +1,15 @@
 #!/bin/sh
 DIR=$(cd "$(dirname "$0")" && pwd)
-exec pi -e "$DIR/aob-pi-mcp.js" ${AOB_PI_APPROVE:+--approve} "$@"
+set -- -e "$DIR/aob-pi-mcp.js" ${AOB_PI_APPROVE:+--approve} "$@"
+# only the core skills are described; the rest are found through skill_search
+if [ -n "$AOB_PI_SKILL_CORE" ]; then
+  home=${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}
+  n=$#
+  set -- "$@" --no-skills
+  for name in $AOB_PI_SKILL_CORE; do
+    [ -e "$home/skills/$name" ] && set -- "$@" --skill "$home/skills/$name"
+  done
+  [ -d .pi/skills ] && set -- "$@" --skill .pi/skills
+  while [ "$n" -gt 0 ]; do set -- "$@" "$1"; shift; n=$((n - 1)); done
+fi
+exec pi "$@"
