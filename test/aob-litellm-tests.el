@@ -145,6 +145,23 @@
       (should (equal (sort (mapcar #'cadr calls) #'string<)
                      '("sk-alpha-key" "sk-beta-key"))))))
 
+(ert-deftest aob-litellm-a-session-reads-the-home-it-runs-on ()
+  "A project home with a gateway says nothing of a session given a profile's."
+  (aob-litellm-tests--with-root
+    (let* ((profile (file-name-as-directory (expand-file-name "profiles/p/pi" root)))
+           (s (aob-litellm-tests--session-in
+               1 (aob-litellm-tests--project (expand-file-name "conf" root)
+                                             "alpha" aob-litellm-tests--key)))
+           (proc (start-process "litellm-probe" nil "sleep" "5")))
+      (unwind-protect
+          (progn
+            (make-directory profile t)
+            (setf (aob-session-conn s) proc)
+            (process-put proc 'aob-env (list (concat "PI_CODING_AGENT_DIR=" profile)))
+            (should (null (aob-overall-usage-parts s)))
+            (should (null calls)))
+        (delete-process proc)))))
+
 (ert-deftest aob-litellm-provider-without-auth-entry-shows-nothing ()
   (aob-litellm-tests--with-root
     (let ((s (aob-litellm-tests--session-in

@@ -614,9 +614,8 @@ login counts as done once that home has saved it."
   (let* ((agent (aob-session-ref s :agent))
          (kind (or (ygg-agent--kind agent agent)
                    (user-error "aob: %s keeps no config home" agent)))
-         (spec (cdr (assoc kind ygg-agent--config-homes)))
-         (env (and (aob-session-conn s) (process-get (aob-session-conn s) 'aob-env))))
-    (dired (or (and env (getenv-internal (plist-get spec :var) env))
+         (spec (cdr (assoc kind ygg-agent--config-homes))))
+    (dired (or (aob-session-env s (plist-get spec :var))
                (expand-file-name (plist-get spec :home))))))
 
 (defun ygg-aob--trash-profile-home (_name spec)

@@ -22,11 +22,13 @@
   "Pi home to (MTIMES BASE . RAW-KEY); in memory only.")
 
 (defun aob-litellm--home (s)
-  (when-let* ((dir (or (aob-session-project s) (aob-session-dir s))))
-    (ignore-errors
-      (and (fboundp 'ygg-agent--known-config-dir)
-           (ygg-agent--known-config-dir
-            "pi" (cdr (assoc "pi" ygg-agent--config-homes)) dir)))))
+  "The pi home S reads: the one its process was given, else its project's."
+  (let ((spec (cdr (assoc "pi" (bound-and-true-p ygg-agent--config-homes)))))
+    (or (and spec (aob-session-env s (plist-get spec :var)))
+        (when-let* ((dir (or (aob-session-project s) (aob-session-dir s))))
+          (ignore-errors
+            (and (fboundp 'ygg-agent--known-config-dir)
+                 (ygg-agent--known-config-dir "pi" spec dir)))))))
 
 (defun aob-litellm--read-json (file)
   (when (file-readable-p file)

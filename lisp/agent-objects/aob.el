@@ -891,6 +891,13 @@ fleet has no session of its own and follows the global tick."
                       aob-buffer-session-id)))
     (aob-session-get id)))
 
+(defun aob-session-env (s var)
+  "VAR as S's connection was started with it, or nil."
+  (when-let* ((proc (aob-session-conn s))
+              ((processp proc))
+              (env (process-get proc 'aob-env)))
+    (getenv-internal var env)))
+
 (defun aob-target ()
   (or (aob-session-at-point)
       (let ((live (aob-live-sessions)))
