@@ -1,9 +1,10 @@
 ;;; ygg-git-compare-pr-info.el --- a pull request's conversation and CI checks in its compare -*- lexical-binding: t; -*-
 
 ;;; Commentary:
-;; A compare of a pull or merge request puts what is said about it in two
-;; sections ahead of the diff: Conversation, its top-level comments and
-;; review summaries, and Checks, each CI job with its state and duration.
+;; A compare of a pull or merge request puts what is said about it in three
+;; sections ahead of the diff: Description, its title, author and body,
+;; Conversation, its top-level comments and review summaries, and Checks, each
+;; CI job with its state and duration.
 ;; Both are fetched in the background through the compare's shared forge
 ;; helper and cache; the checks are kept per head commit and asked again
 ;; every `ygg-git-compare-checks-running-ttl' seconds while the compare is
@@ -45,7 +46,7 @@
 
 (defconst ygg-git-compare--checks-max-errors 3)
 
-(defconst ygg-git-compare--pr-info-order '(ygg-git-compare-conversation ygg-git-compare-checks))
+(defconst ygg-git-compare--pr-info-order '(ygg-git-compare-description ygg-git-compare-conversation ygg-git-compare-checks))
 
 (defconst ygg-git-compare--check-order '(failed cancelled warning running pending passed skipped))
 
@@ -113,12 +114,34 @@
                  ((or "closed" "locked") 'closed))))
     (and state (list :state state))))
 
+(defun ygg-git-compare--pr-about-github (pr)
+  "PR, gh's title, body, author and the rest, as (:title T :body B :author A
+:created C :head H :base B :url U)."
+  (list :title (plist-get pr :title)
+        :body (plist-get pr :body)
+        :author (plist-get (plist-get pr :author) :login)
+        :created (ygg-git-compare--remote-time (plist-get pr :createdAt))
+        :head (plist-get pr :headRefName)
+        :base (plist-get pr :baseRefName)
+        :url (plist-get pr :url)))
+
+(defun ygg-git-compare--pr-about-gitlab (mr)
+  "MR, a GitLab merge request, as `ygg-git-compare--pr-about-github' gives."
+  (list :title (plist-get mr :title)
+        :body (plist-get mr :description)
+        :author (plist-get (plist-get mr :author) :username)
+        :created (ygg-git-compare--remote-time (plist-get mr :created_at))
+        :head (plist-get mr :source_branch)
+        :base (plist-get mr :target_branch)
+        :url (plist-get mr :web_url)))
+
 (defun ygg-git-compare--checks-parse-github (text)
   (let* ((pr (ygg-git-compare--json text))
          (rollup (plist-get pr :statusCheckRollup)))
     (unless (proper-list-p rollup) (error "no rollup"))
     (list :checks (mapcar #'ygg-git-compare--check-github rollup)
-          :status (ygg-git-compare--pr-status-github pr))))
+          :status (ygg-git-compare--pr-status-github pr)
+          :about (ygg-git-compare--pr-about-github pr))))
 
 (defun ygg-git-compare--check-gitlab (job)
   (list :name (or (plist-get job :name) "job")
@@ -134,11 +157,12 @@
         :url (plist-get job :web_url)
         :where (plist-get job :stage)))
 
-(defun ygg-git-compare--checks-parse-gitlab-jobs (text pipeline &optional status)
+(defun ygg-git-compare--checks-parse-gitlab-jobs (text pipeline &optional status about)
   (let ((jobs (ygg-git-compare--remote-json text)))
     (list :checks (mapcar #'ygg-git-compare--check-gitlab jobs)
           :url (plist-get pipeline :web_url)
-          :status status)))
+          :status status
+          :about about)))
 
 (defun ygg-git-compare--checks-fetch-gitlab (pr done)
   (let ((host (plist-get pr :host))
@@ -150,10 +174,11 @@
        (ygg-git-compare--answer
         (lambda (mr &optional failure)
           (let ((pipeline (plist-get mr :head_pipeline))
-                (pr-status (ygg-git-compare--pr-status-gitlab mr)))
+                (pr-status (ygg-git-compare--pr-status-gitlab mr))
+                (about (ygg-git-compare--pr-about-gitlab mr)))
             (cond (failure (funcall done nil failure))
                   ((not (and pipeline (plist-get pipeline :id)))
-                   (funcall done (list :checks nil :status pr-status)))
+                   (funcall done (list :checks nil :status pr-status :about about)))
                   (t (ygg-git-compare--forge-async
                       "glab" (list "api" "--hostname" host "--paginate"
                                    (format "projects/%s/pipelines/%s/jobs?per_page=100"
@@ -162,7 +187,8 @@
                         (ygg-git-compare--answer
                          done "glab" status text err
                          (lambda (text)
-                           (ygg-git-compare--checks-parse-gitlab-jobs text pipeline pr-status)))))))))
+                           (ygg-git-compare--checks-parse-gitlab-jobs
+                            text pipeline pr-status about)))))))))
         "glab" status text err
         #'ygg-git-compare--json)))))
 
@@ -174,7 +200,7 @@ and why not."
     (ygg-git-compare--forge-async
      "gh" (list "pr" "view" (format "%s" (plist-get pr :number))
                 "--repo" (format "%s/%s" (plist-get pr :host) (plist-get pr :path))
-                "--json" "statusCheckRollup,state,isDraft,reviewDecision")
+                "--json" "statusCheckRollup,state,isDraft,reviewDecision,title,body,author,createdAt,headRefName,baseRefName,url")
      (lambda (status text err)
        (ygg-git-compare--answer done "gh" status text err
                                 #'ygg-git-compare--checks-parse-github)))))
@@ -203,6 +229,17 @@ and why not."
                         (or (null value) (numberp value))))
                     '(:started :finished))))
 
+(defun ygg-git-compare--about-valid-p (about)
+  (or (null about)
+      (and (proper-list-p about)
+           (cl-evenp (length about))
+           (seq-every-p (lambda (key)
+                          (let ((value (plist-get about key)))
+                            (or (null value) (stringp value))))
+                        '(:title :body :author :head :base :url))
+           (let ((created (plist-get about :created)))
+             (or (null created) (numberp created))))))
+
 (defun ygg-git-compare--checks-valid-p (value)
   (and (proper-list-p value)
        (cl-evenp (length value))
@@ -211,7 +248,10 @@ and why not."
 
 (defun ygg-git-compare--checks-value (key)
   (let ((value (ignore-errors (ygg-git-compare--cache-value key))))
-    (and (ygg-git-compare--checks-valid-p value) value)))
+    (and (ygg-git-compare--checks-valid-p value)
+         (if (ygg-git-compare--about-valid-p (plist-get value :about))
+             value
+           (plist-put (copy-sequence value) :about nil)))))
 
 (defun ygg-git-compare--checks-active-p (value)
   (seq-some (lambda (check) (memq (plist-get check :state) '(running pending)))
@@ -262,8 +302,19 @@ one allowed to fail is warned."
   (and (eq (plist-get comment :level) 'review)
        (not (plist-get comment :heading))))
 
+(defun ygg-git-compare--description-view ()
+  "What this compare shows of the description: (:about A :loaded L :error E
+:fetching F)."
+  (let* ((view (ygg-git-compare--checks-view))
+         (about (plist-get (plist-get view :value) :about)))
+    (list :about about
+          :loaded (and about t)
+          :error (plist-get view :error)
+          :fetching (plist-get view :fetching))))
+
 (defun ygg-git-compare--pr-info-state ()
-  (list :conversation
+  (list :description (ygg-git-compare--description-view)
+        :conversation
         (seq-filter #'ygg-git-compare--conversation-p
                     (ygg-git-compare--remote-shown (current-buffer) t))
         :checks (ygg-git-compare--checks-view)))
@@ -417,17 +468,24 @@ section is put back and the error signalled."
     new))
 
 (defun ygg-git-compare--pr-info-redraw (state keys)
-  "Draw the sections of KEYS, :conversation or :checks, again from STATE."
+  "Draw the sections of KEYS, :description, :conversation or :checks, again
+from STATE."
   (dolist (key keys)
-    (if (eq key :conversation)
-        (ygg-git-compare--pr-info-replace
-         'ygg-git-compare-conversation
-         (lambda ()
-           (when-let* ((comments (plist-get state :conversation)))
-             (ygg-git-compare--insert-conversation comments))))
-      (ygg-git-compare--pr-info-replace
-       'ygg-git-compare-checks
-       (lambda () (ygg-git-compare--insert-checks (plist-get state :checks)))))
+    (pcase key
+      (:description
+       (ygg-git-compare--pr-info-replace
+        'ygg-git-compare-description
+        (lambda () (ygg-git-compare--insert-description (plist-get state :description)))))
+      (:conversation
+       (ygg-git-compare--pr-info-replace
+        'ygg-git-compare-conversation
+        (lambda ()
+          (when-let* ((comments (plist-get state :conversation)))
+            (ygg-git-compare--insert-conversation comments)))))
+      (:checks
+       (ygg-git-compare--pr-info-replace
+        'ygg-git-compare-checks
+        (lambda () (ygg-git-compare--insert-checks (plist-get state :checks))))))
     (setq ygg-git-compare--pr-info-sig
           (plist-put (copy-sequence ygg-git-compare--pr-info-sig) key (plist-get state key))))
   (ygg-git-compare--header))
@@ -445,7 +503,7 @@ FORCED, their keys, says so; the keys drawn."
                                    (or (memq key forced)
                                        (not (equal (plist-get state key)
                                                    (plist-get ygg-git-compare--pr-info-sig key)))))
-                                 '(:conversation :checks))))
+                                 '(:description :conversation :checks))))
           (when keys
             (condition-case nil (ygg-git-compare--pr-info-redraw state keys) (error nil)))
           keys)))))
@@ -547,11 +605,67 @@ being fetched; with FORCE, whatever their age."
                             (format "Conversation (%d)"
                                     (ygg-git-compare--conversation-count comments))))
     (dolist (comment comments)
+      (when (and (not (eq comment (car comments)))
+                 (zerop (or (plist-get comment :depth) 0)))
+        (insert "\n"))
       (let ((start (point)))
         (insert (ygg-git-compare--comment-block comment) "\n")
         (put-text-property start (point) 'ygg-git-compare-conversation-id
                            (plist-get comment :id))))
     (insert "\n")))
+
+(defun ygg-git-compare--description-heading (about)
+  (let* ((pr (ygg-git-compare--remote-pr))
+         (title (or (plist-get about :title)
+                    (plist-get (cdr ygg-git-compare--b-spec) :title))))
+    (propertize (concat (if (eq (plist-get pr :forge) 'gitlab) "!" "#")
+                        (format "%s" (plist-get pr :number))
+                        (and title (not (string-blank-p title)) (concat " " title)))
+                'font-lock-face 'magit-section-heading)))
+
+(defun ygg-git-compare--description-meta (about)
+  "ABOUT's author, branches and age as one shadow line, or nil."
+  (let ((parts (delq nil
+                     (list (plist-get about :author)
+                           (and (plist-get about :head) (plist-get about :base)
+                                (format "%s → %s" (plist-get about :head) (plist-get about :base)))
+                           (and (plist-get about :created)
+                                (ygg-git-compare--remote-age (plist-get about :created)))))))
+    (and parts (propertize (concat "  " (string-join parts " · ")) 'font-lock-face 'shadow))))
+
+(defun ygg-git-compare--description-lines (about)
+  "ABOUT's body as indented lines with the blank ones at either end left out."
+  (let ((lines (ygg-git-compare--remote-body
+                (list :text (plist-get about :body))
+                (- (ygg-git-compare--remote-width) 2))))
+    (while (and lines (string-empty-p (car lines))) (pop lines))
+    (setq lines (nreverse lines))
+    (while (and lines (string-empty-p (car lines))) (pop lines))
+    (mapcar (lambda (line) (if (string-empty-p line) line (concat "  " line)))
+            (nreverse lines))))
+
+(defun ygg-git-compare--insert-description (view)
+  (let* ((about (plist-get view :about))
+         (failed (plist-get view :error))
+         (lines (and (plist-get view :loaded) (ygg-git-compare--description-lines about))))
+    (magit-insert-section (ygg-git-compare-description nil nil)
+      (magit-insert-heading (ygg-git-compare--description-heading about))
+      (when-let* ((meta (ygg-git-compare--description-meta about)))
+        (insert meta "\n"))
+      (if lines
+          (dolist (line lines) (insert line "\n"))
+        (unless (and failed (not (plist-get view :loaded)))
+          (insert (propertize (cond ((not (plist-get view :loaded))
+                                     (if (plist-get view :fetching) "  fetching…" "  not fetched"))
+                                    (t "  (no description)"))
+                              'font-lock-face 'shadow)
+                  "\n")))
+      (when failed
+        (insert (propertize (format "  description: %s%s" failed
+                                    (if (plist-get view :loaded) " (showing the last fetch)" ""))
+                            'font-lock-face 'error)
+                "\n"))
+      (insert "\n"))))
 
 (defun ygg-git-compare--insert-checks (view)
   (let* ((value (plist-get view :value))
@@ -586,8 +700,8 @@ being fetched; with FORCE, whatever their age."
       (insert "\n"))))
 
 (defun ygg-git-compare--insert-pr-info ()
-  "The Conversation and Checks of the pull request this compare shows, ahead
-of its diff; nothing for any other compare."
+  "The Description, Conversation and Checks of the pull request this compare
+shows, ahead of its diff; nothing for any other compare."
   (when (and (eq (car-safe ygg-git-compare--b-spec) 'pr) (ygg-git-compare--remote-pr))
     (let ((buffer (current-buffer)))
       (condition-case err
@@ -596,6 +710,7 @@ of its diff; nothing for any other compare."
             (condition-case nil (ygg-git-compare--checks-start) (error nil))
             (let ((state (ygg-git-compare--pr-info-state)))
               (setq ygg-git-compare--pr-info-sig state)
+              (ygg-git-compare--insert-description (plist-get state :description))
               (when-let* ((comments (plist-get state :conversation)))
                 (ygg-git-compare--insert-conversation comments))
               (ygg-git-compare--insert-checks (plist-get state :checks)))
@@ -636,10 +751,15 @@ line, or nil."
                                       ygg-git-compare--pr-review-labels)))
               (concat " " (propertize (cadr review) 'face (nth 2 review)))))))
 
-(defun ygg-git-compare--conversation-section ()
+(defun ygg-git-compare--pr-info-section (type)
   (when-let* ((root (bound-and-true-p magit-root-section)))
-    (seq-find (lambda (s) (eq (oref s type) 'ygg-git-compare-conversation))
-              (oref root children))))
+    (seq-find (lambda (s) (eq (oref s type) type)) (oref root children))))
+
+(defun ygg-git-compare--conversation-section ()
+  (ygg-git-compare--pr-info-section 'ygg-git-compare-conversation))
+
+(defun ygg-git-compare--description-section ()
+  (ygg-git-compare--pr-info-section 'ygg-git-compare-description))
 
 (defun ygg-git-compare--conversation-spans ()
   "The comments of the Conversation as (ID BEG END) in this buffer."

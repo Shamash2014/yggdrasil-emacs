@@ -21,6 +21,7 @@
 (defvar ygg-git-compare--b)
 (autoload 'ygg-git-compare--pr-info-refresh "ygg-git-compare-pr-info")
 (autoload 'ygg-git-compare--conversation-section "ygg-git-compare-pr-info")
+(autoload 'ygg-git-compare--description-section "ygg-git-compare-pr-info")
 (declare-function ygg-git-compare-comment-new "ygg-git-compare-comments")
 (declare-function ygg-markdown-fences-mode "ygg-markdown-fences" (lang))
 (declare-function ygg-markdown-fences--fontify "ygg-markdown-fences" (mode body))
@@ -129,19 +130,57 @@ REST, by default as wide, before the later ones."
       (unless (string-empty-p (string-trim first)) (push (string-trim-right first) lines)))
     (nreverse lines)))
 
-(defun ygg-git-compare--remote-inline (line)
-  "LINE with its `code` and **bold** spans drawn, the marks left out."
+(defun ygg-git-compare--remote-mark (line regexp make)
+  "LINE with each match of REGEXP replaced by MAKE called with LINE and the
+match data set."
   (let ((start 0))
-    (while (string-match "`\\([^`\n]+\\)`" line start)
-      (let ((code (propertize (match-string 1 line) 'face 'ygg-git-compare-remote-code)))
-        (setq line (replace-match code t t line)
-              start (+ (match-beginning 0) (length code)))))
-    (setq start 0)
-    (while (string-match "\\*\\*\\([^*\n]+\\)\\*\\*" line start)
-      (let ((bold (propertize (match-string 1 line) 'face 'bold)))
-        (setq line (replace-match bold t t line)
-              start (+ (match-beginning 0) (length bold)))))
+    (while (string-match regexp line start)
+      (let ((made (funcall make line)))
+        (setq line (replace-match made t t line)
+              start (+ (match-beginning 0) (length made)))))
     line))
+
+(defun ygg-git-compare--remote-emphasis (line italic)
+  "The match in LINE as ITALIC text when it stands alone, else as it is."
+  (let ((before (and (> (match-beginning 0) 0) (aref line (1- (match-beginning 0)))))
+        (after (and (< (match-end 0) (length line)) (aref line (match-end 0)))))
+    (if (or (get-text-property (match-beginning 0) 'face line)
+            (and before (string-match-p "[[:alnum:]*_]" (string before)))
+            (and after (string-match-p "[[:alnum:]*_]" (string after))))
+        (match-string 0 line)
+      (let ((text (match-string 1 line)))
+        (add-face-text-property 0 (length text) italic t text)
+        text))))
+
+(defconst ygg-git-compare--remote-url-re
+  "(\\(?:[^()\n]\\|([^()\n]*)\\)*)")
+
+(defun ygg-git-compare--remote-inline (line)
+  "LINE with its `code`, **bold**, *italic*, links and images drawn, the marks
+left out."
+  (thread-first line
+    (ygg-git-compare--remote-mark
+     "`\\([^`\n]+\\)`"
+     (lambda (l) (propertize (match-string 1 l) 'face 'ygg-git-compare-remote-code)))
+    (ygg-git-compare--remote-mark
+     (concat "!\\[\\([^]\n]*\\)\\]" ygg-git-compare--remote-url-re)
+     (lambda (l) (propertize (let ((alt (match-string 1 l))) (if (string-empty-p alt) "image" alt))
+                             'face 'shadow)))
+    (ygg-git-compare--remote-mark
+     (concat "\\[\\([^]\n]+\\)\\]" ygg-git-compare--remote-url-re)
+     (lambda (l) (propertize (match-string 1 l) 'face 'link)))
+    (ygg-git-compare--remote-mark
+     "<\\(https?://[^>[:space:]]+\\)>"
+     (lambda (l) (match-string 1 l)))
+    (ygg-git-compare--remote-mark
+     "\\*\\*\\([^*\n]+\\)\\*\\*"
+     (lambda (l) (propertize (match-string 1 l) 'face 'bold)))
+    (ygg-git-compare--remote-mark
+     "\\*\\([^*[:space:]]\\(?:[^*\n]*[^*[:space:]]\\)?\\)\\*"
+     (lambda (l) (ygg-git-compare--remote-emphasis l 'italic)))
+    (ygg-git-compare--remote-mark
+     "_\\([^_[:space:]]\\(?:[^_\n]*[^_[:space:]]\\)?\\)_"
+     (lambda (l) (ygg-git-compare--remote-emphasis l 'italic)))))
 
 (defun ygg-git-compare--remote-dim (line)
   (let ((line (copy-sequence line)))
@@ -231,15 +270,28 @@ indent a line after an item continues at."
                  (ygg-git-compare--remote-inline text) width prefix))
               nil)))
      ((string-match "\\`\\(#+\\)[ ]+\\(.*\\)\\'" line)
-      (cons (mapcar (lambda (l) (propertize l 'face 'bold))
-                    (ygg-git-compare--remote-wrap (match-string 2 line) width))
+      (cons (mapcar (lambda (l)
+                      (let ((l (copy-sequence l)))
+                        (add-face-text-property 0 (length l) 'bold t l)
+                        l))
+                    (ygg-git-compare--remote-wrap
+                     (ygg-git-compare--remote-inline (match-string 2 line)) width))
             nil))
      ((string-match "\\`\\( *\\)\\([-*+]\\|[0-9]+[.)]\\) +\\(.*\\)\\'" line)
       (let* ((indent (min (length (match-string 1 line)) (/ width 3)))
-             (lead (concat (make-string indent ?\s) (match-string 2 line) " "))
+             (text (match-string 3 line))
+             (marker (match-string 2 line))
+             (task (and (string-match "\\`\\[\\([ xX]\\)\\][ ]+\\(.*\\)\\'" text)
+                        (cons (if (equal (match-string 1 text) " ") "☐" "☑")
+                              (match-string 2 text))))
+             (lead (concat (make-string indent ?\s)
+                           (cond ((null task) marker)
+                                 ((string-match-p "\\`[-*+]\\'" marker) (car task))
+                                 (t (concat marker " " (car task))))
+                           " "))
              (rest (make-string (string-width lead) ?\s)))
         (cons (ygg-git-compare--remote-wrap
-               (ygg-git-compare--remote-inline (match-string 3 line)) width lead rest)
+               (ygg-git-compare--remote-inline (if task (cdr task) text)) width lead rest)
               (string-width lead))))
      ((and hang (string-match "\\`  +\\(.*\\)\\'" line))
       (cons (ygg-git-compare--remote-wrap
@@ -251,10 +303,34 @@ indent a line after an item continues at."
      (t (cons (ygg-git-compare--remote-wrap (ygg-git-compare--remote-inline line) width)
               nil)))))
 
+(defun ygg-git-compare--remote-uncommented (text)
+  "TEXT with its HTML comments, a pull request template's hints, left out of
+its prose, the fenced blocks kept as they are."
+  (let (out prose fence)
+    (cl-flet ((flush ()
+                (when prose
+                  (push (replace-regexp-in-string "<!--\\(?:.\\|\n\\)*?-->" ""
+                                                  (string-join (nreverse prose) "\n"))
+                        out)
+                  (setq prose nil))))
+      (dolist (line (split-string (replace-regexp-in-string "\r\n?" "\n" (or text "")) "\n"))
+        (cond
+         (fence
+          (push line out)
+          (when (ygg-git-compare--remote-closes-p line fence) (setq fence nil)))
+         ((string-match ygg-git-compare--remote-fence-re line)
+          (flush)
+          (setq fence (match-string 1 line))
+          (push line out))
+         (t (push line prose))))
+      (flush))
+    (string-join (nreverse out) "\n")))
+
 (defun ygg-git-compare--remote-body (comment width)
   "COMMENT's text as lines: wrapped to WIDTH, code and suggestions apart."
   (let (out fence lang block hang)
-    (dolist (line (split-string (or (plist-get comment :text) "") "\r?\n"))
+    (dolist (line (split-string (ygg-git-compare--remote-uncommented (plist-get comment :text))
+                                "\n"))
       (cond
        (fence
         (if (ygg-git-compare--remote-closes-p line fence)
@@ -363,8 +439,9 @@ author, age, replies and state, a reply indented under it with no state."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq ygg-git-compare--remote-rewrap-timer nil)
-      (when (ygg-git-compare--conversation-section)
-        (ygg-git-compare--pr-info-refresh buffer :conversation))
+      (when-let* ((keys (append (and (ygg-git-compare--description-section) '(:description))
+                                (and (ygg-git-compare--conversation-section) '(:conversation)))))
+        (apply #'ygg-git-compare--pr-info-refresh buffer keys))
       (ignore-errors (ygg-git-compare--draw-comments)))))
 
 (defun ygg-git-compare--remote-watch-width ()

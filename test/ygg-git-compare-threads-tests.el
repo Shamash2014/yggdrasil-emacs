@@ -71,7 +71,7 @@ a.txt and adds b.txt; main stays checked out.  The forge is never reached."
                       (lambda (program args callback &optional timeout)
                         (cond (ygg-git-compare-threads-tests--real
                                (funcall async program args callback timeout))
-                              ((member "statusCheckRollup" args)
+                              ((seq-some (lambda (arg) (string-search "statusCheckRollup" arg)) args)
                                (funcall callback 0 "{\"statusCheckRollup\":[]}" ""))
                               ((and (equal program "glab")
                                     (string-match-p "merge_requests/[0-9]+\\'" (car (last args))))
@@ -1021,3 +1021,45 @@ string, or (STATUS . WHAT-IT-SAID)."
 
 (provide 'ygg-git-compare-threads-tests)
 ;;; ygg-git-compare-threads-tests.el ends here
+
+(defun ygg-git-compare-threads-tests--body (text)
+  (mapcar #'substring-no-properties (ygg-git-compare--remote-body (list :text text) 60)))
+
+(ert-deftest ygg-git-compare-threads-html-comment-inside-a-fence-is-kept ()
+  (should (member "<!-- x -->"
+                  (ygg-git-compare-threads-tests--body "```\n<!-- x -->\n```")))
+  (should (member "+ <!-- y -->"
+                  (ygg-git-compare-threads-tests--body "```suggestion\n<!-- y -->\n```")))
+  (let ((lines (ygg-git-compare-threads-tests--body "before <!-- a\nb --> after\n```\n<!-- z -->\n```")))
+    (should (member "before after" lines))
+    (should (member "<!-- z -->" lines))))
+
+(ert-deftest ygg-git-compare-threads-italic-keeps-the-faces-inside-it ()
+  (let* ((line (ygg-git-compare--remote-inline "*see `code` here*"))
+         (at (string-search "code" line)))
+    (should (equal (substring-no-properties line) "see code here"))
+    (should (memq 'ygg-git-compare-remote-code (ensure-list (get-text-property at 'face line))))
+    (should (memq 'italic (ensure-list (get-text-property at 'face line))))
+    (should (memq 'italic (ensure-list (get-text-property 0 'face line))))))
+
+(ert-deftest ygg-git-compare-threads-ordered-task-item-keeps-its-number ()
+  (let ((lines (ygg-git-compare-threads-tests--body "1. [x] migrate\n2) [ ] test\n- [x] bullet")))
+    (should (equal lines '("1. ☑ migrate" "2) ☐ test" "☑ bullet")))))
+
+(ert-deftest ygg-git-compare-threads-link-url-may-hold-balanced-parens ()
+  (should (equal (substring-no-properties
+                  (ygg-git-compare--remote-inline "see [spec](https://x/Foo_(bar)) now"))
+                 "see spec now"))
+  (should (equal (substring-no-properties
+                  (ygg-git-compare--remote-inline "![pic](https://x/a_(b).png) ok"))
+                 "pic ok")))
+
+(ert-deftest ygg-git-compare-threads-draws-without-the-pr-info-order ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let ((order ygg-git-compare--pr-info-order))
+        (unwind-protect
+            (progn (makunbound 'ygg-git-compare--pr-info-order)
+                   (ygg-git-compare--draw-comments))
+          (set 'ygg-git-compare--pr-info-order order))))))

@@ -866,12 +866,14 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
        buffer (lambda () (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks)))
       (with-current-buffer buffer
         (let ((types (lambda () (mapcar (lambda (s) (oref s type)) (oref magit-root-section children)))))
-          (should (equal (seq-take (funcall types) 3)
-                         '(ygg-git-compare-conversation ygg-git-compare-checks diffstat)))
+          (should (equal (seq-take (funcall types) 4)
+                         '(ygg-git-compare-description ygg-git-compare-conversation
+                           ygg-git-compare-checks diffstat)))
           (magit-section-hide (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks))
           (ygg-git-compare--pr-info-refresh buffer :conversation :checks)
-          (should (equal (seq-take (funcall types) 3)
-                         '(ygg-git-compare-conversation ygg-git-compare-checks diffstat)))
+          (should (equal (seq-take (funcall types) 4)
+                         '(ygg-git-compare-description ygg-git-compare-conversation
+                           ygg-git-compare-checks diffstat)))
           (should (oref (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks) hidden))
           (magit-section-show (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks))
           (goto-char (point-min))
@@ -1119,5 +1121,165 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
         (ygg-git-compare-refresh))
       (should-not (ygg-git-compare-pr-info-tests--log)))))
 
+(ert-deftest ygg-git-compare-pr-info-github-description-leads-the-sections ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--seed-conversation)
+    (ygg-git-compare-pr-info-tests--put
+     "checks.json"
+     (json-serialize (list :statusCheckRollup [] :title "gh title" :body "does the thing"
+                           :author (list :login "alice") :createdAt "2020-01-01T00:00:00Z"
+                           :headRefName "feature" :baseRefName "main"
+                           :url "https://github.com/o/r/pull/12")))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (string-search "gh title" (ygg-git-compare-pr-info-tests--text))))
+      (with-current-buffer buffer
+        (let* ((text (ygg-git-compare-pr-info-tests--text))
+               (section (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-description))
+               (own (buffer-substring-no-properties (oref section start) (oref section end))))
+          (should (string-search "#12 gh title" own))
+          (should (string-search "alice" own))
+          (should (string-search "feature → main" own))
+          (should (string-search "does the thing" own))
+          (should-not (oref section hidden))
+          (should (< (string-search "#12 gh title" text)
+                     (string-search "Conversation (" text)))
+          (should (< (string-search "Conversation (" text) (string-search "Checks" text)))
+          (should (< (string-search "Checks" text) (string-search "a.txt" text))))))))
+
+(ert-deftest ygg-git-compare-pr-info-gitlab-description-shows-the-merge-request ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "mr.json" (json-serialize (list :iid 12 :state "opened" :head_pipeline nil
+                                     :title "mr title" :description "merges the thing"
+                                     :author (list :username "bob") :created_at "2020-01-01T00:00:00Z"
+                                     :source_branch "feature" :target_branch "main")))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'gitlab head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (string-search "mr title" (ygg-git-compare-pr-info-tests--text))))
+      (with-current-buffer buffer
+        (let* ((text (ygg-git-compare-pr-info-tests--text))
+               (section (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-description))
+               (own (buffer-substring-no-properties (oref section start) (oref section end))))
+          (should (string-search "!12 mr title" own))
+          (should (string-search "bob" own))
+          (should (string-search "feature → main" own))
+          (should (string-search "merges the thing" own))
+          (should (< (string-search "!12 mr title" text) (string-search "Checks" text)))
+          (should (< (string-search "Checks" text) (string-search "a.txt" text))))))))
+
+(ert-deftest ygg-git-compare-pr-info-empty-description-says-so ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "checks.json" (json-serialize (list :statusCheckRollup [] :title "gh title" :body "  \n")))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (string-search "gh title" (ygg-git-compare-pr-info-tests--text))))
+      (with-current-buffer buffer
+        (let ((section (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-description)))
+          (should (string-search "(no description)"
+                                 (buffer-substring-no-properties (oref section start)
+                                                                 (oref section end)))))))))
+
+(ert-deftest ygg-git-compare-pr-info-description-renders-a-template ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "checks.json"
+     (json-serialize
+      (list :statusCheckRollup [] :title "gh title"
+            :body (concat "<!-- Thanks\r\nfor the PR -->\r\n## Summary\r\n"
+                          "- [x] done\r\n- [ ] later\r\nSee [docs](https://x) and *this*.\r\n"
+                          "```elisp\r\n(message \"hi\")\r\n```\r\n"))))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (string-search "gh title" (ygg-git-compare-pr-info-tests--text))))
+      (with-current-buffer buffer
+        (let* ((section (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-description))
+               (own (buffer-substring-no-properties (oref section start) (oref section end))))
+          (should-not (string-search "<!--" own))
+          (should-not (string-search "](" own))
+          (should-not (string-search "- [x]" own))
+          (should-not (string-search "\r" own))
+          (should (string-search "☑ done" own))
+          (should (string-search "☐ later" own))
+          (should (string-search "See docs and this." own))
+          (should (string-search "Summary" own))
+          (should (string-search "(message \"hi\")" own)))))))
+
+(ert-deftest ygg-git-compare-pr-info-conversation-separates-top-level-comments ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--seed-conversation 2)
+    (ygg-git-compare-pr-info-tests--put "checks.json" "{\"statusCheckRollup\":[]}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-conversation)))
+      (with-current-buffer buffer
+        (magit-section-show-level-4-all)
+        (let* ((spans (ygg-git-compare--conversation-spans))
+               (gap (buffer-substring-no-properties (nth 2 (car spans)) (nth 1 (cadr spans)))))
+          (should (> (length spans) 1))
+          (should (equal gap "\n")))))))
+
 (provide 'ygg-git-compare-pr-info-tests)
 ;;; ygg-git-compare-pr-info-tests.el ends here
+
+(defun ygg-git-compare-pr-info-tests--description-text (buffer)
+  (with-current-buffer buffer
+    (let ((section (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-description)))
+      (buffer-substring-no-properties (oref section start) (oref section end)))))
+
+(ert-deftest ygg-git-compare-pr-info-cache-without-about-is-not-an-empty-description ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put "checks.json" "{\"statusCheckRollup\":[]}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (with-current-buffer buffer
+        (let ((key (ygg-git-compare--checks-key (ygg-git-compare--remote-pr))))
+          (puthash key (list :value (list :checks nil) :time (float-time))
+                   (ygg-git-compare--cache-table (ygg-git-compare--gitdir)))
+          (should-not (plist-get (ygg-git-compare--description-view) :loaded))
+          (ygg-git-compare--pr-info-refresh buffer :description)
+          (should-not (string-search "(no description)"
+                                     (ygg-git-compare-pr-info-tests--description-text buffer))))))))
+
+(ert-deftest ygg-git-compare-pr-info-failed-fetch-shows-in-the-description ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put "checks.err" "gh: To use GitHub CLI, run: gh auth login\n")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (let ((own (ygg-git-compare-pr-info-tests--description-text buffer)))
+        (should (string-search "description: gh: To use GitHub CLI" own))
+        (should-not (string-search "not fetched" own))
+        (should-not (string-search "showing the last fetch" own))))))
+
+(ert-deftest ygg-git-compare-pr-info-failed-refetch-keeps-the-last-description ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "checks.json" (json-serialize (list :statusCheckRollup [] :title "gh title" :body "does the thing")))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (string-search "does the thing" (ygg-git-compare-pr-info-tests--text))))
+      (with-current-buffer buffer
+        (let* ((key (ygg-git-compare--checks-key (ygg-git-compare--remote-pr)))
+               (entry (ygg-git-compare--cache-entry key)))
+          (puthash key (plist-put (copy-sequence entry) :error "boom")
+                   (ygg-git-compare--cache-table (ygg-git-compare--gitdir)))
+          (ygg-git-compare--pr-info-refresh buffer :description)))
+      (let ((own (ygg-git-compare-pr-info-tests--description-text buffer)))
+        (should (string-search "does the thing" own))
+        (should (string-search "description: boom (showing the last fetch)" own))))))
+
+(ert-deftest ygg-git-compare-pr-info-malformed-about-keeps-the-checks ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put "checks.json" "{\"statusCheckRollup\":[]}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (with-current-buffer buffer
+        (let ((key (ygg-git-compare--checks-key (ygg-git-compare--remote-pr)))
+              (check (list :name "build" :state 'passed)))
+          (puthash key (list :value (list :checks (list check) :about '(:title 5))
+                             :time (float-time))
+                   (ygg-git-compare--cache-table (ygg-git-compare--gitdir)))
+          (let ((value (ygg-git-compare--checks-value key)))
+            (should (equal (plist-get value :checks) (list check)))
+            (should-not (plist-get value :about))))))))

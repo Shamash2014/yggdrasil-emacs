@@ -1127,12 +1127,13 @@ Nothing is selected and no window layout is remembered for magit's q."
 
 (defun ygg-git-compare--fold ()
   "Fold every file to its heading, the diffstat and untracked files left open,
-point on the first file.  The conversation and checks stay open unless they
-were made folded."
+point on the first file.  The description, conversation and checks stay open
+unless they were made folded."
   (let* ((top (oref magit-root-section children))
          (info (seq-remove (lambda (s) (oref s hidden))
                            (seq-filter (lambda (s) (memq (oref s type)
-                                                         '(ygg-git-compare-conversation
+                                                         '(ygg-git-compare-description
+                                                           ygg-git-compare-conversation
                                                            ygg-git-compare-checks)))
                                        top)))
          (open (seq-filter (lambda (s) (memq (oref s type)
