@@ -195,3 +195,42 @@
       (kill-buffer namesake))))
 
 ;;; ygg-session-restore-tests.el ends here
+
+(ert-deftest ygg-space-bb-lists-every-shown-buffer-and-its-traces ()
+  (ygg-session-restore-tests--fresh
+    (let ((dired (dired-noselect ygg-session-restore-tests--dir))
+          (hidden (get-buffer-create " *internal*"))
+          (trace (get-buffer-create "*trace probe*")))
+      (unwind-protect
+          (progn
+            (switch-to-buffer dired)
+            (ygg--space-track-buffer)
+            (switch-to-buffer hidden)
+            (ygg--space-track-buffer)
+            (cl-letf (((symbol-function 'aob-sessions) (lambda () '(s1 s2)))
+                      ((symbol-function 'aob-session-ref)
+                       (lambda (s _key) (and (eq s 's1) (ygg-space--current-id))))
+                      ((symbol-function 'aob-trace--name) (lambda (_) "*trace probe*")))
+              (let ((names (ygg--space-buffer-names)))
+                (should (member (buffer-name dired) names))
+                (should (member "*trace probe*" names))
+                (should-not (member " *internal*" names)))))
+        (kill-buffer dired) (kill-buffer hidden) (kill-buffer trace)))))
+
+(ert-deftest ygg-space-a-shared-buffer-is-held-by-every-space-that-shows-it ()
+  (ygg-session-restore-tests--fresh
+    (let ((help (get-buffer-create "*shared probe*"))
+          (first (ygg-space--current-id)))
+      (unwind-protect
+          (progn
+            (switch-to-buffer help)
+            (ygg--space-track-buffer)
+            (tab-bar-new-tab)
+            (let ((second (ygg-space--current-id)))
+              (should-not (eql first second))
+              (should (ygg--space-foreign-buffer-p help))
+              (switch-to-buffer help)
+              (ygg--space-track-buffer)
+              (should-not (ygg--space-foreign-buffer-p help))
+              (should (member "*shared probe*" (ygg--space-buffer-names)))))
+        (kill-buffer help)))))

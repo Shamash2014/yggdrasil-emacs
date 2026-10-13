@@ -460,17 +460,34 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
              ygg--space-buffers)
     nil))
 
+(defvar consult-buffer-filter)
+
+(defun ygg--space-trackable-p (buf)
+  "Whether BUF is one a space files: anything shown but the internal and
+what consult itself hides."
+  (let ((name (buffer-name buf)))
+    (not (or (minibufferp buf)
+             (string-prefix-p " " name)
+             (and (boundp 'consult-buffer-filter)
+                  (seq-some (lambda (re) (string-match-p re name)) consult-buffer-filter))))))
+
+(defun ygg--space-exclusive-p (buf)
+  "Whether BUF belongs to one space only: a file, a job, a browser.
+Any other buffer — help, messages, a listing — can be held by several."
+  (or (buffer-file-name buf)
+      (and (fboundp 'ygg--job-buffer-p) (ygg--job-buffer-p buf))
+      (provided-mode-derived-p (buffer-local-value 'major-mode buf)
+                               '(xwidget-webkit-mode eww-mode))))
+
 (defun ygg--space-track-buffer (&optional _frame)
   (when-let* ((id (ygg-space--current-id)))
     (dolist (win (window-list nil 'no-minibuf))
       (let ((buf (window-buffer win)))
-        (when (and (or (buffer-file-name buf)
-                       (and (fboundp 'ygg--job-buffer-p) (ygg--job-buffer-p buf))
-                       (provided-mode-derived-p (buffer-local-value 'major-mode buf)
-                                                '(xwidget-webkit-mode eww-mode)))
-                   ;; exclusive: a buffer stays with its space — the MRU buffer
-                   ;; that fills a window after a kill must not get adopted here
-                   (memql (ygg--space-buffer-owner buf) (list nil id)))
+        (when (and (ygg--space-trackable-p buf)
+                   (or (not (ygg--space-exclusive-p buf))
+                       ;; a buffer stays with its space — the MRU buffer that
+                       ;; fills a window after a kill must not get adopted here
+                       (memql (ygg--space-buffer-owner buf) (list nil id))))
           (cl-pushnew buf (gethash id ygg--space-buffers)))))))
 
 (defun ygg--space-forget-buffer ()
@@ -484,14 +501,23 @@ The most urgent face across all of them wins, per `ygg-space-state-rank'.")
 
 (defvar ygg-agent--registry)
 
+(declare-function aob-trace--name "aob-trace" (s))
+
 (defun ygg--space-agent-buffers ()
-  "Buffers of agents spawned in the current space, per the agent registry."
-  (when (boundp 'ygg-agent--registry)
-    (let ((id (ygg-space--current-id)))
-      (seq-filter #'buffer-live-p
-                  (mapcar (lambda (e) (plist-get e :buffer))
-                          (seq-filter (lambda (e) (eql (plist-get e :space) id))
-                                      ygg-agent--registry))))))
+  "Buffers of the agents in the current space: aob sessions' traces, and
+what the older agent registry still holds."
+  (let ((id (ygg-space--current-id)))
+    (append
+     (when (and (fboundp 'aob-sessions) (fboundp 'aob-session-ref) (fboundp 'aob-trace--name))
+       (delq nil (mapcar (lambda (s)
+                           (and (eql (aob-session-ref s :space) id)
+                                (get-buffer (aob-trace--name s))))
+                         (aob-sessions))))
+     (when (boundp 'ygg-agent--registry)
+       (seq-filter #'buffer-live-p
+                   (mapcar (lambda (e) (plist-get e :buffer))
+                           (seq-filter (lambda (e) (eql (plist-get e :space) id))
+                                       ygg-agent--registry)))))))
 
 (defvar ygg-embr--space-buffers)
 
@@ -729,8 +755,10 @@ space's previous buffer here and bury this one."
              return (plist-get e :space))))
 
 (defun ygg--space-foreign-buffer-p (buf)
-  "BUF is claimed by another space; unclaimed buffers are never foreign."
+  "BUF is claimed by another space and not held by this one too;
+unclaimed buffers are never foreign."
   (when-let* ((id (ygg-space--current-id))
+              ((not (memq buf (gethash id ygg--space-buffers))))
               (owner (or (ygg--space-buffer-owner buf)
                          (ygg--space-agent-buffer-owner buf))))
     (not (eql owner id))))
