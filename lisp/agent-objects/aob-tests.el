@@ -8052,6 +8052,23 @@ line, so no shell, version manager or buffer between drops it."
             (should (= 2 (length (aob-tests--sent-method sent "session/new")))))
         (ignore-errors (kill-buffer "*login fake*"))))))
 
+(ert-deftest aob-auth-terminal-login-keeps-what-it-said ()
+  (aob-tests--with-session s
+    (let ((aob-acp-command-function #'identity)
+          (aob-acp-agents '(("fake" :command ("sh" "-c" "echo login-said-this" "sh")))))
+      (aob-tests--auth-conn s)
+      (unwind-protect
+          (aob-tests--capturing sent
+            (aob-tests--auth-open s)
+            (aob-tests--auth-refuse s (plist-get (car sent) :id))
+            (aob-acp--resolve s (car (aob-session-decisions s)) "sub-login")
+            (aob-tests--await (lambda () (cdr (aob-tests--sent-method sent "session/new"))))
+            (with-current-buffer "*login fake*"
+              (should (string-match-p "login-said-this" (buffer-string)))
+              (should buffer-read-only)
+              (should (eq (key-binding "q") #'quit-window))))
+        (ignore-errors (kill-buffer "*login fake*"))))))
+
 (ert-deftest aob-auth-terminal-login-that-fails-sends-nothing ()
   (aob-tests--with-session s
     (let ((aob-acp-command-function #'identity)

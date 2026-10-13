@@ -4435,16 +4435,20 @@ this connection never reads."
                     (unless (or told (process-live-p p))
                       (setq told t)
                       (when (buffer-live-p buf)
-                        (with-current-buffer buf (term-line-mode)))
-                      (when (and (eql (process-exit-status p) 0)
-                                 (buffer-live-p buf))
-                        (if-let* ((w (get-buffer-window buf t)))
-                            (quit-window t w)
-                          (kill-buffer buf)))
+                        (with-current-buffer buf (aob-acp--auth-terminal-ended)))
                       (funcall done (eql (process-exit-status p) 0)))))
     (with-current-buffer buf (term-char-mode))
     (unless noninteractive (pop-to-buffer buf))
     buf))
+
+(defun aob-acp--auth-terminal-ended ()
+  "Keep a finished login's output to read, q to leave it."
+  (term-line-mode)
+  (setq buffer-read-only t)
+  (let ((map (make-sparse-keymap)))
+    (set-keymap-parent map (current-local-map))
+    (define-key map "q" #'quit-window)
+    (use-local-map map)))
 
 (defun aob-acp--auth-offer (s err then)
   "Offer the logins S's agent advertised as a Decision, ERR having refused.
