@@ -968,7 +968,8 @@ before it is dispatched.")
          ("tool_call_update"
           (when (member (plist-get u :status) '("completed" "failed"))
             (aob-note-progress s))
-          (aob-acp--tool-update s u))
+          (aob-acp--tool-update s u)
+          (aob-acp--delegated-steps s u))
          ("agent_message_chunk"
           (if-let* ((id (aob-session-ref s :local-compaction)))
               (aob-acp--compaction
@@ -1571,6 +1572,67 @@ never learns there was more than one."
 
 (defconst aob-acp-subagent-tools '("Agent" "Task" "subagent")
   "Tool names, or titles, an adapter gives the call that spawns a subagent.")
+
+(defun aob-acp--delegated-updates (parent idx message)
+  "The ACP updates pi MESSAGE of child IDX stands for, under tool call PARENT."
+  (let ((meta (list :parentToolCallId parent))
+        (id (lambda (call) (format "%s/%d/%s" parent idx call))))
+    (pcase (plist-get message :role)
+      ("assistant"
+       (delq nil
+             (mapcar
+              (lambda (block)
+                (pcase (plist-get block :type)
+                  ("text"
+                   (list :sessionUpdate "agent_message_chunk" :_meta meta
+                         :content (list :type "text" :text (plist-get block :text))))
+                  ("thinking"
+                   (when-let* ((text (plist-get block :thinking))
+                               ((not (string-empty-p text))))
+                     (list :sessionUpdate "agent_thought_chunk" :_meta meta
+                           :content (list :type "text" :text text))))
+                  ("toolCall"
+                   (list :sessionUpdate "tool_call" :_meta meta
+                         :toolCallId (funcall id (plist-get block :id))
+                         :title (plist-get block :name)
+                         :rawInput (plist-get block :arguments)
+                         :status "in_progress"))))
+              (plist-get message :content))))
+      ("toolResult"
+       (list (list :sessionUpdate "tool_call_update" :_meta meta
+                   :toolCallId (funcall id (plist-get message :toolCallId))
+                   :status (if (plist-get message :isError) "failed" "completed")
+                   :content (mapcar (lambda (block)
+                                      (list :type "content" :content block))
+                                    (seq-filter (lambda (b) (equal (plist-get b :type) "text"))
+                                                (plist-get message :content)))))))))
+
+(defun aob-acp--delegated-steps (s u)
+  "Replay into S the steps of the subagents U's snapshot carries, under U's call.
+pi-subagents runs each subagent as a pi of its own and reports it only
+through its tool's progress: every update repeats each child's messages
+so far.  Those not yet replayed go through as the steps a subagent sends
+under its Task, the last held back while the call runs, as it may still
+be streaming."
+  (when-let* ((tc (plist-get u :toolCallId))
+              (ev (gethash tc (aob-acp--tools s)))
+              ((plist-get ev :subagent))
+              (results (plist-get (plist-get (plist-get u :rawOutput) :details) :results))
+              ((listp results)))
+    (let ((running (not (member (plist-get u :status) '("completed" "failed"))))
+          (seen (plist-get ev :delegated-seen)))
+      (seq-do-indexed
+       (lambda (result idx)
+         (let* ((messages (plist-get result :messages))
+                (upto (max 0 (- (length messages) (if running 1 0))))
+                (from (or (alist-get idx seen) 0)))
+           (when (> upto from)
+             (dolist (m (seq-subseq messages from upto))
+               (dolist (step (aob-acp--delegated-updates tc idx m))
+                 (aob-acp--on-notification s "session/update" (list :update step))))
+             (setf (alist-get idx seen) upto))))
+       results)
+      (plist-put ev :delegated-seen seen))))
 
 (defun aob-acp--delegation-brief (raw)
   "What the delegation call with raw input RAW sent its agents to do, or nil.

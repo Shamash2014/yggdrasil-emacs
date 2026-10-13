@@ -8126,6 +8126,42 @@ login restarts it and the prompt it refused goes again."
             (should (= 2 (length (aob-tests--sent-method sent "session/new")))))
         (ignore-errors (kill-buffer "*login fake*"))))))
 
+(ert-deftest aob-pi-subagent-steps-land-under-their-call ()
+  "pi-subagents' snapshots replay each child's steps once, under its call."
+  (aob-tests--with-session s
+    (let* ((msgs (lambda (n)
+                   (seq-take
+                    (list '(:role "user" :content "go")
+                          '(:role "assistant"
+                            :content ((:type "thinking" :thinking "hm")
+                                      (:type "text" :text "reading")
+                                      (:type "toolCall" :id "c1" :name "read"
+                                       :arguments (:path "a.el"))))
+                          '(:role "toolResult" :toolCallId "c1" :toolName "read"
+                            :content ((:type "text" :text "body")) :isError nil)
+                          '(:role "assistant" :content ((:type "text" :text "done"))))
+                    n)))
+           (snap (lambda (n status)
+                   (list :sessionUpdate "tool_call_update" :toolCallId "sub1" :status status
+                         :rawOutput (list :details
+                                          (list :results (list (list :messages (funcall msgs n)))))))))
+      (aob-acp--on-notification
+       s "session/update"
+       '(:update (:sessionUpdate "tool_call" :toolCallId "sub1" :title "subagent"
+                  :rawInput (:agent "scout" :task "look") :status "in_progress")))
+      (aob-acp--on-notification s "session/update" (list :update (funcall snap 3 "in_progress")))
+      (aob-acp--on-notification s "session/update" (list :update (funcall snap 3 "in_progress")))
+      (let ((tool (gethash "sub1/0/c1" (aob-acp--tools s)))
+            (kids (seq-filter (lambda (e) (equal (plist-get e :parent) "sub1"))
+                              (aob-session-events s))))
+        (should tool)
+        (should (equal (plist-get tool :parent) "sub1"))
+        (should-not (equal (plist-get tool :status) "completed"))
+        (should (= 1 (length (seq-filter (lambda (e) (eq (plist-get e :type) 'thought)) kids))))
+        (should (= 1 (length (seq-filter (lambda (e) (eq (plist-get e :type) 'message)) kids)))))
+      (aob-acp--on-notification s "session/update" (list :update (funcall snap 4 "completed")))
+      (should (equal (plist-get (gethash "sub1/0/c1" (aob-acp--tools s)) :status) "completed")))))
+
 (ert-deftest aob-auth-terminal-login-that-fails-sends-nothing ()
   (aob-tests--with-session s
     (let ((aob-acp-command-function #'identity)
