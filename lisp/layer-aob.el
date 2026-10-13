@@ -572,6 +572,18 @@ A terminal that takes a pasted key, modal keys and q once it is over."
 
 (setq aob-acp-edit-profile-function #'ygg-pi-edit-profile)
 
+;;;###autoload
+(defun ygg-agent-open-config-home (s)
+  "Open the config home S's agent runs on, the one its process was given."
+  (interactive (list (aob-target)))
+  (let* ((agent (aob-session-ref s :agent))
+         (kind (or (ygg-agent--kind agent agent)
+                   (user-error "aob: %s keeps no config home" agent)))
+         (spec (cdr (assoc kind ygg-agent--config-homes)))
+         (env (and (aob-session-conn s) (process-get (aob-session-conn s) 'aob-env))))
+    (dired (or (and env (getenv-internal (plist-get spec :var) env))
+               (expand-file-name (plist-get spec :home))))))
+
 (defun ygg-aob--trash-profile-home (_name spec)
   "Offer to move the home SPEC's profile kept to the trash, conversations and all."
   (when-let* ((profile (plist-get spec :profile))

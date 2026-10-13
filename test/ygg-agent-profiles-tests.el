@@ -284,5 +284,21 @@
       (should (equal outcome '(nil)))
       (should-not ghostel-compile-finish-functions))))
 
+(ert-deftest ygg-agent-profiles-open-the-home-a-session-runs-on ()
+  (let* ((proc (start-process "home-probe" nil "sleep" "5"))
+         (s (aob-create-session :id "acp:home" :backend 'acp :name "home"
+                                :project "/tmp/" :dir "/tmp/" :state 'idle
+                                :refs (list :agent "claude")))
+         opened)
+    (unwind-protect
+        (progn
+          (setf (aob-session-conn s) proc)
+          (process-put proc 'aob-env '("CLAUDE_CONFIG_DIR=/x/profiles/w/claude" "HOME=/h"))
+          (cl-letf (((symbol-function 'dired) (lambda (d) (setq opened d))))
+            (ygg-agent-open-config-home s))
+          (should (equal opened "/x/profiles/w/claude")))
+      (delete-process proc)
+      (aob-remove-session s))))
+
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here
