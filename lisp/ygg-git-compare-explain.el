@@ -18,7 +18,7 @@
 (defvar aob-acp-show-trace)
 (defvar aob-acp-default-agent)
 (declare-function aob-acp-spawn "aob-acp" (agent &optional intent atts name tree))
-(declare-function aob-acp-preset "aob-acp" (name))
+(declare-function aob-acp-profile "aob-acp" (name))
 
 (defcustom ygg-git-compare-explain-preset nil
   "The preset a session asked about a compare runs under.
@@ -138,7 +138,7 @@ change no file, commit, branch or ref.\n"))))
 
 (defun ygg-git-compare-explain--preset ()
   (let ((preset (or ygg-git-compare-explain-preset aob-acp-default-agent)))
-    (when (plist-get (aob-acp-preset preset) :worktree)
+    (when (plist-get (aob-acp-profile preset) :worktree)
       (user-error "Preset %s makes a worktree of its own; pick one that reads in place"
                   preset))
     preset))

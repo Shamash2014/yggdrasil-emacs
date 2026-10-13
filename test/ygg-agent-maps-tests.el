@@ -1003,13 +1003,13 @@
       (cl-letf (((symbol-function 'aob-acp-spawn)
                  (lambda (agent prompt &rest _)
                    (setq seen (list (aob-acp--project)
-                                    (plist-get (aob-acp-preset agent) :worktree)
-                                    (plist-get (aob-acp-preset agent) :mode)
+                                    (plist-get (aob-acp-profile agent) :worktree)
+                                    (plist-get (aob-acp-profile agent) :mode)
                                     aob-acp-start-worktree
                                     prompt))
                    'session))
                 (aob-acp-start-worktree '("/elsewhere" . "br"))
-                (aob-acp-presets (list (cons aob-acp-default-agent
+                (aob-acp-profiles (list (cons aob-acp-default-agent
                                              '(:agent "claude" :worktree t :mode "bypass")))))
         (ygg-agent-maps-features root))
       (should (equal (file-truename root) (file-truename (car seen))))

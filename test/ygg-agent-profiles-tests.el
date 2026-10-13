@@ -145,22 +145,22 @@
 
 (ert-deftest ygg-agent-profiles-a-new-preset-is-made-saved-and-profiled ()
   (ygg-agent-profiles-tests--with
-    (let ((aob-acp-presets '(("claude" :agent "claude")))
+    (let ((aob-acp-profiles '(("claude" :agent "claude")))
           (answers '("work" "claude"))
           saved)
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (pop answers)))
                 ((symbol-function 'customize-save-variable)
                  (lambda (var val) (set var val) (setq saved t))))
-        (should (equal (aob-acp-read-preset "Preset: ") "work"))
+        (should (equal (aob-acp-read-profile "Preset: ") "work"))
         (should saved)
-        (should (equal (aob-acp-preset "work") '(:agent "claude" :profile "work")))
+        (should (equal (aob-acp-profile "work") '(:agent "claude" :profile "work")))
         (setq saved nil answers '("work"))
-        (should (equal (aob-acp-read-preset "Preset: ") "work"))
+        (should (equal (aob-acp-read-profile "Preset: ") "work"))
         (should-not saved)))))
 
 (ert-deftest ygg-agent-profiles-a-preset-spawns-under-its-profile ()
   (ygg-agent-profiles-tests--with
-    (let ((aob-acp-presets '(("work" :agent "claude" :profile "work")
+    (let ((aob-acp-profiles '(("work" :agent "claude" :profile "work")
                              ("claude" :agent "claude")))
           refs)
       (cl-letf (((symbol-function 'aob-acp-spawn)

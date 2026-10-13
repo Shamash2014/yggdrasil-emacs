@@ -49,12 +49,12 @@ Answer with only the prompt text: no preamble, no closing remarks."
 (defun aob-handoff--presets (preset)
   "The presets, with PRESET kept out of a fresh worktree.
 The handoff works where the source did, uncommitted edits and all."
-  (let ((spec (cdr (assoc preset aob-acp-presets))))
+  (let ((spec (cdr (assoc preset aob-acp-profiles))))
     (if (plist-get spec :worktree)
         (cons (cons preset (cl-loop for (k v) on spec by #'cddr
                                     unless (eq k :worktree) append (list k v)))
-              aob-acp-presets)
-      aob-acp-presets)))
+              aob-acp-profiles)
+      aob-acp-profiles)))
 
 (defun aob-handoff--spawn (source text)
   "Open a fresh session of SOURCE's agent where SOURCE works, TEXT in compose."
@@ -64,7 +64,7 @@ The handoff works where the source did, uncommitted edits and all."
                   default-directory))
          (default-directory (file-name-as-directory (expand-file-name dir)))
          (aob-acp-start-dir (or (aob-session-project source) dir))
-         (aob-acp-presets (aob-handoff--presets preset))
+         (aob-acp-profiles (aob-handoff--presets preset))
          (aob-acp-session-refs
           (append (when-let* ((task (aob-session-ref source :task)))
                     (list :task task))

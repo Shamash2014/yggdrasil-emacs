@@ -13,11 +13,11 @@
 (declare-function aob-session-p "aob")
 (declare-function aob-session-state "aob")
 (declare-function aob-acp-spawn "aob-acp")
-(declare-function aob-acp-preset "aob-acp")
+(declare-function aob-acp-profile "aob-acp")
 (defvar aob-acp-default-agent)
 (defvar aob-acp-start-dir)
 (defvar aob-acp-start-worktree)
-(defvar aob-acp-presets)
+(defvar aob-acp-profiles)
 (defvar aob-acp-before-first-prompt-functions)
 (defvar aob-acp-context-cleared-functions)
 (defvar aob-state-change-hook)
@@ -621,7 +621,7 @@ features.md the next time the maps refresh."
     (ygg-agent-maps-features root t)))
 
 (defun ygg-agent-maps--in-root-preset (agent)
-  (let ((spec (copy-sequence (aob-acp-preset agent))))
+  (let ((spec (copy-sequence (aob-acp-profile agent))))
     (cons agent (cl-loop for (k v) on spec by #'cddr
                          unless (eq k :worktree) append (list k v)))))
 
@@ -644,8 +644,8 @@ Refused while an agent session is live in ROOT unless FORCE."
            (verb (if exists "refresh" "write"))
            (aob-acp-start-dir root)
            (aob-acp-start-worktree nil)
-           (aob-acp-presets (cons (ygg-agent-maps--in-root-preset aob-acp-default-agent)
-                                  aob-acp-presets))
+           (aob-acp-profiles (cons (ygg-agent-maps--in-root-preset aob-acp-default-agent)
+                                  aob-acp-profiles))
            (prompt (format "Use the %s skill to %s lat.md/features.md from source. If that skill is not available, %s lat.md/features.md from source yourself, following the format of %s. Then verify each feature's keys and commands exist in the source, and correct any that do not."
                            skill verb verb
                            (if exists "the existing file" "the other notes in lat.md and lat.md/lat.md"))))

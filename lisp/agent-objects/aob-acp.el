@@ -43,7 +43,7 @@
   "What starts an adapter: NAME → plist with :command argv.
 Only the process lives here.  How a session is to behave — worktree,
 permission mode, model, effort — is a preset, because the same binary
-answers to several of them; see `aob-acp-presets'."
+answers to several of them; see `aob-acp-profiles'."
   :type '(alist :key-type string :value-type plist)
   :group 'aob)
 
@@ -2408,7 +2408,7 @@ modified counts as modified."
   "The /compact S is sent, with instructions when its agent takes them."
   (let ((agent (aob-session-ref s :agent)))
     (if (and aob-acp-compact-instructions (stringp agent)
-             (member (aob-acp-preset-agent agent) aob-acp-compact-instruction-agents))
+             (member (aob-acp-profile-agent agent) aob-acp-compact-instruction-agents))
         (let ((files (aob-acp--touched-files s)))
           (concat "/compact " aob-acp-compact-instructions
                   (when (car files)
@@ -2544,7 +2544,7 @@ as a compaction line with the context reading dropped until the next."
 (defun aob-acp--plain-adapter-p (s)
   (let ((agent (aob-session-ref s :agent)))
     (and (stringp agent)
-         (member (aob-acp-preset-agent agent) aob-acp-plain-adapter-agents))))
+         (member (aob-acp-profile-agent agent) aob-acp-plain-adapter-agents))))
 
 (defun aob-acp--with-local-commands (s commands)
   "COMMANDS S's agent advertises, plus the /clear and /new aob answers itself."
@@ -3421,7 +3421,7 @@ it when the session offers none."
 
 (defun aob-acp--title-argv (s request)
   "The argv for S's agent to answer REQUEST once, or nil."
-  (when-let* ((entry (cdr (assoc (aob-acp-preset-agent (or (aob-session-ref s :agent) ""))
+  (when-let* ((entry (cdr (assoc (aob-acp-profile-agent (or (aob-session-ref s :agent) ""))
                                  aob-acp-title-commands))))
     (let ((model (aob-acp--title-model-for s)))
       (if (functionp entry)
@@ -3471,7 +3471,7 @@ DONE gets the first line of output, or nil."
   (when-let* ((aob-acp-title-model)
               (aob-auto-name)
               ((stringp text))
-              ((member (aob-acp-preset-agent (or (aob-session-ref s :agent) ""))
+              ((member (aob-acp-profile-agent (or (aob-session-ref s :agent) ""))
                        aob-acp-titled-agents))
               ((not (aob-session-ref s :title-asked)))
               ((not (aob-session-ref s :named-by-user)))
@@ -3918,7 +3918,9 @@ never opens — so it is sent the empty vector it was sent before."
       (and (plist-member (plist-get init :agentCapabilities) :mcpCapabilities)
            t)))
 
-(defcustom aob-acp-presets
+(define-obsolete-variable-alias 'aob-acp-presets 'aob-acp-profiles "31.1")
+
+(defcustom aob-acp-profiles
   '(("claude" :agent "claude" :mode "auto")
     ("claude-isolated" :agent "claude" :worktree t :mode "bypassPermissions")
     ("codex" :agent "codex")
@@ -3933,86 +3935,86 @@ permission mode applied as it opens, :model, and :config, a plist of
 config options set once the session is up.
 
 An isolated worker is not another agent, it is the same one asked for
-different things, which is why it is a preset and not a second entry in
+different things, which is why it is a profile and not a second entry in
 the agent table."
   :type '(alist :key-type string :value-type plist)
   :group 'aob)
 
-(defun aob-acp-preset (name)
+(defun aob-acp-profile (name)
   "NAME as a preset plist.
 A name that is only an agent is a preset of itself, so a caller may
 pass either and old configuration keeps working."
-  (or (cdr (assoc name aob-acp-presets))
+  (or (cdr (assoc name aob-acp-profiles))
       (and (assoc name aob-acp-agents) (list :agent name))))
 
-(defun aob-acp-preset-agent (name)
+(defun aob-acp-profile-agent (name)
   "The adapter NAME runs on."
-  (or (plist-get (aob-acp-preset name) :agent) name))
+  (or (plist-get (aob-acp-profile name) :agent) name))
 
 (defun aob-acp-names ()
-  "Everything that can be spawned: presets, and agents without one."
-  (let ((presets (mapcar #'car aob-acp-presets)))
-    (append presets
-            (seq-remove (lambda (a) (member a presets))
+  "Everything that can be spawned: profiles, and agents without one."
+  (let ((profiles (mapcar #'car aob-acp-profiles)))
+    (append profiles
+            (seq-remove (lambda (a) (member a profiles))
                         (mapcar #'car aob-acp-agents)))))
 
-(defvar aob-acp-new-preset-function
+(defvar aob-acp-new-profile-function
   (lambda (_name agent) (list :agent agent))
-  "Called with NAME and AGENT for a preset being made; returns its plist.")
+  "Called with NAME and AGENT for a profile being made; returns its plist.")
 
-(defun aob-acp-read-preset (prompt)
-  "Read a preset with PROMPT; a name not listed is made and saved."
+(defun aob-acp-read-profile (prompt)
+  "Read a profile with PROMPT; a name not listed is made and saved."
   (let ((name (string-trim (completing-read prompt (aob-acp-names)
                                             nil nil nil nil aob-acp-default-agent))))
-    (cond ((string-empty-p name) (user-error "aob: no preset"))
+    (cond ((string-empty-p name) (user-error "aob: no profile"))
           ((member name (aob-acp-names)) name)
-          (t (aob-acp-create-preset name)))))
+          (t (aob-acp-create-profile name)))))
 
-(defun aob-acp--save-presets (presets)
-  (customize-save-variable 'aob-acp-presets presets))
+(defun aob-acp--save-profiles (profiles)
+  (customize-save-variable 'aob-acp-profiles profiles))
 
 ;;;###autoload
-(defun aob-acp-create-preset (name &optional agent)
-  "Make preset NAME running on AGENT, save it, and return NAME."
-  (interactive (list (string-trim (read-string "New preset: "))))
-  (when (string-empty-p name) (user-error "aob: no preset"))
+(defun aob-acp-create-profile (name &optional agent)
+  "Make profile NAME running on AGENT, save it, and return NAME."
+  (interactive (list (string-trim (read-string "New profile: "))))
+  (when (string-empty-p name) (user-error "aob: no profile"))
   (when (member name (aob-acp-names)) (user-error "aob: %s already exists" name))
   (let ((agent (or agent
-                   (completing-read (format "New preset %s runs on: " name)
+                   (completing-read (format "New profile %s runs on: " name)
                                     (mapcar #'car aob-acp-agents) nil t nil nil
-                                    (aob-acp-preset-agent aob-acp-default-agent)))))
+                                    (aob-acp-profile-agent aob-acp-default-agent)))))
     (when (string-empty-p agent) (user-error "aob: no agent"))
-    (aob-acp--save-presets
-     (append aob-acp-presets
-             (list (cons name (funcall aob-acp-new-preset-function name agent)))))
+    (aob-acp--save-profiles
+     (append aob-acp-profiles
+             (list (cons name (funcall aob-acp-new-profile-function name agent)))))
     name))
 
 ;;;###autoload
-(defun aob-acp-edit-preset (name spec)
-  "Replace preset NAME's plist with SPEC and save."
+(defun aob-acp-edit-profile (name spec)
+  "Replace profile NAME's plist with SPEC and save."
   (interactive
-   (let ((name (completing-read "Edit preset: " (mapcar #'car aob-acp-presets) nil t)))
-     (list name (read--expression (format "Preset %s: " name)
-                                  (prin1-to-string (cdr (assoc name aob-acp-presets)))))))
-  (unless (assoc name aob-acp-presets) (user-error "aob: no preset %s" name))
+   (let ((name (completing-read "Edit profile: " (mapcar #'car aob-acp-profiles) nil t)))
+     (list name (read--expression (format "Profile %s: " name)
+                                  (prin1-to-string (cdr (assoc name aob-acp-profiles)))))))
+  (unless (assoc name aob-acp-profiles) (user-error "aob: no profile %s" name))
   (unless (and (plistp spec) (assoc (plist-get spec :agent) aob-acp-agents))
-    (user-error "aob: a preset is a plist whose :agent is one of %s"
+    (user-error "aob: a profile is a plist whose :agent is one of %s"
                 (mapconcat #'car aob-acp-agents ", ")))
-  (aob-acp--save-presets
-   (mapcar (lambda (p) (if (equal (car p) name) (cons name spec) p)) aob-acp-presets)))
+  (aob-acp--save-profiles
+   (mapcar (lambda (p) (if (equal (car p) name) (cons name spec) p)) aob-acp-profiles)))
 
 ;;;###autoload
-(defun aob-acp-delete-preset (name)
-  "Delete preset NAME from `aob-acp-presets' and save the rest.
+(defun aob-acp-delete-profile (name)
+  "Delete profile NAME from `aob-acp-profiles' and save the rest.
 A profile it ran under keeps its home: conversations live there."
-  (interactive (list (completing-read "Delete preset: " (mapcar #'car aob-acp-presets)
+  (interactive (list (completing-read "Delete profile: " (mapcar #'car aob-acp-profiles)
                                       nil t)))
-  (let ((spec (cdr (or (assoc name aob-acp-presets)
-                       (user-error "aob: no preset %s" name)))))
-    (when (or noninteractive (yes-or-no-p (format "Delete preset %s? " name)))
-      (aob-acp--save-presets
-       (seq-remove (lambda (p) (equal (car p) name)) aob-acp-presets))
-      (message "aob: deleted preset %s%s" name
+  (let ((spec (cdr (or (assoc name aob-acp-profiles)
+                       (user-error "aob: no profile %s" name)))))
+    (when (or noninteractive (yes-or-no-p (format "Delete profile %s? " name)))
+      (aob-acp--save-profiles
+       (seq-remove (lambda (p) (equal (car p) name)) aob-acp-profiles))
+      (message "aob: deleted profile %s%s" name
                (if-let* ((profile (plist-get spec :profile)))
                    (format "; profile %s kept" profile)
                  "")))))
@@ -4739,11 +4741,11 @@ started for something already named says so in every list it shows up in.
 TREE, else aob-acp-start-worktree, is a worktree picked to work in, as
 aob-acp-read-worktree answers; an isolated preset keeps its own instead."
   (interactive
-   (let* ((agent (aob-acp-read-preset "ACP agent: "))
-          (tree (unless (plist-get (aob-acp-preset agent) :worktree)
+   (let* ((agent (aob-acp-read-profile "ACP agent: "))
+          (tree (unless (plist-get (aob-acp-profile agent) :worktree)
                   (aob-acp-read-worktree (aob-acp--project)))))
      (list agent (read-string (format "%s » " agent)) nil nil tree)))
-  (let* ((spec (aob-acp-preset agent))
+  (let* ((spec (aob-acp-profile agent))
          (base (or (plist-get spec :agent) agent))
          (project (aob-acp--project))
          (worktree (plist-get spec :worktree))
@@ -4930,8 +4932,8 @@ The resume reads the asleep entry, so that is where the choice goes."
 
 (defun aob-acp-spawn-with (agent project model &optional intent tree)
   "Spawn AGENT on PROJECT with MODEL, sending INTENT as its first turn.
-AGENT is a preset name: what it runs on, how it may act and what it
-answers with come from `aob-acp-presets', so the only thing still asked
+AGENT is a profile name: what it runs on, how it may act and what it
+answers with come from `aob-acp-profiles', so the only thing still asked
 is where.  MODEL overrides the preset\='s own, for a one-off.
 
 With no INTENT the first turn is written in a compose buffer rather than
@@ -4939,7 +4941,7 @@ the minibuffer, and the session is spawned when that is sent: a first
 prompt is the longest one there is, and it can carry attachments.
 TREE is the worktree of PROJECT it works in, as aob-acp-read-worktree answers."
   (interactive
-   (let* ((preset (aob-acp-read-preset "Preset: "))
+   (let* ((preset (aob-acp-read-profile "Profile: "))
           ;; the project you are in is the answer nearly every time; a
           ;; prefix argument is for the times it is not
           (project (if current-prefix-arg
@@ -4952,7 +4954,7 @@ TREE is the worktree of PROJECT it works in, as aob-acp-read-worktree answers."
                                                   default-directory)))
                      (or (aob-acp--project) default-directory))))
      (list preset (expand-file-name project) nil nil
-           (unless (plist-get (aob-acp-preset preset) :worktree)
+           (unless (plist-get (aob-acp-profile preset) :worktree)
              (aob-acp-read-worktree (expand-file-name project))))))
   (let ((dir (file-name-as-directory project)))
     (if intent

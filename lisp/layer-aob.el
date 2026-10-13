@@ -295,7 +295,7 @@ the servers it is handed are decided."
         (_ (aob-acp-config s)))
     (let ((root (ygg-aob--draft-root)))
       (if (and (aob-acp--worktree-choices root)
-               (equal (completing-read "Draft spawns under: " '("preset" "worktree")
+               (equal (completing-read "Draft spawns under: " '("profile" "worktree")
                                        nil t)
                       "worktree"))
           (ygg-aob--set-draft-tree (aob-acp-read-worktree root))
@@ -531,7 +531,7 @@ actions keep their tool title.  The short path stays the clickable target."
           (aob-acp-spawn agent text atts))))
 
 ;; a preset made at its prompt is a profile: a config home of its own, logged in apart
-(setq aob-acp-new-preset-function
+(setq aob-acp-new-profile-function
       (lambda (name agent)
         (if (and ygg-agent-conf-root (ygg-agent--kind agent agent))
             (list :agent agent :profile name)
@@ -542,7 +542,7 @@ actions keep their tool title.  The short path stays the clickable target."
   (let* ((refs (bound-and-true-p aob-acp-session-refs))
          (profile (and (stringp agent)
                        (not (plist-get refs :profile))
-                       (plist-get (aob-acp-preset agent) :profile)))
+                       (plist-get (aob-acp-profile agent) :profile)))
          (aob-acp-session-refs (if profile (append (list :profile profile) refs) refs)))
     (apply fn agent args)))
 (advice-add 'aob-acp-spawn :around #'ygg-aob--with-profile)

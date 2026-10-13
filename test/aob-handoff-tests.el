@@ -30,7 +30,7 @@
   (push (list :agent agent :intent intent :atts atts :name name :tree tree
               :start-dir aob-acp-start-dir :default-directory default-directory
               :refs aob-acp-session-refs
-              :preset (aob-acp-preset agent))
+              :preset (aob-acp-profile agent))
         aob-handoff-tests--spawns)
   (aob-create-session :id "acp:handoff-new" :backend 'acp
                       :name "handoff-new" :project aob-acp-start-dir
@@ -44,7 +44,7 @@
             (aob-acp-persist-file (make-temp-file "aob-handoff-persist-" nil ".eld"))
             (aob-handoff-tests--requests nil)
             (aob-handoff-tests--spawns nil)
-            (aob-acp-presets '(("builder" :agent "claude" :worktree t :mode "plan")))
+            (aob-acp-profiles '(("builder" :agent "claude" :worktree t :mode "plan")))
             (,src (aob-create-session :id "acp:handoff-src" :backend 'acp
                                       :name "src" :project "/tmp/proj/"
                                       :dir "/tmp/proj/wt/" :state 'idle)))
