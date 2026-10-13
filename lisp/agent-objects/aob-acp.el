@@ -3952,6 +3952,27 @@ pass either and old configuration keeps working."
             (seq-remove (lambda (a) (member a presets))
                         (mapcar #'car aob-acp-agents)))))
 
+(defvar aob-acp-new-preset-function
+  (lambda (_name agent) (list :agent agent))
+  "Called with NAME and AGENT for a preset being made; returns its plist.")
+
+(defun aob-acp-read-preset (prompt)
+  "Read a preset with PROMPT; a name not listed is made and saved."
+  (let ((name (string-trim (completing-read prompt (aob-acp-names)
+                                            nil nil nil nil aob-acp-default-agent))))
+    (cond ((string-empty-p name) (user-error "aob: no preset"))
+          ((member name (aob-acp-names)) name)
+          (t (let ((agent (completing-read (format "New preset %s runs on: " name)
+                                           (mapcar #'car aob-acp-agents) nil t nil nil
+                                           (aob-acp-preset-agent aob-acp-default-agent))))
+               (when (string-empty-p agent) (user-error "aob: no agent"))
+               (customize-save-variable
+                'aob-acp-presets
+                (append aob-acp-presets
+                        (list (cons name (funcall aob-acp-new-preset-function
+                                                  name agent)))))
+               name)))))
+
 (defcustom aob-acp-project-mcp-file ".mcp.json"
   "Where a checkout declares the MCP servers its work needs.
 The file claude reads when it runs itself.  Over ACP nothing reads it
@@ -4655,8 +4676,7 @@ started for something already named says so in every list it shows up in.
 TREE, else aob-acp-start-worktree, is a worktree picked to work in, as
 aob-acp-read-worktree answers; an isolated preset keeps its own instead."
   (interactive
-   (let* ((agent (completing-read "ACP agent: " (aob-acp-names)
-                                  nil t nil nil aob-acp-default-agent))
+   (let* ((agent (aob-acp-read-preset "ACP agent: "))
           (tree (unless (plist-get (aob-acp-preset agent) :worktree)
                   (aob-acp-read-worktree (aob-acp--project)))))
      (list agent (read-string (format "%s » " agent)) nil nil tree)))
@@ -4856,8 +4876,7 @@ the minibuffer, and the session is spawned when that is sent: a first
 prompt is the longest one there is, and it can carry attachments.
 TREE is the worktree of PROJECT it works in, as aob-acp-read-worktree answers."
   (interactive
-   (let* ((preset (completing-read "Preset: " (aob-acp-names)
-                                   nil t nil nil aob-acp-default-agent))
+   (let* ((preset (aob-acp-read-preset "Preset: "))
           ;; the project you are in is the answer nearly every time; a
           ;; prefix argument is for the times it is not
           (project (if current-prefix-arg

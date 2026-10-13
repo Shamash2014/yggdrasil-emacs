@@ -299,8 +299,7 @@ the servers it is handed are decided."
                                        nil t)
                       "worktree"))
           (ygg-aob--set-draft-tree (aob-acp-read-worktree root))
-        (let ((preset (completing-read "Draft spawns under: " (aob-acp-names)
-                                       nil t nil nil aob-acp-default-agent)))
+        (let ((preset (aob-acp-read-preset "Draft spawns under: ")))
           (setq aob-compose--target (cons 'new preset)
                 aob-compose--label (concat "→ new " preset))
           (force-mode-line-update)
@@ -530,18 +529,21 @@ actions keep their tool title.  The short path stays the clickable target."
                                              (bound-and-true-p aob-acp-session-refs))))
           (aob-acp-spawn agent text atts))))
 
-;; on the spawn itself: a preset-and-project spawn sends from its own draft callback
+;; a preset made at its prompt is a profile: a config home of its own, logged in apart
+(setq aob-acp-new-preset-function
+      (lambda (name agent)
+        (if (and ygg-agent-conf-root (ygg-agent--kind agent agent))
+            (list :agent agent :profile name)
+          (list :agent agent))))
+
 (defun ygg-aob--with-profile (fn agent &rest args)
-  "Ask which profile the AGENT session being spawned runs under."
+  "Spawn AGENT under the profile its preset names."
   (let* ((refs (bound-and-true-p aob-acp-session-refs))
          (profile (and (stringp agent)
-                       (bound-and-true-p aob-prompt-typed)
-                       (not noninteractive)
                        (not (plist-get refs :profile))
-                       (ygg-agent-read-profile agent)))
+                       (plist-get (aob-acp-preset agent) :profile)))
          (aob-acp-session-refs (if profile (append (list :profile profile) refs) refs)))
     (apply fn agent args)))
-
 (advice-add 'aob-acp-spawn :around #'ygg-aob--with-profile)
 
 ;; an agent belongs to the work it was started on: the task in front of the
