@@ -644,7 +644,8 @@ tools.  Only `mcpOAuth' travels: the account token stays each home's own."
               added)
           (dolist (other (cons ygg-agent--credential-service
                                (ygg-agent--credential-services)))
-            (unless (equal other service)
+            (unless (or (equal other service)
+                        (member other (ygg-agent--profile-services)))
               (when-let* ((json (ygg-agent--keychain-read other))
                           (mcp (gethash "mcpOAuth" json)))
                 (maphash (lambda (k v)
@@ -733,6 +734,39 @@ and a session that runs is worth more than a home nothing writes to."
   (ygg-agent--adopt-plugin-mcp spec dir)
   (unless no-auth (ygg-agent--share-mcp-auth dir)))
 
+(defconst ygg-agent--profile-linked '("plugins/cache" "plugins/marketplaces")
+  "What a profile home links rather than copies: big, and keyed by version.")
+
+(defun ygg-agent--privatize-shares (spec dir)
+  "Give DIR its own copy of SPEC's shared subdirs, links made copies.
+An entry already there is left as it is; one missing is filled in."
+  (let ((home (expand-file-name (plist-get spec :home))))
+    (dolist (sub (plist-get spec :share))
+      (let ((own (expand-file-name sub dir))
+            (src (expand-file-name sub home)))
+        (when (file-symlink-p own) (delete-file own))
+        (when (file-directory-p src)
+          (make-directory own t)
+          (dolist (entry (directory-files src nil directory-files-no-dot-files-regexp))
+            (let ((from (expand-file-name entry src))
+                  (to (expand-file-name entry own)))
+              (unless (file-attributes to)
+                (ignore-errors
+                  (cond ((member (concat sub "/" entry) ygg-agent--profile-linked)
+                         (make-symbolic-link from to))
+                        ((file-symlink-p from)
+                         (make-symbolic-link (file-truename from) to))
+                        ((file-directory-p from) (copy-directory from to t nil t))
+                        (t (copy-file from to nil t t t))))))))))))
+
+(defun ygg-agent--profile-services ()
+  "Keychain services of the profile homes, which share nothing."
+  (when ygg-agent-conf-root
+    (mapcar (lambda (profile)
+              (ygg-agent--credential-name
+               (expand-file-name (format "profiles/%s/claude" profile) ygg-agent-conf-root)))
+            (ygg-agent-profiles))))
+
 (defun ygg-agent--dangling-shares (spec)
   "Entries in SPEC's real shared directories that point nowhere.
 Every config home links to these, so one dead entry is dead in every
@@ -785,7 +819,8 @@ they are only built once, when the project first launches an agent."
     ;; no dot rule here: a home is named after its repository, and .emacs.d
     ;; is a repository like any other
     (dolist (project (directory-files root t directory-files-no-dot-files-regexp))
-      (when (file-directory-p project)
+      (when (and (file-directory-p project)
+                 (not (equal (file-name-nondirectory project) "profiles")))
         (pcase-dolist (`(,kind . ,spec) ygg-agent--config-homes)
           (let ((home (expand-file-name kind project)))
             (when (file-directory-p home)
@@ -843,8 +878,10 @@ ISOLATE names a worker whose home sits beside the repository\='s own."
     (user-error "Bad profile name: %s" profile))
   (let ((dir (expand-file-name (format "profiles/%s/%s" profile kind)
                                ygg-agent-conf-root)))
-    (unless (file-directory-p dir)
-      (ygg-agent--bootstrap-share (cdr (assoc kind ygg-agent--config-homes)) dir))
+    (let ((spec (cdr (assoc kind ygg-agent--config-homes))))
+      (unless (file-directory-p dir)
+        (ygg-agent--bootstrap-share (plist-put (copy-sequence spec) :share nil) dir t))
+      (ygg-agent--privatize-shares spec dir))
     dir))
 
 (defun ygg-agent-read-profile (agent)
@@ -987,6 +1024,7 @@ names the one that was."
            nil)))
 
 (declare-function project-root "project" (project))
+(defvar compilation-environment)
 (declare-function ghostel-compile--start "ghostel-compile"
                   (command buffer-name dir &optional finished-mode interactive
                            compilation-args))
@@ -1016,12 +1054,12 @@ where it earns its place back."
                  (ygg-agent--own-home kind (ygg-agent--repo-home
                                             (expand-file-name project)))))
          (exe (or (executable-find "claude") "claude")))
-    (ygg-agent--bootstrap-share spec home)
+    (unless profile (ygg-agent--bootstrap-share spec home))
     (remhash home ygg-agent--login-cache)
     (clrhash ygg-agent--config-dirs)
-    (let ((process-environment
+    (let ((compilation-environment
            (cons (format "%s=%s" (plist-get spec :var) (directory-file-name home))
-                 process-environment))
+                 compilation-environment))
           (default-directory (file-name-as-directory (expand-file-name project))))
       (pop-to-buffer
        (ghostel-compile--start (mapconcat #'shell-quote-argument (list exe "auth" "login") " ")
