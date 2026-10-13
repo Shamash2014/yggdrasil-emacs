@@ -192,5 +192,23 @@
       (should (string-match-p "\\`env CLAUDE_CONFIG_DIR\\\\?=[^ ]*/profiles/work/claude " (nth 1 call)))
       (should (eq (nth 5 call) t)))))
 
+(ert-deftest ygg-agent-profiles-start-without-the-global-provider ()
+  (ygg-agent-profiles-tests--with
+    (let ((global (expand-file-name ".pi/agent" top)))
+      (make-directory global t)
+      (with-temp-file (expand-file-name "settings.json" global)
+        (insert "{\"defaultProvider\":\"omlx\",\"defaultModel\":\"m\",\"packages\":[\"npm:x\"]}"))
+      (with-temp-file (expand-file-name "models.json" global)
+        (insert "{\"providers\":{\"omlx\":{}}}"))
+      (let* ((home (ygg-agent--profile-home "work" "pi"))
+             (settings (json-parse-string
+                        (with-temp-buffer
+                          (insert-file-contents (expand-file-name "settings.json" home))
+                          (buffer-string)))))
+        (should-not (gethash "defaultProvider" settings))
+        (should-not (gethash "defaultModel" settings))
+        (should (gethash "packages" settings))
+        (should-not (file-exists-p (expand-file-name "models.json" home)))))))
+
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here

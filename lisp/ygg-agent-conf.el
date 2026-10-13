@@ -347,7 +347,8 @@ second run replaces ours rather than adding another."
      :share ("skills" "prompts" "npm" "extensions" "themes")
      :settings "settings.json"
      :seed ("packages" "defaultProvider" "defaultModel")
-     :seed-files (("models.json" "providers") ("mcp.json" "mcpServers"))))
+     :seed-files (("models.json" "providers") ("mcp.json" "mcpServers"))
+     :account ("defaultProvider" "defaultModel" "models.json")))
   "Per-kind config-home spec: env var, marker file, real home, shared subdirs.")
 
 (defcustom ygg-agent-conf-root "~/.agents-conf"
@@ -759,6 +760,15 @@ An entry already there is left as it is; one missing is filled in."
                         ((file-directory-p from) (copy-directory from to t nil t))
                         (t (copy-file from to nil t t t))))))))))))
 
+(defun ygg-agent--profile-spec (spec)
+  "SPEC as a profile home is made from it: nothing linked, no account seeded."
+  (let ((account (plist-get spec :account)))
+    (append (list :share nil
+                  :seed (seq-difference (plist-get spec :seed) account)
+                  :seed-files (seq-remove (lambda (f) (member (car f) account))
+                                          (plist-get spec :seed-files)))
+            spec)))
+
 (defun ygg-agent--profile-services ()
   "Keychain services of the profile homes, which share nothing."
   (when ygg-agent-conf-root
@@ -880,7 +890,7 @@ ISOLATE names a worker whose home sits beside the repository\='s own."
                                ygg-agent-conf-root)))
     (let ((spec (cdr (assoc kind ygg-agent--config-homes))))
       (unless (file-directory-p dir)
-        (ygg-agent--bootstrap-share (plist-put (copy-sequence spec) :share nil) dir t))
+        (ygg-agent--bootstrap-share (ygg-agent--profile-spec spec) dir t))
       (ygg-agent--privatize-shares spec dir))
     dir))
 
