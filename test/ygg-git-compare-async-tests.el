@@ -1346,3 +1346,45 @@ glab, every message collected in `--said'."
         (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p)
         (ygg-git-compare--remote-start (current-buffer) pr key)
         (should (= (funcall fetches) 1))))))
+
+(defun ygg-git-compare-async-tests--fetches (fake)
+  (length (split-string (or (ygg-git-compare-async-tests--read
+                             (expand-file-name "git.log" fake))
+                            "")
+                        "\n" t)))
+
+(ert-deftest ygg-git-compare-async-reopening-within-the-ttl-fetches-the-head-again ()
+  (ygg-git-compare-async-tests--with-world (root fake base head)
+    (ygg-git-compare-async-tests--seed (ygg-git-compare--head-key "origin" 7) base 1)
+    (let ((spec (cons 'pr (list :number 7 :head "feature" :remote "origin"))))
+      (ygg-git-compare--pr-renew (list spec) root)
+      (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p)
+      (should (= (ygg-git-compare-async-tests--fetches fake) 1))
+      (should (equal (ygg-git-compare--cache-value (ygg-git-compare--head-key "origin" 7))
+                     head)))))
+
+(ert-deftest ygg-git-compare-async-a-pinned-head-is-only-where-the-compare-starts ()
+  (ygg-git-compare-async-tests--with-world (root _fake base head)
+    (ygg-git-compare-async-tests--seed (ygg-git-compare--head-key "origin" 7) base 1)
+    (let* ((spec (cons 'pr (list :number 7 :sha base :head "feature" :remote "origin")))
+           (buffer (ygg-git-compare-buffer root '(rev . "main") spec)))
+      (ygg-git-compare--pr-renew (list spec) root)
+      (ygg-git-compare-async-tests--wait
+       (lambda () (equal (plist-get (buffer-local-value 'ygg-git-compare--b buffer) :diff)
+                         head)))
+      (should (equal (plist-get (cdr spec) :sha) head)))))
+
+(ert-deftest ygg-git-compare-async-refreshing-a-compare-fetches-its-pull-request-again ()
+  (ygg-git-compare-async-tests--with-world (root fake base head)
+    (ygg-git-compare-async-tests--seed (ygg-git-compare--head-key "origin" 7) base 1)
+    (let ((buffer (ygg-git-compare-buffer
+                   root '(rev . "main")
+                   (cons 'pr (list :number 7 :head "feature" :remote "origin")))))
+      (ygg-git-compare-async-tests--wait #'ygg-git-compare-async-tests--idle-p)
+      (should (= (ygg-git-compare-async-tests--fetches fake) 0))
+      (with-current-buffer buffer (ygg-git-compare-refresh))
+      (should (string-search "refreshing" (ygg-git-compare-async-tests--header buffer)))
+      (ygg-git-compare-async-tests--wait
+       (lambda () (equal (plist-get (buffer-local-value 'ygg-git-compare--b buffer) :diff)
+                         head)))
+      (should (= (ygg-git-compare-async-tests--fetches fake) 1)))))
