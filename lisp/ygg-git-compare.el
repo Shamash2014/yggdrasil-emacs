@@ -1999,6 +1999,8 @@ when that is known, and a compare that is not its range says why instead."
 (autoload 'ygg-git-compare-select-lines "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-next "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-previous "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-agent-comment-next "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-agent-comment-previous "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-delete "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-copy "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-accept "ygg-git-compare-comments" nil t)
@@ -2117,6 +2119,7 @@ around past the end."
   "f" (cons "next file" #'ygg-git-compare-next-file)
   "u" (cons "next unreviewed hunk" #'ygg-git-compare-next-unreviewed)
   "m" (cons "next comment" #'ygg-git-compare-comment-next)
+  "a" (cons "next agent comment" #'ygg-git-compare-agent-comment-next)
   "t" (cons "next tour step" #'ygg-git-compare-tour-next))
 
 (defvar-keymap ygg-git-compare-previous-map
@@ -2124,6 +2127,7 @@ around past the end."
   "f" (cons "previous file" #'ygg-git-compare-previous-file)
   "u" (cons "previous unreviewed hunk" #'ygg-git-compare-previous-unreviewed)
   "m" (cons "previous comment" #'ygg-git-compare-comment-previous)
+  "a" (cons "previous agent comment" #'ygg-git-compare-agent-comment-previous)
   "t" (cons "previous tour step" #'ygg-git-compare-tour-previous))
 
 (defvar-keymap ygg-git-compare-delete-map
@@ -2208,7 +2212,7 @@ to the next and previous file, ] u and [ u to the next and previous
 unreviewed hunk, and
 ] t and [ t walk a tour an agent ordered, \\[ygg-git-compare-tour] walks the kept one (asking for one if none), W asks for a new one,
 w opens its agent's trace and T leaves it.
-] m and [ m (or \\[ygg-git-compare-comment-next] and \\[ygg-git-compare-comment-previous]) to the next and previous comment.
+] m and [ m (or \\[ygg-git-compare-comment-next] and \\[ygg-git-compare-comment-previous]) to the next and previous comment, and ] a and [ a to the next and previous one an agent wrote.
 On a pull request, Conversation and Checks come before the diff; on a check,
 RET and o open its log and y copies its address.
 \\[isearch-forward-regexp] searches the diff; \\[ygg-git-compare-search-next] and \\[ygg-git-compare-search-previous] repeat it forward and back.

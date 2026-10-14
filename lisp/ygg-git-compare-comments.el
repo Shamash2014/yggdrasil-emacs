@@ -1139,28 +1139,57 @@ it was made on none."
                             (if (cdr pending) "s" "")))
       (ygg-git-compare-comments-drop (mapcar (lambda (c) (plist-get c :id)) pending)))))
 
+(defun ygg-git-compare--step-comment (back pred none)
+  "Go to the next comment overlay whose ids satisfy PRED, or the one before
+with BACK, around at the ends; answer its place as (INDEX . TOTAL).  NONE is
+the error when there is no such overlay."
+  (let* ((starts (or (sort (delete-dups
+                            (mapcar #'overlay-start
+                                    (seq-filter (lambda (ov)
+                                                  (when-let* ((ids (overlay-get ov 'ygg-git-compare-comments)))
+                                                    (funcall pred ids)))
+                                                (overlays-in (point-min) (point-max)))))
+                           #'<)
+                     (user-error "%s" none)))
+         (here (line-beginning-position))
+         (target (if back
+                     (or (car (last (seq-filter (lambda (p) (< p here)) starts)))
+                         (car (last starts)))
+                   (or (seq-find (lambda (p) (> p here)) starts) (car starts)))))
+    (goto-char target)
+    (ygg-git-compare--reveal)
+    (cons (1+ (seq-position starts target)) (length starts))))
+
 (defun ygg-git-compare-comment-next (&optional back)
   "Go to the next comment shown here, or the one before with BACK; around
 past the last."
   (interactive)
-  (let* ((starts (or (sort (delete-dups
-                            (mapcar #'overlay-start
-                                    (seq-filter (lambda (ov)
-                                                  (overlay-get ov 'ygg-git-compare-comments))
-                                                (overlays-in (point-min) (point-max)))))
-                           #'<)
-                     (user-error "No comments here")))
-         (here (line-beginning-position)))
-    (goto-char (if back
-                   (or (car (last (seq-filter (lambda (p) (< p here)) starts)))
-                       (car (last starts)))
-                 (or (seq-find (lambda (p) (> p here)) starts) (car starts))))
-    (ygg-git-compare--reveal)))
+  (ygg-git-compare--step-comment back #'identity "No comments here"))
 
 (defun ygg-git-compare-comment-previous ()
   "Go to the comment shown before point, around past the first."
   (interactive)
   (ygg-git-compare-comment-next t))
+
+(defun ygg-git-compare--step-agent-comment (back)
+  (let* ((agent (seq-filter (lambda (c) (plist-get c :author))
+                            (ygg-git-compare-comments-list t)))
+         (pending (seq-filter #'ygg-git-compare--pending-p agent))
+         (ids (mapcar (lambda (c) (plist-get c :id)) (or pending agent)))
+         (place (ygg-git-compare--step-comment
+                 back (lambda (shown) (seq-intersection shown ids)) "No agent comments here")))
+    (message "agent comment %d/%d%s" (car place) (cdr place) (if pending " (pending)" ""))))
+
+(defun ygg-git-compare-agent-comment-next ()
+  "Go to the next comment an agent wrote, those pending a check first;
+around past the last."
+  (interactive)
+  (ygg-git-compare--step-agent-comment nil))
+
+(defun ygg-git-compare-agent-comment-previous ()
+  "Go to the agent comment shown before point, around past the first."
+  (interactive)
+  (ygg-git-compare--step-agent-comment t))
 
 (defun ygg-git-compare--goto-comment (id)
   (goto-char (or (seq-some (lambda (ov)
@@ -1575,6 +1604,9 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
     ("m" "next comment" ygg-git-compare-comment-next)
     ("M" "previous comment" ygg-git-compare-comment-previous)
     (":" "go to file:line" ygg-git-compare-goto-line)
+
+    ("] a" "next agent comment" ygg-git-compare-agent-comment-next)
+    ("[ a" "previous agent comment" ygg-git-compare-agent-comment-previous)
     ("]" "next unreviewed" ygg-git-compare-next-unreviewed)
     ("[" "previous unreviewed" ygg-git-compare-previous-unreviewed)]
    ["Review marks"
