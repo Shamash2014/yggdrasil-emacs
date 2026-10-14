@@ -73,6 +73,8 @@
 left out of a review."
   :type 'natnum)
 
+(defvar-local ygg-git-compare--context nil
+  "Lines of context the diff is drawn with, nil for magit's own.")
 (defvar-local ygg-git-compare--root nil "The checkout the compare was opened from.")
 (defvar-local ygg-git-compare--plan nil
   "How the sides are diffed, as `ygg-git-compare--planned' answers.")
@@ -1039,6 +1041,12 @@ committed is named by its checkout."
     (> (apply #'+ (cdr counts))
        (if (boundp 'ygg-magit-diff-line-limit) ygg-magit-diff-line-limit 2000))))
 
+(defun ygg-git-compare--default-context ()
+  "The lines of context magit's own diff arguments ask for, nil when none."
+  (when-let* ((arg (seq-find (lambda (a) (string-match-p "\\`-U[0-9]+\\'" a))
+                             (car (magit-diff--get-value 'magit-diff-mode 'never)))))
+    (string-to-number (substring arg 2))))
+
 (defun ygg-git-compare--args (plan)
   "Magit's diff arguments for PLAN with its diffstat; only the diffstat when
 PLAN is too large to wash, since --no-patch cancels what comes before it."
@@ -1046,6 +1054,10 @@ PLAN is too large to wash, since --no-patch cancels what comes before it."
                                          '("--stat" "--numstat" "--no-patch" "-R")
                                          :test #'equal)
                       (cdr (ygg-git-compare--diff-args plan)))))
+    (setq args (append (when-let* ((n (or ygg-git-compare--context
+                                          (ygg-git-compare--default-context))))
+                         (list (format "-U%d" n)))
+                       (seq-remove (lambda (a) (string-prefix-p "-U" a)) args)))
     (if (ygg-git-compare--large-p plan)
         (append '("--no-patch" "--numstat" "--stat") args)
       (cons "--stat" args))))
@@ -1891,6 +1903,9 @@ when that is known, and a compare that is not its range says why instead."
 (autoload 'ygg-git-compare-tour-refresh "ygg-git-compare-tour" nil t)
 (autoload 'ygg-git-compare-tour-trace "ygg-git-compare-tour" nil t)
 (autoload 'ygg-git-compare-tour-receive "ygg-git-compare-tour")
+(autoload 'ygg-git-compare-expand-context "ygg-git-compare-context" nil t)
+(autoload 'ygg-git-compare-shrink-context "ygg-git-compare-context" nil t)
+(autoload 'ygg-git-compare-show-line "ygg-git-compare-context")
 (autoload 'ygg-git-compare-interdiff "ygg-git-compare-interdiff" nil t)
 (autoload 'ygg-git-compare-export-markdown "ygg-git-compare-submit" nil t)
 (autoload 'ygg-git-compare-submit "ygg-git-compare-submit" nil t)
@@ -2041,6 +2056,8 @@ around past the end."
 
 (defvar-keymap ygg-git-compare-mode-map
   "~" #'ygg-git-compare-swap
+  "+" #'ygg-git-compare-expand-context
+  "-" #'ygg-git-compare-shrink-context
   "b" #'ygg-git-compare-switch-base
   "." #'ygg-git-compare-toggle-dots
   "#" #'ygg-git-compare-log
