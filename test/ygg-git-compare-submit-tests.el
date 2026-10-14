@@ -365,14 +365,278 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
         (should-not (ygg-git-compare-submit-tests--posts))
         (should-not ygg-git-compare-submit-tests--dropped)))))
 
-(ert-deftest ygg-git-compare-submit-refuses-another-range ()
+(defconst ygg-git-compare-submit-tests--old-sha (make-string 40 ?a))
+
+(defun ygg-git-compare-submit-tests--moved (id &rest props)
+  "A comment made when the pull request ended at the old sha."
+  (apply #'ygg-git-compare-submit-tests--c id
+         :range (concat "A: " (make-string 40 ?b) " ↔ B: #7 x  " (make-string 40 ?b)
+                        "..." ygg-git-compare-submit-tests--old-sha)
+         props))
+
+(defconst ygg-git-compare-submit-tests--moved-line
+  (ygg-git-compare-submit-tests--moved "line" :level 'line :file "a.txt" :old-path "a.txt"
+                                       :new-path "a.txt" :side 'new :line 2))
+
+(ert-deftest ygg-git-compare-submit-sends-a-comment-made-on-another-range ()
   (ygg-git-compare-submit-tests--with
-      (list (ygg-git-compare-submit-tests--c "old" :level 'review :range "elsewhere"))
+      (list (ygg-git-compare-submit-tests--moved "old" :level 'review))
       ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
-    (should (string-search "elsewhere" (cadr (should-error (ygg-git-compare-submit-forge 'comment)
-                                                           :type 'user-error))))
-    (should-not ygg-git-compare-submit-tests--prompts)
-    (should-not ygg-git-compare-submit-tests--calls)))
+    (should (equal (ygg-git-compare-submit--written-head
+                    (car ygg-git-compare-submit-tests--comments))
+                   ygg-git-compare-submit-tests--old-sha))
+    (ygg-git-compare-submit-forge 'comment)
+    (should-not ygg-git-compare-submit-tests--comments)
+    (should (equal (plist-get (nth 2 (car (ygg-git-compare-submit-tests--posts))) :body)
+                   "(written on aaaaaaa) old"))))
+
+(ert-deftest ygg-git-compare-submit-same-head-under-another-label-is-current ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line)
+      (append (list :head ygg-git-compare-submit-tests--old-sha)
+              ygg-git-compare-submit-tests--github-pr)
+      (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'comment)
+    (let ((posts (ygg-git-compare-submit-tests--posts)))
+      (should (= (length posts) 1))
+      (should (equal (plist-get (nth 2 (car posts)) :comments)
+                     '((:path "a.txt" :line 2 :side "RIGHT" :body "line")))))))
+
+(ert-deftest ygg-git-compare-submit-github-moved-comment-lands-on-its-own-commit ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line
+            (ygg-git-compare-submit-tests--c "now" :level 'line :file "a.txt"
+                                             :new-path "a.txt" :side 'new :line 5)
+            (ygg-git-compare-submit-tests--moved "span" :level 'range :file "a.txt"
+                                                 :new-path "a.txt" :side 'new :line 9
+                                                 :start-side 'old :start-line 7))
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'comment)
+    (should-not ygg-git-compare-submit-tests--comments)
+    (should (equal ygg-git-compare-submit-tests--dropped '("line" "now" "span")))
+    (let ((posts (ygg-git-compare-submit-tests--posts))
+          (sha ygg-git-compare-submit-tests--old-sha))
+      (should (equal (mapcar #'ygg-git-compare-submit-tests--endpoint posts)
+                     '("repos/o/r/pulls/12/reviews" "repos/o/r/pulls/12/comments"
+                       "repos/o/r/pulls/12/comments")))
+      (should (equal (plist-get (nth 2 (nth 0 posts)) :comments)
+                     '((:path "a.txt" :line 5 :side "RIGHT" :body "now"))))
+      (should (equal (plist-get (nth 2 (nth 0 posts)) :commit_id) "h"))
+      (should (equal (nth 2 (nth 1 posts))
+                     `(:path "a.txt" :line 2 :side "RIGHT" :body "line" :commit_id ,sha)))
+      (should (equal (nth 2 (nth 2 posts))
+                     `(:path "a.txt" :line 9 :side "RIGHT" :body "span" :start_line 7
+                       :start_side "LEFT" :commit_id ,sha))))))
+
+(ert-deftest ygg-git-compare-submit-github-draft-says-where-moved-comments-were-written ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line
+            (ygg-git-compare-submit-tests--c "now" :level 'line :file "a.txt"
+                                             :new-path "a.txt" :side 'new :line 5))
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'draft)
+    (let ((posts (ygg-git-compare-submit-tests--posts)))
+      (should (equal (mapcar #'ygg-git-compare-submit-tests--endpoint posts)
+                     '("repos/o/r/pulls/12/reviews")))
+      (should-not (plist-member (nth 2 (car posts)) :event))
+      (should (equal (plist-get (nth 2 (car posts)) :commit_id) "h"))
+      (should (equal (plist-get (nth 2 (car posts)) :body)
+                     "(written on aaaaaaa) `a.txt:2` line"))
+      (should (equal (plist-get (nth 2 (car posts)) :comments)
+                     '((:path "a.txt" :line 5 :side "RIGHT" :body "now")))))))
+
+(ert-deftest ygg-git-compare-submit-moved-note-names-lines-and-side ()
+  (let ((sha ygg-git-compare-submit-tests--old-sha))
+    (should (equal (ygg-git-compare-submit--moved-note
+                    (ygg-git-compare-submit-tests--c "r" :level 'range :file "a.txt" :side 'new
+                                                     :line 18 :start-line 12)
+                    sha)
+                   "(written on aaaaaaa) `a.txt:12–18` r"))
+    (should (equal (ygg-git-compare-submit--moved-note
+                    (ygg-git-compare-submit-tests--c "o" :level 'line :file "a.txt" :side 'old
+                                                     :line 3)
+                    sha)
+                   "(written on aaaaaaa) `a.txt:3` (removed line) o"))))
+
+(ert-deftest ygg-git-compare-submit-github-moved-comment-refused-becomes-a-note ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line)
+      ygg-git-compare-submit-tests--github-pr
+      (lambda (_program args _body)
+        (if (member "repos/o/r/pulls/12/comments" args) (user-error "gh: 422 no") "{}"))
+    (ygg-git-compare-submit-forge 'comment)
+    (should-not ygg-git-compare-submit-tests--comments)
+    (let ((posts (ygg-git-compare-submit-tests--posts)))
+      (should (equal (mapcar #'ygg-git-compare-submit-tests--endpoint posts)
+                     '("repos/o/r/pulls/12/comments" "repos/o/r/issues/12/comments")))
+      (should (equal (nth 2 (nth 1 posts))
+                     '(:body "(written on aaaaaaa) `a.txt:2` line"))))))
+
+(ert-deftest ygg-git-compare-submit-github-moved-comment-refused-twice-keeps-it ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line)
+      ygg-git-compare-submit-tests--github-pr
+      (lambda (_program args _body)
+        (if (seq-find (lambda (a) (string-match-p "/\\(pulls\\|issues\\)/12/comments" a)) args)
+            (user-error "gh: 422 no")
+          "{}"))
+    (ygg-git-compare-submit-forge 'comment)
+    (should (equal (ygg-git-compare-submit-tests--ids) '("line")))))
+
+(ert-deftest ygg-git-compare-submit-github-review-counts-only-what-it-carries ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line
+            (ygg-git-compare-submit-tests--c "now" :level 'line :file "a.txt"
+                                             :new-path "a.txt" :side 'new :line 5 :text "")
+            (ygg-git-compare-submit-tests--moved "span" :level 'line :file "a.txt"
+                                                 :new-path "a.txt" :side 'new :line 9))
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'comment)
+    (should (equal (plist-get (nth 2 (car (ygg-git-compare-submit-tests--posts))) :body)
+                   "1 comment"))))
+
+(ert-deftest ygg-git-compare-submit-github-skips-an-empty-review ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line)
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'comment)
+    (should (equal (mapcar #'ygg-git-compare-submit-tests--endpoint
+                           (ygg-git-compare-submit-tests--posts))
+                   '("repos/o/r/pulls/12/comments")))
+    (should-not ygg-git-compare-submit-tests--comments)))
+
+(ert-deftest ygg-git-compare-submit-github-approval-is-posted-with-nothing-else ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line)
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'approve)
+    (should (equal (mapcar #'ygg-git-compare-submit-tests--endpoint
+                           (ygg-git-compare-submit-tests--posts))
+                   '("repos/o/r/pulls/12/reviews" "repos/o/r/pulls/12/comments")))))
+
+(defun ygg-git-compare-submit-tests--versions (&rest heads)
+  "An answer to glab that lists a diff version for each of HEADS, newest first."
+  (lambda (_program args _body)
+    (if (seq-find (lambda (a) (string-search "/versions" a)) args)
+        (json-serialize
+         (vconcat (mapcar (lambda (head)
+                            `(:head_commit_sha ,head :base_commit_sha ,(concat "base-" head)
+                              :start_commit_sha ,(concat "start-" head)))
+                          heads)))
+      "{\"id\":1}")))
+
+(ert-deftest ygg-git-compare-submit-gitlab-moved-comment-uses-its-version ()
+  (let ((sha ygg-git-compare-submit-tests--old-sha))
+    (ygg-git-compare-submit-tests--with
+        (list ygg-git-compare-submit-tests--moved-line)
+        ygg-git-compare-submit-tests--gitlab-pr
+        (ygg-git-compare-submit-tests--versions "h" sha)
+      (ygg-git-compare-submit-forge 'comment)
+      (should-not ygg-git-compare-submit-tests--comments)
+      (should (= (length (seq-filter (lambda (c) (string-search "/versions" (format "%S" c)))
+                                     ygg-git-compare-submit-tests--calls))
+                 1))
+      (let ((post (nth 2 (car (ygg-git-compare-submit-tests--posts)))))
+        (should (equal (plist-get post :body) "line"))
+        (should (equal (plist-get (plist-get post :position) :base_sha) (concat "base-" sha)))
+        (should (equal (plist-get (plist-get post :position) :start_sha) (concat "start-" sha)))
+        (should (equal (plist-get (plist-get post :position) :head_sha) sha))))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-moved-comment-without-version-goes-in-the-summary ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line
+            (ygg-git-compare-submit-tests--c "sum" :level 'review))
+      ygg-git-compare-submit-tests--gitlab-pr
+      (ygg-git-compare-submit-tests--versions "h")
+    (ygg-git-compare-submit-forge 'comment)
+    (should-not ygg-git-compare-submit-tests--comments)
+    (let ((posts (ygg-git-compare-submit-tests--posts)))
+      (should (= (length posts) 1))
+      (should (equal (plist-get (nth 2 (car posts)) :body)
+                     "(written on aaaaaaa) `a.txt:2` line\n\nsum"))
+      (should-not (plist-member (nth 2 (car posts)) :position)))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-failed-versions-fall-back-to-the-summary ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line)
+      ygg-git-compare-submit-tests--gitlab-pr
+      (lambda (_program args _body)
+        (if (seq-find (lambda (a) (string-search "/versions" a)) args)
+            (user-error "glab: 500")
+          "{\"id\":1}"))
+    (ygg-git-compare-submit-forge 'comment)
+    (should-not ygg-git-compare-submit-tests--comments)
+    (let ((posts (ygg-git-compare-submit-tests--posts)))
+      (should (equal (plist-get (nth 2 (car posts)) :body)
+                     "(written on aaaaaaa) `a.txt:2` line"))
+      (should-not (plist-member (nth 2 (car posts)) :position)))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-summary-failure-keeps-text-moved-comments ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line)
+      ygg-git-compare-submit-tests--gitlab-pr
+      (lambda (_program args _body)
+        (if (seq-find (lambda (a) (string-search "/versions" a)) args)
+            "[]"
+          (user-error "glab: 400")))
+    (ygg-git-compare-submit-forge 'comment)
+    (should (equal (ygg-git-compare-submit-tests--ids) '("line")))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-moved-comment-refused-becomes-a-note ()
+  (let ((sha ygg-git-compare-submit-tests--old-sha))
+    (ygg-git-compare-submit-tests--with
+        (list ygg-git-compare-submit-tests--moved-line)
+        ygg-git-compare-submit-tests--gitlab-pr
+        (lambda (program args body)
+          (if (plist-get body :position)
+              (user-error "glab: 400 line_code")
+            (funcall (ygg-git-compare-submit-tests--versions "h" sha) program args body)))
+      (ygg-git-compare-submit-forge 'comment)
+      (should-not ygg-git-compare-submit-tests--comments)
+      (let ((posts (ygg-git-compare-submit-tests--posts)))
+        (should (equal (mapcar #'ygg-git-compare-submit-tests--endpoint posts)
+                       '("projects/grp%2Fproj/merge_requests/7/discussions"
+                         "projects/grp%2Fproj/merge_requests/7/notes")))
+        (should (equal (nth 2 (nth 1 posts))
+                       '(:body "(written on aaaaaaa) `a.txt:2` line")))))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-reads-versions-only-for-moved-comments ()
+  (ygg-git-compare-submit-tests--with
+      (list (nth 1 ygg-git-compare-submit-tests--mixed))
+      ygg-git-compare-submit-tests--gitlab-pr (ygg-git-compare-submit-tests--lab)
+    (ygg-git-compare-submit-forge 'comment)
+    (should (= (length ygg-git-compare-submit-tests--calls) 1))))
+
+(ert-deftest ygg-git-compare-submit-moved-file-comment-says-where-in-the-summary ()
+  (ygg-git-compare-submit-tests--with
+      (list (ygg-git-compare-submit-tests--moved "whole" :level 'file :file "b.txt"
+                                                 :old-path "b.txt" :new-path "b.txt")
+            (ygg-git-compare-submit-tests--c "now" :level 'review))
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-forge 'comment)
+    (should (equal (plist-get (nth 2 (car (ygg-git-compare-submit-tests--posts))) :body)
+                   "(written on aaaaaaa) `b.txt` - whole\n\nnow"))))
+
+(ert-deftest ygg-git-compare-submit-refuses-a-comment-made-on-a-worktree ()
+  (dolist (event '(comment approve request-changes draft))
+    (ygg-git-compare-submit-tests--with
+        (list (ygg-git-compare-submit-tests--c "wt" :level 'review :range "A: /tmp/wt"))
+        ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+      (should (equal (cadr (should-error (ygg-git-compare-submit-forge event) :type 'user-error))
+                     "A comment was made on A: /tmp/wt; drop it or send it to an agent"))
+      (should-not ygg-git-compare-submit-tests--prompts)
+      (should-not ygg-git-compare-submit-tests--calls))))
+
+(ert-deftest ygg-git-compare-submit-older-fetch-still-counts-its-comments-as-moved ()
+  (ygg-git-compare-submit-tests--with
+      (list ygg-git-compare-submit-tests--moved-line)
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (cl-letf (((symbol-function 'ygg-git-compare--range-label)
+               (lambda () (plist-get (car ygg-git-compare-submit-tests--comments) :range))))
+      (ygg-git-compare-submit-forge 'comment))
+    (should (equal (mapcar #'ygg-git-compare-submit-tests--endpoint
+                           (ygg-git-compare-submit-tests--posts))
+                   '("repos/o/r/pulls/12/comments")))))
 
 (ert-deftest ygg-git-compare-submit-never-sends-a-pending-comment ()
   (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed

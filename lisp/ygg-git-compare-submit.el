@@ -218,15 +218,55 @@ RANGE-KEY, such as \"branch NAME\", for batch use and agents."
             (format ygg-git-compare-submit-type-format type))
           (plist-get comment :text))))
 
-(defun ygg-git-compare-submit--summary (comments)
-  "The review-level COMMENTS, then the file-level ones as `path' - text."
+(defun ygg-git-compare-submit--written-head (comment)
+  "The commit COMMENT's range ends at, nil when it ends at a checkout."
+  (when-let* ((range (plist-get comment :range))
+              (end (car (last (split-string range))))
+              ((string-match "\\.\\.\\.?\\([0-9a-f]\\{40\\}\\)\\'" end)))
+    (match-string 1 end)))
+
+(defun ygg-git-compare-submit--moved-heads (comments pr)
+  "The (COMMENT . SHA) of each of COMMENTS written on a commit other than
+PR's head."
+  (delq nil
+        (mapcar (lambda (c)
+                  (when-let* ((sha (ygg-git-compare-submit--written-head c))
+                              ((not (equal sha (plist-get pr :head)))))
+                    (cons c sha)))
+                comments)))
+
+(defun ygg-git-compare-submit--inline-heads (heads)
+  (seq-filter (lambda (h) (ygg-git-compare-submit--inline-p (car h))) heads))
+
+(defun ygg-git-compare-submit--written-prefix (sha)
+  (if sha (format "(written on %s) " (substring sha 0 7)) ""))
+
+(defun ygg-git-compare-submit--moved-where (comment)
+  (format "`%s:%s`%s" (plist-get comment :file)
+          (if (eq (ygg-git-compare-submit--level comment) 'range)
+              (format "%s–%s" (plist-get comment :start-line) (plist-get comment :line))
+            (plist-get comment :line))
+          (if (eq (plist-get comment :side) 'old) " (removed line)" "")))
+
+(defun ygg-git-compare-submit--moved-note (comment sha)
+  "COMMENT, an inline one written on SHA, as text that says where."
+  (concat (ygg-git-compare-submit--written-prefix sha)
+          (ygg-git-compare-submit--moved-where comment) " "
+          (ygg-git-compare-submit--text comment)))
+
+(defun ygg-git-compare-submit--summary (comments &optional heads)
+  "The review-level COMMENTS, then the file-level ones as `path' - text.
+HEADS says where moved ones were written; an inline one in it is text too."
   (string-join
    (delq nil
          (mapcar (lambda (c)
-                   (pcase (ygg-git-compare-submit--level c)
-                     ('review (ygg-git-compare-submit--text c))
-                     ('file (format "`%s` - %s" (plist-get c :file)
-                                    (ygg-git-compare-submit--text c)))))
+                   (let* ((sha (alist-get c heads nil nil #'eq))
+                          (prefix (ygg-git-compare-submit--written-prefix sha)))
+                     (pcase (ygg-git-compare-submit--level c)
+                       ('review (concat prefix (ygg-git-compare-submit--text c)))
+                       ('file (format "%s`%s` - %s" prefix (plist-get c :file)
+                                      (ygg-git-compare-submit--text c)))
+                       (_ (and sha (ygg-git-compare-submit--moved-note c sha))))))
                  comments))
    "\n\n"))
 
@@ -249,20 +289,27 @@ RANGE-KEY, such as \"branch NAME\", for batch use and agents."
 (defconst ygg-git-compare-submit--github-events
   '((comment . "COMMENT") (approve . "APPROVE") (request-changes . "REQUEST_CHANGES")))
 
-(defun ygg-git-compare-submit--github-review (pr event comments)
-  "The body of PR's review with EVENT of COMMENTS; no event leaves it pending."
+(defun ygg-git-compare-submit--github-review (pr event comments &optional heads)
+  "The body of PR's review with EVENT of COMMENTS; no event leaves it pending.
+An inline one with a head in HEADS is text in the body, with where it was
+written."
   (let* ((event-name (alist-get event ygg-git-compare-submit--github-events))
-         (summary (ygg-git-compare-submit--summary comments))
-         (body (if (and (string-empty-p summary) (memq event '(comment request-changes)))
-                   (format "%d comment%s" (length comments)
-                           (if (= (length comments) 1) "" "s"))
-                 summary)))
+         (summary (ygg-git-compare-submit--summary comments heads))
+         (body (cond ((not (string-empty-p summary)) summary)
+                     ((not (memq event '(comment request-changes))) nil)
+                     (comments (format "%d comment%s" (length comments)
+                                       (if (= (length comments) 1) "" "s")))
+                     ((eq event 'request-changes) "Changes requested"))))
     (append (list :commit_id (plist-get pr :head))
             (and event-name (list :event event-name))
-            (unless (string-empty-p body) (list :body body))
-            (list :comments (vconcat (mapcar #'ygg-git-compare-submit--github-comment
-                                             (seq-filter #'ygg-git-compare-submit--inline-p
-                                                         comments)))))))
+            (and body (list :body body))
+            (list :comments
+                  (vconcat (mapcar #'ygg-git-compare-submit--github-comment
+                                   (seq-filter
+                                    (lambda (c)
+                                      (and (ygg-git-compare-submit--inline-p c)
+                                           (not (assq c heads))))
+                                    comments)))))))
 
 (defun ygg-git-compare-submit--github-refusal (text err)
   "What GitHub said in the body TEXT of a refused call, as gh: STATUS DETAIL;
@@ -340,14 +387,43 @@ approval or request for changes: GitHub, for those two events."
                                           (equal (plist-get value :login) author)))))))))))))
 
 (defun ygg-git-compare-submit--github-steps (pr event comments)
-  (list (list comments nil
-              (lambda (next)
-                (ygg-git-compare-submit--api
-                 "gh" (ygg-git-compare-submit--github-review pr event comments)
-                 (list "api" "--hostname" (plist-get pr :host)
-                       (format "repos/%s/pulls/%s/reviews"
-                               (plist-get pr :path) (plist-get pr :number)))
-                 (lambda (_value err &rest _) (funcall next err)))))))
+  "The review of COMMENTS, then each inline one written on another commit
+posted alone on that commit, as a note on the pull request when refused."
+  (let* ((moved (ygg-git-compare-submit--moved-heads comments pr))
+         (late (and (not (eq event 'draft)) (ygg-git-compare-submit--inline-heads moved)))
+         (carried (seq-remove (lambda (c) (assq c late)) comments))
+         (review (ygg-git-compare-submit--github-review pr event carried moved))
+         (host (plist-get pr :host))
+         (endpoint (lambda (kind what)
+                     (list "api" "--hostname" host
+                           (format "repos/%s/%s/%s/%s" (plist-get pr :path) kind
+                                   (plist-get pr :number) what)))))
+    (append
+     (unless (and (eq event 'comment)
+                  (not (plist-get review :body))
+                  (zerop (length (plist-get review :comments))))
+       (list (list carried nil
+                   (lambda (next)
+                     (ygg-git-compare-submit--api
+                      "gh" review
+                      (funcall endpoint "pulls" "reviews")
+                      (lambda (_value err &rest _) (funcall next err)))))))
+     (mapcar (lambda (h)
+               (list (list (car h)) nil
+                     (lambda (next)
+                       (ygg-git-compare-submit--api
+                        "gh" (append (ygg-git-compare-submit--github-comment (car h))
+                                     (list :commit_id (cdr h)))
+                        (funcall endpoint "pulls" "comments")
+                        (lambda (_value err &optional refused)
+                          (if (and err refused)
+                              (ygg-git-compare-submit--api
+                               "gh" (list :body (ygg-git-compare-submit--moved-note
+                                                 (car h) (cdr h)))
+                               (funcall endpoint "issues" "comments")
+                               (lambda (_value err &rest _) (funcall next err)))
+                            (funcall next err)))))))
+             late))))
 
 (defun ygg-git-compare-submit--line-code (path side line old-line)
   "GitLab's code for the diff LINE of PATH on SIDE, OLD-LINE a context line's
@@ -379,7 +455,8 @@ new LINE; nil when LINE is not a context line there."
     found))
 
 (defun ygg-git-compare-submit--with-old-lines (comment pr)
-  "COMMENT, the old numbers of the context lines it sits on added from PR's diff."
+  "COMMENT, the old numbers of the context lines it sits on added from PR's
+base to head diff."
   (let (diff)
     (cl-flet ((old-line (side line known)
                 (or known
@@ -435,10 +512,23 @@ new LINE; nil when LINE is not a context line there."
                                                      (t "notes"))))
    done))
 
-(defun ygg-git-compare-submit--gitlab-inline (pr draft comment next)
-  "Post COMMENT on its lines, then call NEXT with what went wrong, if
-anything; a range GitLab refuses goes on its last line."
-  (let ((text (ygg-git-compare-submit--text comment)))
+(defun ygg-git-compare-submit--on-version (pr version)
+  "PR placed on the base, start and head of the diff VERSION."
+  (append (list :base (plist-get version :base_commit_sha)
+                :start (plist-get version :start_commit_sha)
+                :head (plist-get version :head_commit_sha))
+          pr))
+
+(defun ygg-git-compare-submit--gitlab-inline (pr draft comment next &optional fallback)
+  "Post COMMENT on its lines, then call NEXT with what went wrong, if anything;
+a range GitLab refuses goes on its last line, and what it still refuses goes
+as the text FALLBACK, when non-nil, in a note without a position."
+  (let* ((text (ygg-git-compare-submit--text comment))
+         (settle (lambda (err refused)
+                   (if (and err refused fallback)
+                       (ygg-git-compare-submit--gitlab-note
+                        pr draft fallback nil (lambda (_value err &rest _) (funcall next err)))
+                     (funcall next err)))))
     (ygg-git-compare-submit--gitlab-note
      pr draft text (ygg-git-compare-submit--gitlab-position comment pr)
      (lambda (_value err &optional refused)
@@ -446,8 +536,8 @@ anything; a range GitLab refuses goes on its last line."
            (ygg-git-compare-submit--gitlab-note
             pr draft (concat (ygg-git-compare-submit--range-prefix comment) text)
             (ygg-git-compare-submit--gitlab-position comment pr t)
-            (lambda (_value err &rest _) (funcall next err)))
-         (funcall next err))))))
+            (lambda (_value err &optional refused) (funcall settle err refused)))
+         (funcall settle err refused))))))
 
 (defconst ygg-git-compare-submit--request-changes-query
   "mutation($projectPath: ID!, $iid: String!) { mergeRequestRequestChanges(input: { projectPath: $projectPath, iid: $iid }) { errors } }")
@@ -474,20 +564,62 @@ anything; a range GitLab refuses goes on its last line."
 
 (defun ygg-git-compare-submit--gitlab-steps (pr event comments)
   "The notes that post COMMENTS to PR, drafts when EVENT is draft, and a
-function of the first failure for the approval or request for changes."
+function of the first failure for the approval or request for changes.  A
+moved inline comment with no diff version of its own is text in the summary."
   (let* ((draft (eq event 'draft))
          (summary-comments (seq-remove #'ygg-git-compare-submit--inline-p comments))
+         (heads (ygg-git-compare-submit--moved-heads comments pr))
+         (inline-heads (ygg-git-compare-submit--inline-heads heads))
+         (versions nil)
+         (summary-failure nil)
+         (version-of (lambda (c)
+                       (when-let* ((sha (alist-get c heads nil nil #'eq)))
+                         (seq-find (lambda (v) (equal (plist-get v :head_commit_sha) sha))
+                                   versions))))
          (steps (append
-                 (when summary-comments
+                 (when inline-heads
+                   (list (list nil "Reading versions"
+                               (lambda (next)
+                                 (ygg-git-compare-submit--gitlab-api
+                                  pr nil
+                                  (list (concat (ygg-git-compare-submit--gitlab-mr pr "versions")
+                                                "?per_page=100"))
+                                  (lambda (value err &rest _)
+                                    (unless err (setq versions value))
+                                    (funcall next nil)))))))
+                 (when (or summary-comments inline-heads)
                    (list (list summary-comments nil
                                (lambda (next)
-                                 (ygg-git-compare-submit--gitlab-note
-                                  pr draft (ygg-git-compare-submit--summary summary-comments)
-                                  nil (lambda (_value err &rest _) (funcall next err)))))))
+                                 (let* ((text-moved (seq-remove
+                                                     (lambda (h) (funcall version-of (car h)))
+                                                     inline-heads))
+                                        (text (ygg-git-compare-submit--summary
+                                               (seq-filter
+                                                (lambda (c)
+                                                  (or (not (ygg-git-compare-submit--inline-p c))
+                                                      (assq c text-moved)))
+                                                comments)
+                                               heads)))
+                                   (if (string-empty-p text)
+                                       (funcall next nil)
+                                     (ygg-git-compare-submit--gitlab-note
+                                      pr draft text nil
+                                      (lambda (_value err &rest _)
+                                        (setq summary-failure err)
+                                        (funcall next err)))))))))
                  (mapcar (lambda (c)
                            (list (list c) nil
                                  (lambda (next)
-                                   (ygg-git-compare-submit--gitlab-inline pr draft c next))))
+                                   (let ((sha (alist-get c heads nil nil #'eq))
+                                         (version (funcall version-of c)))
+                                     (if (and sha (not version))
+                                         (funcall next summary-failure)
+                                       (ygg-git-compare-submit--gitlab-inline
+                                        (if version
+                                            (ygg-git-compare-submit--on-version pr version)
+                                          pr)
+                                        draft c next
+                                        (and sha (ygg-git-compare-submit--moved-note c sha))))))))
                          (seq-filter #'ygg-git-compare-submit--inline-p comments)))))
     (cons steps
           (lambda (failure)
@@ -603,7 +735,8 @@ send or one was made on another range."
   (let* ((comments (ygg-git-compare-submit--select 'forge max-priority))
          (here (ygg-git-compare--range-label))
          (stale (seq-find (lambda (c) (and (plist-get c :range)
-                                           (not (equal (plist-get c :range) here))))
+                                           (not (equal (plist-get c :range) here))
+                                           (not (ygg-git-compare-submit--written-head c))))
                           comments)))
     (unless (or comments (eq event 'approve))
       (user-error "No comments for the pull request%s"
