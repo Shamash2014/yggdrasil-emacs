@@ -648,9 +648,9 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
             sent shown offered meta)
         (ygg-git-compare-tests--with-compare root
           (ygg-git-compare-tests--goto "+two")
-          (ygg-git-compare-tests--comment "why two" 'todo)
+          (ygg-git-compare-tests--comment "why two" 'issue)
           (ygg-git-compare-tests--goto "-2")
-          (ygg-git-compare-tests--comment "keep the digit" 'todo)
+          (ygg-git-compare-tests--comment "keep the digit" 'issue)
           (cl-letf (((symbol-function 'completing-read)
                      (lambda (_p table &rest _)
                        (setq offered (all-completions "" table)
@@ -660,7 +660,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
                      (lambda (s text &rest _) (push (list s text aob-prompt-typed) sent)))
                     ((symbol-function 'ygg-git-compare-show-trace) (lambda (s) (push s shown))))
             (ygg-git-compare-review))
-          (should-not ygg-git-compare--comments))
+          (should (= 2 (length ygg-git-compare--comments))))
         (should (equal (car offered) "new: review plan (preset review)"))
         (should (equal (nth 1 offered) "here"))
         (should (eq (alist-get 'category meta) 'ygg-review-reviewer))
@@ -698,7 +698,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
           (feature (ygg-git-compare-tests--git root "rev-parse" "feature")))
       (ygg-git-compare-tests--with-compare root
         (ygg-git-compare-tests--goto "+two")
-        (ygg-git-compare-tests--comment "before the swap" 'todo)
+        (ygg-git-compare-tests--comment "before the swap" 'issue)
         (ygg-git-compare-swap)
         (let ((m (ygg-git-compare-review-prompt)))
           (should (string-search (format "a.txt:2 · made on A: main ↔ B: feature  %s...%s\n"
@@ -751,7 +751,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
                                     :project aob-compose--dir :state 'starting))))
         (ygg-git-compare-tests--with-compare root
           (ygg-git-compare-tests--goto "+two")
-          (ygg-git-compare-tests--comment "plan this @build" 'todo)
+          (ygg-git-compare-tests--comment "plan this @build" 'issue)
           (cl-letf (((symbol-function 'completing-read)
                      (lambda (_p table &rest _) (car (all-completions "" table))))
                     ((symbol-function 'ygg-aob--expand-presets)
@@ -765,7 +765,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
                      (lambda (&rest args) (push args prompted)))
                     ((symbol-function 'ygg-git-compare-show-trace) #'ignore))
             (let ((aob-acp-show-trace t)) (ygg-git-compare-review)))
-          (should-not ygg-git-compare--comments))
+          (should (= 1 (length ygg-git-compare--comments))))
         (should (= (length spawned) 1))
         (pcase-let ((`(,text ,dir ,typed ,traced) (car spawned)))
           (should-not traced)

@@ -380,12 +380,14 @@ and adds b.txt; main stays checked out."
       (ygg-git-compare-comments-tests--goto "+b1")
       (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-file) "whole file" 'fix)
       (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-review) "overall" 'todo)
-      (let ((prompt (ygg-git-compare-review-prompt)))
+      (let ((prompt (ygg-git-compare--prompt-comments (ygg-git-compare--agent-comments))))
         (should (string-search "[todo] a.txt:1-2\n>  1\n> -2\n> -3\n> +two\ntidy" prompt))
         (should (string-search "b.txt\nwhole file" prompt))
-        (should (string-search "review\noverall" prompt))
+        (should (string-search "review\noverall" prompt)))
+      (let ((prompt (ygg-git-compare-review-prompt)))
         (should (string-search "\nbranch feature\n" prompt))
-        (should (string-search "review_submit" prompt))))))
+        (should (string-search "review_submit" prompt))
+        (should-not (string-search "whole file" prompt))))))
 
 (ert-deftest ygg-git-compare-comments-keys-in-a-compare ()
   (ygg-git-compare-comments-tests--with-repo root
@@ -812,7 +814,8 @@ and adds b.txt; main stays checked out."
                      (list (point-min))))
       (with-current-buffer (ygg-git-compare-comments-summary)
         (should (string-search "Made on another range (1)" (buffer-string))))
-      (should (string-search "made on" (ygg-git-compare-review-prompt)))
+      (should (string-search "made on" (ygg-git-compare--prompt-comments
+                                        (ygg-git-compare--agent-comments))))
       (ygg-git-compare-swap)
       (should-not (string-search "Made on another range"
                                  (ygg-git-compare-comments-tests--shown))))))

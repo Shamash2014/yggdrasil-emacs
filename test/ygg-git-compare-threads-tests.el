@@ -1117,7 +1117,8 @@ string, or (STATUS . WHAT-IT-SAID)."
 (defmacro ygg-git-compare-threads-tests--sending (sent &rest body)
   (declare (indent 1))
   `(cl-letf (((symbol-function 'ygg-git-compare-send-to-reviewer)
-              (lambda (_root text) (push text ,sent) 'session))
+              (lambda (_root text &optional _choice) (push text ,sent) 'session))
+             ((symbol-function 'ygg-git-compare-pick-reviewer) (lambda (&rest _) 'session))
              ((symbol-function 'ygg-git-compare-show-trace) #'ignore)
              ((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>")))
      ,@body))
@@ -1207,14 +1208,270 @@ string, or (STATUS . WHAT-IT-SAID)."
             (let ((text (car sent)))
               (should (string-search ygg-git-compare-act-threads-instructions text))
               (should (string-search "<mr-discussion>\nthread 103" text))
-              (should (< (string-search "</review-comments>" text)
+              (should (< (string-search "</fix-comments>" text)
                          (string-search "<mr-discussion>\n" text))))))))))
 
 (ert-deftest ygg-git-compare-threads-discussion-shows-replies-under-an-open-thread ()
   (let ((text (ygg-git-compare--discussion-render
-               '((:thread "t1" :new-path "x.el" :line 4 :author "ann" :text "first\nsecond")
+               '((:thread "t1" :new-path "x.el" :line 4 :author "ann" :resolvable t :text "first\nsecond")
                  (:thread "t1" :new-path "x.el" :line 4 :author "bo" :text "reply\nmore")
                  (:thread "t2" :new-path "y.el" :author "cy" :text "done" :resolved t)
                  (:thread "t2" :new-path "y.el" :author "di" :text "ok" :resolved t)))))
     (should (equal text (concat "thread t1 · x.el:4 · unresolved · ann\nfirst\nsecond\n"
                                 "  bo: reply\n    more\n\nresolved:\n- t2 y.el cy: done")))))
+
+(defmacro ygg-git-compare-threads-tests--held-fetch (done &rest body)
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'ygg-git-compare--remote-fetch)
+              (lambda (_pr _old callback) (setq ,done callback))))
+     ,@body))
+
+(defun ygg-git-compare-threads-tests--land (done)
+  (funcall done (ygg-git-compare-threads-tests--value
+                 'github #'ygg-git-compare-threads-tests--github)))
+
+(ert-deftest ygg-git-compare-threads-second-review-while-waiting-is-refused ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (let (sent done (asked 0))
+      (ygg-git-compare-threads-tests--held-fetch done
+        (ygg-git-compare-threads-tests--with-compare head 'github
+          (ygg-git-compare-threads-tests--sending sent
+            (cl-letf (((symbol-function 'ygg-git-compare-pick-reviewer)
+                       (lambda (&rest _) (cl-incf asked) 'session)))
+              (ygg-git-compare-review)
+              (let ((err (should-error (ygg-git-compare-review) :type 'user-error)))
+                (should (string-search "Already waiting for MR threads" (cadr err))))
+              (should (= asked 1))
+              (ygg-git-compare-threads-tests--land done)
+              (should (= (length sent) 1)))))))))
+
+(ert-deftest ygg-git-compare-threads-nothing-interactive-runs-when-the-threads-land ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (let (sent done landed)
+      (ygg-git-compare-threads-tests--held-fetch done
+        (ygg-git-compare-threads-tests--with-compare head 'github
+          (ygg-git-compare-threads-tests--sending sent
+            (cl-letf (((symbol-function 'ygg-git-compare-pick-reviewer)
+                       (lambda (&rest _)
+                         (when landed (error "asked from the waiter"))
+                         'session))
+                      ((symbol-function 'completing-read)
+                       (lambda (&rest _) (error "asked from the waiter")))
+                      ((symbol-function 'select-window)
+                       (lambda (&rest _) (error "selected from the waiter"))))
+              (ygg-git-compare-review)
+              (setq landed t)
+              (ygg-git-compare-threads-tests--land done)
+              (should (= (length sent) 1)))))))))
+
+(ert-deftest ygg-git-compare-threads-a-failing-waiter-does-not-stop-the-others ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (let (done other messages)
+      (ygg-git-compare-threads-tests--held-fetch done
+        (ygg-git-compare-threads-tests--with-compare head 'github
+          (cl-letf (((symbol-function 'message)
+                     (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+            (ygg-git-compare--when-discussion (current-buffer) (lambda () (signal 'quit nil)))
+            (ygg-git-compare--remote-start (current-buffer) (ygg-git-compare--remote-pr)
+                                           (ygg-git-compare--remote-key (ygg-git-compare--remote-pr))
+                                           (lambda (&rest _) (setq other t)))
+            (ygg-git-compare-threads-tests--land done)
+            (should other)
+            (should (seq-some (lambda (m) (string-prefix-p "Review not sent" m)) messages))))))))
+
+(ert-deftest ygg-git-compare-threads-status-counts-only-resolvable-threads ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let ((block (ygg-git-compare--discussion-block)))
+        (should (string-search "· approved · frank" block))
+        (should (string-search "· comment · hank" block))
+        (should (string-search "thread 103 · a.txt:3 · unresolved · carol" block))))
+    (let ((groups '((:thread "u" :new-path "x" :author "a" :resolved unknown :resolvable t :text "q")
+                    (:thread "g" :new-path "y" :author "b" :resolved nil :resolvable nil :text "z"))))
+      (let ((text (ygg-git-compare--discussion-render (apply #'append (mapcar #'list groups)))))
+        (should (string-search "· state unknown · a" text))
+        (should (string-search "· comment · b" text)))
+      (should-not (seq-some #'ygg-git-compare--discussion-open-p
+                            (ygg-git-compare--discussion-groups groups))))))
+
+(ert-deftest ygg-git-compare-threads-gitlab-general-notes-are-comments ()
+  (let ((comments (ygg-git-compare--remote-threads
+                   (ygg-git-compare--remote-gitlab
+                    (ygg-git-compare--remote-json
+                     (ygg-git-compare-threads-tests--gitlab nil))
+                    (ygg-git-compare-threads-tests--spec 'gitlab)))))
+    (let ((text (ygg-git-compare--discussion-render comments)))
+      (should (string-search "· comment · kim" text))
+      (should (string-search "· unresolved · lou" text)))))
+
+(ert-deftest ygg-git-compare-threads-stale-threads-are-fetched-first-and-dated ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github
+                                         (* 3 ygg-git-compare-threads-ttl))
+    (let (sent done)
+      (ygg-git-compare-threads-tests--held-fetch done
+        (ygg-git-compare-threads-tests--with-compare head 'github
+          (ygg-git-compare-threads-tests--sending sent
+            (ygg-git-compare-review)
+            (should-not sent)
+            (funcall done nil "gh is down")
+            (should (= (length sent) 1))
+            (should (string-match-p "threads as of [0-9]+m ago; refresh failed: gh is down"
+                                    (car sent)))
+            (should (string-search "thread 103" (car sent)))))))))
+
+(ert-deftest ygg-git-compare-threads-resolved-lines-go-when-their-header-does-not-fit ()
+  (let* ((comments '((:thread "o1" :new-path "a" :author "x" :resolved nil :resolvable t :text "open one")
+                     (:thread "r1" :new-path "b" :author "y" :resolved t :resolvable t :text "done 1")
+                     (:thread "r2" :new-path "c" :author "z" :resolved t :resolvable t :text "done 2")))
+         (ygg-git-compare-review-discussion-max-chars 40)
+         (text (ygg-git-compare--discussion-render comments)))
+    (should (string-search "thread o1" text))
+    (should-not (string-search "resolved:" text))
+    (should-not (string-search "- r1" text))
+    (should (string-search "… 2 more left out" text))))
+
+(ert-deftest ygg-git-compare-threads-closed-compare-sends-nothing ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (let (sent done messages)
+      (ygg-git-compare-threads-tests--held-fetch done
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (push (apply #'format fmt args) messages))))
+          (ygg-git-compare-threads-tests--with-compare head 'github
+            (ygg-git-compare-threads-tests--sending sent
+              (ygg-git-compare-review)
+              (kill-buffer (current-buffer))))
+          (ygg-git-compare-threads-tests--land done)
+          (should-not sent)
+          (should (member "Review not sent: compare closed" messages)))))))
+
+(ert-deftest ygg-git-compare-threads-timeout-sends-without-threads ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (let (sent done)
+      (ygg-git-compare-threads-tests--held-fetch done
+        (ygg-git-compare-threads-tests--with-compare head 'github
+          (let ((ygg-git-compare-forge-timeout 0.05))
+            (ygg-git-compare-threads-tests--sending sent
+              (ygg-git-compare-review)
+              (should-not sent)
+              (sit-for 0.3)
+              (should (= (length sent) 1))
+              (should (string-search "could not be fetched: timed out" (car sent))))))))))
+
+(ert-deftest ygg-git-compare-threads-submit-agent-reads-the-comments-when-it-sends ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github
+                                         (* 3 ygg-git-compare-threads-ttl))
+    (let (sent done dropped
+          (held (list (list :id "t" :level 'file :file "a.txt" :type 'todo :text "alpha"))))
+      (ygg-git-compare-threads-tests--held-fetch done
+        (ygg-git-compare-threads-tests--with-compare head 'github
+          (cl-letf (((symbol-function 'ygg-git-compare-submit--select) (lambda (&rest _) held))
+                    ((symbol-function 'ygg-git-compare-submit--drop)
+                     (lambda (comments) (setq dropped comments))))
+            (ygg-git-compare-threads-tests--sending sent
+              (ygg-git-compare-submit-agent)
+              (should-not sent)
+              (setq held (list (list :id "u" :level 'file :file "b.txt" :type 'fix :text "bravo")))
+              (ygg-git-compare-threads-tests--land done)
+              (should (string-search "bravo" (car sent)))
+              (should-not (string-search "alpha" (car sent)))
+              (should (equal (mapcar (lambda (c) (plist-get c :id)) dropped) '("u"))))))))))
+
+(ert-deftest ygg-git-compare-threads-instructions-follow-what-is-in-the-prompt ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let ((key (ygg-git-compare--remote-key (ygg-git-compare--remote-pr))))
+        (puthash key (list :failed (float-time) :error "gh is down")
+                 (ygg-git-compare-threads-tests--table))
+        (ygg-git-compare-threads-tests--sending sent
+          (let ((prompt (ygg-git-compare-review-prompt)))
+            (should (string-search "could not be fetched: gh is down" prompt))
+            (should-not (string-search ygg-git-compare-review-threads-instructions prompt))
+            (should-not (string-search ygg-git-compare-review-open-instructions prompt))
+            (should-not (string-search ygg-git-compare-review-mine-instructions prompt))))))
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let ((prompt (ygg-git-compare-review-prompt)))
+        (should (string-search ygg-git-compare-review-open-instructions prompt))
+        (should-not (string-search ygg-git-compare-review-mine-instructions prompt))))))
+
+(ert-deftest ygg-git-compare-threads-unknown-author-and-capped-comments ()
+  (should (string-search "· unknown\n"
+                         (ygg-git-compare--discussion-render
+                          '((:thread "t" :new-path "x" :resolvable t :resolved nil :text "q")))))
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let ((ygg-git-compare-review-comments-max-chars 20)
+            (comments (list (list :id "a" :level 'file :file "a.txt" :type 'todo
+                                  :text (make-string 100 ?x)))))
+        (should (string-search "more characters left out"
+                               (ygg-git-compare--prompt-comments comments)))))))
+
+(ert-deftest ygg-git-compare-threads-picker-defaults-to-the-session-that-reviewed ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let* ((aob--sessions (make-hash-table :test #'equal))
+             (aob--order nil)
+             (other (aob-create-session :id "other" :backend 'acp :name "other"
+                                        :project root :state 'idle))
+             (maker (aob-create-session :id "maker" :backend 'acp :name "maker"
+                                        :project root :state 'idle))
+             (aob-acp-agents '(("claude" :command ("x"))))
+             offered default prompted)
+        (ignore other)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_p table _pred _req _init _hist def)
+                     (setq offered (all-completions "" table) default def)
+                     def))
+                  ((symbol-function 'aob-prompt)
+                   (lambda (s text &rest _) (push (cons s text) prompted))))
+          (let ((choice (ygg-git-compare-pick-reviewer
+                         (list (list :id "c" :author "maker" :created (- (float-time) 720))))))
+            (should (eq choice maker))
+            (should (string-match-p "\\`maker · reviewed this compare · 12m ago\\'" default))
+            (should (member "other" offered))
+            (should (member "new: claude" offered))
+            (should (eq (ygg-git-compare-send-to-reviewer root "follow up" choice) maker))
+            (should (equal (cdar prompted) "follow up"))
+            (should (eq (caar prompted) maker)))
+          (let ((choice (ygg-git-compare-pick-reviewer nil)))
+            (should (eq choice maker))
+            (should (equal default "maker"))))))))
+
+(ert-deftest ygg-git-compare-threads-source-thread-comment-carries-its-whole-thread ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let ((ygg-git-compare-review-discussion-max-chars 10)
+            (comment (list :id "m" :level 'file :file "a.txt" :type 'todo :text "answer it"
+                           :source-thread "remote:gh:101")))
+        (let ((text (ygg-git-compare--prompt-comments (list comment))))
+          (should (string-search "<thread>\nthread 101 · a.txt:2 · resolved · alice" text))
+          (should (string-search "  bob: to be clear" text)))
+        (let ((md (let ((ygg-git-compare-markdown-with-threads t))
+                    (ygg-git-compare-markdown (list comment)))))
+          (should (string-search "bob: to be clear" md))
+          (should (< (string-search "answer it" md) (string-search "<thread>" md))))))))
+
+(ert-deftest ygg-git-compare-threads-fix-prompt-is-not-a-review ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (cl-letf (((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>")))
+        (let ((prompt (ygg-git-compare-submit--agent-prompt
+                       (list (list :id "t" :level 'file :file "a.txt" :type 'todo :text "do it")))))
+          (should (string-prefix-p ygg-git-compare-fix-instructions prompt))
+          (should-not (string-search "Do not change any files" prompt))
+          (should (string-search "<fix-comments>" prompt))
+          (should-not (string-search "<review-comments>" prompt))))
+      (let ((prompt (ygg-git-compare-review-prompt)))
+        (should (string-prefix-p ygg-git-compare-review-instructions prompt))
+        (should-not (string-search "<fix-comments>" prompt))))))
+
+(ert-deftest ygg-git-compare-threads-menu-labels ()
+  (should (string-search "Fix with agent"
+                         (format "%S" (transient-get-suffix 'ygg-git-compare-submit "@"))))
+  (should (string-search "agent review"
+                         (funcall #'ygg-git-compare-comments--review-description))))

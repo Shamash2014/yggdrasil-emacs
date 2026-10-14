@@ -225,7 +225,7 @@ a function of (PROGRAM ARGS BODY), says what it prints."
                                      :position (append refs '(:old_path "old.txt" :new_path "new.txt"
                                                               :new_line 2 :old_line 2)))))))))))
 
-(ert-deftest ygg-git-compare-review-sends-and-drops-only-agent-comments ()
+(ert-deftest ygg-git-compare-review-sends-the-pr-comments-and-keeps-the-agent-ones ()
   (ygg-git-compare-post-tests--with-repo (_root base head) "git@github.com:o/r.git"
     (let ((aob--sessions (make-hash-table :test #'equal))
           (aob--order nil)
@@ -253,16 +253,17 @@ a function of (PROGRAM ARGS BODY), says what it prints."
               (should (eq (window-buffer window) compare))
               (should (eq (window-buffer (get-buffer-window trace)) trace))
               (should (= 2 (length (window-list)))))
-            (should (equal (mapcar (lambda (c) (plist-get c :text)) ygg-git-compare--comments)
-                           '("for the pr")))
+            (should (equal (sort (mapcar (lambda (c) (plist-get c :text)) ygg-git-compare--comments)
+                                 #'string<)
+                           '("for the agent" "for the pr")))
             (ygg-git-compare-review)
-            (should (equal (mapcar (lambda (c) (plist-get c :text)) ygg-git-compare--comments)
-                           '("for the pr")))))
+            (should (equal (sort (mapcar (lambda (c) (plist-get c :text)) ygg-git-compare--comments)
+                                 #'string<)
+                           '("for the agent" "for the pr")))))
         (pcase-let ((`(,second ,first) sent))
-          (should (string-search "for the agent" first))
-          (should-not (string-match-p "<review-comments>[^<]*for the pr" first))
+          (should-not (string-search "for the agent" first))
+          (should-not (string-search "<review-comments>" first))
           (should (string-match-p "<my-comments>[^<]*for the pr" first))
-          (should-not (string-search "<review-comments>" second))
           (should (string-search "+two" second)))))))
 
 (ert-deftest ygg-git-compare-review-branch-opens-its-pull-request ()

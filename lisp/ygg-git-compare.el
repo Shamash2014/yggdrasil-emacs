@@ -1466,6 +1466,19 @@ me where one leaves a choice open.  Do not change any files."
   "What an agent is asked to do with a compare it is sent."
   :type 'string)
 
+(defcustom ygg-git-compare-fix-instructions
+  "Make the changes my comments below ask for, in the worktree of B named in
+<compare>, one comment at a time.  First read the \"Review guidelines\" or
+\"Code Review Rules\" sections of AGENTS.md and AGENTS.override.md where they
+exist, and follow them.  If B is not a branch checked out in a local worktree,
+such as a pull request head fetched as a ref, check out the pull request's
+branch first and say which.  Do not call review_submit.  Ask me where a
+comment leaves a choice open.  Run the tests and linters the change touches.
+Then report per comment, and per merge request thread ID where one is given,
+what was changed (file:line) or why nothing was."
+  "What an agent is asked to do with the todo and fix comments it is sent."
+  :type 'string)
+
 (defcustom ygg-git-compare-review-max-chars 60000
   "How much of the compared log and diff a review carries before it is cut."
   :type 'natnum)
@@ -1478,23 +1491,46 @@ me where one leaves a choice open.  Do not change any files."
   "How many characters of the merge request's threads a review carries."
   :type 'natnum)
 
+(defcustom ygg-git-compare-review-comments-max-chars 20000
+  "How many characters of the comments held for an agent a review carries."
+  :type 'natnum)
+
 (defcustom ygg-git-compare-review-threads-instructions
-  "The merge request already has the discussion in <mr-discussion>, and I
-have review comments of my own in <my-comments>.  Do not repeat a point
-either raises; build on them.  For each unresolved or outdated thread,
-submit one finding whose title starts \"thread ID: addressed\" or
-\"thread ID: still open\", anchored at the thread's file and line, saying
-whether the change from A to B answers it."
-  "What an agent is asked to do with the merge request's threads and my
-comments when it reviews."
+  "The merge request already has the discussion in <mr-discussion>.  Do not
+repeat a point it raises; build on it."
+  "What an agent is asked to do with the merge request's threads when it
+reviews."
+  :type 'string)
+
+(defcustom ygg-git-compare-review-mine-instructions
+  "I have review comments of my own in <my-comments>.  Do not repeat a
+point they raise; build on them."
+  "What an agent is asked to do with my own comments on the merge request when
+it reviews."
+  :type 'string)
+
+(defcustom ygg-git-compare-review-open-instructions
+  "For each unresolved thread in <mr-discussion>, submit one finding whose
+title starts \"thread ID: addressed\" or \"thread ID: still open\", anchored
+at the thread's file and line, saying whether the change from A to B answers
+it.  Comments marked comment, approved or state unknown are context only."
+  "What an agent is asked to report of the threads that can still be answered
+when it reviews."
   :type 'string)
 
 (defcustom ygg-git-compare-act-threads-instructions
   "The merge request already has the discussion in <mr-discussion>.  Also
 address its unresolved threads that concern the files of my comments above,
-and report per thread ID what was done."
+and report per thread ID what was done.  Comments marked comment, approved or
+state unknown are context only."
   "What an agent is asked to do with the merge request's threads when it
-acts on my comments."
+acts on my comments and one of them can still be answered."
+  :type 'string)
+
+(defcustom ygg-git-compare-act-context-instructions
+  "The merge request's discussion is in <mr-discussion> for context only."
+  "What an agent is told of the merge request's threads when it acts on my
+comments and none of them can still be answered."
   :type 'string)
 
 (defconst ygg-git-compare-review-preset "review"
@@ -1506,6 +1542,23 @@ acts on my comments."
         (concat (substring text 0 limit)
                 (format "\n… %d more characters left out" (- (length text) limit)))
       text)))
+
+(defun ygg-git-compare--with-thread (text comment)
+  "TEXT, COMMENT as an agent reads it, followed by the whole thread COMMENT was
+made from."
+  (if-let* ((thread (ygg-git-compare--discussion-source comment)))
+      (concat text "\n\n<thread>\n" thread "\n</thread>")
+    text))
+
+(defun ygg-git-compare--prompt-comments (comments)
+  "COMMENTS as an agent reads them, each followed by the whole thread it was
+made from, cut at `ygg-git-compare-review-comments-max-chars'."
+  (ygg-git-compare--capped
+   (mapconcat (lambda (c)
+                (ygg-git-compare--with-thread
+                 (ygg-git-compare--for-prompt c (ygg-git-compare--range-label)) c))
+              comments "\n\n")
+   ygg-git-compare-review-comments-max-chars))
 
 (defun ygg-git-compare--range-label ()
   (format "A: %s ↔ B: %s  %s" (ygg-git-compare--side-label ygg-git-compare--a)
@@ -1520,28 +1573,20 @@ acts on my comments."
   "The comments held for the pull request, as an agent reads them, or nil."
   (when-let* ((mine (and ygg-git-compare--comments
                         (seq-filter #'ygg-git-compare--forge-p (ygg-git-compare-comments-list)))))
-    (concat "<my-comments>\n"
-            (mapconcat (lambda (c)
-                         (ygg-git-compare--for-prompt c (ygg-git-compare--range-label)))
-                       mine "\n\n")
-            "\n</my-comments>")))
+    (concat "<my-comments>\n" (ygg-git-compare--prompt-comments mine) "\n</my-comments>")))
 
 (defun ygg-git-compare-review-prompt ()
   "This compare's comments for an agent, its commits and its diff, as one
 message.  A comment made on another range than the one sent says which.  The
 merge request's threads are those already kept."
-  (let ((discussion (ygg-git-compare--discussion-block))
-        (mine (ygg-git-compare--my-comments-block)))
+  (let* ((facts (ygg-git-compare--discussion-facts))
+         (discussion (plist-get facts :block))
+         (mine (ygg-git-compare--my-comments-block)))
     (concat
      ygg-git-compare-review-instructions
-     (when (or discussion mine)
-       (concat "\n\n" ygg-git-compare-review-threads-instructions))
-     (when-let* ((comments (ygg-git-compare--agent-comments)))
-       (concat "\n\n<review-comments>\n"
-               (mapconcat (lambda (c)
-                            (ygg-git-compare--for-prompt c (ygg-git-compare--range-label)))
-                          comments "\n\n")
-               "\n</review-comments>"))
+     (and (plist-get facts :threads) (concat "\n\n" ygg-git-compare-review-threads-instructions))
+     (and mine (concat "\n\n" ygg-git-compare-review-mine-instructions))
+     (and (plist-get facts :open) (concat "\n\n" ygg-git-compare-review-open-instructions))
      (and mine (concat "\n\n" mine))
      (and discussion (concat "\n\n" discussion))
      "\n\n" (ygg-git-compare-compare-block))))
@@ -1594,7 +1639,7 @@ group and a live session's state."
                 (push (cons (ygg-git-compare--group label group note) value) labels)))
       (add (format "new: review plan (preset %s)" ygg-git-compare-review-preset)
            "New session" "plans from the review" 'review)
-      (dolist (s (aob-live-sessions))
+      (dolist (s (seq-filter #'ygg-git-compare--session-here-p (aob-live-sessions)))
         (add (aob-session-name s) "Live sessions"
              (format "%s · %s" (aob-session-state s) (or (aob-session-cwd s) "?"))
              s))
@@ -1623,18 +1668,75 @@ Only the preset is expanded, never a name TEXT happens to mention."
                    (concat at " " text (substring preset (length at)))))
         (user-error "Could not start a review session"))))
 
-(defun ygg-git-compare-send-to-reviewer (root text)
-  "Send TEXT to a reviewer picked among `ygg-git-compare--reviewers', one
-started in ROOT when new; answer its session."
-  (let* ((reviewers (ygg-git-compare--reviewers))
+(defvar-local ygg-git-compare--reviewer-choice nil
+  "The reviewer this compare last sent a review to.")
+
+(defun ygg-git-compare--session-here-p (session)
+  (let ((cwd (aob-session-cwd session))
+        (root (ignore-errors (magit-toplevel))))
+    (or (null cwd) (null root) (file-in-directory-p cwd root))))
+
+(defun ygg-git-compare--producer (comments)
+  "The live session that wrote the latest of COMMENTS, if one did."
+  (let (best)
+    (dolist (c comments)
+      (when-let* ((author (plist-get c :author))
+                  (session (seq-find (lambda (s) (equal (aob-session-name s) author))
+                                     (aob-live-sessions)))
+                  ((or (null best) (> (or (plist-get c :created) 0) (car best)))))
+        (setq best (cons (or (plist-get c :created) 0) session))))
+    (cdr best)))
+
+(defun ygg-git-compare--same-reviewer-p (a b)
+  (or (eq a b) (and (consp a) (equal a b))))
+
+(autoload 'ygg-git-compare--remote-age "ygg-git-compare-threads")
+
+(defun ygg-git-compare-pick-reviewer (&optional comments)
+  "Ask which reviewer a review goes to among `ygg-git-compare--reviewers',
+offering first the live session that wrote COMMENTS, then the one picked last."
+  (let* ((list (ygg-git-compare--list))
+         (producer (ygg-git-compare--producer comments))
+         (reviewers (ygg-git-compare--reviewers))
+         (reviewers
+          (if (and producer (not (seq-some (lambda (r) (eq (cdr r) producer)) reviewers)))
+              (append reviewers (list (cons (ygg-git-compare--group (aob-session-name producer)
+                                                                    "Live sessions")
+                                            producer)))
+            reviewers))
+         (reviewers
+          (mapcar (lambda (r)
+                    (if (and producer (eq (cdr r) producer))
+                        (cons (ygg-git-compare--group
+                               (format "%s · reviewed this compare · %s" (aob-session-name producer)
+                                       (ygg-git-compare--remote-age
+                                        (or (seq-some (lambda (c) (plist-get c :created)) comments)
+                                            (float-time))))
+                               "Live sessions"
+                               (get-text-property 0 'ygg-git-compare-note (car r)))
+                              (cdr r))
+                      r))
+                  reviewers))
+         (last (buffer-local-value 'ygg-git-compare--reviewer-choice list))
+         (default (car (seq-find (lambda (r)
+                                   (ygg-git-compare--same-reviewer-p
+                                    (cdr r) (or producer last)))
+                                 reviewers)))
          (choice (cdr (assoc (completing-read
                               "Review by: "
                               (ygg-git-compare-table reviewers 'ygg-review-reviewer)
-                              nil t)
-                             reviewers)))
+                              nil t nil nil default)
+                             reviewers))))
+    (unless choice (user-error "No reviewer picked"))
+    (with-current-buffer list (setq ygg-git-compare--reviewer-choice choice))
+    choice))
+
+(defun ygg-git-compare-send-to-reviewer (root text &optional choice)
+  "Send TEXT to CHOICE, a reviewer from `ygg-git-compare-pick-reviewer' asked
+for when not given, one started in ROOT when new; answer its session."
+  (let* ((choice (or choice (ygg-git-compare-pick-reviewer)))
          (session
           (pcase choice
-            ('nil (user-error "No reviewer picked"))
             ('review (ygg-git-compare--spawn-review root text))
             (`(new . ,agent)
              (let ((aob-acp-start-dir root)
@@ -1647,31 +1749,39 @@ started in ROOT when new; answer its session."
     session))
 
 (defun ygg-git-compare-show-trace (session)
-  "Show SESSION's trace in a side window, leaving the compare's windows as they are."
+  "Show SESSION's trace in a side window, leaving the compare's windows as they
+are; the window is selected only while a compare is what the user is in."
   (require 'aob-trace nil t)
   (when (fboundp 'aob-trace-buffer)
     (when-let* ((window (display-buffer-in-side-window
                          (aob-trace-buffer session)
                          '((side . right) (slot . 0) (window-width . 0.4)))))
-      (select-window window))))
+      (when (and (not (active-minibuffer-window))
+                 (with-current-buffer (window-buffer (selected-window))
+                   (or ygg-git-compare--a-spec (buffer-live-p ygg-git-compare--list-buffer))))
+        (select-window window)))))
+
+(defun ygg-git-compare--sent (session)
+  (message "review sent to %s; fixes go with & @"
+           (or (ignore-errors (aob-session-name session)) "an agent"))
+  (ygg-git-compare-show-trace session))
 
 (defun ygg-git-compare-review ()
-  "Send the review comments held for an agent, the merge request's threads
-and the compared range to one, fetching the threads first when they are not kept."
+  "Send the merge request's threads, my comments for the pull request and the
+compared range to an agent to review, fetching the threads first when they are
+late.  The comments held for an agent are not sent; & @ sends those."
   (interactive)
   (require 'aob)
   (require 'aob-acp)
   (let ((list (ygg-git-compare--list)))
-    (ygg-git-compare--when-discussion
-     list
-     (lambda ()
-       (with-current-buffer list
-         (let* ((sent (ygg-git-compare--agent-comments))
-                (session (ygg-git-compare-send-to-reviewer default-directory
-                                                           (ygg-git-compare-review-prompt))))
-           (when sent
-             (ygg-git-compare-comments-drop (mapcar (lambda (c) (plist-get c :id)) sent)))
-           (ygg-git-compare-show-trace session)))))))
+    (ygg-git-compare--discussion-guard list)
+    (let ((choice (ygg-git-compare-pick-reviewer)))
+      (ygg-git-compare--when-discussion
+       list
+       (lambda ()
+         (ygg-git-compare--sent
+          (ygg-git-compare-send-to-reviewer
+           default-directory (ygg-git-compare-review-prompt) choice)))))))
 
 ;;; Posting to the pull request
 
@@ -2032,6 +2142,8 @@ when that is known, and a compare that is not its range says why instead."
                       (list :old_line old))))))
 
 (autoload 'ygg-git-compare--discussion-block "ygg-git-compare-threads")
+(autoload 'ygg-git-compare--discussion-facts "ygg-git-compare-threads")
+(autoload 'ygg-git-compare--discussion-guard "ygg-git-compare-threads")
 (autoload 'ygg-git-compare--when-discussion "ygg-git-compare-threads")
 (autoload 'ygg-git-compare-visit-b "ygg-git-compare-explain" nil t)
 (autoload 'ygg-git-compare-explain "ygg-git-compare-explain" nil t)
@@ -2292,7 +2404,7 @@ refused: a compare is read-only.
 \\[ygg-git-compare-interdiff] shows what changed since the last review.
 \\[ygg-git-compare-visit-b] opens B's own file at the line, for the language server.
 \\[ygg-git-compare-dispatch] comments on the review, lists, checks and sends the comments.
-\\[ygg-git-compare-review] sends the comments for an agent and the compare to one.
+\\[ygg-git-compare-review] sends the compare, my comments and the merge request's threads to an agent to review.
 \\[ygg-git-compare-submit] submits the comments to the pull request.
 \\[ygg-git-compare-quit] leaves, bringing back the windows from before."
   :lighter " Compare"

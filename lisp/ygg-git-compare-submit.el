@@ -141,6 +141,9 @@ first, those past MAX-PRIORITY left out."
               (mapconcat (lambda (l) (concat indent l "\n"))
                          (append '("```diff") (split-string quote "\n") '("```")))))))
 
+(defvar ygg-git-compare-markdown-with-threads nil
+  "Whether the markdown puts the thread a comment was made from under it.")
+
 (defun ygg-git-compare-markdown (comments)
   "COMMENTS as a numbered markdown review, the way tuicr exports one.
 Pending agent comments are left out."
@@ -159,7 +162,12 @@ Pending agent comments are left out."
      (mapconcat (lambda (c)
                   (unless (and (ygg-git-compare-submit--verdict c)
                                (string-empty-p (string-trim (or (plist-get c :text) ""))))
-                    (ygg-git-compare-submit--item (cl-incf n) c)))
+                    (let ((item (ygg-git-compare-submit--item (cl-incf n) c)))
+                      (if-let* ((thread (and ygg-git-compare-markdown-with-threads
+                                             (ygg-git-compare--discussion-source c))))
+                          (concat (string-trim-right item "\n+") "\n\n<thread>\n" thread
+                                  "\n</thread>\n\n")
+                        item))))
                 comments))))
 
 (defun ygg-git-compare-markdown-for-range (dir range-key)
@@ -898,10 +906,18 @@ MAX-PRIORITY leaves out findings less urgent than it."
      (lambda (pr) (ygg-git-compare-submit--post event max-priority pr)))))
 
 (defun ygg-git-compare-submit--agent-prompt (comments)
-  (let ((discussion (ygg-git-compare--discussion-block)))
-    (concat ygg-git-compare-review-instructions
-            (and discussion (concat "\n\n" ygg-git-compare-act-threads-instructions))
-            "\n\n<review-comments>\n" (ygg-git-compare-markdown comments) "</review-comments>\n\n"
+  (let* ((facts (ygg-git-compare--discussion-facts))
+         (discussion (plist-get facts :block)))
+    (concat ygg-git-compare-fix-instructions
+            (and (plist-get facts :threads)
+                 (concat "\n\n" (if (plist-get facts :open)
+                                      ygg-git-compare-act-threads-instructions
+                                    ygg-git-compare-act-context-instructions)))
+            "\n\n<fix-comments>\n"
+            (ygg-git-compare--capped (let ((ygg-git-compare-markdown-with-threads t))
+                                       (ygg-git-compare-markdown comments))
+                                     ygg-git-compare-review-comments-max-chars)
+            "</fix-comments>\n\n"
             (and discussion (concat discussion "\n\n"))
             (ygg-git-compare-compare-block))))
 
@@ -911,28 +927,32 @@ export writes them.  MAX-PRIORITY leaves
 out findings less urgent than it."
   (require 'aob)
   (require 'aob-acp)
-  (with-current-buffer (ygg-git-compare--list)
-    (let* ((comments (ygg-git-compare-submit--select 'agent max-priority))
-           (_ (unless comments
-                (user-error "No comments for the agent%s"
-                            (if-let* ((n (length (ygg-git-compare-submit--select 'forge max-priority)))
-                                      ((> n 0)))
-                                (format ": %d %s to the PR; give %s the todo or fix type to send it here"
-                                        n (if (= n 1) "goes" "go") (if (= n 1) "it" "one"))
-                              ""))))
-           (list (current-buffer)))
-      (ygg-git-compare--when-discussion
-       list
-       (lambda ()
-         (with-current-buffer list
-           (let ((session (ygg-git-compare-send-to-reviewer
-                           default-directory (ygg-git-compare-submit--agent-prompt comments))))
-             (ygg-git-compare-submit--drop comments)
-             (message "%d comment%s sent to an agent%s" (length comments)
-                      (if (= (length comments) 1) "" "s")
-                      (let ((pending (ygg-git-compare-submit--pending-note)))
-                        (if (string-empty-p pending) "" (concat "; " pending))))
-             (ygg-git-compare-show-trace session))))))))
+  (let ((list (ygg-git-compare--list)))
+    (with-current-buffer list
+      (let ((comments (ygg-git-compare-submit--select 'agent max-priority)))
+        (unless comments
+          (user-error "No comments for the agent%s"
+                      (if-let* ((n (length (ygg-git-compare-submit--select 'forge max-priority)))
+                                ((> n 0)))
+                          (format ": %d %s to the PR; give %s the todo or fix type to send it here"
+                                  n (if (= n 1) "goes" "go") (if (= n 1) "it" "one"))
+                        "")))
+        (ygg-git-compare--discussion-guard list)
+        (let ((choice (ygg-git-compare-pick-reviewer comments)))
+          (ygg-git-compare--when-discussion
+           list
+           (lambda ()
+             (if-let* ((comments (ygg-git-compare-submit--select 'agent max-priority)))
+                 (let ((session (ygg-git-compare-send-to-reviewer
+                                 default-directory (ygg-git-compare-submit--agent-prompt comments)
+                                 choice)))
+                   (ygg-git-compare-submit--drop comments)
+                   (message "%d comment%s sent to an agent%s" (length comments)
+                            (if (= (length comments) 1) "" "s")
+                            (let ((pending (ygg-git-compare-submit--pending-note)))
+                              (if (string-empty-p pending) "" (concat "; " pending))))
+                   (ygg-git-compare-show-trace session))
+               (message "Review not sent: the comments for the agent are gone")))))))))
 
 ;;; Menu
 
@@ -993,7 +1013,7 @@ out findings less urgent than it."
     ("d" "Draft" ygg-git-compare-submit-draft)
     ("m" "Merge…" ygg-git-pr-merge)]
    ["Agent"
-    ("@" "Send to agent" ygg-git-compare-submit-to-agent)]
+    ("@" "Fix with agent" ygg-git-compare-submit-to-agent)]
    ["Markdown"
     ("y" "Copy" ygg-git-compare-export-markdown)
     ("b" "Show in buffer" ygg-git-compare-export-markdown-buffer)
