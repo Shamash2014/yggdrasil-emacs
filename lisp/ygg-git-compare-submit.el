@@ -898,9 +898,12 @@ MAX-PRIORITY leaves out findings less urgent than it."
      (lambda (pr) (ygg-git-compare-submit--post event max-priority pr)))))
 
 (defun ygg-git-compare-submit--agent-prompt (comments)
-  (concat ygg-git-compare-review-instructions
-          "\n\n<review-comments>\n" (ygg-git-compare-markdown comments) "</review-comments>\n\n"
-          (ygg-git-compare-compare-block)))
+  (let ((discussion (ygg-git-compare--discussion-block)))
+    (concat ygg-git-compare-review-instructions
+            (and discussion (concat "\n\n" ygg-git-compare-act-threads-instructions))
+            "\n\n<review-comments>\n" (ygg-git-compare-markdown comments) "</review-comments>\n\n"
+            (and discussion (concat discussion "\n\n"))
+            (ygg-git-compare-compare-block))))
 
 (defun ygg-git-compare-submit-agent (&optional max-priority)
   "Send the agent-typed comments with the compare, written as the markdown
@@ -917,14 +920,19 @@ out findings less urgent than it."
                                 (format ": %d %s to the PR; give %s the todo or fix type to send it here"
                                         n (if (= n 1) "goes" "go") (if (= n 1) "it" "one"))
                               ""))))
-           (text (ygg-git-compare-submit--agent-prompt comments))
-           (session (ygg-git-compare-send-to-reviewer default-directory text)))
-      (ygg-git-compare-submit--drop comments)
-      (message "%d comment%s sent to an agent%s" (length comments)
-               (if (= (length comments) 1) "" "s")
-               (let ((pending (ygg-git-compare-submit--pending-note)))
-                 (if (string-empty-p pending) "" (concat "; " pending))))
-      (ygg-git-compare-show-trace session))))
+           (list (current-buffer)))
+      (ygg-git-compare--when-discussion
+       list
+       (lambda ()
+         (with-current-buffer list
+           (let ((session (ygg-git-compare-send-to-reviewer
+                           default-directory (ygg-git-compare-submit--agent-prompt comments))))
+             (ygg-git-compare-submit--drop comments)
+             (message "%d comment%s sent to an agent%s" (length comments)
+                      (if (= (length comments) 1) "" "s")
+                      (let ((pending (ygg-git-compare-submit--pending-note)))
+                        (if (string-empty-p pending) "" (concat "; " pending))))
+             (ygg-git-compare-show-trace session))))))))
 
 ;;; Menu
 

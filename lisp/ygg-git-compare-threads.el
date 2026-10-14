@@ -713,20 +713,24 @@ was made with them; nil when it does not say."
   (let ((value (ignore-errors (ygg-git-compare--cache-value key))))
     (and (ygg-git-compare--remote-valid-p value) value)))
 
-(defun ygg-git-compare--remote-start (list pr key)
+(defun ygg-git-compare--remote-start (list pr key &optional then)
   "Fetch PR's comments in the background unless they are fresh or being
-fetched, redrawing LIST's compare when they land."
+fetched, redrawing LIST's compare when they land.  THEN is called with the
+value and why not when what is fetched lands."
   (let* ((dir default-directory)
          (stale (ygg-git-compare--cache-stale-p
                  (ignore-errors (ygg-git-compare--cache-entry key))
                  ygg-git-compare-threads-ttl))
-         (waiter (and stale (not ygg-git-compare--remote-waiting)
-                      (lambda (&rest _)
-                        (when (buffer-live-p list)
-                          (with-current-buffer list (setq ygg-git-compare--remote-waiting nil))
-                          (ygg-git-compare--pr-info-refresh list)
-                          (ygg-git-compare--redraw-comments list))))))
-    (when waiter (setq ygg-git-compare--remote-waiting t))
+         (redraw (and stale (not ygg-git-compare--remote-waiting)))
+         (waiter (and stale (or redraw then)
+                      (lambda (&rest args)
+                        (when redraw
+                          (when (buffer-live-p list)
+                            (with-current-buffer list (setq ygg-git-compare--remote-waiting nil))
+                            (ygg-git-compare--pr-info-refresh list)
+                            (ygg-git-compare--redraw-comments list)))
+                        (when then (apply then args))))))
+    (when redraw (setq ygg-git-compare--remote-waiting t))
     (condition-case failure
         (ygg-git-compare--cached
          key ygg-git-compare-threads-ttl
@@ -810,6 +814,111 @@ waits for nothing."
         (error
          (list (ygg-git-compare--remote-notice
                 (concat "forge comments: " (error-message-string err)))))))))
+
+;;; Telling an agent
+
+(defun ygg-git-compare--discussion-groups (comments)
+  "COMMENTS as lists by thread, in the order the threads first appear."
+  (let (order (table (make-hash-table :test #'equal)))
+    (dolist (c comments)
+      (let ((id (plist-get c :thread)))
+        (unless (gethash id table) (push id order))
+        (puthash id (cons c (gethash id table)) table)))
+    (mapcar (lambda (id) (reverse (gethash id table))) (nreverse order))))
+
+(defun ygg-git-compare--discussion-where (comment)
+  (let ((file (plist-get comment :new-path))
+        (line (or (plist-get comment :line)
+                  (and (plist-get comment :outdated) (plist-get comment :orig-line)))))
+    (cond ((null file) "general")
+          (line (format "%s:%s" file line))
+          (t file))))
+
+(defun ygg-git-compare--discussion-status (comment)
+  (cond ((ygg-git-compare--remote-resolved-p comment) "resolved")
+        ((plist-get comment :outdated) "outdated")
+        (t "unresolved")))
+
+(defun ygg-git-compare--discussion-text (comment)
+  (string-trim (or (plist-get comment :text) "")))
+
+(defun ygg-git-compare--discussion-thread (group)
+  (let ((head (car group)))
+    (ygg-git-compare--capped
+     (concat (format "thread %s · %s · %s · %s\n" (plist-get head :thread)
+                     (ygg-git-compare--discussion-where head)
+                     (ygg-git-compare--discussion-status head)
+                     (plist-get head :author))
+             (ygg-git-compare--discussion-text head)
+             (mapconcat (lambda (reply)
+                          (concat "\n  " (or (plist-get reply :author) "?") ": "
+                                  (replace-regexp-in-string
+                                   "\n" "\n    " (ygg-git-compare--discussion-text reply))))
+                        (cdr group) ""))
+     ygg-git-compare-review-thread-limit)))
+
+(defun ygg-git-compare--discussion-line (group)
+  (let ((head (car group)))
+    (format "- %s %s %s: %s" (plist-get head :thread)
+            (ygg-git-compare--discussion-where head) (plist-get head :author)
+            (truncate-string-to-width
+             (car (split-string (ygg-git-compare--discussion-text head) "\n")) 100 nil nil "…"))))
+
+(defun ygg-git-compare--discussion-render (comments)
+  "COMMENTS' threads, the unresolved with their replies then the resolved one
+to a line, cut at `ygg-git-compare-review-discussion-max-chars'; nil without any."
+  (let* ((groups (ygg-git-compare--discussion-groups comments))
+         (resolved (seq-filter (lambda (g) (ygg-git-compare--remote-resolved-p (car g))) groups))
+         (open (seq-remove (lambda (g) (memq g resolved)) groups))
+         (entries (append (mapcar (lambda (g) (cons "\n\n" (ygg-git-compare--discussion-thread g)))
+                                  open)
+                          (and resolved
+                               (cons (cons "\n\n" "resolved:")
+                                     (mapcar (lambda (g)
+                                               (cons "\n" (ygg-git-compare--discussion-line g)))
+                                             resolved)))))
+         (used 0) kept (left 0))
+    (dolist (entry entries)
+      (if (and kept (> (+ used (length (cdr entry))) ygg-git-compare-review-discussion-max-chars))
+          (cl-incf left)
+        (push (concat (and kept (car entry)) (cdr entry)) kept)
+        (cl-incf used (length (cdr entry)))))
+    (when groups
+      (concat (apply #'concat (nreverse kept))
+              (and (> left 0) (format "\n\n… %d more left out" left))))))
+
+(defun ygg-git-compare--discussion-block ()
+  "The merge request this compare is of, its threads as an agent reads them,
+or why they could not be had; nil when it is no merge request or has no threads."
+  (when-let* ((pr (and (eq (car-safe ygg-git-compare--b-spec) 'pr)
+                       (ygg-git-compare--remote-pr))))
+    (let* ((key (ygg-git-compare--remote-key pr))
+           (value (ygg-git-compare--remote-value key))
+           (failure (plist-get (ignore-errors (ygg-git-compare--cache-entry key)) :error)))
+      (if value
+          (when-let* ((text (ygg-git-compare--discussion-render
+                             (ygg-git-compare--remote-annotate (plist-get value :comments)))))
+            (concat "<mr-discussion>\n" text "\n</mr-discussion>"))
+        (concat "<mr-discussion>\nthe threads could not be fetched"
+                (and failure (concat ": " failure)) "; review without them\n</mr-discussion>")))))
+
+(defun ygg-git-compare--when-discussion (list then)
+  "Call THEN once LIST's merge request has its threads kept or has failed to
+give them, at once when it is no merge request or they are kept."
+  (with-current-buffer list
+    (let* ((pr (and (eq (car-safe ygg-git-compare--b-spec) 'pr)
+                    (ygg-git-compare--remote-pr)))
+           (key (and pr (ygg-git-compare--remote-key pr))))
+      (if (or (null pr) (ygg-git-compare--remote-value key)
+              (not (ygg-git-compare--cache-stale-p
+                    (ignore-errors (ygg-git-compare--cache-entry key))
+                    ygg-git-compare-threads-ttl)))
+          (funcall then)
+        (message "fetching MR threads…")
+        (condition-case nil
+            (ygg-git-compare--remote-start
+             list pr key (lambda (&rest _) (when (buffer-live-p list) (funcall then))))
+          (error (funcall then)))))))
 
 ;;; Acting on one
 

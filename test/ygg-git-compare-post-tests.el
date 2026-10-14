@@ -260,7 +260,8 @@ a function of (PROGRAM ARGS BODY), says what it prints."
                            '("for the pr")))))
         (pcase-let ((`(,second ,first) sent))
           (should (string-search "for the agent" first))
-          (should-not (string-search "for the pr" first))
+          (should-not (string-match-p "<review-comments>[^<]*for the pr" first))
+          (should (string-match-p "<my-comments>[^<]*for the pr" first))
           (should-not (string-search "<review-comments>" second))
           (should (string-search "+two" second)))))))
 
