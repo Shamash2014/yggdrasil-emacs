@@ -1334,9 +1334,11 @@ and place."
         (while (assoc label rows) (setq label (concat label "'")))
         (push (cons (ygg-git-compare--group label (or group "Review") note) c) rows)))))
 
-(defun ygg-git-compare--comment-at-point (&optional pred)
-  "The comment at point that PRED holds for, asked for among several."
-  (let ((comments (seq-filter (or pred #'identity) (ygg-git-compare--comments-at-point))))
+(defun ygg-git-compare--comment-at-point (&optional pred comments)
+  "The comment at point that PRED holds for, asked for among several; of
+COMMENTS when given."
+  (let ((comments (seq-filter (or pred #'identity)
+                              (or comments (ygg-git-compare--comments-at-point)))))
     (if (cdr comments)
         (let ((rows (ygg-git-compare--comment-candidates comments)))
           (cdr (assoc (completing-read "Comment: "
@@ -1371,16 +1373,102 @@ it was made on none."
   "Accept COMMENT that an agent proposed."
   (ygg-git-compare--put (ygg-git-compare--accepted comment)))
 
+(defun ygg-git-compare--thread-quote (thread)
+  (mapconcat (lambda (c)
+               (concat "> " (or (plist-get c :author) "?") ":\n"
+                       (replace-regexp-in-string
+                        "^" "> " (string-trim (or (plist-get c :text) "")))))
+             thread "\n>\n"))
+
+(defun ygg-git-compare--thread-anchor (head)
+  (let ((path (plist-get head :new-path))
+        (side (plist-get head :side))
+        (line (plist-get head :line))
+        (start (plist-get head :start-line)))
+    (append (and path (list :file path :old-path path :new-path path))
+            (and line (list :side side :line line))
+            (and line start (list :start-side side :start-line start)))))
+
+(defun ygg-git-compare--thread-comment (head type)
+  "A new comment of TYPE for an agent quoting the forge's thread led by HEAD."
+  (let ((thread (seq-filter (lambda (c) (and (equal (plist-get c :thread) (plist-get head :thread))
+                                             (not (plist-get c :notice))))
+                            (ygg-git-compare--remote-shown (ygg-git-compare--list))))
+        (level (plist-get head :level)))
+    (plist-put
+     (plist-put
+      (append (ygg-git-compare--new-comment (if (memq level '(line range file)) level 'review)
+                                            (ygg-git-compare--thread-anchor head))
+              (list :source-thread (plist-get head :id)))
+      :type type)
+     :text (ygg-git-compare--thread-quote (or thread (list head))))))
+
+(defun ygg-git-compare--next-destination (comment)
+  "The agent type COMMENT goes to next, or nil for the pull request."
+  (let ((types ygg-git-compare-agent-types))
+    (if (ygg-git-compare--forge-p comment)
+        (car types)
+      (cadr (memq (plist-get comment :type) types)))))
+
+(defun ygg-git-compare--redirected (comment)
+  "COMMENT sent to the next of the agent types, or back to the pull request."
+  (let ((next (ygg-git-compare--next-destination comment))
+        (comment (copy-sequence comment)))
+    (cond ((null next)
+           (plist-put (plist-put comment :type (plist-get comment :pr-type)) :pr-type nil))
+          (t (when (ygg-git-compare--forge-p comment)
+               (setq comment (plist-put comment :pr-type (plist-get comment :type))))
+             (plist-put comment :type next)))))
+
+(defun ygg-git-compare--say-destination (comment)
+  (if (ygg-git-compare--forge-p comment)
+      (message "→ %s (PR)" (or (plist-get comment :type) "untyped"))
+    (message "→ %s (agent)" (plist-get comment :type))))
+
+(defun ygg-git-compare--local-redirect (comment)
+  (let ((comment (if (ygg-git-compare--pending-p comment)
+                     (ygg-git-compare--accepted comment)
+                   comment)))
+    (if (and (plist-get comment :source-thread)
+             (null (ygg-git-compare--next-destination comment)))
+        (progn (ygg-git-compare-comments-drop (list (plist-get comment :id)))
+               (message "→ dropped (the forge's thread stays on the PR)"))
+      (let ((moved (ygg-git-compare--redirected comment)))
+        (ygg-git-compare--put moved)
+        (ygg-git-compare--say-destination moved)))))
+
+(defun ygg-git-compare--remote-redirect (comment)
+  (let* ((shown (ygg-git-compare--remote-shown (ygg-git-compare--list)))
+         (head (or (seq-find (lambda (c) (and (equal (plist-get c :thread) (plist-get comment :thread))
+                                              (not (plist-get c :depth))))
+                             shown)
+                   comment))
+         (kept (seq-find (lambda (c) (equal (plist-get c :source-thread) (plist-get head :id)))
+                         (ygg-git-compare-comments-list t))))
+    (if kept
+        (ygg-git-compare--local-redirect kept)
+      (let ((new (ygg-git-compare--thread-comment head (car ygg-git-compare-agent-types))))
+        (ygg-git-compare--put new)
+        (ygg-git-compare--say-destination new)))))
+
 (defun ygg-git-compare--flip-comment (comment)
-  "Send COMMENT to the other of the pull request and the agent."
-  (when (ygg-git-compare--remote-id-p (plist-get comment :id))
-    (user-error "That comment is already on the pull request"))
-  (ygg-git-compare--put (ygg-git-compare--flipped comment)))
+  "Send COMMENT on from the pull request to each agent type in turn and back;
+one of the forge's gets a comment of yours quoting its thread."
+  (if (plist-get comment :remote)
+      (ygg-git-compare--remote-redirect comment)
+    (ygg-git-compare--local-redirect comment)))
 
 (defun ygg-git-compare-comment-flip ()
-  "Send the comment at point to the other of the pull request and the agent."
+  "Send the comment at point from the pull request to each agent type in turn
+and back."
   (interactive)
-  (ygg-git-compare--flip-comment (ygg-git-compare--comment-at-point)))
+  (let ((copied (delq nil (mapcar (lambda (c) (plist-get c :source-thread))
+                                  (ygg-git-compare-comments-list t)))))
+    (ygg-git-compare--flip-comment
+     (ygg-git-compare--comment-at-point
+      (lambda (c) (not (or (plist-get c :notice) (plist-get c :heading)
+                           (member (plist-get c :id) copied))))
+      (ygg-git-compare--drawn-at-point)))))
 
 (defun ygg-git-compare-comment-delete ()
   "Delete the comment at point, asking first unless it is pending a check."
@@ -1803,6 +1891,13 @@ then the forge's."
 
 ;;; From an agent
 
+(defun ygg-git-compare--received-type (type)
+  "TYPE as a comment for the pull request: an agent's fix is an issue and any
+other of its types a suggestion."
+  (cond ((not (memq type ygg-git-compare-agent-types)) type)
+        ((eq type 'fix) 'issue)
+        (t 'suggestion)))
+
 (defun ygg-git-compare--received (comment author)
   "COMMENT as an agent sent it, keys and symbols as strings or not, made a
 comment from AUTHOR pending a check."
@@ -1825,7 +1920,9 @@ comment from AUTHOR pending a check."
     (list :id (or (plist-get c :id) (ygg-git-compare--new-id))
           :level (or (plist-get c :level)
                      (cond (start 'range) (line 'line) (file 'file) (t 'review)))
-          :type (plist-get c :type)
+          :type (ygg-git-compare--received-type (plist-get c :type))
+          :agent-type (and (memq (plist-get c :type) ygg-git-compare-agent-types)
+                           (plist-get c :type))
           :text (or (plist-get c :text) "")
           :title (plist-get c :title)
           :priority (plist-get c :priority)
@@ -1871,6 +1968,9 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
   (format "agent review (+ %s)"
           (mapconcat #'symbol-name ygg-git-compare-agent-types ", ")))
 
+(defun ygg-git-compare-comments--cycle-description ()
+  (concat "PR → " (mapconcat #'symbol-name ygg-git-compare-agent-types " → ")))
+
 (transient-define-prefix ygg-git-compare-dispatch ()
   "Comment on the compare, check what agents proposed, and send it."
   [["Comment"
@@ -1880,7 +1980,7 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
     ("f" "on the file" ygg-git-compare-comment-file)
     ("L""list them" ygg-git-compare-comments-summary)
     ("Q" "list in quickfix" ygg-git-compare-comments-qf)
-    ("D" "flip between PR and agent" ygg-git-compare-comment-flip)
+    ("D" ygg-git-compare-comments--cycle-description ygg-git-compare-comment-flip)
     ("A" "accept all pending" ygg-git-compare-comments-accept-all)
     ("X" "dismiss all pending" ygg-git-compare-comments-dismiss-all)]
    ["Navigate"
