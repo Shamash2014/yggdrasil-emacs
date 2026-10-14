@@ -1001,3 +1001,57 @@ and adds b.txt; main stays checked out."
                 (if (consp b) (cdr b) b))))
   (with-temp-buffer
     (should-error (ygg-git-compare-draft-flip) :type 'user-error)))
+
+(defun ygg-git-compare-comments-tests--agent-compare (root)
+  (ygg-git-compare-comments-tests--goto "+two")
+  (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "mine")
+  (ygg-git-compare-comments-receive
+   root "feature" '((:file "a.txt" :line 3 :text "agent a") (:file "b.txt" :line 2 :text "agent b"))
+   "claude")
+  (ygg-git-compare-refresh)
+  (magit-section-show-level-4-all))
+
+(defun ygg-git-compare-comments-tests--line ()
+  (buffer-substring (line-beginning-position) (line-end-position)))
+
+(ert-deftest ygg-git-compare-agent-comment-next-skips-user-comments-and-wraps ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--agent-compare root)
+      (goto-char (point-min))
+      (ygg-git-compare-agent-comment-next)
+      (should (equal (ygg-git-compare-comments-tests--line) "+three"))
+      (ygg-git-compare-agent-comment-next)
+      (should (equal (ygg-git-compare-comments-tests--line) "+b2"))
+      (ygg-git-compare-agent-comment-next)
+      (should (equal (ygg-git-compare-comments-tests--line) "+three"))
+      (ygg-git-compare-agent-comment-previous)
+      (should (equal (ygg-git-compare-comments-tests--line) "+b2")))))
+
+(ert-deftest ygg-git-compare-agent-comment-next-prefers-pending ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--agent-compare root)
+      (ygg-git-compare-comments-tests--goto "+three")
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p table &rest _)
+                   (seq-find (lambda (label) (string-search "agent a" label))
+                             (all-completions "" table)))))
+        (ygg-git-compare-comment-accept))
+      (ygg-git-compare-comments-tests--goto "+three")
+      (let (said)
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+          (ygg-git-compare-agent-comment-next)
+          (should (equal (ygg-git-compare-comments-tests--line) "+b2"))
+          (should (equal said "agent comment 1/1 (pending)"))
+          (ygg-git-compare-agent-comment-next)
+          (should (equal (ygg-git-compare-comments-tests--line) "+b2")))))))
+
+(ert-deftest ygg-git-compare-agent-comment-next-refuses-without-agent-comments ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "mine")
+      (should-error (ygg-git-compare-agent-comment-next) :type 'user-error)
+      (should-error (ygg-git-compare-agent-comment-previous) :type 'user-error))))
