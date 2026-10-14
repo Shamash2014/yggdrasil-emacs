@@ -1343,7 +1343,9 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
     ("b" "switch base" ygg-git-compare-switch-base)
     ("~" "swap sides" ygg-git-compare-swap)
     ("." "A...B or A..B" ygg-git-compare-toggle-dots)
-    ("#" "commits of each side" ygg-git-compare-log)]])
+    ("#" "commits of each side" ygg-git-compare-log)
+    ("+" "more context" ygg-git-compare-expand-context)
+    ("-" "less context" ygg-git-compare-shrink-context)]])
 
 (provide 'ygg-git-compare-comments)
 ;;; ygg-git-compare-comments.el ends here

@@ -1001,4 +1001,53 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                            (ygg-git-compare-submit-tests--posts))
                    '("projects/grp%2Fproj/merge_requests/7/approve")))))
 
+(defconst ygg-git-compare-submit-tests--inside-and-outside
+  (list (ygg-git-compare-submit-tests--c "near" :level 'line :file "a.txt" :old-path "a.txt"
+                                         :new-path "a.txt" :side 'new :line 2)
+        (ygg-git-compare-submit-tests--c "far" :level 'line :file "a.txt" :old-path "a.txt"
+                                         :new-path "a.txt" :side 'new :line 40)))
+
+(defmacro ygg-git-compare-submit-tests--with-forge-hunks (hunks &rest body)
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'ygg-git-compare-submit--forge-hunks)
+              (lambda (&rest _) ,hunks)))
+     ,@body))
+
+(ert-deftest ygg-git-compare-submit-github-line-outside-the-hunks-goes-in-the-summary ()
+  (ygg-git-compare-submit-tests--with-forge-hunks '((1 7 1 7))
+    (ygg-git-compare-submit-tests--with
+        ygg-git-compare-submit-tests--inside-and-outside
+        ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+      (ygg-git-compare-submit-forge 'comment)
+      (should-not ygg-git-compare-submit-tests--comments)
+      (let ((posts (ygg-git-compare-submit-tests--posts)))
+        (should (= (length posts) 1))
+        (let ((review (nth 2 (car posts))))
+          (should (equal (plist-get review :body) "`a.txt:40` far"))
+          (should (equal (mapcar (lambda (c) (plist-get c :line)) (plist-get review :comments))
+                         '(2))))))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-line-outside-the-hunks-goes-in-the-summary ()
+  (ygg-git-compare-submit-tests--with-forge-hunks '((1 7 1 7))
+    (ygg-git-compare-submit-tests--with
+        ygg-git-compare-submit-tests--inside-and-outside
+        ygg-git-compare-submit-tests--gitlab-pr (ygg-git-compare-submit-tests--lab)
+      (ygg-git-compare-submit-forge 'comment)
+      (should-not ygg-git-compare-submit-tests--comments)
+      (let ((posts (ygg-git-compare-submit-tests--posts)))
+        (should (= (length posts) 2))
+        (should (equal (mapcar (lambda (p) (plist-get (nth 2 p) :body)) posts)
+                       '("`a.txt:40` far" "near")))
+        (should-not (plist-member (nth 2 (car posts)) :position))
+        (should (plist-get (nth 2 (cadr posts)) :position))))))
+
+(ert-deftest ygg-git-compare-submit-line-inside-the-hunks-or-unknown-stays-inline ()
+  (let ((near (car ygg-git-compare-submit-tests--inside-and-outside))
+        (far (cadr ygg-git-compare-submit-tests--inside-and-outside)))
+    (ygg-git-compare-submit-tests--with-forge-hunks '((1 7 1 7))
+      (should-not (ygg-git-compare-submit--outside-p near ygg-git-compare-submit-tests--github-pr))
+      (should (ygg-git-compare-submit--outside-p far ygg-git-compare-submit-tests--github-pr)))
+    (ygg-git-compare-submit-tests--with-forge-hunks 'unknown
+      (should-not (ygg-git-compare-submit--outside-p far ygg-git-compare-submit-tests--github-pr)))))
+
 ;;; ygg-git-compare-submit-tests.el ends here

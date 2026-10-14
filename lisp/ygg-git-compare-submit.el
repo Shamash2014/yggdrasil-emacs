@@ -225,14 +225,56 @@ RANGE-KEY, such as \"branch NAME\", for batch use and agents."
               ((string-match "\\.\\.\\.?\\([0-9a-f]\\{40\\}\\)\\'" end)))
     (match-string 1 end)))
 
+(defun ygg-git-compare-submit--forge-hunks (pr path)
+  "The (OLD-START OLD-LEN NEW-START NEW-LEN) of each hunk of PR's diff of PATH
+as the forge draws it, with three lines of context; `unknown' when git cannot
+say."
+  (let ((lines (magit-git-lines "diff" "--no-color" "--no-ext-diff" "-U3"
+                                (plist-get pr :base) (plist-get pr :head) "--" path))
+        hunks)
+    (cond (lines
+           (dolist (text lines)
+             (when (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@" text)
+               (push (list (string-to-number (match-string 1 text))
+                           (if (match-string 2 text) (string-to-number (match-string 2 text)) 1)
+                           (string-to-number (match-string 3 text))
+                           (if (match-string 4 text) (string-to-number (match-string 4 text)) 1))
+                     hunks)))
+           (nreverse hunks))
+          ((eql 0 (magit-git-exit-code "diff" "--quiet" (plist-get pr :base) (plist-get pr :head)
+                                       "--" path))
+           nil)
+          (t 'unknown))))
+
+(defun ygg-git-compare-submit--in-hunks-p (hunks side line)
+  (seq-some (lambda (h)
+              (pcase-let ((`(,old ,old-len ,new ,new-len) h))
+                (if (eq side 'old)
+                    (and (>= line old) (< line (+ old old-len)))
+                  (and (>= line new) (< line (+ new new-len))))))
+            hunks))
+
+(defun ygg-git-compare-submit--outside-p (comment pr)
+  "Whether COMMENT, an inline one, sits on a line outside the hunks the forge
+draws for PR."
+  (when (ygg-git-compare-submit--inline-p comment)
+    (let ((hunks (ygg-git-compare-submit--forge-hunks pr (plist-get comment :new-path))))
+      (and (listp hunks)
+           (not (and (ygg-git-compare-submit--in-hunks-p
+                      hunks (plist-get comment :side) (plist-get comment :line))
+                     (or (not (eq (ygg-git-compare-submit--level comment) 'range))
+                         (ygg-git-compare-submit--in-hunks-p
+                          hunks (plist-get comment :start-side)
+                          (plist-get comment :start-line)))))))))
+
 (defun ygg-git-compare-submit--moved-heads (comments pr)
   "The (COMMENT . SHA) of each of COMMENTS written on a commit other than
-PR's head."
+PR's head, and (COMMENT) of each inline one on a line outside PR's hunks."
   (delq nil
         (mapcar (lambda (c)
-                  (when-let* ((sha (ygg-git-compare-submit--written-head c))
-                              ((not (equal sha (plist-get pr :head)))))
-                    (cons c sha)))
+                  (let ((sha (ygg-git-compare-submit--written-head c)))
+                    (cond ((and sha (not (equal sha (plist-get pr :head)))) (cons c sha))
+                          ((ygg-git-compare-submit--outside-p c pr) (list c)))))
                 comments)))
 
 (defun ygg-git-compare-submit--inline-heads (heads)
@@ -266,7 +308,7 @@ HEADS says where moved ones were written; an inline one in it is text too."
                        ('review (concat prefix (ygg-git-compare-submit--text c)))
                        ('file (format "%s`%s` - %s" prefix (plist-get c :file)
                                       (ygg-git-compare-submit--text c)))
-                       (_ (and sha (ygg-git-compare-submit--moved-note c sha))))))
+                       (_ (and (assq c heads) (ygg-git-compare-submit--moved-note c sha))))))
                  comments))
    "\n\n"))
 
@@ -390,7 +432,8 @@ approval or request for changes: GitHub, for those two events."
   "The review of COMMENTS, then each inline one written on another commit
 posted alone on that commit, as a note on the pull request when refused."
   (let* ((moved (ygg-git-compare-submit--moved-heads comments pr))
-         (late (and (not (eq event 'draft)) (ygg-git-compare-submit--inline-heads moved)))
+         (late (and (not (eq event 'draft))
+                    (seq-filter #'cdr (ygg-git-compare-submit--inline-heads moved))))
          (carried (seq-remove (lambda (c) (assq c late)) comments))
          (review (ygg-git-compare-submit--github-review pr event carried moved))
          (host (plist-get pr :host))
@@ -577,7 +620,7 @@ moved inline comment with no diff version of its own is text in the summary."
                          (seq-find (lambda (v) (equal (plist-get v :head_commit_sha) sha))
                                    versions))))
          (steps (append
-                 (when inline-heads
+                 (when (seq-some #'cdr inline-heads)
                    (list (list nil "Reading versions"
                                (lambda (next)
                                  (ygg-git-compare-submit--gitlab-api
@@ -612,7 +655,7 @@ moved inline comment with no diff version of its own is text in the summary."
                                  (lambda (next)
                                    (let ((sha (alist-get c heads nil nil #'eq))
                                          (version (funcall version-of c)))
-                                     (if (and sha (not version))
+                                     (if (and (assq c heads) (not version))
                                          (funcall next summary-failure)
                                        (ygg-git-compare-submit--gitlab-inline
                                         (if version
