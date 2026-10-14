@@ -583,28 +583,47 @@ as the text FALLBACK, when non-nil, in a note without a position."
             (lambda (_value err &optional refused) (funcall settle err refused)))
          (funcall settle err refused))))))
 
-(defconst ygg-git-compare-submit--request-changes-query
-  "mutation($projectPath: ID!, $iid: String!) { mergeRequestRequestChanges(input: { projectPath: $projectPath, iid: $iid }) { errors } }")
+(defun ygg-git-compare-submit--gitlab-reviewer-state (pr done)
+  "Call DONE with (STATE ERR): the state GitLab holds for you as a reviewer of
+PR, STATE nil when you are not one."
+  (ygg-git-compare-submit--gitlab-api
+   pr nil (list "user")
+   (lambda (me err &rest _)
+     (if err
+         (funcall done nil err)
+       (ygg-git-compare-submit--gitlab-api
+        pr nil (list (ygg-git-compare-submit--gitlab-mr pr "reviewers"))
+        (lambda (reviewers err &rest _)
+          (funcall done
+                   (and (not err)
+                        (plist-get
+                         (seq-find (lambda (r)
+                                     (equal (plist-get (plist-get r :user) :id)
+                                            (plist-get me :id)))
+                                   reviewers)
+                         :state))
+                   err)))))))
 
 (defun ygg-git-compare-submit--gitlab-request-changes (pr next)
-  (ygg-git-compare-submit--gitlab-api
-   pr nil
-   (list "graphql"
-         "-f" (concat "query=" ygg-git-compare-submit--request-changes-query)
-         "-f" (concat "projectPath=" (plist-get pr :path))
-         "-f" (format "iid=%s" (plist-get pr :number)))
-   (lambda (out err &rest _)
-     (let ((errors (append (plist-get out :errors)
-                           (plist-get (plist-get (plist-get out :data)
-                                                 :mergeRequestRequestChanges)
-                                      :errors))))
-       (funcall next
-                (or err
-                    (when errors
-                      (format "glab graphql: %s"
-                              (mapconcat (lambda (e) (if (stringp e) e (or (plist-get e :message)
-                                                                           (format "%S" e))))
-                                         errors "; ")))))))))
+  (ygg-git-compare-submit--gitlab-reviewer-state
+   pr
+   (lambda (state err)
+     (cond (err (funcall next err))
+           ((null state)
+            (funcall next "GitLab records requested changes only from a reviewer: add yourself as a reviewer of this merge request"))
+           (t
+            (ygg-git-compare-submit--gitlab-note
+             pr nil "/request_changes" nil
+             (lambda (_value err &rest _)
+               (if err
+                   (funcall next err)
+                 (ygg-git-compare-submit--gitlab-reviewer-state
+                  pr
+                  (lambda (state err)
+                    (funcall next
+                             (cond (err err)
+                                   ((not (equal state "requested_changes"))
+                                    "GitLab did not record the request for changes")))))))))))))
 
 (defun ygg-git-compare-submit--gitlab-steps (pr event comments)
   "The notes that post COMMENTS to PR, drafts when EVENT is draft, and a
