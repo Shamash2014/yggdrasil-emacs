@@ -2054,6 +2054,7 @@ around past the end."
   "C-k" #'ygg-git-compare-previous-hunk
   "m" #'ygg-git-compare-comment-next
   "M" #'ygg-git-compare-comment-previous
+  ":" #'ygg-git-compare-goto-line
   "/" #'isearch-forward-regexp
   "n" #'ygg-git-compare-search-next
   "N" #'ygg-git-compare-search-previous

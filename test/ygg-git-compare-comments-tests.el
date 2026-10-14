@@ -1001,3 +1001,63 @@ and adds b.txt; main stays checked out."
                 (if (consp b) (cdr b) b))))
   (with-temp-buffer
     (should-error (ygg-git-compare-draft-flip) :type 'user-error)))
+
+(defun ygg-git-compare-comments-tests--line-at-point ()
+  (buffer-substring-no-properties (line-beginning-position) (line-end-position)))
+
+(ert-deftest ygg-git-compare-goto-line-new-side ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-goto-line "a.txt:3")
+      (should (equal (ygg-git-compare-comments-tests--line-at-point) "+three"))
+      (ygg-git-compare-goto-line "b.txt 2")
+      (should (equal (ygg-git-compare-comments-tests--line-at-point) "+b2"))
+      (ygg-git-compare-goto-line "1")
+      (should (equal (ygg-git-compare-comments-tests--line-at-point) "+b1"))
+      (ygg-git-compare-comments-tests--goto "+three")
+      (ygg-git-compare-goto-line "1")
+      (should (equal (ygg-git-compare-comments-tests--line-at-point) " 1")))))
+
+(ert-deftest ygg-git-compare-goto-line-old-side ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-goto-line "a.txt:-3")
+      (should (equal (ygg-git-compare-comments-tests--line-at-point) "-3"))
+      (should (eq (plist-get (ygg-git-compare--anchor) :side) 'old)))))
+
+(ert-deftest ygg-git-compare-goto-line-matches-a-basename ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (git "checkout" "-q" "feature")
+    (make-directory (expand-file-name "sub" root))
+    (write "sub/c.txt" "c1\nc2\n")
+    (git "add" ".")
+    (git "commit" "-q" "-m" "nested")
+    (git "checkout" "-q" "main")
+    (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") '(rev . "feature"))
+      (magit-section-show-level-4-all)
+      (ygg-git-compare-goto-line "c.txt:2")
+      (should (equal (ygg-git-compare-comments-tests--line-at-point) "+c2"))
+      (should (equal (plist-get (ygg-git-compare--anchor) :file) "sub/c.txt")))))
+
+(ert-deftest ygg-git-compare-goto-line-unfolds-a-folded-file ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+b1")
+      (let ((file (magit-current-section)))
+        (while (not (magit-section-match 'file file)) (setq file (oref file parent)))
+        (magit-section-hide file)
+        (should (oref file hidden))
+        (goto-char (point-min))
+        (ygg-git-compare-goto-line "b.txt:2")
+        (should-not (oref file hidden))
+        (should (equal (ygg-git-compare-comments-tests--line-at-point) "+b2"))
+        (should-not (invisible-p (point)))))))
+
+(ert-deftest ygg-git-compare-goto-line-outside-the-diff ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (should (equal (cadr (should-error (ygg-git-compare-goto-line "b.txt:9") :type 'user-error))
+                     "9 of b.txt is outside the diff"))
+      (should (equal (cadr (should-error (ygg-git-compare-goto-line "b.txt:-1") :type 'user-error))
+                     "-1 of b.txt is outside the diff"))
+      (should-error (ygg-git-compare-goto-line "nope.txt:1") :type 'user-error))))

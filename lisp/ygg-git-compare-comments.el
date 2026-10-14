@@ -1006,6 +1006,70 @@ past the last."
                  (point-min)))
   (ygg-git-compare--reveal))
 
+(defun ygg-git-compare--file-sections ()
+  (seq-filter (lambda (s) (magit-section-match 'file s))
+              (oref magit-root-section children)))
+
+(defun ygg-git-compare--find-file-section (path)
+  "The file section whose path is PATH, or ends in /PATH, or whose name is PATH."
+  (let ((files (ygg-git-compare--file-sections)))
+    (cl-flet ((named (fn) (seq-find (lambda (s)
+                                      (seq-some fn (delq nil (list (oref s value)
+                                                                   (oref s source)))))
+                                    files)))
+      (or (named (lambda (p) (equal p path)))
+          (named (lambda (p) (string-suffix-p (concat "/" path) p)))
+          (named (lambda (p) (equal (file-name-nondirectory p) path)))))))
+
+(defun ygg-git-compare--line-position (path side line)
+  "The start of the diff line of PATH on SIDE, new or old, numbered LINE, or nil
+when no hunk shows it."
+  (when-let* ((file (ygg-git-compare--find-file-section path)))
+    (seq-some (lambda (hunk)
+                (when-let* (((magit-section-match 'hunk hunk))
+                            ((oref hunk from-range))
+                            ((oref hunk to-range))
+                            (hit (seq-find (lambda (l) (if (and (eq side 'old) (nth 3 l))
+                                                           (eql (nth 3 l) line)
+                                                         (and (eq (nth 1 l) side)
+                                                              (eql (nth 2 l) line))))
+                                           (ygg-git-compare--hunk-lines hunk))))
+                  (save-excursion (goto-char (car hit)) (line-beginning-position))))
+              (oref file children))))
+
+(defun ygg-git-compare--section-path-at-point ()
+  (let ((section (magit-current-section)))
+    (while (and section (not (magit-section-match 'file section)))
+      (setq section (oref section parent)))
+    (and section (oref section value))))
+
+(defun ygg-git-compare--parse-place (input)
+  "INPUT, \"PATH:LINE\", \"PATH LINE\" or \"LINE\", as (PATH SIDE LINE), PATH nil
+without one and SIDE old for a LINE with a leading -."
+  (let ((input (string-trim input)))
+    (unless (string-match "\\`\\(?:\\(.+?\\)[: ]+\\)?\\(-\\)?\\([0-9]+\\)\\'" input)
+      (user-error "Not PATH:LINE: %s" input))
+    (list (match-string 1 input)
+          (if (match-string 2 input) 'old 'new)
+          (string-to-number (match-string 3 input)))))
+
+(defun ygg-git-compare-goto-line (place)
+  "Go to PLACE, \"PATH:LINE\" or \"LINE\" of the file at point, in the diff; a LINE
+with a leading - counts the old side."
+  (interactive
+   (list (completing-read "Go to path:line: "
+                          (mapcar (lambda (s) (oref s value))
+                                  (ygg-git-compare--file-sections)))))
+  (pcase-let* ((`(,path ,side ,line) (ygg-git-compare--parse-place place))
+               (path (or path (ygg-git-compare--section-path-at-point)
+                         (user-error "No file at point"))))
+    (unless (ygg-git-compare--find-file-section path)
+      (user-error "%s is not in the diff" path))
+    (goto-char (or (ygg-git-compare--line-position path side line)
+                   (user-error "%s of %s is outside the diff"
+                               (if (eq side 'old) (- line) line) path)))
+    (ygg-git-compare--reveal)))
+
 ;;; Summary
 
 (defvar-local ygg-git-compare--summary-max-priority nil
@@ -1323,6 +1387,7 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
    ["Navigate"
     ("m" "next comment" ygg-git-compare-comment-next)
     ("M" "previous comment" ygg-git-compare-comment-previous)
+    (":" "go to file:line" ygg-git-compare-goto-line)
     ("]" "next unreviewed" ygg-git-compare-next-unreviewed)
     ("[" "previous unreviewed" ygg-git-compare-previous-unreviewed)]
    ["Review marks"
