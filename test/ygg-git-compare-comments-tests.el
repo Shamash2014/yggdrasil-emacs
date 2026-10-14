@@ -1001,3 +1001,101 @@ and adds b.txt; main stays checked out."
                 (if (consp b) (cdr b) b))))
   (with-temp-buffer
     (should-error (ygg-git-compare-draft-flip) :type 'user-error)))
+
+(defun ygg-git-compare-comments-tests--advance (root file text)
+  "Commit TEXT as FILE on feature, which main's compare of it then lacks."
+  (let ((default-directory root))
+    (ygg-git-compare-comments-tests--git root "checkout" "-q" "feature")
+    (if text
+        (with-temp-file (expand-file-name file root) (insert text))
+      (ygg-git-compare-comments-tests--git root "rm" "-q" file))
+    (ygg-git-compare-comments-tests--git root "add" "-A")
+    (ygg-git-compare-comments-tests--git root "commit" "-q" "-m" "advance")
+    (ygg-git-compare-comments-tests--git root "checkout" "-q" "main")
+    (ygg-git-compare-refresh)))
+
+(defun ygg-git-compare-comments-tests--overlays ()
+  (seq-filter (lambda (ov) (overlay-get ov 'ygg-git-compare-comments))
+              (overlays-in (point-min) (point-max))))
+
+(ert-deftest ygg-git-compare-comments-unchanged-line-shifts-with-inserted-lines ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+three")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on three")
+      (ygg-git-compare-comments-tests--advance root "a.txt" "0\n0b\n1\ntwo\nthree\n4\n5\n")
+      (let ((ov (seq-find (lambda (ov) (string-search "on three" (or (overlay-get ov 'after-string) "")))
+                          (ygg-git-compare-comments-tests--overlays))))
+        (should ov)
+        (goto-char (overlay-start ov))
+        (should (looking-at-p "\\+three"))
+        (should-not (string-search "outdated" (ygg-git-compare-comments-tests--shown)))
+        (should-not (string-search "Made on another range"
+                                   (ygg-git-compare-comments-tests--shown)))))))
+
+(ert-deftest ygg-git-compare-comments-changed-line-is-outdated-at-the-file-top ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+three")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on three")
+      (let ((old (substring (plist-get (car (ygg-git-compare-comments-list)) :range) -40)))
+        (ygg-git-compare-comments-tests--advance root "a.txt" "1\ntwo\nTHREE\n4\n5\n")
+        (let ((shown (ygg-git-compare-comments-tests--shown)))
+          (should (string-search (format "outdated · written on %s · was L3" (substring old 0 7))
+                                 shown))
+          (should (string-search "on three" shown)))
+        (let ((ov (seq-find (lambda (ov) (string-search "on three" (or (overlay-get ov 'after-string) "")))
+                            (ygg-git-compare-comments-tests--overlays))))
+          (goto-char (overlay-start ov))
+          (should (string-search "a.txt" (buffer-substring (line-beginning-position)
+                                                           (line-end-position)))))))))
+
+(ert-deftest ygg-git-compare-comments-removed-file-lists-its-comment-as-outdated ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+b2")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on b2")
+      (ygg-git-compare-comments-tests--advance root "b.txt" nil)
+      (let ((shown (ygg-git-compare-comments-tests--shown)))
+        (should (string-search "Outdated comments" shown))
+        (should (string-search "outdated · written on" shown))
+        (should (string-search "on b2" shown))))))
+
+(ert-deftest ygg-git-compare-comments-next-reaches-outdated-and-moved-comments ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+three")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on three")
+      (ygg-git-compare-comments-tests--goto "+b2")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on b2")
+      (ygg-git-compare-comments-tests--goto "+two")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on two")
+      (ygg-git-compare-comments-tests--advance root "a.txt" "0\n1\ntwo\nTHREE\n4\n5\n")
+      (ygg-git-compare-comments-tests--advance root "b.txt" nil)
+      (let ((ids nil))
+        (goto-char (point-min))
+        (dotimes (_ 3)
+          (ygg-git-compare-comment-next)
+          (dolist (ov (overlays-at (point)))
+            (setq ids (append (overlay-get ov 'ygg-git-compare-comments) ids)))
+          (dolist (ov (overlays-in (line-beginning-position) (1+ (line-end-position))))
+            (setq ids (append (overlay-get ov 'ygg-git-compare-comments) ids))))
+        (should (= (length (delete-dups ids)) 3))))))
+
+(ert-deftest ygg-git-compare-comments-line-follows-when-base-and-head-both-moved ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+three")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on three")
+      (let ((default-directory root))
+        (ygg-git-compare-comments-tests--git root "checkout" "-q" "main")
+        (with-temp-file (expand-file-name "c.txt" root) (insert "c\n"))
+        (ygg-git-compare-comments-tests--git root "add" "-A")
+        (ygg-git-compare-comments-tests--git root "commit" "-q" "-m" "develop"))
+      (ygg-git-compare-comments-tests--advance root "a.txt" "0\n0b\n1\ntwo\nthree\n4\n5\n")
+      (let ((ov (seq-find (lambda (ov) (string-search "on three" (or (overlay-get ov 'after-string) "")))
+                          (ygg-git-compare-comments-tests--overlays))))
+        (should ov)
+        (goto-char (overlay-start ov))
+        (should (looking-at-p "\\+three"))
+        (should-not (string-search "outdated" (ygg-git-compare-comments-tests--shown)))))))
