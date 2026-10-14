@@ -561,21 +561,25 @@ PR, STATE nil when you are not one."
                    err)))))))
 
 (defun ygg-git-compare-submit--gitlab-request-changes (pr next)
-  (ygg-git-compare-submit--gitlab-api
-   pr '(:reviewer_state "requested_changes")
-   (list (ygg-git-compare-submit--gitlab-mr pr "draft_notes/bulk_publish"))
-   (lambda (_value err &rest _)
-     (if err
-         (funcall next err)
-       (ygg-git-compare-submit--gitlab-reviewer-state
-        pr
-        (lambda (state err)
-          (funcall next
-                   (cond (err err)
-                         ((null state)
-                          "GitLab records requested changes only from a reviewer: add yourself as a reviewer of this merge request")
-                         ((not (equal state "requested_changes"))
-                          "this GitLab did not record the request for changes: draft_notes bulk_publish ignores reviewer_state on it")))))))))
+  (ygg-git-compare-submit--gitlab-reviewer-state
+   pr
+   (lambda (state err)
+     (cond (err (funcall next err))
+           ((null state)
+            (funcall next "GitLab records requested changes only from a reviewer: add yourself as a reviewer of this merge request"))
+           (t
+            (ygg-git-compare-submit--gitlab-note
+             pr nil "/request_changes" nil
+             (lambda (_value err &rest _)
+               (if err
+                   (funcall next err)
+                 (ygg-git-compare-submit--gitlab-reviewer-state
+                  pr
+                  (lambda (state err)
+                    (funcall next
+                             (cond (err err)
+                                   ((not (equal state "requested_changes"))
+                                    "GitLab did not record the request for changes")))))))))))))
 
 (defun ygg-git-compare-submit--gitlab-steps (pr event comments)
   "The notes that post COMMENTS to PR, drafts when EVENT is draft, and a

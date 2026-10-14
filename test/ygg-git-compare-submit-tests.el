@@ -693,16 +693,25 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
         (user-error "glab api: 400 position is invalid")
       "{\"id\":1}")))
 
-(defun ygg-git-compare-submit-tests--lab-reviewer (state)
-  "Answer glab as user 5 who is a reviewer in STATE, or no reviewer when nil."
-  (lambda (_program args _body)
-    (let ((path (car (last args))))
+(defvar ygg-git-compare-submit-tests--reviewer-state nil)
+
+(defvar ygg-git-compare-submit-tests--honours nil)
+
+(defun ygg-git-compare-submit-tests--lab-reviewer (_program args body)
+  "Answer glab as user 5, a reviewer in the state held in
+`ygg-git-compare-submit-tests--reviewer-state' or none when nil; a note of
+\"/request_changes\" moves it to requested_changes when it is honoured."
+  (let ((path (car (last args))))
+      (when (and ygg-git-compare-submit-tests--honours ygg-git-compare-submit-tests--reviewer-state
+                 (equal (plist-get body :body) "/request_changes"))
+        (setq ygg-git-compare-submit-tests--reviewer-state "requested_changes"))
       (cond ((equal path "user") "{\"id\":5}")
             ((string-suffix-p "/reviewers" path)
-             (if state
-                 (format "[{\"user\":{\"id\":9},\"state\":\"unreviewed\"},{\"user\":{\"id\":5},\"state\":\"%s\"}]" state)
+             (if ygg-git-compare-submit-tests--reviewer-state
+                 (format "[{\"user\":{\"id\":9},\"state\":\"unreviewed\"},{\"user\":{\"id\":5},\"state\":\"%s\"}]"
+                         ygg-git-compare-submit-tests--reviewer-state)
                "[{\"user\":{\"id\":9},\"state\":\"unreviewed\"}]"))
-            (t "{\"id\":1}")))))
+            (t "{\"id\":1}"))))
 
 (ert-deftest ygg-git-compare-submit-gitlab-comment-and-approve ()
   (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
@@ -769,36 +778,42 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                           ygg-git-compare-submit-tests--calls))
     (should (string-search "1 kept" (car ygg-git-compare-submit-tests--messages)))))
 
-(defun ygg-git-compare-submit-tests--request-changes (state)
+(defun ygg-git-compare-submit-tests--request-changes (state honours)
+  (setq ygg-git-compare-submit-tests--reviewer-state state
+        ygg-git-compare-submit-tests--honours honours)
   (ygg-git-compare-submit-tests--with
       (list (ygg-git-compare-submit-tests--c "s" :level 'review))
       ygg-git-compare-submit-tests--gitlab-pr
-      (ygg-git-compare-submit-tests--lab-reviewer state)
+      #'ygg-git-compare-submit-tests--lab-reviewer
     (ygg-git-compare-submit-forge 'request-changes)
     (list (reverse ygg-git-compare-submit-tests--calls)
           ygg-git-compare-submit-tests--dropped
           (car ygg-git-compare-submit-tests--messages))))
 
-(ert-deftest ygg-git-compare-submit-gitlab-request-changes-publishes-with-the-reviewer-state ()
+(defun ygg-git-compare-submit-tests--quick-action-notes (calls)
+  (seq-filter (lambda (c) (equal (plist-get (nth 2 c) :body) "/request_changes")) calls))
+
+(ert-deftest ygg-git-compare-submit-gitlab-request-changes-posts-the-quick-action ()
   (pcase-let ((`(,calls ,dropped ,message)
-               (ygg-git-compare-submit-tests--request-changes "requested_changes")))
-    (let ((publish (seq-find (lambda (c)
-                               (string-suffix-p "/draft_notes/bulk_publish"
-                                                (ygg-git-compare-submit-tests--endpoint c)))
-                             calls)))
-      (should publish)
-      (should (equal (plist-get (nth 2 publish) :reviewer_state) "requested_changes"))
-      (should-not (seq-find (lambda (c) (member "graphql" (nth 1 c))) calls)))
+               (ygg-git-compare-submit-tests--request-changes "unreviewed" t)))
+    (let ((notes (ygg-git-compare-submit-tests--quick-action-notes calls)))
+      (should (= (length notes) 1))
+      (should (string-suffix-p "/merge_requests/7/notes"
+                               (ygg-git-compare-submit-tests--endpoint (car notes)))))
+    (should-not (seq-find (lambda (c) (string-search "bulk_publish"
+                                                     (or (ygg-git-compare-submit-tests--endpoint c) "")))
+                          calls))
     (should (equal dropped '("s")))
     (should (string-search "requested changes" message))))
 
 (ert-deftest ygg-git-compare-submit-gitlab-request-changes-names-a-missing-reviewer ()
-  (pcase-let ((`(,_ ,dropped ,message) (ygg-git-compare-submit-tests--request-changes nil)))
+  (pcase-let ((`(,calls ,dropped ,message) (ygg-git-compare-submit-tests--request-changes nil t)))
+    (should-not (ygg-git-compare-submit-tests--quick-action-notes calls))
     (should (equal dropped '("s")))
     (should (string-search "add yourself as a reviewer" message))))
 
 (ert-deftest ygg-git-compare-submit-gitlab-request-changes-notices-an-ignored-state ()
-  (pcase-let ((`(,_ ,_ ,message) (ygg-git-compare-submit-tests--request-changes "unreviewed")))
+  (pcase-let ((`(,_ ,_ ,message) (ygg-git-compare-submit-tests--request-changes "unreviewed" nil)))
     (should (string-search "did not record the request for changes" message))))
 
 (ert-deftest ygg-git-compare-submit-gitlab-keeps-only-what-failed-on-a-non-user-error ()
@@ -982,7 +997,9 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
   (dolist (case '((approve . " and approved it") (request-changes . " and requested changes")))
     (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
         ygg-git-compare-submit-tests--gitlab-pr
-        (ygg-git-compare-submit-tests--lab-reviewer "requested_changes")
+        #'ygg-git-compare-submit-tests--lab-reviewer
+      (setq ygg-git-compare-submit-tests--reviewer-state "unreviewed"
+            ygg-git-compare-submit-tests--honours t)
       (ygg-git-compare-submit-forge (car case))
       (should (equal (car ygg-git-compare-submit-tests--messages)
                      (format "Posted 4 comments to gitlab MR !7%s (%s)" (cdr case)
