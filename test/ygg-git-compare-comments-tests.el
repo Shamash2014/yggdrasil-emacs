@@ -1416,3 +1416,78 @@ and adds b.txt; main stays checked out."
         (search-forward "b.txt")
         (should (ygg-git-compare--comments-at-point))
         (should (string-search "b.txt:2" (ygg-git-compare-comments-tests--shown)))))))
+
+(defun ygg-git-compare-comments-tests--unwashed (root comments)
+  "ROOT's unwashed compare of feature once agent COMMENTS arrived."
+  (ygg-git-compare-comments-receive root "feature" comments "claude")
+  (prog1 (ygg-git-compare-buffer root '(rev . "main") '(rev . "feature"))
+    (should (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") '(rev . "feature"))
+              (ygg-git-compare--unwashed-p)))))
+
+(defun ygg-git-compare-comments-tests--face-at (text needle)
+  (get-text-property (string-search needle text) 'face text))
+
+(ert-deftest ygg-git-compare-comments-away-from-their-hunk-show-the-lines-they-are-on ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (let ((ygg-magit-diff-line-limit 1)
+          (ygg-git-compare-excerpt-context 1))
+      (with-current-buffer
+          (ygg-git-compare-comments-tests--unwashed
+           root '((:file "a.txt" :line 3 :text "on three")))
+        (let* ((text (ygg-git-compare-comments-tests--shown))
+               (lines (split-string (substring-no-properties text) "\n")))
+          (should (equal (seq-take (cl-member "▎ +two" lines :test #'equal) 3)
+                         '("▎ +two" "▎ +three" "▎  4")))
+          (should-not (member "▎ -2" lines))
+          (should (eq (car (ygg-git-compare-comments-tests--face-at text "+three"))
+                      'ygg-git-compare-comment-target))
+          (should (equal (ygg-git-compare-comments-tests--face-at text "+three")
+                         '(ygg-git-compare-comment-target magit-diff-added)))
+          (should (eq (ygg-git-compare-comments-tests--face-at text "+two")
+                      'magit-diff-added))
+          (should (eq (ygg-git-compare-comments-tests--face-at text " 4")
+                      'magit-diff-context))
+          (should (< (string-search "+three" text) (string-search "on three" text))))))))
+
+(ert-deftest ygg-git-compare-comments-on-an-old-line-show-the-removed-lines ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (let ((ygg-magit-diff-line-limit 1)
+          (ygg-git-compare-excerpt-context 0))
+      (with-current-buffer
+          (ygg-git-compare-comments-tests--unwashed
+           root '((:file "a.txt" :side old :line 2 :text "was two")))
+        (let* ((text (ygg-git-compare-comments-tests--shown))
+               (lines (split-string (substring-no-properties text) "\n")))
+          (should (member "▎ -2" lines))
+          (should-not (member "▎ -3" lines))
+          (should-not (member "▎ +two" lines))
+          (should (equal (ygg-git-compare-comments-tests--face-at text "-2")
+                         '(ygg-git-compare-comment-target magit-diff-removed))))))))
+
+(ert-deftest ygg-git-compare-comments-away-from-their-hunk-cost-one-diff-per-file ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (let ((ygg-magit-diff-line-limit 1)
+          (calls 0))
+      (advice-add 'magit-git-lines :before
+                  (lambda (&rest args) (when (equal (car args) "diff") (cl-incf calls)))
+                  '((name . count-diffs)))
+      (unwind-protect
+          (with-current-buffer
+              (ygg-git-compare-comments-tests--unwashed
+               root '((:file "a.txt" :line 2 :text "one")
+                       (:file "a.txt" :line 3 :text "two")
+                       (:file "a.txt" :side old :line 3 :text "three")))
+            (setq calls 0)
+            (ygg-git-compare--draw-comments)
+            (should (= calls 1)))
+        (advice-remove 'magit-git-lines 'count-diffs)))))
+
+(ert-deftest ygg-git-compare-comments-on-a-file-show-no-lines ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (let ((ygg-magit-diff-line-limit 1))
+      (with-current-buffer
+          (ygg-git-compare-comments-tests--unwashed
+           root '((:file "a.txt" :level file :text "about the file")))
+        (let ((text (substring-no-properties (ygg-git-compare-comments-tests--shown))))
+          (should (string-search "about the file" text))
+          (should-not (string-search "+three" text)))))))

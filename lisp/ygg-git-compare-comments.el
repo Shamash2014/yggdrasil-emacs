@@ -717,14 +717,19 @@ is on, anywhere on the line, and to what it was otherwise."
                                 'face 'bold))
           (and dir (propertize (directory-file-name dir) 'face 'shadow)))))
 
+(defun ygg-git-compare--comment-face (comment)
+  (let ((priority (plist-get comment :priority))
+        (type (plist-get comment :type)))
+    (cond (priority (ygg-git-compare--priority-face priority))
+          (type (ygg-git-compare--type-face type))
+          (t 'font-lock-doc-face))))
+
 (defun ygg-git-compare--comment-block (comment &optional placed)
   "COMMENT as lines to show, leading with its place when PLACED."
   (let* ((type (plist-get comment :type))
          (priority (plist-get comment :priority))
          (pending (ygg-git-compare--pending-p comment))
-         (face (cond (priority (ygg-git-compare--priority-face priority))
-                     (type (ygg-git-compare--type-face type))
-                     (t 'font-lock-doc-face)))
+         (face (ygg-git-compare--comment-face comment))
          (bar (propertize "▎ " 'face face))
          (place (and placed (ygg-git-compare--place-chips comment)))
          (meta (delq nil
@@ -780,12 +785,98 @@ gives it, or nil."
               (when-let* (((magit-section-match 'hunk hunk))
                           ((oref hunk from-range))
                           ((oref hunk to-range)))
-                (seq-find (lambda (l) (if (and (eq side 'old) (nth 3 l))
-                                          (eql (nth 3 l) line)
-                                        (and (eq (nth 1 l) side)
-                                             (eql (nth 2 l) line))))
+                (seq-find (lambda (l) (ygg-git-compare--line-match l side line))
                           (ygg-git-compare--hunk-lines hunk))))
             (oref file children)))
+
+(defun ygg-git-compare--line-match (entry side line)
+  (if (and (eq side 'old) (nth 3 entry))
+      (eql (nth 3 entry) line)
+    (and (eq (nth 1 entry) side) (eql (nth 2 entry) line))))
+
+(defcustom ygg-git-compare-excerpt-context 3
+  "Diff lines shown around the lines of a comment away from its hunk."
+  :type 'natnum
+  :group 'ygg-git-compare)
+
+(defvar ygg-git-compare--excerpt-cache nil
+  "The diffs fetched while comments are drawn, by (DIR ARGS PATHS).")
+
+(defun ygg-git-compare--diff-entries (lines)
+  "The hunks of the diff LINES, each as the entries (TEXT SIDE LINE OLD-LINE)
+that ygg-git-compare--hunk-lines gives with the line's text for its position."
+  (let (hunks hunk old new)
+    (dolist (text lines)
+      (if-let* ((header (ygg-git-compare--hunk-header text)))
+          (progn (when hunk (push (nreverse hunk) hunks))
+                 (setq hunk nil old (nth 0 header) new (nth 2 header)))
+        (when old
+          (pcase (and (> (length text) 0) (aref text 0))
+            (?- (push (list text 'old old) hunk) (cl-incf old))
+            (?+ (push (list text 'new new) hunk) (cl-incf new))
+            (?\s (push (list text 'new new old) hunk) (cl-incf old) (cl-incf new))))))
+    (when hunk (push (nreverse hunk) hunks))
+    (nreverse hunks)))
+
+(defun ygg-git-compare--excerpt-hunks (args paths)
+  (let* ((key (list default-directory args paths))
+         (hit (gethash key ygg-git-compare--excerpt-cache 'miss)))
+    (if (eq hit 'miss)
+        (puthash key
+                 (ygg-git-compare--diff-entries
+                  (apply #'magit-git-lines "diff" "--no-color" "--no-ext-diff"
+                         (format "-U%d" ygg-git-compare-excerpt-context)
+                         (append args (cons "--" paths))))
+                 ygg-git-compare--excerpt-cache)
+      hit)))
+
+(defun ygg-git-compare--excerpt-args (comment away)
+  "What git diff takes for the range COMMENT's lines are read in: its own when
+AWAY, else this compare's; nil when its commits are unknown."
+  (if away
+      (when-let* ((ends (ygg-git-compare--range-ends (plist-get comment :range)))
+                  (old (ygg-git-compare--old-commit (plist-get comment :range))))
+        (list old (cdr ends)))
+    (ygg-git-compare--diff-args ygg-git-compare--plan)))
+
+(defun ygg-git-compare--excerpt (comment away)
+  "The diff lines COMMENT is on with their context, led by its bar, or nil."
+  (when-let* ((args (ygg-git-compare--excerpt-args comment away))
+              (new-path (plist-get comment :new-path))
+              (side (plist-get comment :side))
+              (line (plist-get comment :line))
+              (hunks (ygg-git-compare--excerpt-hunks
+                      args (delete-dups (list (or (plist-get comment :old-path) new-path)
+                                              new-path))))
+              (hunk (seq-find (lambda (h) (seq-some (lambda (l) (ygg-git-compare--line-match l side line)) h))
+                              hunks)))
+    (cl-flet ((index (side line)
+                (cl-position-if (lambda (l) (ygg-git-compare--line-match l side line)) hunk)))
+      (let* ((last (index side line))
+             (first (or (and (eq (plist-get comment :level) 'range)
+                             (plist-get comment :start-line)
+                             (index (or (plist-get comment :start-side) side)
+                                    (plist-get comment :start-line)))
+                        last))
+             (low (min first last))
+             (high (max first last))
+             (bar (propertize "▎ " 'face (ygg-git-compare--comment-face comment)))
+             (from (max 0 (- low ygg-git-compare-excerpt-context)))
+             (to (min (1- (length hunk)) (+ high ygg-git-compare-excerpt-context)))
+             (i (1- from)))
+        (mapconcat
+         (lambda (l)
+           (let* ((text (copy-sequence (car l)))
+                  (face (pcase (aref text 0)
+                          (?+ 'magit-diff-added)
+                          (?- 'magit-diff-removed)
+                          (_ 'magit-diff-context))))
+             (cl-incf i)
+             (add-face-text-property
+              0 (length text) (if (<= low i high) (list 'ygg-git-compare-comment-target face) face)
+              nil text)
+             (concat bar text)))
+         (cl-subseq hunk from (1+ to)) "\n")))))
 
 ;;; Comments written on an older head
 
@@ -1059,6 +1150,8 @@ it has no place for at the top of the diff of every file."
                      (ygg-git-compare--b-head list)))
           (here (with-current-buffer list (ygg-git-compare--range-label)))
           (default-directory (buffer-local-value 'default-directory list))
+          (magit-git-global-arguments (with-current-buffer list (ygg-git-compare--global-args)))
+          (ygg-git-compare--excerpt-cache (make-hash-table :test 'equal))
           (places nil)
           (stale nil)
           (gone nil)
@@ -1081,7 +1174,12 @@ it has no place for at the top of the diff of every file."
                             (file (save-excursion (goto-char (oref file start))
                                                   (line-end-position)))))
                (block (ygg-git-compare--comment-block
-                       c (not (or pos (memq level '(file review)))))))
+                       c (not (or pos (memq level '(file review))))))
+               (excerpt (and (eq (current-buffer) list) (not pos)
+                             (memq level '(line range)) (plist-get c :new-path)
+                             (not (string-empty-p block))
+                             (ygg-git-compare--excerpt c (or stale-p outdated)))))
+          (when excerpt (setq block (concat excerpt "\n" block)))
           (cond (stale-p
                  (when (eq (current-buffer) list)
                    (push (list (plist-get c :id) block) stale)))
