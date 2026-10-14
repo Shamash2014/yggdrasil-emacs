@@ -471,10 +471,17 @@ what consult itself hides."
              (and (boundp 'consult-buffer-filter)
                   (seq-some (lambda (re) (string-match-p re name)) consult-buffer-filter))))))
 
+(defvar ygg-space-exclusive-functions nil
+  "Functions of a buffer; one returning non-nil makes it belong to one space only.")
+
+(defvar ygg-space-cycle-skip-functions nil
+  "Functions of a buffer; one returning non-nil keeps it out of buffer cycling.")
+
 (defun ygg--space-exclusive-p (buf)
   "Whether BUF belongs to one space only: a file, a job, a browser.
 Any other buffer — help, messages, a listing — can be held by several."
   (or (buffer-file-name buf)
+      (run-hook-with-args-until-success 'ygg-space-exclusive-functions buf)
       (and (fboundp 'ygg--job-buffer-p) (ygg--job-buffer-p buf))
       (provided-mode-derived-p (buffer-local-value 'major-mode buf)
                                '(xwidget-webkit-mode eww-mode))))
@@ -764,7 +771,8 @@ unclaimed buffers are never foreign."
     (not (eql owner id))))
 
 (defun ygg--space-skip-foreign (_window buffer _bury-or-kill)
-  (ygg--space-foreign-buffer-p buffer))
+  (or (run-hook-with-args-until-success 'ygg-space-cycle-skip-functions buffer)
+      (ygg--space-foreign-buffer-p buffer)))
 
 ;; covers next/prev-buffer AND the window fallback after a kill
 (setq switch-to-prev-buffer-skip #'ygg--space-skip-foreign)

@@ -980,7 +980,8 @@ With a prefix arg, prompt for the target branch."
 (autoload 'ygg-git-compare-interdiff "ygg-git-compare-interdiff" nil t)
 (with-eval-after-load 'ygg-git-compare
   (require 'ygg-git-compare-interdiff)
-  (require 'ygg-git-compare-marks))
+  (require 'ygg-git-compare-marks)
+  (require 'ygg-git-compare-space))
 (autoload 'ygg-git-compare-review-branch "ygg-git-compare" nil t)
 (autoload 'ygg-git-compare-comments-receive "ygg-git-compare-comments")
 
