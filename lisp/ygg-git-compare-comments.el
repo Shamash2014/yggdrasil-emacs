@@ -727,7 +727,11 @@ is on, anywhere on the line, and to what it was otherwise."
                            (and ygg-git-compare--mark-drafts (not pending)
                                 (propertize "draft" 'face '(warning italic)))
                            (and pending (propertize "pending" 'face 'shadow))
-                           (and (ygg-git-compare--stale-p comment)
+                           (and (plist-get comment :outdated)
+                                (propertize (ygg-git-compare--outdated-label comment)
+                                            'face 'warning))
+                           (and (not (plist-get comment :relocated))
+                                (ygg-git-compare--stale-p comment)
                                 (propertize (format "stale · made on %s"
                                                     (plist-get comment :range))
                                             'face 'warning))
@@ -751,6 +755,108 @@ is on, anywhere on the line, and to what it was otherwise."
                                      shown))
                                  body))
                  "\n"))))
+
+;;; Comments written on an older head
+
+(defvar ygg-git-compare--remap-cache (make-hash-table :test 'equal)
+  "How a file's lines went between two commits, by (REPO OLD NEW PATH).")
+
+(autoload 'ygg-git-compare-submit--written-head "ygg-git-compare-submit")
+
+(defun ygg-git-compare--b-head (list)
+  "The commit LIST's side B is at, nil when it is a checkout."
+  (with-current-buffer list
+    (when-let* (((not (eq ygg-git-compare--b (plist-get ygg-git-compare--plan :work))))
+                (rev (plist-get ygg-git-compare--b :diff)))
+      (magit-rev-parse "--verify" "-q" (concat rev "^{commit}")))))
+
+(defun ygg-git-compare--diff-hunks (old new path)
+  "The (OLD-START OLD-COUNT NEW-COUNT) of each hunk of PATH between OLD and NEW."
+  (delq nil
+        (mapcar (lambda (line)
+                  (when (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+[0-9]+\\(?:,\\([0-9]+\\)\\)? @@" line)
+                    (list (string-to-number (match-string 1 line))
+                          (if (match-string 2 line) (string-to-number (match-string 2 line)) 1)
+                          (if (match-string 3 line) (string-to-number (match-string 3 line)) 1))))
+                (magit-git-lines "diff" "--unified=0" "--no-color" "--no-ext-diff"
+                                 old new "--" path))))
+
+(defun ygg-git-compare--remap (old new path)
+  "How PATH's lines went from commit OLD to NEW: (ok . HUNKS), gone, or
+unavailable."
+  (let ((key (list (magit-toplevel) old new path)))
+    (or (gethash key ygg-git-compare--remap-cache)
+        (let ((map (cond ((not (magit-git-success "cat-file" "-e" (concat old "^{commit}")))
+                          'unavailable)
+                         ((not (magit-git-success "cat-file" "-e" (concat new ":" path)))
+                          'gone)
+                         ((not (magit-git-success "cat-file" "-e" (concat old ":" path)))
+                          'unavailable)
+                         (t (cons 'ok (ygg-git-compare--diff-hunks old new path))))))
+          (unless (eq map 'unavailable)
+            (puthash key map ygg-git-compare--remap-cache))
+          map))))
+
+(defun ygg-git-compare--map-line (hunks line)
+  "Where LINE goes through HUNKS, nil when a hunk changes it."
+  (let ((offset 0))
+    (catch 'done
+      (pcase-dolist (`(,start ,old ,new) hunks)
+        (cond ((if (zerop old) (<= line start) (< line start))
+               (throw 'done (+ line offset)))
+              ((and (> old 0) (< line (+ start old)))
+               (throw 'done nil)))
+        (cl-incf offset (- new old)))
+      (+ line offset))))
+
+(defun ygg-git-compare--range-ends (range)
+  "The (BASE . HEAD) commits RANGE's last token names, nil when it is not two."
+  (when (and range
+             (string-match "\\([0-9a-f]\\{40\\}\\)\\.\\.\\.?\\([0-9a-f]\\{40\\}\\)\\'" range))
+    (cons (match-string 1 range) (match-string 2 range))))
+
+(defun ygg-git-compare--b-label (range)
+  (when (and range (string-match "↔ B: \\(.*\\)  [^ ]+\\'" range))
+    (match-string 1 range)))
+
+(defun ygg-git-compare--relocate (comment head here)
+  "COMMENT written on other commits than HERE's, moved to where its lines went,
+or marked :outdated when they did not survive; nil when it is not one, or
+was made on another B than HERE's."
+  (when-let* (((memq (plist-get comment :level) '(line range)))
+              (range (plist-get comment :range))
+              (was (ygg-git-compare--range-ends range))
+              (now (ygg-git-compare--range-ends here))
+              ((equal head (cdr now)))
+              ((equal (ygg-git-compare--b-label range) (ygg-git-compare--b-label here)))
+              ((not (equal was now))))
+    (let* ((old-side (eq (plist-get comment :side) 'old))
+           (from (if old-side (car was) (cdr was)))
+           (to (if old-side (car now) (cdr now)))
+           (path (if old-side
+                     (or (plist-get comment :old-path) (plist-get comment :new-path))
+                   (plist-get comment :new-path)))
+           (moved (plist-put (copy-sequence comment) :relocated (cdr was)))
+           (map (cond ((not path) 'unavailable)
+                      ((equal from to) '(ok))
+                      (t (ygg-git-compare--remap from to path))))
+           (start (plist-get comment :start-line)))
+      (pcase map
+        ('gone (plist-put (plist-put moved :outdated t) :gone t))
+        ('unavailable (plist-put moved :outdated t))
+        (`(ok . ,hunks)
+         (let ((line (ygg-git-compare--map-line hunks (plist-get comment :line)))
+               (first (and start (ygg-git-compare--map-line hunks start))))
+           (if (and line (or first (not start)))
+               (plist-put (plist-put moved :line line) :start-line first)
+             (plist-put moved :outdated t))))))))
+
+(defun ygg-git-compare--outdated-label (comment)
+  (format "outdated · written on %s · was %s"
+          (substring (plist-get comment :relocated) 0 7)
+          (if (eq (plist-get comment :level) 'range)
+              (format "L%s–L%s" (plist-get comment :start-line) (plist-get comment :line))
+            (format "L%s" (plist-get comment :line)))))
 
 (defun ygg-git-compare--line-pos (file comment)
   "Where in FILE's section the line COMMENT is on ends, or nil."
@@ -794,16 +900,27 @@ it has no place for at the top of the diff of every file."
                      comments))
           (files (seq-filter (lambda (s) (magit-section-match 'file s))
                              (oref magit-root-section children)))
+          (head (and (string-prefix-p "branch " (with-current-buffer list
+                                                    (ygg-git-compare--compare-key)))
+                     (ygg-git-compare--b-head list)))
+          (here (with-current-buffer list (ygg-git-compare--range-label)))
+          (default-directory (buffer-local-value 'default-directory list))
           (places nil)
           (stale nil)
+          (gone nil)
           (top nil))
-      (dolist (c comments)
-        (let* ((level (plist-get c :level))
-               (file (and (plist-get c :new-path)
+      (dolist (original comments)
+        (let* ((level (plist-get original :level))
+               (c (or (and (ygg-git-compare--stale-p original)
+                           (ygg-git-compare--relocate original head here))
+                      original))
+               (outdated (plist-get c :outdated))
+               (file (and (plist-get c :new-path) (not (plist-get c :gone))
                           (seq-find (lambda (s) (equal (oref s value) (plist-get c :new-path)))
                                     files)))
-               (stale-p (ygg-git-compare--stale-p c))
-               (pos (and file (not stale-p) (memq level '(line range))
+               (stale-p (and (not (plist-get c :relocated))
+                             (ygg-git-compare--stale-p c)))
+               (pos (and file (not stale-p) (not outdated) (memq level '(line range))
                          (ygg-git-compare--line-pos file c)))
                (place (cond (stale-p nil)
                             (pos pos)
@@ -817,13 +934,14 @@ it has no place for at the top of the diff of every file."
                 (place (push (list (plist-get c :id) block)
                              (alist-get place places nil nil #'eql)))
                 ((eq (current-buffer) list)
-                 (push (list (plist-get c :id) block) top)))))
+                 (push (list (plist-get c :id) block)
+                       (if outdated gone top))))))
       (pcase-dolist (`(,pos . ,shown) places)
         (let ((ov (make-overlay (save-excursion (goto-char pos) (line-beginning-position)) pos)))
           (overlay-put ov 'ygg-git-compare-comments (mapcar #'car shown))
           (overlay-put ov 'after-string
                        (concat "\n" (ygg-git-compare--shown-text shown)))))
-      (when (or stale top)
+      (when (or stale gone top)
         (let* ((first (seq-find (lambda (s)
                                   (not (memq (oref s type) (bound-and-true-p ygg-git-compare--pr-info-order))))
                                 (oref magit-root-section children)))
@@ -833,11 +951,14 @@ it has no place for at the top of the diff of every file."
                                                (mapcar #'car top))
                                      (save-excursion (goto-char begin) (line-end-position))
                                    begin))))
-          (overlay-put ov 'ygg-git-compare-comments (mapcar #'car (append stale top)))
+          (overlay-put ov 'ygg-git-compare-comments (mapcar #'car (append stale gone top)))
           (overlay-put ov 'before-string
                        (concat (when stale
                                  (concat (propertize "Made on another range" 'face 'warning)
                                          "\n" (mapconcat #'cadr (reverse stale) "\n") "\n"))
+                               (when gone
+                                 (concat (propertize "Outdated comments" 'face 'warning)
+                                         "\n" (mapconcat #'cadr (reverse gone) "\n") "\n"))
                                (when top
                                  (concat (ygg-git-compare--shown-text top) "\n")))))))))
 
