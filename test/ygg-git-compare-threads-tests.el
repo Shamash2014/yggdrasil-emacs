@@ -366,7 +366,7 @@ string, or (STATUS . WHAT-IT-SAID)."
   (ygg-git-compare-threads-tests--with-repo root head
     (ygg-git-compare-threads-tests--with-compare head 'github
       (should (= (length ygg-git-compare-threads-tests--spawned) 4))
-      (ygg-git-compare-refresh)
+      (ygg-git-compare--redraw)
       (ygg-git-compare--draw-comments)
       (should (= (length ygg-git-compare-threads-tests--spawned) 4))
       (let ((redraws 0)
