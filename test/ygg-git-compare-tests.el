@@ -959,7 +959,9 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
 ;;; ygg-git-compare-tests.el ends here
 
 (ert-deftest ygg-git-compare-retired-comment-keys-say-where-comments-went ()
-  (dolist (key '("c" "i" "A" "K"))
+  (should (eq (lookup-key ygg-git-compare-mode-map "A") #'ygg-git-compare-comments-accept-all))
+  (should (eq (lookup-key ygg-git-compare-mode-map "a") #'ygg-git-compare-comment-accept))
+  (dolist (key '("c" "i" "K"))
     (should (eq (lookup-key ygg-git-compare-mode-map key) #'ygg-git-compare-comment-moved)))
   (let ((said (ygg-git-compare-comment-moved)))
     (should (string-search "C" said))

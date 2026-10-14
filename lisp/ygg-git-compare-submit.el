@@ -20,6 +20,11 @@
 (defvar transient--original-buffer)
 (declare-function ygg-git-compare-comments-list "ygg-git-compare-comments"
                   (&optional include-pending))
+(defvar ygg-git-compare--discussion-memo)
+(declare-function ygg-git-compare--discussion-source "ygg-git-compare-threads" (comment))
+(declare-function ygg-git-compare--discussion-kept "ygg-git-compare-threads" ())
+(declare-function ygg-git-compare--thread-block "ygg-git-compare-threads" (thread))
+(declare-function ygg-git-compare--accept-comment "ygg-git-compare-comments" (comment))
 (declare-function ygg-git-compare-comments-drop "ygg-git-compare-comments" (ids))
 
 (defcustom ygg-git-compare-export-intro
@@ -165,8 +170,8 @@ Pending agent comments are left out."
                     (let ((item (ygg-git-compare-submit--item (cl-incf n) c)))
                       (if-let* ((thread (and ygg-git-compare-markdown-with-threads
                                              (ygg-git-compare--discussion-source c))))
-                          (concat (string-trim-right item "\n+") "\n\n<thread>\n" thread
-                                  "\n</thread>\n\n")
+                          (concat (string-trim-right item "\n+") "\n\n"
+                                  (ygg-git-compare--thread-block thread) "\n\n")
                         item))))
                 comments))))
 
@@ -905,21 +910,67 @@ MAX-PRIORITY leaves out findings less urgent than it."
     (ygg-git-compare--this-pr
      (lambda (pr) (ygg-git-compare-submit--post event max-priority pr)))))
 
+(defun ygg-git-compare-submit--fit (comments)
+  "COMMENTS as the markdown an agent is sent within
+`ygg-git-compare-review-comments-max-chars', as (MARKDOWN . SENT).  Threads
+under comments are cut first; then comments are held back, last first, but one
+is always sent whole."
+  (let* ((ordered (ygg-git-compare-submit--order
+                   (seq-remove #'ygg-git-compare-submit--pending-p comments)))
+         (cap ygg-git-compare-review-comments-max-chars)
+         (limits (seq-uniq (cons ygg-git-compare-review-thread-limit
+                                 (seq-filter (lambda (n) (< n ygg-git-compare-review-thread-limit))
+                                             '(1000 500 250)))))
+         (ygg-git-compare-markdown-with-threads t)
+         (render (lambda (k) (ygg-git-compare-markdown (seq-take ordered k)))))
+    (or (seq-some (lambda (limit)
+                    (let* ((ygg-git-compare-review-thread-limit limit)
+                           (md (funcall render (length ordered))))
+                      (and (<= (length md) cap) (cons md ordered))))
+                  limits)
+        (let ((ygg-git-compare-review-thread-limit (car (last limits)))
+              (k (length ordered)))
+          (while (and (> k 1) (> (length (funcall render k)) cap))
+            (cl-decf k))
+          (cons (funcall render k) (seq-take ordered k))))))
+
 (defun ygg-git-compare-submit--agent-prompt (comments)
-  (let* ((facts (ygg-git-compare--discussion-facts))
+  "The prompt for the agent of COMMENTS as (PROMPT . SENT), SENT the comments
+that fit it."
+  (let* ((ygg-git-compare--discussion-memo (ygg-git-compare--discussion-kept))
+         (fit (ygg-git-compare-submit--fit comments))
+         (sent (cdr fit))
+         (facts (ygg-git-compare--discussion-facts
+                 (seq-keep (lambda (c) (and (ygg-git-compare--discussion-source c)
+                                            (plist-get c :source-thread)))
+                           sent)))
          (discussion (plist-get facts :block)))
-    (concat ygg-git-compare-fix-instructions
-            (and (plist-get facts :threads)
-                 (concat "\n\n" (if (plist-get facts :open)
-                                      ygg-git-compare-act-threads-instructions
-                                    ygg-git-compare-act-context-instructions)))
-            "\n\n<fix-comments>\n"
-            (ygg-git-compare--capped (let ((ygg-git-compare-markdown-with-threads t))
-                                       (ygg-git-compare-markdown comments))
-                                     ygg-git-compare-review-comments-max-chars)
-            "</fix-comments>\n\n"
-            (and discussion (concat discussion "\n\n"))
-            (ygg-git-compare-compare-block))))
+    (cons (concat ygg-git-compare-fix-instructions
+                  (and (plist-get facts :threads)
+                       (concat "\n\n" (if (plist-get facts :open)
+                                            ygg-git-compare-act-threads-instructions
+                                          ygg-git-compare-act-context-instructions)))
+                  "\n\n<fix-comments>\n" (car fit) "</fix-comments>\n\n"
+                  (and discussion (concat discussion "\n\n"))
+                  (ygg-git-compare-compare-block))
+          sent)))
+
+(defun ygg-git-compare-submit--pending-agent (max-priority)
+  (seq-filter (lambda (c) (and (ygg-git-compare-submit--pending-p c)
+                               (not (ygg-git-compare--forge-p c))
+                               (ygg-git-compare-submit--within-p c max-priority)))
+              (ygg-git-compare-comments-list t)))
+
+(defun ygg-git-compare-submit--accept-pending (max-priority)
+  "Accept the todo and fix comments an agent proposed, once the user agrees."
+  (when-let* ((pending (ygg-git-compare-submit--pending-agent max-priority))
+              ((y-or-n-p (format "Accept and send %d pending todo/fix comment%s from %s? "
+                                 (length pending) (if (cdr pending) "s" "")
+                                 (mapconcat #'identity
+                                            (seq-uniq (mapcar (lambda (c) (or (plist-get c :author) "unknown"))
+                                                              pending))
+                                            ", ")))))
+    (mapc #'ygg-git-compare--accept-comment pending)))
 
 (defun ygg-git-compare-submit-agent (&optional max-priority)
   "Send the agent-typed comments with the compare, written as the markdown
@@ -929,26 +980,33 @@ out findings less urgent than it."
   (require 'aob-acp)
   (let ((list (ygg-git-compare--list)))
     (with-current-buffer list
+      (ygg-git-compare-submit--accept-pending max-priority)
       (let ((comments (ygg-git-compare-submit--select 'agent max-priority)))
         (unless comments
           (user-error "No comments for the agent%s"
                       (if-let* ((n (length (ygg-git-compare-submit--select 'forge max-priority)))
                                 ((> n 0)))
-                          (format ": %d %s to the PR; give %s the todo or fix type to send it here"
-                                  n (if (= n 1) "goes" "go") (if (= n 1) "it" "one"))
+                          (format ": %d %s to the PR; press D on a comment to make it a todo or fix"
+                                  n (if (= n 1) "goes" "go"))
                         "")))
         (ygg-git-compare--discussion-guard list)
-        (let ((choice (ygg-git-compare-pick-reviewer comments)))
+        (let ((choice (ygg-git-compare-pick-reviewer comments t)))
           (ygg-git-compare--when-discussion
            list
            (lambda ()
              (if-let* ((comments (ygg-git-compare-submit--select 'agent max-priority)))
-                 (let ((session (ygg-git-compare-send-to-reviewer
-                                 default-directory (ygg-git-compare-submit--agent-prompt comments)
-                                 choice)))
-                   (ygg-git-compare-submit--drop comments)
-                   (message "%d comment%s sent to an agent%s" (length comments)
-                            (if (= (length comments) 1) "" "s")
+                 (let* ((built (ygg-git-compare-submit--agent-prompt comments))
+                        (sent (cdr built))
+                        (session (ygg-git-compare-send-to-reviewer
+                                  default-directory (car built) choice)))
+                   (ygg-git-compare-submit--drop sent)
+                   (message "%s%s"
+                            (if (< (length sent) (length comments))
+                                (format "sent %d of %d; %d kept for the next send"
+                                        (length sent) (length comments)
+                                        (- (length comments) (length sent)))
+                              (format "%d comment%s sent to an agent" (length sent)
+                                      (if (= (length sent) 1) "" "s")))
                             (let ((pending (ygg-git-compare-submit--pending-note)))
                               (if (string-empty-p pending) "" (concat "; " pending))))
                    (ygg-git-compare-show-trace session))

@@ -80,9 +80,50 @@
       (should-not (memq (current-buffer) (list list file))))
     (ygg-space--goto-id a)
     (switch-to-buffer "*scratch*")
-    (dotimes (_ 6)
-      (previous-buffer)
-      (should-not (memq (current-buffer) (list list file))))))
+    (should (cl-loop repeat 6
+                     do (previous-buffer)
+                     thereis (memq (current-buffer) (list list file))))))
+
+(ert-deftest ygg-git-compare-space-summary-buffer-follows-the-same-rule ()
+  (ygg-git-compare-space-tests--with-spaces
+    (ygg-git-compare-space-tests--open list file)
+    (let ((summary (generate-new-buffer "*ygg-compare-summary-test*")))
+      (unwind-protect
+          (progn
+            (with-current-buffer summary (setq ygg-git-compare--list-buffer list))
+            (should-not (ygg-git-compare-space--skip-p summary))
+            (ygg-space--goto-id b)
+            (should (ygg-git-compare-space--skip-p summary))
+            (should-not (ygg-git-compare-space--skip-p (get-buffer-create "*plain*"))))
+        (kill-buffer summary)))))
+
+(ert-deftest ygg-git-compare-space-opening-moves-the-compare-here ()
+  (ygg-git-compare-space-tests--with-spaces
+    (ygg-git-compare-space-tests--open list file)
+    (ygg-space--goto-id b)
+    (let (shown)
+      (with-current-buffer list
+        (ygg-git-compare-space--open
+         (lambda () (ygg-git-compare-space--only-here (lambda () (setq shown t)))))
+        (should shown))
+      (should (eql (ygg--space-buffer-owner list) b))
+      (should (eql (ygg--space-buffer-owner file) b))
+      (should-not (memq list (gethash a ygg--space-buffers)))
+      (ygg-space--goto-id a)
+      (should-not (ygg-git-compare-space--here-p list)))))
+
+(ert-deftest ygg-git-compare-space-showing-without-opening-keeps-the-home ()
+  (ygg-git-compare-space-tests--with-spaces
+    (ygg-git-compare-space-tests--open list file)
+    (ygg-space--goto-id b)
+    (let (shown)
+      (with-current-buffer list
+        (ygg-git-compare-space--only-here (lambda () (setq shown t))))
+      (should-not shown)
+      (should (eql (ygg--space-buffer-owner list) a)))))
+
+(ert-deftest ygg-git-compare-space-open-is-advised ()
+  (should (advice-member-p #'ygg-git-compare-space--open 'ygg-git-compare-open)))
 
 (ert-deftest ygg-git-compare-space-idle-follow-does-nothing-elsewhere ()
   (ygg-git-compare-space-tests--with-spaces

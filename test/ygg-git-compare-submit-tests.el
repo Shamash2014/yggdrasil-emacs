@@ -874,7 +874,8 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                                                          :file "a.txt" :type 'todo :status 'pending)))
         sent shown)
     (ygg-git-compare-submit-tests--with comments nil #'ignore
-      (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session))))
+      (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda (&rest _) '(("live" . session))))
+                ((symbol-function 'y-or-n-p) #'ignore)
                 ((symbol-function 'completing-read) (lambda (&rest _) "live"))
                 ((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>"))
                 ((symbol-function 'aob-prompt) (lambda (s text &rest _) (push (cons s text) sent)))
@@ -895,12 +896,13 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                                                          :file "a.txt" :type 'todo :status 'pending)))
         sent)
     (ygg-git-compare-submit-tests--with comments nil #'ignore
-      (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session))))
+      (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda (&rest _) '(("live" . session))))
+                ((symbol-function 'y-or-n-p) #'ignore)
                 ((symbol-function 'completing-read) (lambda (&rest _) "live"))
                 ((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>"))
                 ((symbol-function 'aob-prompt) (lambda (&rest args) (push args sent)))
                 ((symbol-function 'ygg-git-compare-show-trace) #'ignore))
-        (should (string-search "1 goes to the PR; give it the todo or fix"
+        (should (string-search "1 goes to the PR; press D on a comment to make it a todo or fix"
                                (cadr (should-error (ygg-git-compare-submit-agent)
                                                    :type 'user-error))))
         (should-not sent)
@@ -935,7 +937,8 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
 (ert-deftest ygg-git-compare-submit-agent-leaves-forge-comments-held ()
   (let (sent)
     (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--typed nil #'ignore
-      (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session))))
+      (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda (&rest _) '(("live" . session))))
+                ((symbol-function 'y-or-n-p) #'ignore)
                 ((symbol-function 'completing-read) (lambda (&rest _) "live"))
                 ((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>"))
                 ((symbol-function 'aob-prompt) (lambda (_s text &rest _) (push text sent)))
@@ -1029,14 +1032,78 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
   (ygg-git-compare-submit-tests--with
       (list (ygg-git-compare-submit-tests--c "a") (ygg-git-compare-submit-tests--c "b"))
       nil #'ignore
-    (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session)))))
-      (should (string-search "2 go to the PR; give one the todo or fix"
+    (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda (&rest _) '(("live" . session)))))
+      (should (string-search "2 go to the PR; press D on a comment to make it a todo or fix"
                              (cadr (should-error (ygg-git-compare-submit-agent)
                                                  :type 'user-error)))))))
 
+(defun ygg-git-compare-submit-tests--agent-send ()
+  (let (sent)
+    (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda (&rest _) '(("live" . session))))
+              ((symbol-function 'completing-read) (lambda (&rest _) "live"))
+              ((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>"))
+              ((symbol-function 'aob-prompt) (lambda (s text &rest _) (push (cons s text) sent)))
+              ((symbol-function 'ygg-git-compare-show-trace) #'ignore))
+      (ygg-git-compare-submit-agent))
+    sent))
+
+(defmacro ygg-git-compare-submit-tests--accepting (&rest body)
+  `(cl-letf (((symbol-function 'ygg-git-compare--accept-comment)
+              (lambda (c)
+                (setq ygg-git-compare-submit-tests--comments
+                      (mapcar (lambda (x) (if (equal (plist-get x :id) (plist-get c :id))
+                                              (plist-put (copy-sequence x) :status nil)
+                                            x))
+                              ygg-git-compare-submit-tests--comments)))))
+     ,@body))
+
+(ert-deftest ygg-git-compare-submit-agent-asks-to-accept-pending-and-sends-them ()
+  (let ((comments (list (ygg-git-compare-submit-tests--c "proposed" :level 'file :file "a.txt"
+                                                         :type 'todo :status 'pending
+                                                         :author "claude: geo")
+                        (ygg-git-compare-submit-tests--c "proposed too" :level 'file :file "a.txt"
+                                                         :type 'fix :status 'pending
+                                                         :author "claude: geo")))
+        asked)
+    (ygg-git-compare-submit-tests--with comments nil #'ignore
+      (ygg-git-compare-submit-tests--accepting
+       (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) t)))
+         (let ((sent (ygg-git-compare-submit-tests--agent-send)))
+           (should (equal asked '("Accept and send 2 pending todo/fix comments from claude: geo? ")))
+           (should (string-search "proposed too" (cdar sent)))
+           (should (equal ygg-git-compare-submit-tests--dropped '("proposed" "proposed too")))))))))
+
+(ert-deftest ygg-git-compare-submit-agent-declined-pending-send-nothing ()
+  (let ((comments (list (ygg-git-compare-submit-tests--c "proposed" :level 'file :file "a.txt"
+                                                         :type 'todo :status 'pending))))
+    (ygg-git-compare-submit-tests--with comments nil #'ignore
+      (cl-letf (((symbol-function 'y-or-n-p) #'ignore)
+                ((symbol-function 'ygg-git-compare--reviewers) (lambda (&rest _) '(("live" . session)))))
+        (should-error (ygg-git-compare-submit-agent) :type 'user-error)
+        (should-not ygg-git-compare-submit-tests--dropped)))))
+
+(ert-deftest ygg-git-compare-submit-agent-sends-whole-comments-and-keeps-the-rest ()
+  (let ((comments (list (ygg-git-compare-submit-tests--c (make-string 300 ?a) :level 'file
+                                                         :file "a.txt" :type 'todo)
+                        (ygg-git-compare-submit-tests--c (make-string 300 ?b) :level 'file
+                                                         :file "b.txt" :type 'todo)
+                        (ygg-git-compare-submit-tests--c (make-string 300 ?c) :level 'file
+                                                         :file "c.txt" :type 'todo)))
+        (ygg-git-compare-review-comments-max-chars 800)
+        (ygg-git-compare-export-intro ""))
+    (ygg-git-compare-submit-tests--with comments nil #'ignore
+      (let ((sent (ygg-git-compare-submit-tests--agent-send)))
+        (should (string-search (make-string 300 ?a) (cdar sent)))
+        (should (string-search (make-string 300 ?b) (cdar sent)))
+        (should-not (string-search (make-string 300 ?c) (cdar sent)))
+        (should (equal ygg-git-compare-submit-tests--dropped
+                       (mapcar (lambda (c) (plist-get c :id)) (seq-take comments 2))))
+        (should (seq-some (lambda (m) (string-search "sent 2 of 3; 1 kept for the next send" m))
+                          ygg-git-compare-submit-tests--messages))))))
+
 (ert-deftest ygg-git-compare-submit-agent-refusal-with-no-comments-is-bare ()
   (ygg-git-compare-submit-tests--with nil nil #'ignore
-    (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda () '(("live" . session)))))
+    (cl-letf (((symbol-function 'ygg-git-compare--reviewers) (lambda (&rest _) '(("live" . session)))))
       (should (equal "No comments for the agent"
                      (cadr (should-error (ygg-git-compare-submit-agent)
                                          :type 'user-error)))))))

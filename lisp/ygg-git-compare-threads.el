@@ -842,9 +842,30 @@ waits for nothing."
       (plist-get comment :resolvable)
     (and (plist-member comment :resolved) (not (plist-get comment :state)))))
 
+(defvar ygg-git-compare--discussion-memo 'none
+  "The kept threads of the prompt under way as (COMMENTS . GROUPS), `none' outside one.")
+
 (defun ygg-git-compare--discussion-groups (comments)
   "COMMENTS as lists by thread, in the order the threads first appear."
-  (mapcar #'cdr (seq-group-by (lambda (c) (plist-get c :thread)) comments)))
+  (let (order (table (make-hash-table :test #'equal)))
+    (dolist (c comments)
+      (let ((key (plist-get c :thread)))
+        (unless (gethash key table) (push key order))
+        (push c (gethash key table))))
+    (mapcar (lambda (key) (nreverse (gethash key table))) (nreverse order))))
+
+(defun ygg-git-compare--discussion-kept ()
+  "The annotated comments the forge kept for this compare and their threads, as
+(COMMENTS . GROUPS), asked once while a prompt is built."
+  (if (not (eq ygg-git-compare--discussion-memo 'none))
+      ygg-git-compare--discussion-memo
+    (when-let* ((state (ygg-git-compare--remote-kept (current-buffer))))
+      (let ((comments (ygg-git-compare--remote-annotate (plist-get state :comments))))
+        (cons comments (ygg-git-compare--discussion-groups comments))))))
+
+(defun ygg-git-compare--remote-changes-requested-p (comment)
+  (when-let* ((state (plist-get comment :state)))
+    (equal (downcase (replace-regexp-in-string "_" " " state)) "changes requested")))
 
 (defun ygg-git-compare--discussion-where (comment)
   (let ((file (plist-get comment :new-path))
@@ -857,18 +878,22 @@ waits for nothing."
 (defun ygg-git-compare--discussion-status (comment)
   (cond ((ygg-git-compare--remote-resolved-p comment) "resolved")
         ((plist-get comment :state)
-         (if (equal (downcase (plist-get comment :state)) "approved") "approved" "comment"))
+         (cond ((ygg-git-compare--remote-changes-requested-p comment) "changes requested")
+               ((equal (downcase (plist-get comment :state)) "approved") "approved")
+               (t "comment")))
         ((ygg-git-compare--remote-unknown-p comment) "state unknown")
         ((not (ygg-git-compare--remote-resolvable-p comment)) "comment")
         ((plist-get comment :outdated) "outdated")
         (t "unresolved")))
 
 (defun ygg-git-compare--discussion-open-p (group)
-  "Whether GROUP is a thread that can be resolved and has not been."
+  "Whether GROUP is a thread that can be resolved and has not been, or a review
+asking for changes."
   (let ((head (car group)))
-    (and (ygg-git-compare--remote-resolvable-p head)
-         (not (ygg-git-compare--remote-resolved-p head))
-         (not (ygg-git-compare--remote-unknown-p head)))))
+    (or (ygg-git-compare--remote-changes-requested-p head)
+        (and (ygg-git-compare--remote-resolvable-p head)
+             (not (ygg-git-compare--remote-resolved-p head))
+             (not (ygg-git-compare--remote-unknown-p head))))))
 
 (defun ygg-git-compare--discussion-author (comment)
   (or (plist-get comment :author) "unknown"))
@@ -926,37 +951,44 @@ to a line, cut at `ygg-git-compare-review-discussion-max-chars'; nil without any
   "The thread of the forge COMMENT was made from, whole, nil when it was made
 from none or the forge no longer shows it."
   (when-let* ((id (plist-get comment :source-thread))
-              (state (ygg-git-compare--remote-kept (current-buffer)))
-              (group (seq-find (lambda (g) (equal (plist-get (car g) :id) id))
-                               (ygg-git-compare--discussion-groups
-                                (ygg-git-compare--remote-annotate (plist-get state :comments))))))
+              (kept (ygg-git-compare--discussion-kept))
+              (group (seq-find (lambda (g) (equal (plist-get (car g) :id) id)) (cdr kept))))
     (ygg-git-compare--discussion-thread group)))
 
-(defun ygg-git-compare--discussion-facts ()
+(defun ygg-git-compare--thread-block (thread)
+  (concat "<thread>\n" thread "\n</thread>"))
+
+(defun ygg-git-compare--with-thread (text comment)
+  "TEXT, COMMENT as an agent reads it, followed by the whole thread COMMENT was
+made from."
+  (if-let* ((thread (ygg-git-compare--discussion-source comment)))
+      (concat text "\n\n" (ygg-git-compare--thread-block thread))
+    text))
+
+(defun ygg-git-compare--discussion-facts (&optional inlined)
   "What this compare tells an agent of its merge request's threads, as (:block
 TEXT :threads WHETHER IT HAS ANY :open WHETHER ONE CAN STILL BE ANSWERED); the
 block is why they could not be had when they could not, nil when it is no
-merge request or has no threads."
+merge request or has no threads.  The threads whose first comment ids are in
+INLINED are left out of the block, being told elsewhere."
   (when-let* ((state (ygg-git-compare--remote-kept (current-buffer))))
     (let ((note ygg-git-compare--discussion-note))
       (if (plist-get state :value)
-          (let* ((comments (ygg-git-compare--remote-annotate (plist-get state :comments)))
-                 (text (ygg-git-compare--discussion-render comments)))
+          (let* ((groups (cdr (ygg-git-compare--discussion-kept)))
+                 (text (ygg-git-compare--discussion-render
+                        (apply #'append
+                               (seq-remove (lambda (g) (member (plist-get (car g) :id) inlined))
+                                           groups)))))
             (when text
               (list :block (concat "<mr-discussion>\n" (and note (concat note "\n\n")) text
                                    "\n</mr-discussion>")
                     :threads t
                     :open (seq-some #'ygg-git-compare--discussion-open-p
-                                    (ygg-git-compare--discussion-groups comments)))))
+                                    groups))))
         (list :block (concat "<mr-discussion>\nthe threads could not be fetched"
                              (when-let* ((why (or (plist-get state :failed) note)))
                                (concat ": " why))
                              "; review without them\n</mr-discussion>"))))))
-
-(defun ygg-git-compare--discussion-block ()
-  "The merge request this compare is of, its threads as an agent reads them,
-or why they could not be had; nil when it is no merge request or has no threads."
-  (plist-get (ygg-git-compare--discussion-facts) :block))
 
 (defun ygg-git-compare--discussion-guard (list)
   "Say so, as a user error, when LIST is already waiting for the threads of a send."

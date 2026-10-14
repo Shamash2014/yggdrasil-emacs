@@ -1069,6 +1069,139 @@ string, or (STATUS . WHAT-IT-SAID)."
         (should (< elapsed 2))
         (should (string-search "alice" (ygg-git-compare-threads-tests--shown)))))))
 
+(ert-deftest ygg-git-compare-threads-groups-keep-first-appearance-order ()
+  (let ((groups (ygg-git-compare--discussion-groups
+                 '((:thread "b" :text "1") (:thread "a" :text "2") (:thread "b" :text "3")
+                   (:thread "c" :text "4") (:thread "a" :text "5")))))
+    (should (equal (mapcar (lambda (g) (plist-get (car g) :thread)) groups) '("b" "a" "c")))
+    (should (equal (mapcar (lambda (c) (plist-get c :text)) (car groups)) '("1" "3")))))
+
+(ert-deftest ygg-git-compare-threads-changes-requested-review-is-actionable ()
+  (let ((review '(:thread "review-1" :author "zed" :level review :state "CHANGES REQUESTED"
+                  :text "fix it")))
+    (should (string-search "· changes requested · zed"
+                           (ygg-git-compare--discussion-render (list review))))
+    (should (ygg-git-compare--discussion-open-p (list review)))
+    (should (ygg-git-compare--discussion-open-p
+             (list (plist-put (copy-sequence review) :state "changes_requested"))))
+    (should (string-search "· comment · zed"
+                           (ygg-git-compare--discussion-render
+                            (list (plist-put (copy-sequence review) :state "COMMENTED")))))
+    (should-not (ygg-git-compare--discussion-open-p
+                 (list (plist-put (copy-sequence review) :state "APPROVED"))))
+    (should (string-search "changes requested" ygg-git-compare-review-open-instructions))
+    (should (string-search "changes requested" ygg-git-compare-act-threads-instructions))))
+
+(ert-deftest ygg-git-compare-threads-fix-prompt-tells-an-inlined-thread-once-and-annotates-once ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let ((annotated 0)
+            (annotate (symbol-function 'ygg-git-compare--remote-annotate))
+            (comments (list (list :id "m" :level 'file :file "a.txt" :type 'todo :text "answer it"
+                                  :source-thread "remote:gh:101")
+                            (list :id "n" :level 'file :file "b.txt" :type 'todo :text "and this"
+                                  :source-thread "remote:gh:101"))))
+        (cl-letf (((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>"))
+                  ((symbol-function 'ygg-git-compare--remote-annotate)
+                   (lambda (&rest args) (cl-incf annotated) (apply annotate args))))
+          (let ((prompt (car (ygg-git-compare-submit--agent-prompt comments))))
+            (should (= 1 annotated))
+            (should (= 2 (with-temp-buffer (insert prompt) (goto-char (point-min))
+                                           (how-many "thread 101 ·"))))
+            (should (string-search "thread 103" prompt))
+            (should-not (string-search "thread 101"
+                                       (substring prompt (string-search "\n<mr-discussion>\n" prompt))))))))))
+
+(ert-deftest ygg-git-compare-threads-fix-trims-threads-before-dropping-comments ()
+  (let ((comments (list (list :id "m" :level 'file :file "a.txt" :type 'todo :text "one"
+                              :range "R" :source-thread "x")
+                        (list :id "n" :level 'file :file "b.txt" :type 'todo :text "two"
+                              :range "R" :source-thread "y"))))
+    (cl-letf (((symbol-function 'ygg-git-compare--discussion-source)
+               (lambda (_) (ygg-git-compare--capped (make-string 1500 ?x)
+                                                    ygg-git-compare-review-thread-limit))))
+      (let* ((ygg-git-compare-review-comments-max-chars 2500)
+             (fit (ygg-git-compare-submit--fit comments)))
+        (should (= 2 (length (cdr fit))))
+        (should (string-search "more characters left out" (car fit)))
+        (should (<= (length (car fit)) 2500)))
+      (let* ((ygg-git-compare-review-comments-max-chars 700)
+             (fit (ygg-git-compare-submit--fit comments)))
+        (should (= 1 (length (cdr fit))))
+        (should (equal (plist-get (car (cdr fit)) :id) "m"))))))
+
+(ert-deftest ygg-git-compare-threads-picker-for-a-fix-lists-this-repository-and-the-producer ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let* ((aob--sessions (make-hash-table :test #'equal))
+             (aob--order nil)
+             (alien (aob-create-session :id "alien" :backend 'acp :name "alien"
+                                        :project "/nowhere/else" :state 'idle))
+             (mine (aob-create-session :id "mine" :backend 'acp :name "mine"
+                                       :project root :state 'idle))
+             (producer (aob-create-session :id "prod" :backend 'acp
+                                           :name "claude: Geo tracking review"
+                                           :project root :state 'done))
+             (aob-acp-agents '(("claude" :command ("x"))))
+             prompt offered default)
+        (ignore alien mine)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (p table _pred _req _init _hist def)
+                     (setq prompt p offered (all-completions "" table) default def)
+                     def)))
+          (should (eq (ygg-git-compare-pick-reviewer
+                       (list (list :id "c" :author "claude: Geo tracking review"
+                                   :created (- (float-time) 60))
+                             (list :id "d" :author "mine" :created (- (float-time) 3600)))
+                       t)
+                      producer))
+          (should (equal prompt "Fix with: "))
+          (should (string-prefix-p "claude: Geo tracking review" default))
+          (should (string-search "done" (format "%S" (car (ygg-git-compare--reviewers t)))))
+          (should-not (seq-some (lambda (o) (string-search "review plan" o)) offered))
+          (should-not (member "alien" offered))
+          (should (member "mine" offered))
+          (should (member "new: claude" offered))
+          (should (string-prefix-p "claude: Geo tracking review" (car offered)))
+          (ygg-git-compare-pick-reviewer nil)
+          (should (equal prompt "Review by: "))
+          (should (seq-some (lambda (o) (string-search "review plan" o)) offered)))))))
+
+(ert-deftest ygg-git-compare-threads-picker-names-the-age-of-the-newest-comment-by-the-producer ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let* ((aob--sessions (make-hash-table :test #'equal))
+             (aob--order nil)
+             (maker (aob-create-session :id "maker" :backend 'acp :name "maker"
+                                        :project root :state 'idle))
+             (aob-acp-agents nil)
+             default)
+        (ignore maker)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_p _table _pred _req _init _hist def) (setq default def) def)))
+          (ygg-git-compare-pick-reviewer
+           (list (list :id "a" :author "maker" :created (- (float-time) 7200))
+                 (list :id "b" :author "someone" :created (- (float-time) 60))
+                 (list :id "c" :author "maker" :created (- (float-time) 300))))
+          (should (string-match-p "5m ago" default)))))))
+
+(ert-deftest ygg-git-compare-threads-picker-lists-sessions-in-other-worktrees ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let* ((aob--sessions (make-hash-table :test #'equal))
+             (aob--order nil)
+             (tree (expand-file-name "wt-b/" (file-name-directory (directory-file-name root))))
+             (other (aob-create-session :id "wt" :backend 'acp :name "wt" :project root
+                                        :dir tree :state 'idle)))
+        (make-directory tree t)
+        (cl-letf (((symbol-function 'magit-list-worktrees)
+                   (lambda () (list (list (directory-file-name root)) (list (directory-file-name tree))))))
+          (should (ygg-git-compare--session-here-p other))
+          (should (string-search "worktree wt-b" (ygg-git-compare--session-note other)))
+          (should (assoc "wt" (ygg-git-compare--reviewers t))))
+        (delete-directory tree)))))
+
 (provide 'ygg-git-compare-threads-tests)
 ;;; ygg-git-compare-threads-tests.el ends here
 
@@ -1138,17 +1271,20 @@ string, or (STATUS . WHAT-IT-SAID)."
           (should-not (string-search "bob" block))
           (should (string-search ygg-git-compare-review-threads-instructions prompt)))))))
 
+(defun ygg-git-compare-tests--block ()
+  (plist-get (ygg-git-compare--discussion-facts) :block))
+
 (ert-deftest ygg-git-compare-threads-prompt-applies-the-limits ()
   (ygg-git-compare-threads-tests--with-repo root head
     (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
     (ygg-git-compare-threads-tests--with-compare head 'github
       (let ((ygg-git-compare-review-thread-limit 30))
         (should (string-match-p "more characters left out"
-                                (ygg-git-compare--discussion-block))))
+                                (ygg-git-compare-tests--block))))
       (let ((ygg-git-compare-review-discussion-max-chars 10))
         (should (string-match-p "… [0-9]+ more left out"
-                                (ygg-git-compare--discussion-block)))
-        (should (string-search "thread 103" (ygg-git-compare--discussion-block)))))))
+                                (ygg-git-compare-tests--block)))
+        (should (string-search "thread 103" (ygg-git-compare-tests--block)))))))
 
 (ert-deftest ygg-git-compare-threads-prompt-carries-my-comments ()
   (ygg-git-compare-threads-tests--with-repo root head
@@ -1283,7 +1419,7 @@ string, or (STATUS . WHAT-IT-SAID)."
   (ygg-git-compare-threads-tests--with-repo root head
     (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
     (ygg-git-compare-threads-tests--with-compare head 'github
-      (let ((block (ygg-git-compare--discussion-block)))
+      (let ((block (ygg-git-compare-tests--block)))
         (should (string-search "· approved · frank" block))
         (should (string-search "· comment · hank" block))
         (should (string-search "thread 103 · a.txt:3 · unresolved · carol" block))))
@@ -1462,10 +1598,10 @@ string, or (STATUS . WHAT-IT-SAID)."
       (cl-letf (((symbol-function 'ygg-git-compare-compare-block) (lambda () "<compare/>")))
         (let ((prompt (ygg-git-compare-submit--agent-prompt
                        (list (list :id "t" :level 'file :file "a.txt" :type 'todo :text "do it")))))
-          (should (string-prefix-p ygg-git-compare-fix-instructions prompt))
-          (should-not (string-search "Do not change any files" prompt))
-          (should (string-search "<fix-comments>" prompt))
-          (should-not (string-search "<review-comments>" prompt))))
+          (should (string-prefix-p ygg-git-compare-fix-instructions (car prompt)))
+          (should-not (string-search "Do not change any files" (car prompt)))
+          (should (string-search "<fix-comments>" (car prompt)))
+          (should-not (string-search "<review-comments>" (car prompt)))))
       (let ((prompt (ygg-git-compare-review-prompt)))
         (should (string-prefix-p ygg-git-compare-review-instructions prompt))
         (should-not (string-search "<fix-comments>" prompt))))))

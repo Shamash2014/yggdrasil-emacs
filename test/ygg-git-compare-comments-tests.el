@@ -380,7 +380,7 @@ and adds b.txt; main stays checked out."
       (ygg-git-compare-comments-tests--goto "+b1")
       (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-file) "whole file" 'fix)
       (ygg-git-compare-comments-tests--write (ygg-git-compare-comment-review) "overall" 'todo)
-      (let ((prompt (ygg-git-compare--prompt-comments (ygg-git-compare--agent-comments))))
+      (let ((prompt (ygg-git-compare--prompt-comments (seq-remove #'ygg-git-compare--forge-p (ygg-git-compare-comments-list)))))
         (should (string-search "[todo] a.txt:1-2\n>  1\n> -2\n> -3\n> +two\ntidy" prompt))
         (should (string-search "b.txt\nwhole file" prompt))
         (should (string-search "review\noverall" prompt)))
@@ -422,7 +422,7 @@ and adds b.txt; main stays checked out."
                        ("n" ygg-git-compare-search-next)
                        ("N" ygg-git-compare-search-previous)
                        ("i" ygg-git-compare-comment-moved)
-                       ("A" ygg-git-compare-comment-moved)
+                       ("A" ygg-git-compare-comments-accept-all)
                        ("d d" ygg-git-compare-comment-delete)
                        ("K" ygg-git-compare-comment-moved)
                        ("y" ygg-git-compare-export-markdown)
@@ -679,6 +679,7 @@ and adds b.txt; main stays checked out."
        (string-prefix-p "ygg-git-compare-comment" (symbol-name def))
        (not (memq def '(ygg-git-compare-comment-next ygg-git-compare-comment-previous
                         ygg-git-compare-comment-copy ygg-git-compare-comment-accept ygg-git-compare-comment-moved
+                        ygg-git-compare-comments-accept-all
                         ygg-git-compare-comment-delete ygg-git-compare-comment-goto)))))
 
 (ert-deftest ygg-git-compare-comments-capital-c-is-the-one-comment-key ()
@@ -815,7 +816,7 @@ and adds b.txt; main stays checked out."
       (with-current-buffer (ygg-git-compare-comments-summary)
         (should (string-search "Made on another range (1)" (buffer-string))))
       (should (string-search "made on" (ygg-git-compare--prompt-comments
-                                        (ygg-git-compare--agent-comments))))
+                                        (seq-remove #'ygg-git-compare--forge-p (ygg-git-compare-comments-list)))))
       (ygg-git-compare-swap)
       (should-not (string-search "Made on another range"
                                  (ygg-git-compare-comments-tests--shown))))))
