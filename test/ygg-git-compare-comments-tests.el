@@ -1491,3 +1491,117 @@ and adds b.txt; main stays checked out."
         (let ((text (substring-no-properties (ygg-git-compare-comments-tests--shown))))
           (should (string-search "about the file" text))
           (should-not (string-search "+three" text)))))))
+
+(defun ygg-git-compare-comments-tests--mark (&rest props)
+  (ygg-git-compare--mark-comments
+   (current-buffer)
+   (list (append (list :level 'range :new-path "a.txt" :side 'new) props)))
+  (ygg-git-compare-comments-tests--targets))
+
+(ert-deftest ygg-git-compare-comment-span-of-a-range-starting-above-the-hunk-starts-at-its-first-line ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (let ((text (car (ygg-git-compare-comments-tests--mark :start-line 0 :line 3))))
+        (should (string-prefix-p " 1" text))
+        (should (string-suffix-p "+three" text))))))
+
+(ert-deftest ygg-git-compare-comment-span-of-a-range-without-start-side-uses-its-side ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (should (equal (ygg-git-compare-comments-tests--mark :start-line 2 :line 3)
+                     '("+two\n+three"))))))
+
+(ert-deftest ygg-git-compare-comment-span-of-a-range-across-hunks-mark-only-its-lines ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (let ((lines (mapconcat (lambda (n) (format "l%d\n" n)) (number-sequence 1 30) "")))
+      (ygg-git-compare-comments-tests--git root "checkout" "-q" "-b" "wide" "main")
+      (with-temp-file (expand-file-name "a.txt" root) (insert lines))
+      (ygg-git-compare-comments-tests--git root "add" "-A")
+      (ygg-git-compare-comments-tests--git root "commit" "-q" "-m" "wide")
+      (ygg-git-compare-comments-tests--git root "checkout" "-q" "-b" "wide2")
+      (with-temp-file (expand-file-name "a.txt" root)
+        (insert (replace-regexp-in-string "^l28$" "L28" (replace-regexp-in-string "^l3$" "L3" lines))))
+      (ygg-git-compare-comments-tests--git root "add" "-A")
+      (ygg-git-compare-comments-tests--git root "commit" "-q" "-m" "wide2")
+      (ygg-git-compare-comments-tests--git root "checkout" "-q" "main")
+      (with-current-buffer (ygg-git-compare-buffer root '(rev . "wide") '(rev . "wide2"))
+        (magit-section-show-level-4-all)
+        (let ((texts (ygg-git-compare-comments-tests--mark :start-line 3 :line 28)))
+          (should (= (length texts) 2))
+          (should (string-prefix-p "+L3" (car texts)))
+          (should (string-suffix-p "+L28" (cadr texts)))
+          (should-not (seq-some (lambda (text) (string-search "@@" text)) texts)))))))
+
+(ert-deftest ygg-git-compare-relocated-comment-is-followed-where-it-is-drawn ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+three")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on three")
+      (ygg-git-compare-comments-tests--advance root "a.txt" "0\n0b\n1\ntwo\nthree\n4\n5\n")
+      (ygg-git-compare-comments-tests--goto "+three")
+      (should (equal (mapcar (lambda (c) (plist-get c :line))
+                             (ygg-git-compare--comment-targets))
+                     '(5)))
+      (ygg-git-compare--jumped (ygg-git-compare--comments-at-point))
+      (should (equal (ygg-git-compare-comments-tests--targets) '("+three"))))))
+
+(ert-deftest ygg-git-compare-forge-comment-is-a-target-and-marked-when-gone-to ()
+  (require 'ygg-git-compare-threads)
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (let ((remote (list :id "remote:1" :remote t :level 'line :new-path "b.txt"
+                          :side 'new :line 2 :text "from the forge")))
+        (cl-letf (((symbol-function 'ygg-git-compare--remote-comments) (lambda (_) (list remote)))
+                  ((symbol-function 'ygg-git-compare--remote-shown) (lambda (&rest _) (list remote))))
+          (ygg-git-compare--redraw-comments (current-buffer))
+          (ygg-git-compare-comments-tests--goto "+b2")
+          (should (equal (mapcar (lambda (c) (plist-get c :id)) (ygg-git-compare--comment-targets))
+                         '("remote:1")))
+          (goto-char (point-min))
+          (ygg-git-compare--goto-remote remote)
+          (should (equal (ygg-git-compare-comments-tests--targets) '("+b2"))))))))
+
+(ert-deftest ygg-git-compare-follow-reveals-again-when-the-right-pane-is-rendered-again ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--agent-compare root)
+      (let ((ygg-git-compare--file-window (selected-window))
+            (list (current-buffer))
+            (revealed 0))
+        (cl-letf (((symbol-function 'ygg-git-compare--reveal) (lambda () (cl-incf revealed))))
+          (ygg-git-compare-comments-tests--goto "+b2")
+          (ygg-git-compare--follow list)
+          (ygg-git-compare--follow list)
+          (should (= revealed 1))
+          (with-current-buffer (get-buffer (ygg-git-compare--file-buffer-name))
+            (magit-refresh-buffer))
+          (ygg-git-compare--follow list)
+          (should (= revealed 2)))))))
+
+(ert-deftest ygg-git-compare-follow-clears-the-marks-when-the-right-window-is-gone ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--agent-compare root)
+      (let ((ygg-git-compare--file-window (selected-window))
+            (list (current-buffer)))
+        (ygg-git-compare-comments-tests--goto "+b2")
+        (ygg-git-compare--follow list)
+        (with-current-buffer (get-buffer (ygg-git-compare--file-buffer-name))
+          (should (ygg-git-compare-comments-tests--targets)))
+        (setq ygg-git-compare--file-window nil)
+        (ygg-git-compare--follow list)
+        (with-current-buffer (get-buffer (ygg-git-compare--file-buffer-name))
+          (should-not (ygg-git-compare-comments-tests--targets)))))))
+
+(ert-deftest ygg-git-compare-follow-and-jumped-cancel-the-pending-follow ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--agent-compare root)
+      (let ((list (current-buffer)))
+        (dolist (run (list (lambda () (ygg-git-compare--follow list))
+                           (lambda () (ygg-git-compare--jumped nil))))
+          (let ((timer (run-with-idle-timer 1000 nil #'ignore)))
+            (setq ygg-git-compare--timer timer)
+            (funcall run)
+            (should-not ygg-git-compare--timer)
+            (should-not (memq timer timer-idle-list))))))))

@@ -661,6 +661,7 @@ ends it."
 those of the forge.")
 
 (declare-function ygg-git-compare--remote-comments "ygg-git-compare-threads" (list))
+(declare-function ygg-git-compare--remote-resolved-p "ygg-git-compare-threads" (comment))
 (declare-function ygg-git-compare--remote-block "ygg-git-compare-threads" (comment))
 (autoload 'ygg-git-compare--remote-comments "ygg-git-compare-threads")
 (autoload 'ygg-git-compare--conversation-spans "ygg-git-compare-pr-info")
@@ -807,14 +808,17 @@ gives it, or nil."
 that ygg-git-compare--hunk-lines gives with the line's text for its position."
   (let (hunks hunk old new)
     (dolist (text lines)
-      (if-let* ((header (ygg-git-compare--hunk-header text)))
-          (progn (when hunk (push (nreverse hunk) hunks))
-                 (setq hunk nil old (nth 0 header) new (nth 2 header)))
-        (when old
-          (pcase (and (> (length text) 0) (aref text 0))
-            (?- (push (list text 'old old) hunk) (cl-incf old))
-            (?+ (push (list text 'new new) hunk) (cl-incf new))
-            (?\s (push (list text 'new new old) hunk) (cl-incf old) (cl-incf new))))))
+      (cond
+       ((string-prefix-p "diff " text) (setq old nil))
+       ((ygg-git-compare--hunk-header text)
+        (let ((header (ygg-git-compare--hunk-header text)))
+          (when hunk (push (nreverse hunk) hunks))
+          (setq hunk nil old (nth 0 header) new (nth 2 header))))
+       (old
+        (pcase (and (> (length text) 0) (aref text 0))
+          (?- (push (list text 'old old) hunk) (cl-incf old))
+          (?+ (push (list text 'new new) hunk) (cl-incf new))
+          (?\s (push (list text 'new new old) hunk) (cl-incf old) (cl-incf new))))))
     (when hunk (push (nreverse hunk) hunks))
     (nreverse hunks)))
 
@@ -839,6 +843,13 @@ AWAY, else this compare's; nil when its commits are unknown."
         (list old (cdr ends)))
     (ygg-git-compare--diff-args ygg-git-compare--plan)))
 
+(defun ygg-git-compare--excerpt-bar-face (comment)
+  (if (plist-get comment :remote)
+      (if (or (ygg-git-compare--remote-resolved-p comment) (plist-get comment :outdated))
+          'shadow
+        'font-lock-doc-face)
+    (ygg-git-compare--comment-face comment)))
+
 (defun ygg-git-compare--excerpt (comment away)
   "The diff lines COMMENT is on with their context, led by its bar, or nil."
   (when-let* ((args (ygg-git-compare--excerpt-args comment away))
@@ -853,14 +864,14 @@ AWAY, else this compare's; nil when its commits are unknown."
     (cl-flet ((index (side line)
                 (cl-position-if (lambda (l) (ygg-git-compare--line-match l side line)) hunk)))
       (let* ((last (index side line))
-             (first (or (and (eq (plist-get comment :level) 'range)
-                             (plist-get comment :start-line)
-                             (index (or (plist-get comment :start-side) side)
-                                    (plist-get comment :start-line)))
-                        last))
+             (start (and (eq (plist-get comment :level) 'range)
+                         (plist-get comment :start-line)))
+             (first (if start
+                        (or (index (or (plist-get comment :start-side) side) start) 0)
+                      last))
              (low (min first last))
              (high (max first last))
-             (bar (propertize "▎ " 'face (ygg-git-compare--comment-face comment)))
+             (bar (propertize "▎ " 'face (ygg-git-compare--excerpt-bar-face comment)))
              (from (max 0 (- low ygg-git-compare-excerpt-context)))
              (to (min (1- (length hunk)) (+ high ygg-git-compare-excerpt-context)))
              (i (1- from)))
@@ -1030,18 +1041,46 @@ was made on another B than HERE's."
   "The diff lines of the comment point is on."
   :group 'ygg-git-compare)
 
-(defun ygg-git-compare--comment-span (file comment)
-  "The start of the first and the end of the last diff line COMMENT is on in
-FILE's section, as (BEG . END), or nil."
-  (when-let* ((end (ygg-git-compare--line-hit file (plist-get comment :side)
-                                              (plist-get comment :line)))
-              (start (if (eq (plist-get comment :level) 'range)
-                         (ygg-git-compare--line-hit file (plist-get comment :start-side)
-                                                    (plist-get comment :start-line))
-                       end)))
-    (let ((beg (min (car start) (car end)))
-          (last (max (car start) (car end))))
-      (cons beg (save-excursion (goto-char last) (line-end-position))))))
+(defun ygg-git-compare--file-section (path)
+  "The section of PATH among the files this diff shows, nil when it has none."
+  (when path
+    (cl-flet ((named (sections)
+                (seq-find (lambda (s) (and (equal (oref s value) path)
+                                           (ygg-git-compare--diffed-file-p s)))
+                          sections)))
+      (or (named (oref magit-root-section children))
+          (named (seq-mapcat (lambda (s) (oref s children))
+                             (seq-filter (lambda (s) (eq (oref s type) 'diffstat))
+                                         (oref magit-root-section children))))))))
+
+(defun ygg-git-compare--comment-spans (file comment)
+  "The (BEG . END) of each run of diff lines COMMENT covers in FILE's section; a
+range starting above what is drawn starts at its first drawn line."
+  (let* ((side (plist-get comment :side))
+         (line (plist-get comment :line))
+         (lines (and line (ygg-git-compare--file-lines file)))
+         (last (and lines (cl-position-if (lambda (e) (ygg-git-compare--line-match e side line))
+                                          lines))))
+    (when last
+      (let* ((start (and (eq (plist-get comment :level) 'range)
+                         (plist-get comment :start-line)))
+             (start-side (or (plist-get comment :start-side) side))
+             (first (or (and start
+                             (or (cl-position-if
+                                  (lambda (e) (ygg-git-compare--line-match e start-side start))
+                                  lines)
+                                 (cl-position-if
+                                  (lambda (e) (when-let* ((n (ygg-git-compare--entry-line e start-side)))
+                                                (>= n start)))
+                                  lines)))
+                        last))
+             runs)
+        (dolist (e (cl-subseq lines (min first last) (1+ (max first last))))
+          (let ((end (save-excursion (goto-char (car e)) (line-end-position))))
+            (if (and runs (= (car e) (1+ (cdar runs))))
+                (setcdr (car runs) end)
+              (push (cons (car e) end) runs))))
+        (nreverse runs)))))
 
 (defun ygg-git-compare--target-overlays ()
   (seq-filter (lambda (ov) (overlay-get ov 'ygg-git-compare-target))
@@ -1057,38 +1096,63 @@ FILE's section, as (BEG . END), or nil."
     (ygg-git-compare--clear-targets buffer)
     (let (first)
       (dolist (c comments first)
-        (when-let* ((file (seq-find (lambda (s) (and (magit-section-match 'file s)
-                                                     (equal (oref s value) (plist-get c :new-path))))
-                                    (oref magit-root-section children)))
-                    (span (ygg-git-compare--comment-span file c)))
-          (let ((ov (make-overlay (car span) (cdr span))))
-            (overlay-put ov 'face 'ygg-git-compare-comment-target)
-            (overlay-put ov 'ygg-git-compare-target t)
-            (overlay-put ov 'evaporate t))
-          (setq first (or first (car span))))))))
+        (when-let* ((file (ygg-git-compare--file-section (plist-get c :new-path)))
+                    (spans (ygg-git-compare--comment-spans file c)))
+          (dolist (span spans)
+            (let ((ov (make-overlay (car span) (cdr span))))
+              (overlay-put ov 'face 'ygg-git-compare-comment-target)
+              (overlay-put ov 'ygg-git-compare-target t)
+              (overlay-put ov 'evaporate t)))
+          (setq first (or first (caar spans))))))))
 
-(defun ygg-git-compare--diff-files ()
-  (let (files)
-    (magit-map-sections
-     (lambda (s) (when (magit-section-match 'file s) (push (oref s value) files))))
-    files))
+(defun ygg-git-compare--off-range-p (comment)
+  "Whether COMMENT was made on another range and stays there."
+  (and (not (plist-get comment :relocated)) (ygg-git-compare--stale-p comment)))
+
+(defun ygg-git-compare--placed (comment head here)
+  "COMMENT as this compare draws it: moved to where its lines went when it was
+made on another range."
+  (or (and (ygg-git-compare--stale-p comment)
+           (ygg-git-compare--relocate comment head here))
+      comment))
+
+(defun ygg-git-compare--comments-head (list comments)
+  (and (seq-some (lambda (c) (not (plist-get c :remote))) comments)
+       (string-prefix-p "branch " (with-current-buffer list (ygg-git-compare--compare-key)))
+       (ygg-git-compare--b-head list)))
+
+(defun ygg-git-compare--placed-comments (comments)
+  "COMMENTS as this diff draws them, those it has no lines for left out."
+  (when comments
+    (let* ((list (ygg-git-compare--list))
+           (head (and (seq-some #'ygg-git-compare--stale-p comments)
+                      (ygg-git-compare--comments-head list comments)))
+           (here (with-current-buffer list (ygg-git-compare--range-label))))
+      (seq-remove (lambda (c) (or (plist-get c :outdated) (ygg-git-compare--off-range-p c)))
+                  (mapcar (lambda (c) (ygg-git-compare--placed c head here)) comments)))))
 
 (defun ygg-git-compare--comment-targets ()
-  "The comments on this line that sit on a file this diff has."
-  (when-let* ((comments (seq-remove #'ygg-git-compare--stale-p
-                                    (ygg-git-compare--comments-at-point)))
-              (files (ygg-git-compare--diff-files)))
-    (seq-filter (lambda (c) (member (plist-get c :new-path) files)) comments)))
+  "The comments drawn on this line, where they are drawn, that sit on a file
+this diff has."
+  (seq-filter (lambda (c) (ygg-git-compare--file-section (plist-get c :new-path)))
+              (ygg-git-compare--placed-comments (ygg-git-compare--drawn-at-point))))
 
 (defvar-local ygg-git-compare--aimed nil
-  "The file and comments the right pane was last scrolled to.")
+  "The file, comments and render of it the right pane was last scrolled to.")
+
+(defun ygg-git-compare--unaim ()
+  "Take the marks off the right pane's diff."
+  (setq ygg-git-compare--aimed nil)
+  (when-let* ((buffer (get-buffer (ygg-git-compare--file-buffer-name))))
+    (ygg-git-compare--clear-targets buffer)))
 
 (defun ygg-git-compare--aim-comments (file comments)
   "Mark COMMENTS' lines in the right pane's FILE, scrolling there when they
 are new; with none, clear the marks."
-  (let ((buffer (get-buffer (ygg-git-compare--file-buffer-name)))
-        (window ygg-git-compare--file-window)
-        (key (cons file (mapcar (lambda (c) (plist-get c :id)) comments))))
+  (let* ((buffer (get-buffer (ygg-git-compare--file-buffer-name)))
+         (window ygg-git-compare--file-window)
+         (key (list file (mapcar (lambda (c) (plist-get c :id)) comments)
+                    (and buffer (buffer-chars-modified-tick buffer)))))
     (when buffer (ygg-git-compare--clear-targets buffer))
     (if (null comments)
         (setq ygg-git-compare--aimed nil)
@@ -1110,7 +1174,7 @@ are new; with none, clear the marks."
 
 (defun ygg-git-compare--jumped (comments)
   "Mark COMMENTS' lines here until point leaves them, and show their file now."
-  (ygg-git-compare--mark-comments (current-buffer) comments)
+  (ygg-git-compare--mark-comments (current-buffer) (ygg-git-compare--placed-comments comments))
   (add-hook 'post-command-hook #'ygg-git-compare--release-jump nil t)
   (ygg-git-compare--follow (current-buffer)))
 
@@ -1138,16 +1202,7 @@ it has no place for at the top of the diff of every file."
     (let ((ygg-git-compare--mark-drafts
            (seq-find (lambda (c) (and (plist-get c :remote) (not (plist-get c :notice))))
                      comments))
-          (files (seq-filter (lambda (s) (magit-section-match 'file s))
-                             (if (ygg-git-compare--unwashed-p)
-                                 (seq-mapcat (lambda (s) (oref s children))
-                                             (seq-filter (lambda (s) (eq (oref s type) 'diffstat))
-                                                         (oref magit-root-section children)))
-                               (oref magit-root-section children))))
-          (head (and (seq-some (lambda (c) (not (plist-get c :remote))) comments)
-                     (string-prefix-p "branch " (with-current-buffer list
-                                                    (ygg-git-compare--compare-key)))
-                     (ygg-git-compare--b-head list)))
+          (head (ygg-git-compare--comments-head list comments))
           (here (with-current-buffer list (ygg-git-compare--range-label)))
           (default-directory (buffer-local-value 'default-directory list))
           (magit-git-global-arguments (with-current-buffer list (ygg-git-compare--global-args)))
@@ -1158,15 +1213,11 @@ it has no place for at the top of the diff of every file."
           (top nil))
       (dolist (original comments)
         (let* ((level (plist-get original :level))
-               (c (or (and (ygg-git-compare--stale-p original)
-                           (ygg-git-compare--relocate original head here))
-                      original))
+               (c (ygg-git-compare--placed original head here))
                (outdated (plist-get c :outdated))
-               (file (and (plist-get c :new-path) (not (plist-get c :gone))
-                          (seq-find (lambda (s) (equal (oref s value) (plist-get c :new-path)))
-                                    files)))
-               (stale-p (and (not (plist-get c :relocated))
-                             (ygg-git-compare--stale-p c)))
+               (file (and (not (plist-get c :gone))
+                          (ygg-git-compare--file-section (plist-get c :new-path))))
+               (stale-p (ygg-git-compare--off-range-p c))
                (pos (and file (not stale-p) (not outdated) (memq level '(line range))
                          (ygg-git-compare--line-pos file c)))
                (place (cond (stale-p nil)
@@ -1176,6 +1227,7 @@ it has no place for at the top of the diff of every file."
                (block (ygg-git-compare--comment-block
                        c (not (or pos (memq level '(file review))))))
                (excerpt (and (eq (current-buffer) list) (not pos)
+                             (zerop (or (plist-get c :depth) 0))
                              (memq level '(line range)) (plist-get c :new-path)
                              (not (string-empty-p block))
                              (ygg-git-compare--excerpt c (or stale-p outdated)))))
@@ -1232,14 +1284,26 @@ it has no place for at the top of the diff of every file."
 
 ;;; Acting on the comment at point
 
+(defun ygg-git-compare--ids-at-point ()
+  (seq-mapcat (lambda (ov) (overlay-get ov 'ygg-git-compare-comments))
+              (overlays-in (line-beginning-position) (line-end-position))))
+
 (defun ygg-git-compare--comments-at-point ()
   "The comments shown on this line, or the one this section of a summary is."
   (let ((ids (if (derived-mode-p 'ygg-git-compare-comments-summary-mode)
                  (ensure-list (magit-section-value-if 'ygg-git-compare-comment))
-               (seq-mapcat (lambda (ov) (overlay-get ov 'ygg-git-compare-comments))
-                           (overlays-in (line-beginning-position) (line-end-position))))))
+               (ygg-git-compare--ids-at-point))))
     (and ids (seq-filter (lambda (c) (member (plist-get c :id) ids))
                          (ygg-git-compare-comments-list t)))))
+
+(defun ygg-git-compare--drawn-at-point ()
+  "The comments of the compare and of the forge drawn on this line."
+  (let ((ids (ygg-git-compare--ids-at-point)))
+    (append (ygg-git-compare--comments-at-point)
+            (and (seq-some #'ygg-git-compare--remote-id-p ids)
+                 (seq-filter (lambda (c) (member (plist-get c :id) ids))
+                             (ignore-errors
+                               (ygg-git-compare--remote-shown (ygg-git-compare--list))))))))
 
 (defun ygg-git-compare--first-line (comment)
   "The first line of COMMENT's text."

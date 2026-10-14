@@ -1344,15 +1344,17 @@ an untracked one against nothing."
   "Make BUFFER's right pane show the file at point, unless it already does."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
+      (when ygg-git-compare--timer (cancel-timer ygg-git-compare--timer))
       (setq ygg-git-compare--timer nil)
-      (let ((comments (and (fboundp 'ygg-git-compare--comment-targets)
-                           (ygg-git-compare--comment-targets))))
-        (when-let* ((file (or (plist-get (car comments) :new-path) (magit-file-at-point)))
-                    ((window-live-p ygg-git-compare--file-window)))
-          (unless (equal ygg-git-compare--shown (cons magit-buffer-diff-range file))
-            (ygg-git-compare--show-file file))
-          (when (fboundp 'ygg-git-compare--aim-comments)
-            (ygg-git-compare--aim-comments file comments)))))))
+      (if (not (window-live-p ygg-git-compare--file-window))
+          (when (fboundp 'ygg-git-compare--unaim) (ygg-git-compare--unaim))
+        (let ((comments (and (fboundp 'ygg-git-compare--comment-targets)
+                             (ygg-git-compare--comment-targets))))
+          (when-let* ((file (or (plist-get (car comments) :new-path) (magit-file-at-point))))
+            (unless (equal ygg-git-compare--shown (cons magit-buffer-diff-range file))
+              (ygg-git-compare--show-file file))
+            (when (fboundp 'ygg-git-compare--aim-comments)
+              (ygg-git-compare--aim-comments file comments))))))))
 
 (defun ygg-git-compare--schedule ()
   (when ygg-git-compare--timer (cancel-timer ygg-git-compare--timer))
@@ -2020,6 +2022,7 @@ when that is known, and a compare that is not its range says why instead."
 (declare-function ygg-git-compare--load-comments "ygg-git-compare-comments" ())
 (declare-function ygg-git-compare--draw-comments "ygg-git-compare-comments" ())
 (declare-function ygg-git-compare--comment-targets "ygg-git-compare-comments" ())
+(declare-function ygg-git-compare--unaim "ygg-git-compare-comments" ())
 (declare-function ygg-git-compare--aim-comments "ygg-git-compare-comments" (file comments))
 
 (defun ygg-git-compare--reveal ()

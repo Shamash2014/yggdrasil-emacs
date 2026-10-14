@@ -23,6 +23,8 @@
 (autoload 'ygg-git-compare--conversation-section "ygg-git-compare-pr-info")
 (autoload 'ygg-git-compare--description-section "ygg-git-compare-pr-info")
 (declare-function ygg-git-compare-comment-new "ygg-git-compare-comments")
+(declare-function ygg-git-compare--file-section "ygg-git-compare-comments" (path))
+(declare-function ygg-git-compare--jumped "ygg-git-compare-comments" (comments))
 (declare-function ygg-markdown-fences-mode "ygg-markdown-fences" (lang))
 (declare-function ygg-markdown-fences--fontify "ygg-markdown-fences" (mode body))
 
@@ -837,10 +839,7 @@ with BY-THREAD, the first comment of a thread, asked for among threads."
 (defun ygg-git-compare--goto-remote (comment)
   "Go to the forge's COMMENT in this diff: its line, or its file's top with
 a note when the line is no longer in the diff."
-  (let* ((file (seq-find (lambda (s)
-                           (and (magit-section-match 'file s)
-                                (equal (oref s value) (plist-get comment :new-path))))
-                         (oref magit-root-section children)))
+  (let* ((file (ygg-git-compare--file-section (plist-get comment :new-path)))
          (outdated (plist-get comment :outdated))
          (pos (and file (not outdated) (memq (plist-get comment :level) '(line range))
                    (ygg-git-compare--line-pos file comment))))
@@ -848,6 +847,7 @@ a note when the line is no longer in the diff."
           ((and file outdated) (goto-char (oref file start)))
           (t (ygg-git-compare--goto-comment (plist-get comment :id))))
     (ygg-git-compare--reveal)
+    (when pos (ygg-git-compare--jumped (list comment)))
     (when outdated
       (message "%s" (ygg-git-compare--remote-outdated-note comment)))))
 
