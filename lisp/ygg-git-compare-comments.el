@@ -900,7 +900,8 @@ it has no place for at the top of the diff of every file."
                      comments))
           (files (seq-filter (lambda (s) (magit-section-match 'file s))
                              (oref magit-root-section children)))
-          (head (and (string-prefix-p "branch " (with-current-buffer list
+          (head (and (seq-some (lambda (c) (not (plist-get c :remote))) comments)
+                     (string-prefix-p "branch " (with-current-buffer list
                                                     (ygg-git-compare--compare-key)))
                      (ygg-git-compare--b-head list)))
           (here (with-current-buffer list (ygg-git-compare--range-label)))
