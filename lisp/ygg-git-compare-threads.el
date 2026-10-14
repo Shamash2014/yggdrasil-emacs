@@ -23,7 +23,7 @@
 (autoload 'ygg-git-compare--conversation-section "ygg-git-compare-pr-info")
 (autoload 'ygg-git-compare--description-section "ygg-git-compare-pr-info")
 (declare-function ygg-git-compare-comment-new "ygg-git-compare-comments")
-(declare-function ygg-git-compare--file-section "ygg-git-compare-comments" (path))
+(declare-function ygg-git-compare--find-file-section "ygg-git-compare-comments" (path))
 (declare-function ygg-git-compare--jumped "ygg-git-compare-comments" (comments))
 (declare-function ygg-markdown-fences-mode "ygg-markdown-fences" (lang))
 (declare-function ygg-markdown-fences--fontify "ygg-markdown-fences" (mode body))
@@ -391,12 +391,18 @@ author, age, replies and state, a reply indented under it with no state."
       (ygg-git-compare--remote-draw comment)
     (error (propertize "(a comment from the forge that could not be shown)" 'face 'shadow))))
 
+(defun ygg-git-compare--remote-dim-p (comment)
+  (or (ygg-git-compare--remote-resolved-p comment) (plist-get comment :outdated)))
+
+(defun ygg-git-compare--remote-bar-face (comment)
+  (if (ygg-git-compare--remote-dim-p comment) 'shadow 'font-lock-doc-face))
+
 (defun ygg-git-compare--remote-draw (comment)
   (let* ((depth (or (plist-get comment :depth) 0))
-         (dim (or (ygg-git-compare--remote-resolved-p comment) (plist-get comment :outdated)))
+         (dim (ygg-git-compare--remote-dim-p comment))
          (folded (plist-get comment :folded))
          (bar (concat (make-string (* 2 depth) ?\s)
-                      (propertize "▎ " 'face (if dim 'shadow 'font-lock-doc-face))))
+                      (propertize "▎ " 'face (ygg-git-compare--remote-bar-face comment))))
          (width (- (ygg-git-compare--remote-width) (string-width bar)))
          (replies (plist-get comment :replies))
          (state (and (zerop depth) (ygg-git-compare--remote-state comment)))
@@ -839,7 +845,7 @@ with BY-THREAD, the first comment of a thread, asked for among threads."
 (defun ygg-git-compare--goto-remote (comment)
   "Go to the forge's COMMENT in this diff: its line, or its file's top with
 a note when the line is no longer in the diff."
-  (let* ((file (ygg-git-compare--file-section (plist-get comment :new-path)))
+  (let* ((file (ygg-git-compare--find-file-section (plist-get comment :new-path)))
          (outdated (plist-get comment :outdated))
          (pos (and file (not outdated) (memq (plist-get comment :level) '(line range))
                    (ygg-git-compare--line-pos file comment))))

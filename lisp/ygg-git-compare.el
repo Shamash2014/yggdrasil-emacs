@@ -1340,21 +1340,25 @@ an untracked one against nothing."
       (ygg-git-compare-mode 1)
       (current-buffer))))
 
-(defun ygg-git-compare--follow (buffer)
-  "Make BUFFER's right pane show the file at point, unless it already does."
+(defun ygg-git-compare--follow (buffer &optional targets)
+  "Make BUFFER's right pane show the file at point, unless it already does;
+TARGETS are the comments to aim at when the caller has them."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (when ygg-git-compare--timer (cancel-timer ygg-git-compare--timer))
       (setq ygg-git-compare--timer nil)
       (if (not (window-live-p ygg-git-compare--file-window))
           (when (fboundp 'ygg-git-compare--unaim) (ygg-git-compare--unaim))
-        (let ((comments (and (fboundp 'ygg-git-compare--comment-targets)
-                             (ygg-git-compare--comment-targets))))
-          (when-let* ((file (or (plist-get (car comments) :new-path) (magit-file-at-point))))
-            (unless (equal ygg-git-compare--shown (cons magit-buffer-diff-range file))
-              (ygg-git-compare--show-file file))
-            (when (fboundp 'ygg-git-compare--aim-comments)
-              (ygg-git-compare--aim-comments file comments))))))))
+        (let ((comments (or targets
+                            (and (fboundp 'ygg-git-compare--comment-targets)
+                                 (ygg-git-compare--comment-targets)))))
+          (if-let* ((file (or (plist-get (car comments) :new-path) (magit-file-at-point))))
+              (progn
+                (unless (equal ygg-git-compare--shown (cons magit-buffer-diff-range file))
+                  (ygg-git-compare--show-file file))
+                (when (fboundp 'ygg-git-compare--aim-comments)
+                  (ygg-git-compare--aim-comments file comments)))
+            (when (fboundp 'ygg-git-compare--unaim) (ygg-git-compare--unaim))))))))
 
 (defun ygg-git-compare--schedule ()
   (when ygg-git-compare--timer (cancel-timer ygg-git-compare--timer))

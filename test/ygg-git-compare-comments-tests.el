@@ -1269,9 +1269,76 @@ and adds b.txt; main stays checked out."
             (list (current-buffer)))
         (cl-letf (((symbol-function 'magit-rev-parse)
                    (lambda (&rest args) (cl-incf asked) (apply real args))))
-          (let ((ygg-git-compare--b-head-memo (cons list 'unset)))
-            (should (equal (ygg-git-compare--b-head list) (ygg-git-compare--b-head list)))
-            (should (= asked 1))))))))
+          (ygg-git-compare--forget-b-head)
+          (should (equal (ygg-git-compare--b-head list) (ygg-git-compare--b-head list)))
+          (should (= asked 1))
+          (ygg-git-compare--forget-b-head)
+          (ygg-git-compare--b-head list)
+          (should (= asked 2)))))))
+
+(defun ygg-git-compare-comments-tests--processes (thunk)
+  (let ((started 0)
+        (count (lambda (&rest _) (setq started (1+ started)))))
+    (dolist (fn '(process-file call-process make-process start-process start-file-process))
+      (advice-add fn :before count))
+    (unwind-protect (funcall thunk)
+      (dolist (fn '(process-file call-process make-process start-process start-file-process))
+        (advice-remove fn count)))
+    started))
+
+(ert-deftest ygg-git-compare-follow-on-a-relocated-comment-starts-no-process ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+three")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on three")
+      (ygg-git-compare-comments-tests--advance root "a.txt" "0\n0b\n1\ntwo\nthree\n4\n5\n")
+      (let ((ygg-git-compare--file-window (selected-window))
+            (list (current-buffer)))
+        (ygg-git-compare-comments-tests--goto "+three")
+        (ygg-git-compare--follow list)
+        (should (zerop (ygg-git-compare-comments-tests--processes
+                        (lambda () (ygg-git-compare--follow list)))))))))
+
+(ert-deftest ygg-git-compare-follow-off-any-comment-or-file-clears-the-marks ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--agent-compare root)
+      (let ((ygg-git-compare--file-window (selected-window))
+            (list (current-buffer)))
+        (ygg-git-compare-comments-tests--goto "+b2")
+        (ygg-git-compare--follow list)
+        (goto-char (point-min))
+        (ygg-git-compare--follow list)
+        (should-not ygg-git-compare--aimed)
+        (with-current-buffer (get-buffer (ygg-git-compare--file-buffer-name))
+          (should-not (ygg-git-compare-comments-tests--targets)))))))
+
+(ert-deftest ygg-git-compare-follow-leaves-the-pane-scrolled-by-hand-until-the-comment-changes ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--agent-compare root)
+      (let ((ygg-git-compare--file-window (selected-window))
+            (list (current-buffer))
+            (aimed 0))
+        (ygg-git-compare-comments-tests--goto "+b2")
+        (ygg-git-compare--follow list)
+        (cl-letf (((symbol-function 'recenter) (lambda (&rest _) (cl-incf aimed))))
+          (with-current-buffer (get-buffer (ygg-git-compare--file-buffer-name))
+            (let ((inhibit-read-only t)) (put-text-property (point-min) (1+ (point-min)) 'x 1)))
+          (ygg-git-compare--follow list)
+          (should (= aimed 0))
+          (ygg-git-compare-comments-tests--goto "+three")
+          (ygg-git-compare--follow list)
+          (should (= aimed 1)))))))
+
+(ert-deftest ygg-git-compare-comment-spans-do-not-start-below-the-last-line ()
+  (with-temp-buffer
+    (insert "1\n2\n3\n4\n")
+    (cl-letf (((symbol-function 'ygg-git-compare--file-lines)
+               (lambda (_) '((1 new 1) (3 new 2) (5 old 3) (7 old 4)))))
+      (should (equal (ygg-git-compare--comment-spans
+                      nil '(:level range :side new :line 2 :start-side old :start-line 2))
+                     '((3 . 4)))))))
 
 (ert-deftest ygg-git-compare-comments-outdated-range-names-its-lines-once ()
   (let* ((comment (list :level 'range :start-line 20 :line 21 :outdated t :text "x"
