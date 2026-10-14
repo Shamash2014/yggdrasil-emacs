@@ -534,7 +534,6 @@ not be had, and OLD the comments held before, whose states stand then."
              :line (and anchored line) :start-line start
              :orig-line (or (plist-get c :original_line) line)
              :orig-commit (plist-get c :original_commit_id)
-             :orig-commit (plist-get c :original_commit_id)
              :resolved (if state (car state) 'unknown)
              :outdated (or (cdr state) (and (null line) (not file-subject))))))
    raw))

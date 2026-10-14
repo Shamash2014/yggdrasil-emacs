@@ -14,7 +14,8 @@
 
 (defcustom ygg-git-compare-context-step 10
   "Lines of context that one press of more or less context adds or removes."
-  :type 'natnum)
+  :type 'natnum
+  :group 'ygg-git-compare)
 
 (defconst ygg-git-compare-context--whole 1000000
   "Lines of context that draw a whole file.")
@@ -26,15 +27,10 @@
   (with-current-buffer (ygg-git-compare--list)
     (or ygg-git-compare--context (ygg-git-compare-context--default))))
 
-(defun ygg-git-compare-context--hunk-at-point ()
-  (let ((section (magit-current-section)))
-    (while (and section (not (magit-section-match 'hunk section)))
-      (setq section (oref section parent)))
-    (and section (oref section from-range) (oref section to-range) section)))
-
 (defun ygg-git-compare-context--spot ()
   "Point as (PATH SIDE LINE) on a diff line, (PATH) on a file, else nil."
-  (let ((hunk (ygg-git-compare-context--hunk-at-point)))
+  (let ((hunk (let ((section (ygg-git-compare--section-up 'hunk)))
+                (and section (oref section from-range) (oref section to-range) section))))
     (if hunk
         (let ((entry (seq-find (lambda (e) (= (car e) (line-beginning-position)))
                                (ygg-git-compare--hunk-lines hunk))))
@@ -44,29 +40,27 @@
       (when-let* ((file (magit-file-at-point)))
         (list file)))))
 
-(defun ygg-git-compare-context--file-section (path)
-  (seq-find (lambda (s) (and (eq (oref s type) 'file)
-                             (or (equal (oref s value) path)
-                                 (and (slot-exists-p s 'source) (equal (oref s source) path)))))
-            (oref magit-root-section children)))
-
 (defun ygg-git-compare-context--marker (path side line)
   "A marker on the diff line of PATH's SIDE and LINE drawn in this buffer."
-  (when-let* ((file (ygg-git-compare-context--file-section path)))
-    (catch 'found
-      (dolist (hunk (oref file children))
-        (when (and (magit-section-match 'hunk hunk) (oref hunk from-range) (oref hunk to-range))
-          (dolist (entry (ygg-git-compare--hunk-lines hunk))
-            (when (if (eq side 'old)
-                      (or (and (eq (nth 1 entry) 'old) (eql (nth 2 entry) line))
-                          (eql (nth 3 entry) line))
-                    (and (eq (nth 1 entry) 'new) (eql (nth 2 entry) line)))
-              (throw 'found (copy-marker (car entry))))))))))
+  (when-let* ((pos (ygg-git-compare--line-position path side line)))
+    (copy-marker pos)))
+
+(defun ygg-git-compare-context--nearest (path side line)
+  "The start of the diff line of PATH drawn in this buffer whose SIDE number is
+nearest LINE, nil when it draws none."
+  (when-let* ((file (ygg-git-compare--find-file-section path)))
+    (let (best)
+      (dolist (entry (ygg-git-compare--file-lines file))
+        (when-let* ((number (ygg-git-compare--entry-line entry side))
+                    (gap (abs (- number line)))
+                    ((or (null best) (< gap (car best)))))
+          (setq best (cons gap (car entry)))))
+      (cdr best))))
 
 (defun ygg-git-compare-context--drawn-in (path)
   "The buffer that draws PATH's hunks: this compare, or its file pane when
 the compare is too large to wash."
-  (let ((file (ygg-git-compare-context--file-section path)))
+  (let ((file (ygg-git-compare--find-file-section path)))
     (if (and file (not (seq-some (lambda (s) (magit-section-match 'hunk s))
                                  (oref file children))))
         (progn (ygg-git-compare--show-file path)
@@ -82,11 +76,10 @@ file has none."
          (nearest nil))
     (dolist (text (apply #'magit-git-lines "diff" "--no-color" "--no-ext-diff" "-U0"
                          (append (ygg-git-compare--diff-args plan) (list "--" path))))
-      (when (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@" text)
+      (when-let* ((header (ygg-git-compare--hunk-header text)))
         (let* ((old (eq side 'old))
-               (first (string-to-number (match-string (if old 1 3) text)))
-               (count-text (match-string (if old 2 4) text))
-               (count (if count-text (string-to-number count-text) 1))
+               (first (nth (if old 0 2) header))
+               (count (nth (if old 1 3) header))
                (distance (cond ((zerop count) (if (<= line first) (1+ (- first line)) (- line first)))
                                ((< line first) (- first line))
                                ((> line (+ first count -1)) (- line first count -1))
@@ -96,8 +89,10 @@ file has none."
 
 (defun ygg-git-compare-context--restore (spot)
   (when-let* ((pos (pcase spot
-                     (`(,path ,side ,line) (ygg-git-compare-context--marker path side line))
-                     (`(,path) (when-let* ((file (ygg-git-compare-context--file-section path)))
+                     (`(,path ,side ,line)
+                      (or (ygg-git-compare-context--marker path side line)
+                          (ygg-git-compare-context--nearest path side line)))
+                     (`(,path) (when-let* ((file (ygg-git-compare--find-file-section path)))
                                  (oref file start))))))
     (goto-char pos)
     (ygg-git-compare--reveal)
@@ -142,11 +137,12 @@ just enough context drawn for it; nil when the file has no such line."
                   (ygg-git-compare-context--marker path side line))))
       (or (find)
           (when-let* ((distance (ygg-git-compare-context--distance path side line)))
-            (ygg-git-compare-context--set
-             (max distance (ygg-git-compare-context--current)))
-            (or (find)
-                (progn (ygg-git-compare-context--set ygg-git-compare-context--whole)
-                       (find))))))))
+            (let ((before (ygg-git-compare-context--current)))
+              (ygg-git-compare-context--set (max distance before))
+              (or (find)
+                  (progn (ygg-git-compare-context--set ygg-git-compare-context--whole)
+                         (find))
+                  (progn (ygg-git-compare-context--set before) nil))))))))
 
 (provide 'ygg-git-compare-context)
 ;;; ygg-git-compare-context.el ends here

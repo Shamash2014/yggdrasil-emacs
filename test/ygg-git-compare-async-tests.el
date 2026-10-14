@@ -1388,3 +1388,79 @@ glab, every message collected in `--said'."
        (lambda () (equal (plist-get (buffer-local-value 'ygg-git-compare--b buffer) :diff)
                          head)))
       (should (= (ygg-git-compare-async-tests--fetches fake) 1)))))
+
+(defun ygg-git-compare-async-tests--settled (root base head chosen)
+  "A compare of a pull request opened with A at its head, settled with the
+pull request's own answer; the buffer, and what A would be on its base."
+  (ygg-git-compare-async-tests--git root "fetch" "-q" "origin" "refs/pull/7/head")
+  (let* ((token (list nil))
+         (pr (list :number 7 :head head :start base :base-ref "main"))
+         (buffer (ygg-git-compare-buffer
+                  root (cons 'rev head)
+                  (cons 'pr (list :number 7 :head "feature" :sha head :remote "origin"
+                                  :title "Add two")))))
+    (with-current-buffer buffer
+      (setq ygg-git-compare--review-token token
+            ygg-git-compare--note nil
+            ygg-git-compare--a-chosen chosen))
+    (ygg-git-compare--review-settle buffer token root "feature" "origin" 7 pr nil)
+    (list buffer (car (ygg-git-compare--review-specs pr "feature" "origin")))))
+
+(ert-deftest ygg-git-compare-async-a-pull-request-compare-follows-its-base ()
+  (ygg-git-compare-async-tests--with-world (root _fake base head)
+    (pcase-let ((`(,buffer ,own) (ygg-git-compare-async-tests--settled root base head nil)))
+      (with-current-buffer buffer
+        (should (equal ygg-git-compare--a-spec own))
+        (should-not (equal ygg-git-compare--a-spec (cons 'rev head)))
+        (should (equal (plist-get (cdr ygg-git-compare--b-spec) :title) "Add two"))))))
+
+(ert-deftest ygg-git-compare-async-a-chosen-side-a-stays-whatever-the-base-does ()
+  (ygg-git-compare-async-tests--with-world (root _fake base head)
+    (pcase-let ((`(,buffer ,own) (ygg-git-compare-async-tests--settled root base head t)))
+      (with-current-buffer buffer
+        (should (equal ygg-git-compare--a-spec (cons 'rev head)))
+        (should-not (equal ygg-git-compare--a-spec own))
+        (should (equal (plist-get (cdr ygg-git-compare--b-spec) :title) "Add two"))
+        (should (equal (plist-get (cdr ygg-git-compare--b-spec) :sha) head))))))
+
+(ert-deftest ygg-git-compare-async-switching-base-or-picking-a-keeps-it ()
+  (ygg-git-compare-async-tests--with-world (root _fake base head)
+    (pcase-let ((`(,buffer ,_own) (ygg-git-compare-async-tests--settled root base head nil)))
+      (with-current-buffer buffer
+        (should-not ygg-git-compare--a-chosen)
+        (cl-letf (((symbol-function 'ygg-git-compare--read)
+                   (lambda (&rest _) (cons 'rev head)))
+                  ((symbol-function 'ygg-git-compare-default-a)
+                   (lambda (&rest _) (cons 'rev base))))
+          (ygg-git-compare-switch-base))
+        (should ygg-git-compare--a-chosen)
+        (should (equal ygg-git-compare--a-spec (cons 'rev head)))))
+    (cl-letf (((symbol-function 'ygg-git-compare-default-a)
+               (lambda (&rest _) (cons 'rev base))))
+      (should (ygg-git-compare--a-picked-p (cons 'rev head) '(pr . nil)))
+      (should-not (ygg-git-compare--a-picked-p (cons 'rev base) '(pr . nil))))))
+
+(defun ygg-git-compare-async-tests--pinned-buffer (root base head)
+  (ygg-git-compare-async-tests--seed (ygg-git-compare--head-key "origin" 7) head 100000)
+  (let ((spec (cons 'pr (list :number 7 :sha head :head "feature" :remote "origin"))))
+    (ygg-git-compare-async-tests--git root "fetch" "-q" "origin" "refs/pull/7/head")
+    (cons spec (ygg-git-compare-buffer root (cons 'rev base) spec))))
+
+(ert-deftest ygg-git-compare-async-a-fetch-landing-on-the-same-head-clears-the-note ()
+  (ygg-git-compare-async-tests--with-world (root _fake base head)
+    (pcase-let ((`(,spec . ,buffer) (ygg-git-compare-async-tests--pinned-buffer root base head)))
+      (should (string-search "refreshing" (ygg-git-compare-async-tests--header buffer)))
+      (ygg-git-compare-async-tests--seed (ygg-git-compare--head-key "origin" 7) head 1)
+      (ygg-git-compare--pr-repin spec root head nil)
+      (should-not (string-search "refreshing" (ygg-git-compare-async-tests--header buffer))))))
+
+(ert-deftest ygg-git-compare-async-a-failed-fetch-says-so-in-the-header ()
+  (ygg-git-compare-async-tests--with-world (root _fake base head)
+    (pcase-let ((`(,spec . ,buffer) (ygg-git-compare-async-tests--pinned-buffer root base head)))
+      (puthash (ygg-git-compare--head-key "origin" 7)
+               (list :value head :time (- (float-time) 1) :failed (float-time) :error "boom")
+               (ygg-git-compare--cache-table (magit-gitdir)))
+      (ygg-git-compare--pr-repin spec root nil "boom")
+      (let ((header (ygg-git-compare-async-tests--header buffer)))
+        (should (string-search "not refreshed: boom" header))
+        (should-not (string-search "refreshing" header))))))

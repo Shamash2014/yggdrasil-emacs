@@ -80,6 +80,8 @@ left out of a review."
   "How the sides are diffed, as `ygg-git-compare--planned' answers.")
 (defvar-local ygg-git-compare--a-spec nil "Side A as picked: (KIND . WHAT).")
 (defvar-local ygg-git-compare--b-spec nil "Side B as picked: (KIND . WHAT).")
+(defvar-local ygg-git-compare--a-chosen nil
+  "Non-nil when side A was picked, so a pull request's base does not replace it.")
 (defvar-local ygg-git-compare--a nil "Side A as resolved, a plist.")
 (defvar-local ygg-git-compare--b nil "Side B as resolved, a plist.")
 (defvar-local ygg-git-compare--dots "..."
@@ -729,6 +731,8 @@ tells which ref holds the head."
                    (if (plist-get entry :failed)
                        (format "not refreshed: %s" (plist-get entry :error))
                      "refreshing…")))
+          ((plist-get entry :failed)
+           (format "not refreshed: %s" (plist-get entry :error)))
           ((ygg-git-compare--refreshing-p 'head) "refreshing…"))))
 
 (defun ygg-git-compare--dirty-p (dir)
@@ -745,12 +749,24 @@ tells which ref holds the head."
 (defun ygg-git-compare--pr-repin (spec root sha err)
   "Stand SPEC, a pinned pull request side, on SHA, its head as the remote
 has it now, and draw its compares again."
-  (when (and sha (not err) (not (equal sha (plist-get (cdr spec) :sha))))
-    (plist-put (cdr spec) :sha sha)
+  (let ((moved (and sha (not err) (not (equal sha (plist-get (cdr spec) :sha))))))
+    (when moved (plist-put (cdr spec) :sha sha))
     (dolist (buffer (ygg-git-compare--spec-buffers spec))
       (with-current-buffer buffer
         (let ((default-directory root))
-          (ygg-git-compare--redraw))))))
+          (if moved
+              (ygg-git-compare--redraw)
+            (ygg-git-compare--renote spec)))))))
+
+(defun ygg-git-compare--renote (spec)
+  "Say again in the header what is known of SPEC's head, a pull request side."
+  (let ((note (ygg-git-compare--head-note (plist-get (cdr spec) :number)
+                                          (plist-get (cdr spec) :remote))))
+    (cond ((eq spec ygg-git-compare--a-spec)
+           (setq ygg-git-compare--a (plist-put ygg-git-compare--a :note note)))
+          ((eq spec ygg-git-compare--b-spec)
+           (setq ygg-git-compare--b (plist-put ygg-git-compare--b :note note))))
+    (ygg-git-compare--header)))
 
 (defun ygg-git-compare--pr-resettle (spec root pr err)
   (when (and pr (not err))
@@ -1080,6 +1096,14 @@ committed is named by its checkout."
                 (plist-get side :diff))))
     (concat (end ygg-git-compare--a) ygg-git-compare--dots (end ygg-git-compare--b))))
 
+(defun ygg-git-compare--hunk-header (text)
+  "The (OLD-START OLD-LEN NEW-START NEW-LEN) of the hunk header TEXT, nil when
+TEXT is not one."
+  (when (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@" text)
+    (cl-flet ((count (group) (if-let* ((n (match-string group text))) (string-to-number n) 1)))
+      (list (string-to-number (match-string 1 text)) (count 2)
+            (string-to-number (match-string 3 text)) (count 4)))))
+
 (defun ygg-git-compare--diff-args (plan)
   "What git diff takes for PLAN's tracked changes, before any option of magit's."
   (cons (plist-get plan :range) (and (plist-get plan :reverse) '("-R"))))
@@ -1364,7 +1388,8 @@ an untracked one against nothing."
        (ygg-git-compare--read (format "Compare %s against (A)"
                                       (ygg-git-compare--label ygg-git-compare--b-spec
                                                               (funcall cands)))
-                              cands (ygg-git-compare-default-a ygg-git-compare--b-spec))))))
+                              cands (ygg-git-compare-default-a ygg-git-compare--b-spec)))
+      (setq ygg-git-compare--a-chosen t))))
 
 (defun ygg-git-compare-toggle-dots ()
   "Diff A...B, from where the sides parted, or A..B, one against the other."
@@ -1970,6 +1995,7 @@ when that is known, and a compare that is not its range says why instead."
 (autoload 'ygg-git-compare-submit "ygg-git-compare-submit" nil t)
 (autoload 'ygg-git-compare-comment "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-file "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-goto-line "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-select-lines "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-next "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-previous "ygg-git-compare-comments" nil t)
@@ -2302,9 +2328,10 @@ refused: a compare is read-only.
       (ygg-git-compare--fold)
       (current-buffer))))
 
-(defun ygg-git-compare-open (a b)
+(defun ygg-git-compare-open (a b &optional a-chosen)
   "Compare sides A and B of this repository in the whole frame.
-Its review comments are the ones kept for these sides."
+Its review comments are the ones kept for these sides.  With A-CHOSEN, A
+was picked and stays whatever the base of a pull request B becomes."
   (let* ((old (and (bound-and-true-p ygg-git-compare-mode) (ygg-git-compare--list)))
          (root (or (and old (buffer-local-value 'ygg-git-compare--root old))
                    (magit-toplevel)
@@ -2316,6 +2343,8 @@ Its review comments are the ones kept for these sides."
          (buffer (ygg-git-compare-buffer root a b)))
     (when (and old (buffer-live-p old) (not (eq old buffer)))
       (ygg-git-compare--close old))
+    (when a-chosen
+      (with-current-buffer buffer (setq ygg-git-compare--a-chosen t)))
     (delete-other-windows)
     (switch-to-buffer buffer)
     (let ((right (split-window nil (round (* ygg-git-compare-list-width
@@ -2329,14 +2358,20 @@ Its review comments are the ones kept for these sides."
     buffer))
 
 ;;;###autoload
-(defun ygg-git-compare (a b)
+(defun ygg-git-compare (a b &optional a-chosen)
   "Compare side A with side B of this repository in the whole frame.
 A side is a worktree with what it has not committed, a branch, a commit
 or an open pull request.  B is read first and defaults to this worktree;
 A defaults to a pull request's base, HEAD when B is this worktree with
-uncommitted changes, else the repository's default branch."
-  (interactive (progn (require 'magit) (ygg-git-compare--read-sides)))
-  (ygg-git-compare-open a b))
+uncommitted changes, else the repository's default branch.  A picked
+other than that default is kept when B is a pull request whose base moves."
+  (interactive (progn (require 'magit)
+                      (pcase-let ((`(,a ,b) (ygg-git-compare--read-sides)))
+                        (list a b (ygg-git-compare--a-picked-p a b)))))
+  (ygg-git-compare-open a b a-chosen))
+
+(defun ygg-git-compare--a-picked-p (a b)
+  (not (equal a (ygg-git-compare-default-a b))))
 
 ;;;###autoload
 (defun ygg-git-compare-at-point ()
@@ -2353,7 +2388,7 @@ uncommitted changes, else the repository's default branch."
              (a (ygg-git-compare--read (format "Compare %s against (A)"
                                                (ygg-git-compare--label b cands))
                                        cands (ygg-git-compare-default-a b))))
-        (ygg-git-compare-open a b)))))
+        (ygg-git-compare-open a b (ygg-git-compare--a-picked-p a b))))))
 
 (defun ygg-git-compare--merge-requests (repo)
   "REPO's open merge requests as `ygg-git-compare-candidates' lists pull
@@ -2439,13 +2474,24 @@ or nil."
       (setq ygg-git-compare--note note)
       (ygg-git-compare--header))))
 
+(defun ygg-git-compare--merged-pr-spec (new old)
+  "The pull request side NEW with the properties OLD has that it lacks."
+  (if (and (eq (car-safe old) 'pr)
+           (eql (plist-get (cdr old) :number) (plist-get (cdr new) :number)))
+      (cons 'pr (append (cdr new)
+                        (cl-loop for (key value) on (cdr old) by #'cddr
+                                 unless (plist-member (cdr new) key)
+                                 append (list key value))))
+    new))
+
 (defun ygg-git-compare--review-show (buffer specs)
   (with-current-buffer buffer
     (setq ygg-git-compare--note nil)
-    (if (and (equal (car specs) ygg-git-compare--a-spec)
-             (equal (cdr specs) ygg-git-compare--b-spec))
-        (ygg-git-compare--header)
-      (ygg-git-compare--redraw (car specs) (cdr specs)))))
+    (let ((a (if ygg-git-compare--a-chosen ygg-git-compare--a-spec (car specs)))
+          (b (ygg-git-compare--merged-pr-spec (cdr specs) ygg-git-compare--b-spec)))
+      (if (and (equal a ygg-git-compare--a-spec) (equal b ygg-git-compare--b-spec))
+          (ygg-git-compare--header)
+        (ygg-git-compare--redraw a b)))))
 
 (defun ygg-git-compare--review-none (buffer name selector err base)
   "Say in BUFFER's header and in the echo area why the review it was opened

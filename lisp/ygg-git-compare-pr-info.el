@@ -815,12 +815,6 @@ in the browser when it is no job."
   "RET" #'ygg-git-compare-conversation-goto
   "<return>" #'ygg-git-compare-conversation-goto)
 
-(autoload 'ygg-git-compare-conversation-goto "ygg-git-compare-threads" nil t)
-
-(defvar-keymap magit-ygg-git-compare-conversation-section-map
-  "RET" #'ygg-git-compare-conversation-goto
-  "<return>" #'ygg-git-compare-conversation-goto)
-
 (defvar-keymap magit-ygg-git-compare-check-section-map
   "RET" #'ygg-git-compare-check-open
   "<return>" #'ygg-git-compare-check-open

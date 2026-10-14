@@ -134,5 +134,49 @@
       (should (looking-at-p " l40$")))
     (should-not (ygg-git-compare-show-line "a.txt" 'new 400))))
 
+(ert-deftest ygg-git-compare-context-goto-line-draws-just-enough-and-lands ()
+  (ygg-git-compare-context-tests--with-compare root
+    (ygg-git-compare-goto-line "a.txt:14")
+    (should (looking-at-p " l14$"))
+    (should (= ygg-git-compare--context 6))
+    (ygg-git-compare-goto-line "-40")
+    (should (looking-at-p " l40$"))))
+
+(ert-deftest ygg-git-compare-context-goto-line-past-the-file-keeps-the-context ()
+  (ygg-git-compare-context-tests--with-compare root
+    (should (equal (cadr (should-error (ygg-git-compare-goto-line "a.txt:400") :type 'user-error))
+                   "400 of a.txt is outside the diff"))
+    (should-not ygg-git-compare--context)
+    (should-not (ygg-git-compare-context-tests--drawn-p " l10"))))
+
+(ert-deftest ygg-git-compare-context-goto-line-reads-the-line-after-a-bare-path ()
+  (ygg-git-compare-context-tests--with-compare root
+    (let (offered)
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_prompt collection &rest _)
+                   (setq offered collection)
+                   (car collection)))
+                ((symbol-function 'read-string) (lambda (&rest _) "14")))
+        (call-interactively #'ygg-git-compare-goto-line))
+      (should (equal offered '("a.txt:")))
+      (should (looking-at-p " l14$")))
+    (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "a.txt:21"))
+              ((symbol-function 'read-string) (lambda (&rest _) (error "asked"))))
+      (call-interactively #'ygg-git-compare-goto-line))
+    (should (looking-at-p " l21$"))))
+
+(ert-deftest ygg-git-compare-context-shrinking-lands-on-the-nearest-remaining-line ()
+  (ygg-git-compare-context-tests--with-compare root
+    (ygg-git-compare-expand-context)
+    (magit-section-show-level-4-all)
+    (ygg-git-compare-context-tests--goto " l30")
+    (ygg-git-compare-shrink-context)
+    (should (looking-at-p " l23$"))
+    (ygg-git-compare-expand-context)
+    (magit-section-show-level-4-all)
+    (ygg-git-compare-context-tests--goto " l9")
+    (ygg-git-compare-shrink-context)
+    (should (looking-at-p " l17$"))))
+
 (provide 'ygg-git-compare-context-tests)
 ;;; ygg-git-compare-context-tests.el ends here

@@ -225,26 +225,41 @@ RANGE-KEY, such as \"branch NAME\", for batch use and agents."
               ((string-match "\\.\\.\\.?\\([0-9a-f]\\{40\\}\\)\\'" end)))
     (match-string 1 end)))
 
+(defvar ygg-git-compare-submit--memo nil
+  "What git said of PR diffs since this submit began, by question; nil outside one.")
+
+(defun ygg-git-compare-submit--memoized (key fn)
+  "What FN answers, asked once per KEY in a submit."
+  (if (not ygg-git-compare-submit--memo)
+      (funcall fn)
+    (let ((hit (gethash key ygg-git-compare-submit--memo 'none)))
+      (if (eq hit 'none)
+          (puthash key (funcall fn) ygg-git-compare-submit--memo)
+        hit))))
+
+(defun ygg-git-compare-submit--diff-lines (pr path &optional old-path)
+  "The lines of PR's diff of PATH, renamed from OLD-PATH, with three lines of
+context."
+  (ygg-git-compare-submit--memoized
+   (list 'lines (magit-toplevel) (plist-get pr :base) (plist-get pr :head) path old-path)
+   (lambda ()
+     (magit-git-lines "diff" "--no-color" "--no-ext-diff" "-U3"
+                      (plist-get pr :base) (plist-get pr :head) "--" path old-path))))
+
 (defun ygg-git-compare-submit--forge-hunks (pr path &optional old-path)
   "The (OLD-START OLD-LEN NEW-START NEW-LEN) of each hunk of PR's diff of PATH,
 renamed from OLD-PATH, as the forge draws it, with three lines of context;
 `unknown' when git cannot say."
-  (let ((lines (magit-git-lines "diff" "--no-color" "--no-ext-diff" "-U3"
-                                (plist-get pr :base) (plist-get pr :head) "--" path old-path))
-        hunks)
-    (cond (lines
-           (dolist (text lines)
-             (when (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@" text)
-               (push (list (string-to-number (match-string 1 text))
-                           (if (match-string 2 text) (string-to-number (match-string 2 text)) 1)
-                           (string-to-number (match-string 3 text))
-                           (if (match-string 4 text) (string-to-number (match-string 4 text)) 1))
-                     hunks)))
-           (nreverse hunks))
-          ((eql 0 (magit-git-exit-code "diff" "--quiet" (plist-get pr :base) (plist-get pr :head)
-                                       "--" path old-path))
-           nil)
-          (t 'unknown))))
+  (ygg-git-compare-submit--memoized
+   (list 'hunks (magit-toplevel) (plist-get pr :base) (plist-get pr :head) path old-path)
+   (lambda ()
+     (let ((lines (ygg-git-compare-submit--diff-lines pr path old-path)))
+       (cond (lines
+              (delq nil (mapcar #'ygg-git-compare--hunk-header lines)))
+             ((eql 0 (magit-git-exit-code "diff" "--quiet" (plist-get pr :base)
+                                          (plist-get pr :head) "--" path old-path))
+              nil)
+             (t 'unknown))))))
 
 (defun ygg-git-compare-submit--in-hunks-p (hunks side line)
   (seq-some (lambda (h)
@@ -271,6 +286,7 @@ draws for PR."
 (defun ygg-git-compare-submit--moved-heads (comments pr)
   "The (COMMENT . SHA) of each of COMMENTS written on a commit other than
 PR's head, and (COMMENT) of each inline one on a line outside PR's hunks."
+  (setq ygg-git-compare-submit--memo (make-hash-table :test 'equal))
   (delq nil
         (mapcar (lambda (c)
                   (let ((sha (ygg-git-compare-submit--written-head c)))
@@ -486,9 +502,9 @@ old number, and the line's type, nil for context."
 new LINE; nil when LINE is not a context line there."
   (let (old new found)
     (dolist (text diff)
-      (cond ((string-match "\\`@@ -\\([0-9]+\\)\\(?:,[0-9]+\\)? \\+\\([0-9]+\\)" text)
-             (setq old (string-to-number (match-string 1 text))
-                   new (string-to-number (match-string 2 text))))
+      (cond ((when-let* ((header (ygg-git-compare--hunk-header text)))
+               (setq old (nth 0 header)
+                     new (nth 2 header))))
             ((null old))
             ((string-prefix-p "-" text) (cl-incf old))
             ((string-prefix-p "+" text) (cl-incf new))
@@ -508,10 +524,9 @@ base to head diff."
                          (ygg-git-compare-submit--context-old-line
                           (or diff
                               (setq diff (ignore-errors
-                                           (magit-git-lines
-                                            "diff" "--no-color" "--no-ext-diff"
-                                            (plist-get pr :base) (plist-get pr :head) "--"
-                                            (plist-get comment :new-path)))))
+                                           (ygg-git-compare-submit--diff-lines
+                                            pr (plist-get comment :new-path)
+                                            (plist-get comment :old-path)))))
                           line)))))
       (append (list :old-line (old-line (plist-get comment :side) (plist-get comment :line)
                                         (plist-get comment :old-line))

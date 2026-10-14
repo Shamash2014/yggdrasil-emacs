@@ -56,6 +56,7 @@ forge call is recorded and ANSWER, a function of (PROGRAM ARGS BODY),
 says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
   (declare (indent 3))
   `(let ((ygg-git-compare-submit-tests--comments (copy-tree ,comments))
+         (ygg-git-compare-submit--memo nil)
          (ygg-git-compare-submit-tests--dropped nil)
          (ygg-git-compare-submit-tests--calls nil)
          (ygg-git-compare-submit-tests--messages nil)
@@ -843,7 +844,8 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
     (should-not (ygg-git-compare-submit--context-old-line diff 40))))
 
 (ert-deftest ygg-git-compare-submit-gitlab-position-numbers-a-context-line-on-both-sides ()
-  (cl-letf (((symbol-function 'magit-git-lines)
+  (cl-letf ((ygg-git-compare-submit--memo nil)
+            ((symbol-function 'magit-git-lines)
              (lambda (&rest _) ygg-git-compare-submit-tests--diff)))
     (let* ((agent (ygg-git-compare-submit-tests--c "a" :level 'range :new-path "a.txt"
                                                    :old-path "a.txt" :side 'new :line 15
@@ -1097,3 +1099,25 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
       (should-not (ygg-git-compare-submit--outside-p far ygg-git-compare-submit-tests--github-pr)))))
 
 ;;; ygg-git-compare-submit-tests.el ends here
+
+(ert-deftest ygg-git-compare-submit-asks-git-once-for-a-pair-and-path ()
+  (let ((asked 0)
+        (ygg-git-compare-submit--memo nil))
+    (cl-letf (((symbol-function 'magit-git-lines)
+               (lambda (&rest _) (cl-incf asked) ygg-git-compare-submit-tests--diff))
+              ((symbol-function 'magit-toplevel) (lambda (&rest _) "/r/")))
+      (ygg-git-compare-submit--moved-heads
+       (list (ygg-git-compare-submit-tests--c "a" :level 'line :new-path "a.txt"
+                                              :old-path "a.txt" :side 'new :line 12)
+             (ygg-git-compare-submit-tests--c "b" :level 'line :new-path "a.txt"
+                                              :old-path "a.txt" :side 'new :line 15))
+       ygg-git-compare-submit-tests--gitlab-pr)
+      (should (= asked 1))
+      (ygg-git-compare-submit--gitlab-position
+       (ygg-git-compare-submit-tests--c "a" :level 'line :new-path "a.txt"
+                                        :old-path "a.txt" :side 'new :line 15)
+       ygg-git-compare-submit-tests--gitlab-pr)
+      (should (= asked 1))
+      (ygg-git-compare-submit--moved-heads nil ygg-git-compare-submit-tests--gitlab-pr)
+      (ygg-git-compare-submit--forge-hunks ygg-git-compare-submit-tests--gitlab-pr "a.txt" "a.txt")
+      (should (= asked 2)))))

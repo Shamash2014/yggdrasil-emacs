@@ -1129,7 +1129,7 @@ and adds b.txt; main stays checked out."
       (let ((old (substring (plist-get (car (ygg-git-compare-comments-list)) :range) -40)))
         (ygg-git-compare-comments-tests--advance root "a.txt" "1\ntwo\nTHREE\n4\n5\n")
         (let ((shown (ygg-git-compare-comments-tests--shown)))
-          (should (string-search (format "outdated · written on %s · was L3" (substring old 0 7))
+          (should (string-search (format "outdated · written on %s" (substring old 0 7))
                                  shown))
           (should (string-search "on three" shown)))
         (let ((ov (seq-find (lambda (ov) (string-search "on three" (or (overlay-get ov 'after-string) "")))
@@ -1187,3 +1187,114 @@ and adds b.txt; main stays checked out."
         (goto-char (overlay-start ov))
         (should (looking-at-p "\\+three"))
         (should-not (string-search "outdated" (ygg-git-compare-comments-tests--shown)))))))
+
+(defun ygg-git-compare-comments-tests--commit-on-main (root text)
+  "Commit TEXT as a.txt on main, which the compare of it then lacks."
+  (with-temp-file (expand-file-name "a.txt" root) (insert text))
+  (ygg-git-compare-comments-tests--git root "add" "-A")
+  (ygg-git-compare-comments-tests--git root "commit" "-q" "-m" "main moves")
+  (ygg-git-compare-refresh))
+
+(defun ygg-git-compare-comments-tests--range-comment (range &rest props)
+  (append (list :id "r" :level 'range :type nil :text "x" :new-path "a.txt" :old-path "a.txt"
+                :range range)
+          props))
+
+(ert-deftest ygg-git-compare-comments-old-side-comment-stays-when-only-a-moves ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (goto-char (point-min))
+      (re-search-forward "^-2$")
+      (beginning-of-line)
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "on two")
+      (ygg-git-compare-comments-tests--commit-on-main root "0\n1\n2\n3\n4\n5\n")
+      (let ((ov (seq-find (lambda (ov) (string-search "on two" (or (overlay-get ov 'after-string) "")))
+                          (ygg-git-compare-comments-tests--overlays))))
+        (should ov)
+        (goto-char (overlay-start ov))
+        (should (looking-at-p "-2$"))
+        (should-not (string-search "outdated" (ygg-git-compare-comments-tests--shown)))))))
+
+(ert-deftest ygg-git-compare-comments-old-side-follows-a-in-a-two-dot-compare ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-toggle-dots)
+      (let ((was (ygg-git-compare--range-label)))
+        (ygg-git-compare-comments-tests--commit-on-main root "0\n1\n2\n3\n4\n5\n")
+        (let ((moved (ygg-git-compare--relocate
+                      (ygg-git-compare-comments-tests--range-comment
+                       was :level 'line :side 'old :line 2)
+                      (ygg-git-compare--b-head (current-buffer))
+                      (ygg-git-compare--range-label))))
+          (should (eql (plist-get moved :line) 3))
+          (should-not (plist-get moved :outdated)))))))
+
+(ert-deftest ygg-git-compare-comments-range-start-follows-its-own-side ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (let ((was (ygg-git-compare--range-label)))
+        (ygg-git-compare-comments-tests--advance root "a.txt" "0\n0b\n1\ntwo\nthree\n4\n5\n")
+        (let ((moved (ygg-git-compare--relocate
+                      (ygg-git-compare-comments-tests--range-comment
+                       was :side 'new :line 3 :start-side 'old :start-line 2)
+                      (ygg-git-compare--b-head (current-buffer))
+                      (ygg-git-compare--range-label))))
+          (should (eql (plist-get moved :line) 5))
+          (should (eql (plist-get moved :start-line) 2))
+          (should-not (plist-get moved :outdated)))))))
+
+(ert-deftest ygg-git-compare-comments-remap-asks-git-once-about-unavailable-commits ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (let ((asked 0)
+          (real (symbol-function 'magit-git-success))
+          (missing (make-string 40 ?a)))
+      (ygg-git-compare--forget-unavailable)
+      (cl-letf (((symbol-function 'magit-git-success)
+                 (lambda (&rest args)
+                   (cl-incf asked)
+                   (apply real args))))
+        (let ((default-directory root))
+          (should (eq (ygg-git-compare--remap missing "main" "a.txt") 'unavailable))
+          (should (eq (ygg-git-compare--remap missing "main" "a.txt") 'unavailable))
+          (should (= asked 1))
+          (ygg-git-compare--forget-unavailable)
+          (ygg-git-compare--remap missing "main" "a.txt")
+          (should (= asked 2)))))))
+
+(ert-deftest ygg-git-compare-comments-b-head-is-read-once-per-draw ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (let ((asked 0)
+            (real (symbol-function 'magit-rev-parse))
+            (list (current-buffer)))
+        (cl-letf (((symbol-function 'magit-rev-parse)
+                   (lambda (&rest args) (cl-incf asked) (apply real args))))
+          (let ((ygg-git-compare--b-head-memo (cons list 'unset)))
+            (should (equal (ygg-git-compare--b-head list) (ygg-git-compare--b-head list)))
+            (should (= asked 1))))))))
+
+(ert-deftest ygg-git-compare-comments-outdated-range-names-its-lines-once ()
+  (let* ((comment (list :level 'range :start-line 20 :line 21 :outdated t :text "x"
+                        :relocated (make-string 40 ?a) :file "a.txt"))
+         (shown (substring-no-properties
+                 (ygg-git-compare--comment-block comment (ygg-git-compare--where comment)))))
+    (should (string-search "outdated · written on aaaaaaa" shown))
+    (should (string-search "a.txt:20-21" shown))
+    (should-not (string-search "was" shown))
+    (should-not (string-search "L20" shown))))
+
+(ert-deftest ygg-git-compare-comments-goto-line-reads-the-line-after-a-bare-path ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (let (offered)
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_prompt collection &rest _) (setq offered collection) "b.txt"))
+                  ((symbol-function 'read-string) (lambda (&rest _) "2")))
+          (call-interactively #'ygg-git-compare-goto-line))
+        (should (equal (sort (copy-sequence offered) #'string<) '("a.txt:" "b.txt:")))
+        (should (equal (ygg-git-compare-comments-tests--line-at-point) "+b2"))))))
+
+(ert-deftest ygg-git-compare-hunk-header-reads-the-counts ()
+  (should (equal (ygg-git-compare--hunk-header "@@ -10,4 +12,5 @@ fn") '(10 4 12 5)))
+  (should (equal (ygg-git-compare--hunk-header "@@ -3 +3,0 @@") '(3 1 3 0)))
+  (should-not (ygg-git-compare--hunk-header "+@@ -3 +3 @@")))
