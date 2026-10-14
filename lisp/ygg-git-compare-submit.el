@@ -225,12 +225,12 @@ RANGE-KEY, such as \"branch NAME\", for batch use and agents."
               ((string-match "\\.\\.\\.?\\([0-9a-f]\\{40\\}\\)\\'" end)))
     (match-string 1 end)))
 
-(defun ygg-git-compare-submit--forge-hunks (pr path)
-  "The (OLD-START OLD-LEN NEW-START NEW-LEN) of each hunk of PR's diff of PATH
-as the forge draws it, with three lines of context; `unknown' when git cannot
-say."
+(defun ygg-git-compare-submit--forge-hunks (pr path &optional old-path)
+  "The (OLD-START OLD-LEN NEW-START NEW-LEN) of each hunk of PR's diff of PATH,
+renamed from OLD-PATH, as the forge draws it, with three lines of context;
+`unknown' when git cannot say."
   (let ((lines (magit-git-lines "diff" "--no-color" "--no-ext-diff" "-U3"
-                                (plist-get pr :base) (plist-get pr :head) "--" path))
+                                (plist-get pr :base) (plist-get pr :head) "--" path old-path))
         hunks)
     (cond (lines
            (dolist (text lines)
@@ -242,7 +242,7 @@ say."
                      hunks)))
            (nreverse hunks))
           ((eql 0 (magit-git-exit-code "diff" "--quiet" (plist-get pr :base) (plist-get pr :head)
-                                       "--" path))
+                                       "--" path old-path))
            nil)
           (t 'unknown))))
 
@@ -258,7 +258,8 @@ say."
   "Whether COMMENT, an inline one, sits on a line outside the hunks the forge
 draws for PR."
   (when (ygg-git-compare-submit--inline-p comment)
-    (let ((hunks (ygg-git-compare-submit--forge-hunks pr (plist-get comment :new-path))))
+    (let ((hunks (ygg-git-compare-submit--forge-hunks pr (plist-get comment :new-path)
+                                                      (plist-get comment :old-path))))
       (and (listp hunks)
            (not (and (ygg-git-compare-submit--in-hunks-p
                       hunks (plist-get comment :side) (plist-get comment :line))

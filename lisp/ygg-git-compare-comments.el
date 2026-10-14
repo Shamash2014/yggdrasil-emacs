@@ -727,7 +727,7 @@ is on, anywhere on the line, and to what it was otherwise."
                            (and ygg-git-compare--mark-drafts (not pending)
                                 (propertize "draft" 'face '(warning italic)))
                            (and pending (propertize "pending" 'face 'shadow))
-                           (and (plist-get comment :outdated)
+                           (and (plist-get comment :outdated) (plist-get comment :relocated)
                                 (propertize (ygg-git-compare--outdated-label comment)
                                             'face 'warning))
                            (and (not (plist-get comment :relocated))

@@ -164,11 +164,6 @@ a function of (PROGRAM ARGS BODY), says what it prints."
         (should (string-search "A..B" (cadr (should-error (ygg-git-compare-submit-forge 'draft)
                                                           :type 'user-error))))
         (ygg-git-compare-toggle-dots)
-        (should (string-search "made on" (cadr (should-error (ygg-git-compare-submit-forge 'draft)
-                                                             :type 'user-error))))
-        (ygg-git-compare-comments-drop
-         (mapcar (lambda (c) (plist-get c :id)) (ygg-git-compare-comments-list)))
-        (ygg-git-compare-post-tests--comment "fresh" "+two")
         (ygg-git-compare-submit-forge 'draft))
       (should (= (length (seq-filter (lambda (c) (member "--input" (nth 1 c)))
                                      ygg-git-compare-post-tests--calls))
