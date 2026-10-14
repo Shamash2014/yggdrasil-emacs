@@ -73,11 +73,15 @@
 left out of a review."
   :type 'natnum)
 
+(defvar-local ygg-git-compare--context nil
+  "Lines of context the diff is drawn with, nil for magit's own.")
 (defvar-local ygg-git-compare--root nil "The checkout the compare was opened from.")
 (defvar-local ygg-git-compare--plan nil
   "How the sides are diffed, as `ygg-git-compare--planned' answers.")
 (defvar-local ygg-git-compare--a-spec nil "Side A as picked: (KIND . WHAT).")
 (defvar-local ygg-git-compare--b-spec nil "Side B as picked: (KIND . WHAT).")
+(defvar-local ygg-git-compare--a-chosen nil
+  "Non-nil when side A was picked, so a pull request's base does not replace it.")
 (defvar-local ygg-git-compare--a nil "Side A as resolved, a plist.")
 (defvar-local ygg-git-compare--b nil "Side B as resolved, a plist.")
 (defvar-local ygg-git-compare--dots "..."
@@ -677,9 +681,15 @@ says its head is old, or stands at another commit than the one last fetched."
                 (ygg-git-compare--redraw)))
           (user-error (message "%s" (error-message-string failure))))))))
 
-(defun ygg-git-compare-fetch-pr (number &optional remote)
+(defun ygg-git-compare--pr-ref (forge number)
+  (format (if (eq forge 'gitlab) "merge-requests/%s/head" "pull/%s/head") number))
+
+(defun ygg-git-compare-fetch-pr (number &optional remote forge renew on-fresh)
   "Pull request NUMBER's head commit, once REMOTE's has been fetched without
-a branch for it; nil until then, the fetch running in the background."
+a branch for it; nil until then, the fetch running in the background.
+With RENEW it is fetched again whatever the age of the last answer, and
+ON-FRESH, by default `--pr-landed', is called with what it finds.  FORGE
+tells which ref holds the head."
   (let* ((remote (or remote (ygg-git-compare--remote)
                      (user-error "No remote to fetch from")))
          (key (ygg-git-compare--head-key remote number))
@@ -688,11 +698,13 @@ a branch for it; nil until then, the fetch running in the background."
                 ((not (magit-commit-p sha))))
       (ygg-git-compare--cache-drop key))
     (let ((sha (ygg-git-compare--cached
-                key ygg-git-compare-pr-ttl
+                key (if renew 0 ygg-git-compare-pr-ttl)
                 (lambda (done)
                   (let ((default-directory dir))
-                    (ygg-git-compare--fetch-ref remote (format "pull/%s/head" number) done)))
-                #'ygg-git-compare--pr-landed)))
+                    (ygg-git-compare--fetch-ref remote (ygg-git-compare--pr-ref forge number)
+                                                done)))
+                (or on-fresh #'ygg-git-compare--pr-landed)
+                (and renew 0))))
       (and sha (magit-commit-p sha) sha))))
 
 (defun ygg-git-compare--pending-note (number remote)
@@ -714,16 +726,76 @@ a branch for it; nil until then, the fetch running in the background."
   (let* ((entry (ygg-git-compare--cache-entry
                  (ygg-git-compare--head-key (or remote (ygg-git-compare--remote)) number)))
          (time (plist-get entry :time)))
-    (when (and (numberp time) (> (- (float-time) time) ygg-git-compare-pr-ttl))
-      (format "head as of %s; %s" (ygg-git-compare--age (truncate (- (float-time) time)))
-              (if (plist-get entry :failed)
-                  (format "not refreshed: %s" (plist-get entry :error))
-                "refreshing…")))))
+    (cond ((and (numberp time) (> (- (float-time) time) ygg-git-compare-pr-ttl))
+           (format "head as of %s; %s" (ygg-git-compare--age (truncate (- (float-time) time)))
+                   (if (plist-get entry :failed)
+                       (format "not refreshed: %s" (plist-get entry :error))
+                     "refreshing…")))
+          ((plist-get entry :failed)
+           (format "not refreshed: %s" (plist-get entry :error)))
+          ((ygg-git-compare--refreshing-p 'head) "refreshing…"))))
 
 (defun ygg-git-compare--dirty-p (dir)
   (let ((default-directory dir))
     (not (string-empty-p (ygg-git-compare--git "--no-optional-locks" "status"
                                                "--porcelain")))))
+
+(defun ygg-git-compare--spec-buffers (spec)
+  (seq-filter (lambda (buffer)
+                (or (eq spec (buffer-local-value 'ygg-git-compare--a-spec buffer))
+                    (eq spec (buffer-local-value 'ygg-git-compare--b-spec buffer))))
+              (buffer-list)))
+
+(defun ygg-git-compare--pr-repin (spec root sha err)
+  "Stand SPEC, a pinned pull request side, on SHA, its head as the remote
+has it now, and draw its compares again."
+  (let ((moved (and sha (not err) (not (equal sha (plist-get (cdr spec) :sha))))))
+    (when moved (plist-put (cdr spec) :sha sha))
+    (dolist (buffer (ygg-git-compare--spec-buffers spec))
+      (with-current-buffer buffer
+        (let ((default-directory root))
+          (if moved
+              (ygg-git-compare--redraw)
+            (ygg-git-compare--renote spec)))))))
+
+(defun ygg-git-compare--renote (spec)
+  "Say again in the header what is known of SPEC's head, a pull request side."
+  (let ((note (ygg-git-compare--head-note (plist-get (cdr spec) :number)
+                                          (plist-get (cdr spec) :remote))))
+    (cond ((eq spec ygg-git-compare--a-spec)
+           (setq ygg-git-compare--a (plist-put ygg-git-compare--a :note note)))
+          ((eq spec ygg-git-compare--b-spec)
+           (setq ygg-git-compare--b (plist-put ygg-git-compare--b :note note))))
+    (ygg-git-compare--header)))
+
+(defun ygg-git-compare--pr-resettle (spec root pr err)
+  (when (and pr (not err))
+    (dolist (buffer (ygg-git-compare--spec-buffers spec))
+      (ygg-git-compare--review-settle
+       buffer (buffer-local-value 'ygg-git-compare--review-token buffer) root
+       (plist-get (cdr spec) :head) (plist-get (cdr spec) :remote)
+       (plist-get (cdr spec) :number) pr err))))
+
+(defun ygg-git-compare--pr-renew (specs root)
+  "Ask the remote and the forge again, in the background, for the head and
+base of each pull request among SPECS, whatever their caches hold; a
+compare drawn from older answers is drawn again on the newer."
+  (dolist (spec specs)
+    (when (eq (car-safe spec) 'pr)
+      (let ((pr (cdr spec))
+            (default-directory root))
+        (ignore-errors
+          (ygg-git-compare-fetch-pr
+           (plist-get pr :number) (plist-get pr :remote) (plist-get pr :forge) t
+           (and (plist-get pr :sha)
+                (lambda (sha err) (ygg-git-compare--pr-repin spec root sha err)))))
+        (when (plist-get pr :host)
+          (ignore-errors
+            (ygg-git-compare--forge-pr
+             (list (plist-get pr :forge) (plist-get pr :host) (plist-get pr :path))
+             (plist-get pr :number)
+             (lambda (new err) (ygg-git-compare--pr-resettle spec root new err))
+             t)))))))
 
 (defun ygg-git-compare-resolve (spec)
   "SPEC as the commits it stands for, without touching any checkout or ref.
@@ -747,11 +819,12 @@ header says of it; it is fetched in the background and drawn when here."
     (`(pr . ,pr)
      (let ((sha (or (plist-get pr :sha)
                     (ygg-git-compare-fetch-pr (plist-get pr :number)
-                                              (plist-get pr :remote)))))
+                                              (plist-get pr :remote)
+                                              (plist-get pr :forge)))))
        (list :label (format "#%s %s" (plist-get pr :number)
                             (or (plist-get pr :head) ""))
              :diff sha :log sha
-             :note (when (and sha (not (plist-get pr :sha)))
+             :note (when sha
                      (ygg-git-compare--head-note (plist-get pr :number)
                                                  (plist-get pr :remote)))
              :pending (unless sha
@@ -1023,6 +1096,14 @@ committed is named by its checkout."
                 (plist-get side :diff))))
     (concat (end ygg-git-compare--a) ygg-git-compare--dots (end ygg-git-compare--b))))
 
+(defun ygg-git-compare--hunk-header (text)
+  "The (OLD-START OLD-LEN NEW-START NEW-LEN) of the hunk header TEXT, nil when
+TEXT is not one."
+  (when (string-match "\\`@@ -\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? \\+\\([0-9]+\\)\\(?:,\\([0-9]+\\)\\)? @@" text)
+    (cl-flet ((count (group) (if-let* ((n (match-string group text))) (string-to-number n) 1)))
+      (list (string-to-number (match-string 1 text)) (count 2)
+            (string-to-number (match-string 3 text)) (count 4)))))
+
 (defun ygg-git-compare--diff-args (plan)
   "What git diff takes for PLAN's tracked changes, before any option of magit's."
   (cons (plist-get plan :range) (and (plist-get plan :reverse) '("-R"))))
@@ -1039,6 +1120,12 @@ committed is named by its checkout."
     (> (apply #'+ (cdr counts))
        (if (boundp 'ygg-magit-diff-line-limit) ygg-magit-diff-line-limit 2000))))
 
+(defun ygg-git-compare--default-context ()
+  "The lines of context magit's own diff arguments ask for, nil when none."
+  (when-let* ((arg (seq-find (lambda (a) (string-match-p "\\`-U[0-9]+\\'" a))
+                             (car (magit-diff--get-value 'magit-diff-mode 'never)))))
+    (string-to-number (substring arg 2))))
+
 (defun ygg-git-compare--args (plan)
   "Magit's diff arguments for PLAN with its diffstat; only the diffstat when
 PLAN is too large to wash, since --no-patch cancels what comes before it."
@@ -1046,6 +1133,10 @@ PLAN is too large to wash, since --no-patch cancels what comes before it."
                                          '("--stat" "--numstat" "--no-patch" "-R")
                                          :test #'equal)
                       (cdr (ygg-git-compare--diff-args plan)))))
+    (setq args (append (when-let* ((n (or ygg-git-compare--context
+                                          (ygg-git-compare--default-context))))
+                         (list (format "-U%d" n)))
+                       (seq-remove (lambda (a) (string-prefix-p "-U" a)) args)))
     (if (ygg-git-compare--large-p plan)
         (append '("--no-patch" "--numstat" "--stat") args)
       (cons "--stat" args))))
@@ -1280,7 +1371,10 @@ an untracked one against nothing."
 (defun ygg-git-compare-refresh ()
   "Resolve both sides again, a worktree's changes as they stand now."
   (interactive)
-  (with-current-buffer (ygg-git-compare--list) (ygg-git-compare--redraw)))
+  (with-current-buffer (ygg-git-compare--list)
+    (ygg-git-compare--pr-renew (list ygg-git-compare--a-spec ygg-git-compare--b-spec)
+                               ygg-git-compare--root)
+    (ygg-git-compare--redraw)))
 
 (defun ygg-git-compare-swap ()
   "Swap sides A and B."
@@ -1297,7 +1391,8 @@ an untracked one against nothing."
        (ygg-git-compare--read (format "Compare %s against (A)"
                                       (ygg-git-compare--label ygg-git-compare--b-spec
                                                               (funcall cands)))
-                              cands (ygg-git-compare-default-a ygg-git-compare--b-spec))))))
+                              cands (ygg-git-compare-default-a ygg-git-compare--b-spec)))
+      (setq ygg-git-compare--a-chosen t))))
 
 (defun ygg-git-compare-toggle-dots ()
   "Diff A...B, from where the sides parted, or A..B, one against the other."
@@ -1752,25 +1847,26 @@ told here."
                                           (plist-get pr :head)))
             pr)))
 
-(defun ygg-git-compare--forge-pr (repo selector &optional on-fresh)
+(defun ygg-git-compare--forge-pr (repo selector &optional on-fresh renew)
   "The open pull or merge request of REPO, as `--forge-repo' gives it, that
 SELECTOR names, a number or a source branch, as last found; nil when a
 branch has none or nothing is known yet.  A plist: :forge :host :path
 :number :head :base, the commit where it parted from its target, :start,
 the target's tip, :base-ref and :url.  The forge is asked again in the
 background when the answer is older than `ygg-git-compare-pr-ttl', and
-ON-FRESH then called with (PR ERR)."
+ON-FRESH then called with (PR ERR); with RENEW whatever its age."
   (let ((dir default-directory))
     (ygg-git-compare--with-base
      (ygg-git-compare--cached
-      (ygg-git-compare--pr-key repo selector) ygg-git-compare-pr-ttl
+      (ygg-git-compare--pr-key repo selector) (if renew 0 ygg-git-compare-pr-ttl)
       (lambda (done)
         (let ((default-directory dir))
           (ygg-git-compare--forge-pr-fetch repo selector done)))
       (and on-fresh
            (lambda (pr err)
              (let ((default-directory dir))
-               (funcall on-fresh (ygg-git-compare--with-base pr) err))))))))
+               (funcall on-fresh (ygg-git-compare--with-base pr) err))))
+      (and renew 0)))))
 
 (defun ygg-git-compare--known-pr (repo selector what)
   "The request SELECTOR names as last found; a user error saying why when
@@ -1894,11 +1990,15 @@ when that is known, and a compare that is not its range says why instead."
 (autoload 'ygg-git-compare-tour-refresh "ygg-git-compare-tour" nil t)
 (autoload 'ygg-git-compare-tour-trace "ygg-git-compare-tour" nil t)
 (autoload 'ygg-git-compare-tour-receive "ygg-git-compare-tour")
+(autoload 'ygg-git-compare-expand-context "ygg-git-compare-context" nil t)
+(autoload 'ygg-git-compare-shrink-context "ygg-git-compare-context" nil t)
+(autoload 'ygg-git-compare-show-line "ygg-git-compare-context")
 (autoload 'ygg-git-compare-interdiff "ygg-git-compare-interdiff" nil t)
 (autoload 'ygg-git-compare-export-markdown "ygg-git-compare-submit" nil t)
 (autoload 'ygg-git-compare-submit "ygg-git-compare-submit" nil t)
 (autoload 'ygg-git-compare-comment "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-file "ygg-git-compare-comments" nil t)
+(autoload 'ygg-git-compare-goto-line "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-select-lines "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-next "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-previous "ygg-git-compare-comments" nil t)
@@ -2050,6 +2150,8 @@ around past the end."
 
 (defvar-keymap ygg-git-compare-mode-map
   "~" #'ygg-git-compare-swap
+  "+" #'ygg-git-compare-expand-context
+  "-" #'ygg-git-compare-shrink-context
   "b" #'ygg-git-compare-switch-base
   "." #'ygg-git-compare-toggle-dots
   "#" #'ygg-git-compare-log
@@ -2063,6 +2165,7 @@ around past the end."
   "C-k" #'ygg-git-compare-previous-hunk
   "m" #'ygg-git-compare-comment-next
   "M" #'ygg-git-compare-comment-previous
+  ":" #'ygg-git-compare-goto-line
   "/" #'isearch-forward-regexp
   "n" #'ygg-git-compare-search-next
   "N" #'ygg-git-compare-search-previous
@@ -2234,9 +2337,10 @@ refused: a compare is read-only.
       (ygg-git-compare--fold)
       (current-buffer))))
 
-(defun ygg-git-compare-open (a b)
+(defun ygg-git-compare-open (a b &optional a-chosen)
   "Compare sides A and B of this repository in the whole frame.
-Its review comments are the ones kept for these sides."
+Its review comments are the ones kept for these sides.  With A-CHOSEN, A
+was picked and stays whatever the base of a pull request B becomes."
   (let* ((old (and (bound-and-true-p ygg-git-compare-mode) (ygg-git-compare--list)))
          (root (or (and old (buffer-local-value 'ygg-git-compare--root old))
                    (magit-toplevel)
@@ -2244,9 +2348,12 @@ Its review comments are the ones kept for these sides."
          (config (if old
                      (buffer-local-value 'ygg-git-compare--window-config old)
                    (current-window-configuration)))
+         (_ (ygg-git-compare--pr-renew (list a b) root))
          (buffer (ygg-git-compare-buffer root a b)))
     (when (and old (buffer-live-p old) (not (eq old buffer)))
       (ygg-git-compare--close old))
+    (when a-chosen
+      (with-current-buffer buffer (setq ygg-git-compare--a-chosen t)))
     (delete-other-windows)
     (switch-to-buffer buffer)
     (let ((right (split-window nil (round (* ygg-git-compare-list-width
@@ -2260,14 +2367,20 @@ Its review comments are the ones kept for these sides."
     buffer))
 
 ;;;###autoload
-(defun ygg-git-compare (a b)
+(defun ygg-git-compare (a b &optional a-chosen)
   "Compare side A with side B of this repository in the whole frame.
 A side is a worktree with what it has not committed, a branch, a commit
 or an open pull request.  B is read first and defaults to this worktree;
 A defaults to a pull request's base, HEAD when B is this worktree with
-uncommitted changes, else the repository's default branch."
-  (interactive (progn (require 'magit) (ygg-git-compare--read-sides)))
-  (ygg-git-compare-open a b))
+uncommitted changes, else the repository's default branch.  A picked
+other than that default is kept when B is a pull request whose base moves."
+  (interactive (progn (require 'magit)
+                      (pcase-let ((`(,a ,b) (ygg-git-compare--read-sides)))
+                        (list a b (ygg-git-compare--a-picked-p a b)))))
+  (ygg-git-compare-open a b a-chosen))
+
+(defun ygg-git-compare--a-picked-p (a b)
+  (not (equal a (ygg-git-compare-default-a b))))
 
 ;;;###autoload
 (defun ygg-git-compare-at-point ()
@@ -2284,7 +2397,7 @@ uncommitted changes, else the repository's default branch."
              (a (ygg-git-compare--read (format "Compare %s against (A)"
                                                (ygg-git-compare--label b cands))
                                        cands (ygg-git-compare-default-a b))))
-        (ygg-git-compare-open a b)))))
+        (ygg-git-compare-open a b (ygg-git-compare--a-picked-p a b))))))
 
 (defun ygg-git-compare--merge-requests (repo)
   "REPO's open merge requests as `ygg-git-compare-candidates' lists pull
@@ -2350,10 +2463,8 @@ are old."
 or nil."
   (let ((refs (delq nil
                     (list (unless (magit-commit-p (plist-get pr :head))
-                            (format (if (eq (plist-get pr :forge) 'gitlab)
-                                        "merge-requests/%s/head"
-                                      "pull/%s/head")
-                                    (plist-get pr :number)))
+                            (ygg-git-compare--pr-ref (plist-get pr :forge)
+                                                     (plist-get pr :number)))
                           (unless (magit-commit-p (plist-get pr :start))
                             (plist-get pr :base-ref))))))
     (cl-labels ((next (refs)
@@ -2372,13 +2483,24 @@ or nil."
       (setq ygg-git-compare--note note)
       (ygg-git-compare--header))))
 
+(defun ygg-git-compare--merged-pr-spec (new old)
+  "The pull request side NEW with the properties OLD has that it lacks."
+  (if (and (eq (car-safe old) 'pr)
+           (eql (plist-get (cdr old) :number) (plist-get (cdr new) :number)))
+      (cons 'pr (append (cdr new)
+                        (cl-loop for (key value) on (cdr old) by #'cddr
+                                 unless (plist-member (cdr new) key)
+                                 append (list key value))))
+    new))
+
 (defun ygg-git-compare--review-show (buffer specs)
   (with-current-buffer buffer
     (setq ygg-git-compare--note nil)
-    (if (and (equal (car specs) ygg-git-compare--a-spec)
-             (equal (cdr specs) ygg-git-compare--b-spec))
-        (ygg-git-compare--header)
-      (ygg-git-compare--redraw (car specs) (cdr specs)))))
+    (let ((a (if ygg-git-compare--a-chosen ygg-git-compare--a-spec (car specs)))
+          (b (ygg-git-compare--merged-pr-spec (cdr specs) ygg-git-compare--b-spec)))
+      (if (and (equal a ygg-git-compare--a-spec) (equal b ygg-git-compare--b-spec))
+          (ygg-git-compare--header)
+        (ygg-git-compare--redraw a b)))))
 
 (defun ygg-git-compare--review-none (buffer name selector err base)
   "Say in BUFFER's header and in the echo area why the review it was opened

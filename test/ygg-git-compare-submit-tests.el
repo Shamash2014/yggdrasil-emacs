@@ -56,6 +56,7 @@ forge call is recorded and ANSWER, a function of (PROGRAM ARGS BODY),
 says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
   (declare (indent 3))
   `(let ((ygg-git-compare-submit-tests--comments (copy-tree ,comments))
+         (ygg-git-compare-submit--memo nil)
          (ygg-git-compare-submit-tests--dropped nil)
          (ygg-git-compare-submit-tests--calls nil)
          (ygg-git-compare-submit-tests--messages nil)
@@ -693,6 +694,26 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
         (user-error "glab api: 400 position is invalid")
       "{\"id\":1}")))
 
+(defvar ygg-git-compare-submit-tests--reviewer-state nil)
+
+(defvar ygg-git-compare-submit-tests--honours nil)
+
+(defun ygg-git-compare-submit-tests--lab-reviewer (_program args body)
+  "Answer glab as user 5, a reviewer in the state held in
+`ygg-git-compare-submit-tests--reviewer-state' or none when nil; a note of
+\"/request_changes\" moves it to requested_changes when it is honoured."
+  (let ((path (car (last args))))
+      (when (and ygg-git-compare-submit-tests--honours ygg-git-compare-submit-tests--reviewer-state
+                 (equal (plist-get body :body) "/request_changes"))
+        (setq ygg-git-compare-submit-tests--reviewer-state "requested_changes"))
+      (cond ((equal path "user") "{\"id\":5}")
+            ((string-suffix-p "/reviewers" path)
+             (if ygg-git-compare-submit-tests--reviewer-state
+                 (format "[{\"user\":{\"id\":9},\"state\":\"unreviewed\"},{\"user\":{\"id\":5},\"state\":\"%s\"}]"
+                         ygg-git-compare-submit-tests--reviewer-state)
+               "[{\"user\":{\"id\":9},\"state\":\"unreviewed\"}]"))
+            (t "{\"id\":1}"))))
+
 (ert-deftest ygg-git-compare-submit-gitlab-comment-and-approve ()
   (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
       ygg-git-compare-submit-tests--gitlab-pr (ygg-git-compare-submit-tests--lab)
@@ -758,20 +779,43 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                           ygg-git-compare-submit-tests--calls))
     (should (string-search "1 kept" (car ygg-git-compare-submit-tests--messages)))))
 
-(ert-deftest ygg-git-compare-submit-gitlab-request-changes-reads-graphql-errors ()
+(defun ygg-git-compare-submit-tests--request-changes (state honours)
+  (setq ygg-git-compare-submit-tests--reviewer-state state
+        ygg-git-compare-submit-tests--honours honours)
   (ygg-git-compare-submit-tests--with
       (list (ygg-git-compare-submit-tests--c "s" :level 'review))
       ygg-git-compare-submit-tests--gitlab-pr
-      (lambda (_program args _body)
-        (if (member "graphql" args)
-            "{\"data\":{\"mergeRequestRequestChanges\":{\"errors\":[\"not a reviewer\"]}}}"
-          "{\"id\":1}"))
+      #'ygg-git-compare-submit-tests--lab-reviewer
     (ygg-git-compare-submit-forge 'request-changes)
-    (let ((graphql (nth 1 (car ygg-git-compare-submit-tests--calls))))
-      (should (member "projectPath=grp/proj" graphql))
-      (should (member "iid=7" graphql)))
-    (should (equal ygg-git-compare-submit-tests--dropped '("s")))
-    (should (string-search "not a reviewer" (car ygg-git-compare-submit-tests--messages)))))
+    (list (reverse ygg-git-compare-submit-tests--calls)
+          ygg-git-compare-submit-tests--dropped
+          (car ygg-git-compare-submit-tests--messages))))
+
+(defun ygg-git-compare-submit-tests--quick-action-notes (calls)
+  (seq-filter (lambda (c) (equal (plist-get (nth 2 c) :body) "/request_changes")) calls))
+
+(ert-deftest ygg-git-compare-submit-gitlab-request-changes-posts-the-quick-action ()
+  (pcase-let ((`(,calls ,dropped ,message)
+               (ygg-git-compare-submit-tests--request-changes "unreviewed" t)))
+    (let ((notes (ygg-git-compare-submit-tests--quick-action-notes calls)))
+      (should (= (length notes) 1))
+      (should (string-suffix-p "/merge_requests/7/notes"
+                               (ygg-git-compare-submit-tests--endpoint (car notes)))))
+    (should-not (seq-find (lambda (c) (string-search "bulk_publish"
+                                                     (or (ygg-git-compare-submit-tests--endpoint c) "")))
+                          calls))
+    (should (equal dropped '("s")))
+    (should (string-search "requested changes" message))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-request-changes-names-a-missing-reviewer ()
+  (pcase-let ((`(,calls ,dropped ,message) (ygg-git-compare-submit-tests--request-changes nil t)))
+    (should-not (ygg-git-compare-submit-tests--quick-action-notes calls))
+    (should (equal dropped '("s")))
+    (should (string-search "add yourself as a reviewer" message))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-request-changes-notices-an-ignored-state ()
+  (pcase-let ((`(,_ ,_ ,message) (ygg-git-compare-submit-tests--request-changes "unreviewed" nil)))
+    (should (string-search "did not record the request for changes" message))))
 
 (ert-deftest ygg-git-compare-submit-gitlab-keeps-only-what-failed-on-a-non-user-error ()
   (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
@@ -800,7 +844,8 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
     (should-not (ygg-git-compare-submit--context-old-line diff 40))))
 
 (ert-deftest ygg-git-compare-submit-gitlab-position-numbers-a-context-line-on-both-sides ()
-  (cl-letf (((symbol-function 'magit-git-lines)
+  (cl-letf ((ygg-git-compare-submit--memo nil)
+            ((symbol-function 'magit-git-lines)
              (lambda (&rest _) ygg-git-compare-submit-tests--diff)))
     (let* ((agent (ygg-git-compare-submit-tests--c "a" :level 'range :new-path "a.txt"
                                                    :old-path "a.txt" :side 'new :line 15
@@ -953,7 +998,10 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
 (ert-deftest ygg-git-compare-submit-says-what-was-also-decided ()
   (dolist (case '((approve . " and approved it") (request-changes . " and requested changes")))
     (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
-        ygg-git-compare-submit-tests--gitlab-pr (lambda (&rest _) "{\"id\":1}")
+        ygg-git-compare-submit-tests--gitlab-pr
+        #'ygg-git-compare-submit-tests--lab-reviewer
+      (setq ygg-git-compare-submit-tests--reviewer-state "unreviewed"
+            ygg-git-compare-submit-tests--honours t)
       (ygg-git-compare-submit-forge (car case))
       (should (equal (car ygg-git-compare-submit-tests--messages)
                      (format "Posted 4 comments to gitlab MR !7%s (%s)" (cdr case)
@@ -1001,4 +1049,75 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                            (ygg-git-compare-submit-tests--posts))
                    '("projects/grp%2Fproj/merge_requests/7/approve")))))
 
+(defconst ygg-git-compare-submit-tests--inside-and-outside
+  (list (ygg-git-compare-submit-tests--c "near" :level 'line :file "a.txt" :old-path "a.txt"
+                                         :new-path "a.txt" :side 'new :line 2)
+        (ygg-git-compare-submit-tests--c "far" :level 'line :file "a.txt" :old-path "a.txt"
+                                         :new-path "a.txt" :side 'new :line 40)))
+
+(defmacro ygg-git-compare-submit-tests--with-forge-hunks (hunks &rest body)
+  (declare (indent 1))
+  `(cl-letf (((symbol-function 'ygg-git-compare-submit--forge-hunks)
+              (lambda (&rest _) ,hunks)))
+     ,@body))
+
+(ert-deftest ygg-git-compare-submit-github-line-outside-the-hunks-goes-in-the-summary ()
+  (ygg-git-compare-submit-tests--with-forge-hunks '((1 7 1 7))
+    (ygg-git-compare-submit-tests--with
+        ygg-git-compare-submit-tests--inside-and-outside
+        ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+      (ygg-git-compare-submit-forge 'comment)
+      (should-not ygg-git-compare-submit-tests--comments)
+      (let ((posts (ygg-git-compare-submit-tests--posts)))
+        (should (= (length posts) 1))
+        (let ((review (nth 2 (car posts))))
+          (should (equal (plist-get review :body) "`a.txt:40` far"))
+          (should (equal (mapcar (lambda (c) (plist-get c :line)) (plist-get review :comments))
+                         '(2))))))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-line-outside-the-hunks-goes-in-the-summary ()
+  (ygg-git-compare-submit-tests--with-forge-hunks '((1 7 1 7))
+    (ygg-git-compare-submit-tests--with
+        ygg-git-compare-submit-tests--inside-and-outside
+        ygg-git-compare-submit-tests--gitlab-pr (ygg-git-compare-submit-tests--lab)
+      (ygg-git-compare-submit-forge 'comment)
+      (should-not ygg-git-compare-submit-tests--comments)
+      (let ((posts (ygg-git-compare-submit-tests--posts)))
+        (should (= (length posts) 2))
+        (should (equal (mapcar (lambda (p) (plist-get (nth 2 p) :body)) posts)
+                       '("`a.txt:40` far" "near")))
+        (should-not (plist-member (nth 2 (car posts)) :position))
+        (should (plist-get (nth 2 (cadr posts)) :position))))))
+
+(ert-deftest ygg-git-compare-submit-line-inside-the-hunks-or-unknown-stays-inline ()
+  (let ((near (car ygg-git-compare-submit-tests--inside-and-outside))
+        (far (cadr ygg-git-compare-submit-tests--inside-and-outside)))
+    (ygg-git-compare-submit-tests--with-forge-hunks '((1 7 1 7))
+      (should-not (ygg-git-compare-submit--outside-p near ygg-git-compare-submit-tests--github-pr))
+      (should (ygg-git-compare-submit--outside-p far ygg-git-compare-submit-tests--github-pr)))
+    (ygg-git-compare-submit-tests--with-forge-hunks 'unknown
+      (should-not (ygg-git-compare-submit--outside-p far ygg-git-compare-submit-tests--github-pr)))))
+
 ;;; ygg-git-compare-submit-tests.el ends here
+
+(ert-deftest ygg-git-compare-submit-asks-git-once-for-a-pair-and-path ()
+  (let ((asked 0)
+        (ygg-git-compare-submit--memo nil))
+    (cl-letf (((symbol-function 'magit-git-lines)
+               (lambda (&rest _) (cl-incf asked) ygg-git-compare-submit-tests--diff))
+              ((symbol-function 'magit-toplevel) (lambda (&rest _) "/r/")))
+      (ygg-git-compare-submit--moved-heads
+       (list (ygg-git-compare-submit-tests--c "a" :level 'line :new-path "a.txt"
+                                              :old-path "a.txt" :side 'new :line 12)
+             (ygg-git-compare-submit-tests--c "b" :level 'line :new-path "a.txt"
+                                              :old-path "a.txt" :side 'new :line 15))
+       ygg-git-compare-submit-tests--gitlab-pr)
+      (should (= asked 1))
+      (ygg-git-compare-submit--gitlab-position
+       (ygg-git-compare-submit-tests--c "a" :level 'line :new-path "a.txt"
+                                        :old-path "a.txt" :side 'new :line 15)
+       ygg-git-compare-submit-tests--gitlab-pr)
+      (should (= asked 1))
+      (ygg-git-compare-submit--moved-heads nil ygg-git-compare-submit-tests--gitlab-pr)
+      (ygg-git-compare-submit--forge-hunks ygg-git-compare-submit-tests--gitlab-pr "a.txt" "a.txt")
+      (should (= asked 2)))))

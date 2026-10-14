@@ -225,14 +225,73 @@ RANGE-KEY, such as \"branch NAME\", for batch use and agents."
               ((string-match "\\.\\.\\.?\\([0-9a-f]\\{40\\}\\)\\'" end)))
     (match-string 1 end)))
 
+(defvar ygg-git-compare-submit--memo nil
+  "What git said of PR diffs since this submit began, by question; nil outside one.")
+
+(defun ygg-git-compare-submit--memoized (key fn)
+  "What FN answers, asked once per KEY in a submit."
+  (if (not ygg-git-compare-submit--memo)
+      (funcall fn)
+    (let ((hit (gethash key ygg-git-compare-submit--memo 'none)))
+      (if (eq hit 'none)
+          (puthash key (funcall fn) ygg-git-compare-submit--memo)
+        hit))))
+
+(defun ygg-git-compare-submit--diff-lines (pr path &optional old-path)
+  "The lines of PR's diff of PATH, renamed from OLD-PATH, with three lines of
+context."
+  (ygg-git-compare-submit--memoized
+   (list 'lines (magit-toplevel) (plist-get pr :base) (plist-get pr :head) path old-path)
+   (lambda ()
+     (magit-git-lines "diff" "--no-color" "--no-ext-diff" "-U3"
+                      (plist-get pr :base) (plist-get pr :head) "--" path old-path))))
+
+(defun ygg-git-compare-submit--forge-hunks (pr path &optional old-path)
+  "The (OLD-START OLD-LEN NEW-START NEW-LEN) of each hunk of PR's diff of PATH,
+renamed from OLD-PATH, as the forge draws it, with three lines of context;
+`unknown' when git cannot say."
+  (ygg-git-compare-submit--memoized
+   (list 'hunks (magit-toplevel) (plist-get pr :base) (plist-get pr :head) path old-path)
+   (lambda ()
+     (let ((lines (ygg-git-compare-submit--diff-lines pr path old-path)))
+       (cond (lines
+              (delq nil (mapcar #'ygg-git-compare--hunk-header lines)))
+             ((eql 0 (magit-git-exit-code "diff" "--quiet" (plist-get pr :base)
+                                          (plist-get pr :head) "--" path old-path))
+              nil)
+             (t 'unknown))))))
+
+(defun ygg-git-compare-submit--in-hunks-p (hunks side line)
+  (seq-some (lambda (h)
+              (pcase-let ((`(,old ,old-len ,new ,new-len) h))
+                (if (eq side 'old)
+                    (and (>= line old) (< line (+ old old-len)))
+                  (and (>= line new) (< line (+ new new-len))))))
+            hunks))
+
+(defun ygg-git-compare-submit--outside-p (comment pr)
+  "Whether COMMENT, an inline one, sits on a line outside the hunks the forge
+draws for PR."
+  (when (ygg-git-compare-submit--inline-p comment)
+    (let ((hunks (ygg-git-compare-submit--forge-hunks pr (plist-get comment :new-path)
+                                                      (plist-get comment :old-path))))
+      (and (listp hunks)
+           (not (and (ygg-git-compare-submit--in-hunks-p
+                      hunks (plist-get comment :side) (plist-get comment :line))
+                     (or (not (eq (ygg-git-compare-submit--level comment) 'range))
+                         (ygg-git-compare-submit--in-hunks-p
+                          hunks (plist-get comment :start-side)
+                          (plist-get comment :start-line)))))))))
+
 (defun ygg-git-compare-submit--moved-heads (comments pr)
   "The (COMMENT . SHA) of each of COMMENTS written on a commit other than
-PR's head."
+PR's head, and (COMMENT) of each inline one on a line outside PR's hunks."
+  (setq ygg-git-compare-submit--memo (make-hash-table :test 'equal))
   (delq nil
         (mapcar (lambda (c)
-                  (when-let* ((sha (ygg-git-compare-submit--written-head c))
-                              ((not (equal sha (plist-get pr :head)))))
-                    (cons c sha)))
+                  (let ((sha (ygg-git-compare-submit--written-head c)))
+                    (cond ((and sha (not (equal sha (plist-get pr :head)))) (cons c sha))
+                          ((ygg-git-compare-submit--outside-p c pr) (list c)))))
                 comments)))
 
 (defun ygg-git-compare-submit--inline-heads (heads)
@@ -266,7 +325,7 @@ HEADS says where moved ones were written; an inline one in it is text too."
                        ('review (concat prefix (ygg-git-compare-submit--text c)))
                        ('file (format "%s`%s` - %s" prefix (plist-get c :file)
                                       (ygg-git-compare-submit--text c)))
-                       (_ (and sha (ygg-git-compare-submit--moved-note c sha))))))
+                       (_ (and (assq c heads) (ygg-git-compare-submit--moved-note c sha))))))
                  comments))
    "\n\n"))
 
@@ -390,7 +449,8 @@ approval or request for changes: GitHub, for those two events."
   "The review of COMMENTS, then each inline one written on another commit
 posted alone on that commit, as a note on the pull request when refused."
   (let* ((moved (ygg-git-compare-submit--moved-heads comments pr))
-         (late (and (not (eq event 'draft)) (ygg-git-compare-submit--inline-heads moved)))
+         (late (and (not (eq event 'draft))
+                    (seq-filter #'cdr (ygg-git-compare-submit--inline-heads moved))))
          (carried (seq-remove (lambda (c) (assq c late)) comments))
          (review (ygg-git-compare-submit--github-review pr event carried moved))
          (host (plist-get pr :host))
@@ -442,9 +502,9 @@ old number, and the line's type, nil for context."
 new LINE; nil when LINE is not a context line there."
   (let (old new found)
     (dolist (text diff)
-      (cond ((string-match "\\`@@ -\\([0-9]+\\)\\(?:,[0-9]+\\)? \\+\\([0-9]+\\)" text)
-             (setq old (string-to-number (match-string 1 text))
-                   new (string-to-number (match-string 2 text))))
+      (cond ((when-let* ((header (ygg-git-compare--hunk-header text)))
+               (setq old (nth 0 header)
+                     new (nth 2 header))))
             ((null old))
             ((string-prefix-p "-" text) (cl-incf old))
             ((string-prefix-p "+" text) (cl-incf new))
@@ -464,10 +524,9 @@ base to head diff."
                          (ygg-git-compare-submit--context-old-line
                           (or diff
                               (setq diff (ignore-errors
-                                           (magit-git-lines
-                                            "diff" "--no-color" "--no-ext-diff"
-                                            (plist-get pr :base) (plist-get pr :head) "--"
-                                            (plist-get comment :new-path)))))
+                                           (ygg-git-compare-submit--diff-lines
+                                            pr (plist-get comment :new-path)
+                                            (plist-get comment :old-path)))))
                           line)))))
       (append (list :old-line (old-line (plist-get comment :side) (plist-get comment :line)
                                         (plist-get comment :old-line))
@@ -539,28 +598,47 @@ as the text FALLBACK, when non-nil, in a note without a position."
             (lambda (_value err &optional refused) (funcall settle err refused)))
          (funcall settle err refused))))))
 
-(defconst ygg-git-compare-submit--request-changes-query
-  "mutation($projectPath: ID!, $iid: String!) { mergeRequestRequestChanges(input: { projectPath: $projectPath, iid: $iid }) { errors } }")
+(defun ygg-git-compare-submit--gitlab-reviewer-state (pr done)
+  "Call DONE with (STATE ERR): the state GitLab holds for you as a reviewer of
+PR, STATE nil when you are not one."
+  (ygg-git-compare-submit--gitlab-api
+   pr nil (list "user")
+   (lambda (me err &rest _)
+     (if err
+         (funcall done nil err)
+       (ygg-git-compare-submit--gitlab-api
+        pr nil (list (ygg-git-compare-submit--gitlab-mr pr "reviewers"))
+        (lambda (reviewers err &rest _)
+          (funcall done
+                   (and (not err)
+                        (plist-get
+                         (seq-find (lambda (r)
+                                     (equal (plist-get (plist-get r :user) :id)
+                                            (plist-get me :id)))
+                                   reviewers)
+                         :state))
+                   err)))))))
 
 (defun ygg-git-compare-submit--gitlab-request-changes (pr next)
-  (ygg-git-compare-submit--gitlab-api
-   pr nil
-   (list "graphql"
-         "-f" (concat "query=" ygg-git-compare-submit--request-changes-query)
-         "-f" (concat "projectPath=" (plist-get pr :path))
-         "-f" (format "iid=%s" (plist-get pr :number)))
-   (lambda (out err &rest _)
-     (let ((errors (append (plist-get out :errors)
-                           (plist-get (plist-get (plist-get out :data)
-                                                 :mergeRequestRequestChanges)
-                                      :errors))))
-       (funcall next
-                (or err
-                    (when errors
-                      (format "glab graphql: %s"
-                              (mapconcat (lambda (e) (if (stringp e) e (or (plist-get e :message)
-                                                                           (format "%S" e))))
-                                         errors "; ")))))))))
+  (ygg-git-compare-submit--gitlab-reviewer-state
+   pr
+   (lambda (state err)
+     (cond (err (funcall next err))
+           ((null state)
+            (funcall next "GitLab records requested changes only from a reviewer: add yourself as a reviewer of this merge request"))
+           (t
+            (ygg-git-compare-submit--gitlab-note
+             pr nil "/request_changes" nil
+             (lambda (_value err &rest _)
+               (if err
+                   (funcall next err)
+                 (ygg-git-compare-submit--gitlab-reviewer-state
+                  pr
+                  (lambda (state err)
+                    (funcall next
+                             (cond (err err)
+                                   ((not (equal state "requested_changes"))
+                                    "GitLab did not record the request for changes")))))))))))))
 
 (defun ygg-git-compare-submit--gitlab-steps (pr event comments)
   "The notes that post COMMENTS to PR, drafts when EVENT is draft, and a
@@ -577,7 +655,7 @@ moved inline comment with no diff version of its own is text in the summary."
                          (seq-find (lambda (v) (equal (plist-get v :head_commit_sha) sha))
                                    versions))))
          (steps (append
-                 (when inline-heads
+                 (when (seq-some #'cdr inline-heads)
                    (list (list nil "Reading versions"
                                (lambda (next)
                                  (ygg-git-compare-submit--gitlab-api
@@ -612,7 +690,7 @@ moved inline comment with no diff version of its own is text in the summary."
                                  (lambda (next)
                                    (let ((sha (alist-get c heads nil nil #'eq))
                                          (version (funcall version-of c)))
-                                     (if (and sha (not version))
+                                     (if (and (assq c heads) (not version))
                                          (funcall next summary-failure)
                                        (ygg-git-compare-submit--gitlab-inline
                                         (if version
