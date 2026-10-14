@@ -1055,3 +1055,67 @@ and adds b.txt; main stays checked out."
       (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "mine")
       (should-error (ygg-git-compare-agent-comment-next) :type 'user-error)
       (should-error (ygg-git-compare-agent-comment-previous) :type 'user-error))))
+
+(defun ygg-git-compare-comments-tests--targets ()
+  (mapcar (lambda (ov) (buffer-substring (overlay-start ov) (overlay-end ov)))
+          (ygg-git-compare--target-overlays)))
+
+(ert-deftest ygg-git-compare-follow-shows-the-file-of-the-comment-and-marks-its-line ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--agent-compare root)
+      (let ((ygg-git-compare--file-window (selected-window))
+            (list (current-buffer)))
+        (ygg-git-compare-comments-tests--goto "+b2")
+        (ygg-git-compare--follow list)
+        (with-current-buffer (get-buffer (ygg-git-compare--file-buffer-name))
+          (should (equal magit-buffer-diff-files '("b.txt")))
+          (should (equal (ygg-git-compare-comments-tests--targets) '("+b2")))
+          (should (eq (overlay-get (car (ygg-git-compare--target-overlays)) 'face)
+                      'ygg-git-compare-comment-target)))
+        (ygg-git-compare-comments-tests--goto "+three")
+        (ygg-git-compare--follow list)
+        (with-current-buffer (get-buffer (ygg-git-compare--file-buffer-name))
+          (should (equal magit-buffer-diff-files '("a.txt")))
+          (should (equal (ygg-git-compare-comments-tests--targets) '("+three"))))
+        (ygg-git-compare-comments-tests--goto "+b1")
+        (ygg-git-compare--follow list)
+        (with-current-buffer (get-buffer (ygg-git-compare--file-buffer-name))
+          (should-not (ygg-git-compare-comments-tests--targets)))))))
+
+(ert-deftest ygg-git-compare-comment-next-marks-the-lines-until-point-leaves ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--agent-compare root)
+      (goto-char (point-min))
+      (ygg-git-compare-agent-comment-next)
+      (should (equal (ygg-git-compare-comments-tests--targets) '("+three")))
+      (ygg-git-compare--release-jump)
+      (should (ygg-git-compare-comments-tests--targets))
+      (ygg-git-compare-comments-tests--goto "+b1")
+      (ygg-git-compare--release-jump)
+      (should-not (ygg-git-compare-comments-tests--targets)))))
+
+(ert-deftest ygg-git-compare-comment-heading-leads-with-basename-and-line ()
+  (let ((base '(:level line :file "apps/lib/x.txt" :new-path "apps/lib/x.txt" :side new
+                       :line 44 :type issue :priority 1 :text "t")))
+    (cl-flet ((head (comment)
+                (substring-no-properties
+                 (car (split-string (ygg-git-compare--comment-block comment t) "\n")))))
+      (should (equal (head base) "▎ x.txt:44 [P1] [issue] PR apps/lib"))
+      (should (equal (head (append '(:level range :start-line 40) base))
+                     "▎ x.txt:40–44 [P1] [issue] PR apps/lib"))
+      (should (equal (head (append '(:side old) base))
+                     "▎ x.txt:-44 [P1] [issue] PR apps/lib")))))
+
+(ert-deftest ygg-git-compare-comments-of-an-unwashed-diff-sit-under-their-file ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (let ((ygg-magit-diff-line-limit 1))
+      (ygg-git-compare-comments-receive
+       root "feature" '((:file "b.txt" :line 2 :text "agent b")) "claude")
+      (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") '(rev . "feature"))
+        (should (ygg-git-compare--unwashed-p))
+        (goto-char (point-min))
+        (search-forward "b.txt")
+        (should (ygg-git-compare--comments-at-point))
+        (should (string-search "b.txt:2" (ygg-git-compare-comments-tests--shown)))))))

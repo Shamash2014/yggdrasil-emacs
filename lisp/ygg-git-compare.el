@@ -1254,11 +1254,14 @@ an untracked one against nothing."
   (when (buffer-live-p buffer)
     (with-current-buffer buffer
       (setq ygg-git-compare--timer nil)
-      (when-let* ((file (magit-file-at-point))
-                  ((window-live-p ygg-git-compare--file-window))
-                  ((not (equal ygg-git-compare--shown
-                               (cons magit-buffer-diff-range file)))))
-        (ygg-git-compare--show-file file)))))
+      (let ((comments (and (fboundp 'ygg-git-compare--comment-targets)
+                           (ygg-git-compare--comment-targets))))
+        (when-let* ((file (or (plist-get (car comments) :new-path) (magit-file-at-point)))
+                    ((window-live-p ygg-git-compare--file-window)))
+          (unless (equal ygg-git-compare--shown (cons magit-buffer-diff-range file))
+            (ygg-git-compare--show-file file))
+          (when (fboundp 'ygg-git-compare--aim-comments)
+            (ygg-git-compare--aim-comments file comments)))))))
 
 (defun ygg-git-compare--schedule ()
   (when ygg-git-compare--timer (cancel-timer ygg-git-compare--timer))
@@ -1916,6 +1919,8 @@ when that is known, and a compare that is not its range says why instead."
 (declare-function ygg-git-compare--for-prompt "ygg-git-compare-comments" (comment here))
 (declare-function ygg-git-compare--load-comments "ygg-git-compare-comments" ())
 (declare-function ygg-git-compare--draw-comments "ygg-git-compare-comments" ())
+(declare-function ygg-git-compare--comment-targets "ygg-git-compare-comments" ())
+(declare-function ygg-git-compare--aim-comments "ygg-git-compare-comments" (file comments))
 
 (defun ygg-git-compare--reveal ()
   "Open every folded section point is in."
