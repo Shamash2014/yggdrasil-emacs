@@ -667,6 +667,8 @@ those of the forge.")
 (autoload 'ygg-git-compare--remote-block "ygg-git-compare-threads")
 (defvar ygg-git-compare--pr-info-order)
 (autoload 'ygg-git-compare--remote-shown "ygg-git-compare-threads")
+(autoload 'ygg-git-compare--goto-remote "ygg-git-compare-threads")
+(autoload 'ygg-git-compare--goto-remote "ygg-git-compare-threads")
 (autoload 'ygg-git-compare-threads-toggle-resolved "ygg-git-compare-threads" nil t)
 (autoload 'ygg-git-compare-threads-open "ygg-git-compare-threads" nil t)
 (autoload 'ygg-git-compare-threads-copy "ygg-git-compare-threads" nil t)
@@ -1156,9 +1158,11 @@ it lists."
 (defun ygg-git-compare-comments-qf-goto (id)
   "Show the comment ID, a row id, in the diff of every file."
   (interactive (list (ygg-qf-kind-target-id)))
-  (ygg-git-compare-comments-qf--find id)
-  (pop-to-buffer (car id))
-  (ygg-git-compare--goto-comment (cdr id)))
+  (let ((comment (ygg-git-compare-comments-qf--find id)))
+    (pop-to-buffer (car id))
+    (if (plist-get comment :remote)
+        (ygg-git-compare--goto-remote comment)
+      (ygg-git-compare--goto-comment (cdr id)))))
 
 (defun ygg-git-compare-comments-qf-copy (id)
   "Copy the text of the comment ID, a row id."

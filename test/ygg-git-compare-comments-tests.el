@@ -254,6 +254,34 @@ and adds b.txt; main stays checked out."
           (should-not (string-search "urgent" (buffer-string))))
         (should (= (length (ygg-git-compare-comments-list t)) 2))))))
 
+(ert-deftest ygg-git-compare-comments-summary-ret-lands-on-a-line-comment ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--goto "+two")
+      (ygg-git-compare-comments-tests--write (ygg-git-compare-comment) "in a")
+      (let ((list (current-buffer)))
+        (goto-char (point-min))
+        (with-current-buffer (ygg-git-compare-comments-summary)
+          (goto-char (point-min))
+          (search-forward "in a")
+          (call-interactively (key-binding (kbd "RET")))
+          (should (eq (current-buffer) list))
+          (should (looking-at-p "^\\+two")))))))
+
+(ert-deftest ygg-git-compare-comments-qf-goto-lands-on-a-remote-comment ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (let ((list (current-buffer))
+            (remote (list :remote t :id "remote:gh:1" :thread 1 :level 'line :author "al"
+                          :created (float-time) :side 'new :line 3
+                          :file "a.txt" :new-path "a.txt" :text "remote words")))
+        (cl-letf (((symbol-function 'ygg-git-compare--remote-shown)
+                   (lambda (&rest _) (list remote))))
+          (ygg-git-compare--draw-comments)
+          (goto-char (point-min))
+          (ygg-git-compare-comments-qf-goto (cons list "remote:gh:1"))
+          (should (looking-at-p "^\\+three")))))))
+
 (ert-deftest ygg-git-compare-comments-from-an-agent-wait-for-a-check ()
   (ygg-git-compare-comments-tests--with-repo root
     (should (equal (ygg-git-compare-comments-receive

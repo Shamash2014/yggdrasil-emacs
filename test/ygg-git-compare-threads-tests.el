@@ -135,7 +135,7 @@ removed line 3, an outdated one, a file comment, an approval and a note."
              :user (list :login "bob") :created_at "2020-01-02T00:00:00Z" :html_url "https://x/c102")
        (list :id 103 :path "a.txt" :line 3 :side "LEFT" :body "old three" :start_line 2
              :user (list :login "carol") :created_at stamp :html_url "https://x/c103")
-       (list :id 104 :path "a.txt" :original_line 9 :side "RIGHT" :body "gone code"
+       (list :id 104 :path "a.txt" :original_line 9 :original_commit_id "abcdef0123456789" :side "RIGHT" :body "gone code"
              :user (list :login "dave") :created_at stamp :html_url "https://x/c104")
        (list :id 105 :path "b.txt" :subject_type "file" :body "whole file"
              :user (list :login "erin") :created_at stamp :html_url "https://x/c105")))
@@ -917,6 +917,56 @@ string, or (STATUS . WHAT-IT-SAID)."
           (should (equal (list (plist-get ygg-git-compare--draft :side)
                                (plist-get ygg-git-compare--draft :line))
                          '(new 2))))))))
+
+(ert-deftest ygg-git-compare-threads-ret-in-conversation-lands-on-the-thread-line ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (cl-letf (((symbol-function 'ygg-git-compare--conversation-p)
+                 (lambda (c) (plist-get c :remote))))
+        (ygg-git-compare--pr-info-refresh (current-buffer))
+        (ygg-git-compare--draw-comments)
+        (goto-char (oref (ygg-git-compare--conversation-section) content))
+        (search-forward "alice")
+        (call-interactively (key-binding (kbd "RET")))
+        (should (looking-at-p "^\\+two"))))))
+
+(ert-deftest ygg-git-compare-threads-ret-on-a-general-conversation-entry-still-toggles ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (goto-char (oref (ygg-git-compare--conversation-section) content))
+      (search-forward "ship it")
+      (let* ((section (ygg-git-compare--conversation-section))
+             (was (and (oref section hidden) t)))
+        (call-interactively (key-binding (kbd "RET")))
+        (should-not (eq (and (oref section hidden) t) was))))))
+
+(ert-deftest ygg-git-compare-threads-ret-on-an-outdated-thread-lands-on-the-file-top ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github)
+    (ygg-git-compare-threads-tests--with-compare head 'github
+      (let* ((comment (ygg-git-compare-threads-tests--find
+                       (ygg-git-compare--remote-shown (current-buffer)) "remote:gh:104"))
+             (said nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+          (goto-char (point-max))
+          (ygg-git-compare--goto-remote comment))
+        (should (looking-at-p "^modified +a.txt"))
+        (should (equal said "outdated: was L9 on abcdef0"))))))
+
+(ert-deftest ygg-git-compare-threads-gitlab-outdated-thread-names-its-old-head ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'gitlab #'ygg-git-compare-threads-tests--gitlab)
+    (ygg-git-compare-threads-tests--with-compare head 'gitlab
+      (let ((said nil))
+        (cl-letf (((symbol-function 'message)
+                   (lambda (fmt &rest args) (setq said (apply #'format fmt args)))))
+          (ygg-git-compare--goto-remote
+           (ygg-git-compare-threads-tests--find
+            (ygg-git-compare--remote-shown (current-buffer)) "remote:gl:1")))
+        (should (equal said "outdated: was L2 on oldhead"))))))
 
 ;;; Resize
 

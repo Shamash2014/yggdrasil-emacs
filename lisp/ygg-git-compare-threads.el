@@ -533,6 +533,8 @@ not be had, and OLD the comments held before, whose states stand then."
              :side (if (equal (plist-get c :side) "LEFT") 'old 'new)
              :line (and anchored line) :start-line start
              :orig-line (or (plist-get c :original_line) line)
+             :orig-commit (plist-get c :original_commit_id)
+             :orig-commit (plist-get c :original_commit_id)
              :resolved (if state (car state) 'unknown)
              :outdated (or (cdr state) (and (null line) (not file-subject))))))
    raw))
@@ -823,6 +825,80 @@ with BY-THREAD, the first comment of a thread, asked for among threads."
                             comments)))
           (cdr (assoc (completing-read "Comment: " rows nil t) rows)))
       (or (car comments) (user-error "No comment from the forge here")))))
+
+;;; Going to one
+
+(defun ygg-git-compare--remote-outdated-note (comment)
+  (let ((line (plist-get comment :orig-line))
+        (sha (or (plist-get comment :orig-commit) (plist-get comment :head-sha))))
+    (concat "outdated"
+            (and line (format ": was L%s" line))
+            (and sha (format " on %s" (seq-take sha 7))))))
+
+(defun ygg-git-compare--goto-remote (comment)
+  "Go to the forge's COMMENT in this diff: its line, or its file's top with
+a note when the line is no longer in the diff."
+  (let* ((file (seq-find (lambda (s)
+                           (and (magit-section-match 'file s)
+                                (equal (oref s value) (plist-get comment :new-path))))
+                         (oref magit-root-section children)))
+         (outdated (plist-get comment :outdated))
+         (pos (and file (not outdated) (memq (plist-get comment :level) '(line range))
+                   (ygg-git-compare--line-pos file comment))))
+    (cond (pos (goto-char pos) (beginning-of-line))
+          ((and file outdated) (goto-char (oref file start)))
+          (t (ygg-git-compare--goto-comment (plist-get comment :id))))
+    (ygg-git-compare--reveal)
+    (when outdated
+      (message "%s" (ygg-git-compare--remote-outdated-note comment)))))
+
+(defun ygg-git-compare-conversation-goto ()
+  "Go to the line of the Conversation comment at point in the diff; on any
+other, fold or open the section."
+  (interactive)
+  (let ((comment (and-let* ((id (get-text-property (point) 'ygg-git-compare-conversation-id)))
+                   (seq-find (lambda (c) (equal (plist-get c :id) id))
+                             (ygg-git-compare--remote-shown (current-buffer))))))
+    (if (and comment (plist-get comment :new-path))
+        (ygg-git-compare--goto-remote comment)
+      (magit-section-toggle (magit-current-section)))))
+
+;;; Going to one
+
+(defun ygg-git-compare--remote-outdated-note (comment)
+  (let ((line (plist-get comment :orig-line))
+        (sha (or (plist-get comment :orig-commit) (plist-get comment :head-sha))))
+    (concat "outdated"
+            (and line (format ": was L%s" line))
+            (and sha (format " on %s" (seq-take sha 7))))))
+
+(defun ygg-git-compare--goto-remote (comment)
+  "Go to the forge's COMMENT in this diff: its line, or its file's top with
+a note when the line is no longer in the diff."
+  (let* ((file (seq-find (lambda (s)
+                           (and (magit-section-match 'file s)
+                                (equal (oref s value) (plist-get comment :new-path))))
+                         (oref magit-root-section children)))
+         (outdated (plist-get comment :outdated))
+         (pos (and file (not outdated) (memq (plist-get comment :level) '(line range))
+                   (ygg-git-compare--line-pos file comment))))
+    (cond (pos (goto-char pos) (beginning-of-line))
+          ((and file outdated) (goto-char (oref file start)))
+          (t (ygg-git-compare--goto-comment (plist-get comment :id))))
+    (ygg-git-compare--reveal)
+    (when outdated
+      (message "%s" (ygg-git-compare--remote-outdated-note comment)))))
+
+(defun ygg-git-compare-conversation-goto ()
+  "Go to the line of the Conversation comment at point in the diff; on any
+other, fold or open the section."
+  (interactive)
+  (let ((comment (and-let* ((id (get-text-property (point) 'ygg-git-compare-conversation-id)))
+                   (seq-find (lambda (c) (equal (plist-get c :id) id))
+                             (ygg-git-compare--remote-shown (current-buffer))))))
+    (if (and comment (plist-get comment :new-path))
+        (ygg-git-compare--goto-remote comment)
+      (magit-section-toggle (magit-current-section)))))
 
 (defun ygg-git-compare-threads-open ()
   "Open the forge's comment at point in the browser."
