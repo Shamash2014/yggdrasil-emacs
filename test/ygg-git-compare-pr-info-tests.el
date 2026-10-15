@@ -24,10 +24,14 @@
 (defconst ygg-git-compare-pr-info-tests--gh
   "#!/bin/sh
 echo \"gh $*\" >> \"$FAKE_DIR/log\"
+prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"--input\" ]; then echo \"body $(cat \"$a\")\" >> \"$FAKE_DIR/log\"; fi; prev=\"$a\"; done
 reply() { if [ -f \"$FAKE_DIR/$1.err\" ]; then cat \"$FAKE_DIR/$1.err\" >&2; exit 1; fi
   if [ -f \"$FAKE_DIR/$1.json\" ]; then cat \"$FAKE_DIR/$1.json\"; else echo '[]'; fi; }
 case \"$*\" in
   *statusCheckRollup*) reply checks ;;
+  */approve*) echo '{}' ;;
+  *pending_deployments*) reply pending ;;
+  *actions/runs?*) reply runs ;;
   *graphql*) reply graphql ;;
   *pulls/*/comments*) reply inline ;;
   *pulls/*/reviews*) reply reviews ;;
@@ -39,10 +43,12 @@ esac
 (defconst ygg-git-compare-pr-info-tests--glab
   "#!/bin/sh
 echo \"glab $*\" >> \"$FAKE_DIR/log\"
+prev=\"\"; for a in \"$@\"; do if [ \"$prev\" = \"--input\" ]; then echo \"body $(cat \"$a\")\" >> \"$FAKE_DIR/log\"; fi; prev=\"$a\"; done
 reply() { if [ -f \"$FAKE_DIR/$1.err\" ]; then cat \"$FAKE_DIR/$1.err\" >&2; exit 1; fi
   if [ -f \"$FAKE_DIR/$1.json\" ]; then cat \"$FAKE_DIR/$1.json\"; else echo '[]'; fi; }
 case \"$*\" in
   *jobs*) reply jobs ;;
+  *deployments*) reply blocked ;;
   *discussions*) reply discussions ;;
   *merge_requests/12/approvals) reply approvals ;;
   *merge_requests/12) reply mr ;;
@@ -533,6 +539,225 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
             (with-current-buffer buffer
               (should-not ygg-git-compare--checks-timer)))
         (set-window-buffer window before)))))
+
+;;; Approvals
+
+(defun ygg-git-compare-pr-info-tests--wait-for-call (needle)
+  (let ((deadline (+ (float-time) 10)))
+    (while (and (< (float-time) deadline)
+                (= (ygg-git-compare-pr-info-tests--calls needle) 0))
+      (accept-process-output nil 0.05))))
+
+(defun ygg-git-compare-pr-info-tests--press (key prompt-var)
+  "Press KEY at point, confirming, and leave the question asked in PROMPT-VAR."
+  (cl-letf (((symbol-function 'y-or-n-p)
+             (lambda (prompt) (set prompt-var prompt) t)))
+    (call-interactively (key-binding (kbd key)))))
+
+(defvar ygg-git-compare-pr-info-tests--asked nil)
+
+(defun ygg-git-compare-pr-info-tests--waiting-rollup ()
+  (concat "{\"statusCheckRollup\":"
+          (ygg-git-compare-pr-info-tests--json
+           (list :__typename "CheckRun" :name "deploy-job" :status "WAITING" :conclusion ""
+                 :detailsUrl "https://github.com/o/r/actions/runs/22/job/5"
+                 :workflowName "Deploy")
+           (list :__typename "CheckRun" :name "lint" :status "COMPLETED" :conclusion "SUCCESS"
+                 :detailsUrl "https://github.com/o/r/actions/runs/23/job/6"
+                 :workflowName "CI"))
+          "}"))
+
+(ert-deftest ygg-git-compare-pr-info-pending-deployments-are-asked-only-for-waiting-checks ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put "checks.json"
+                                        (concat "{\"statusCheckRollup\":"
+                                                (ygg-git-compare-pr-info-tests--rollup t) "}"))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (should (= (ygg-git-compare-pr-info-tests--calls "pending_deployments") 0))
+      (should (= (ygg-git-compare-pr-info-tests--calls "actions/runs") 0)))))
+
+(ert-deftest ygg-git-compare-pr-info-waiting-deployment-is-marked-and-reviewed ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put "checks.json"
+                                        (ygg-git-compare-pr-info-tests--waiting-rollup))
+    (ygg-git-compare-pr-info-tests--put
+     "pending.json"
+     "[{\"environment\":{\"id\":161,\"name\":\"prod\"},\"current_user_can_approve\":true},{\"environment\":{\"id\":162,\"name\":\"stage\"},\"current_user_can_approve\":false}]")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (should (= (ygg-git-compare-pr-info-tests--calls "pending_deployments") 1))
+      (with-current-buffer buffer
+        (let ((text (ygg-git-compare-pr-info-tests--text)))
+          (should (string-search "Checks (2)  ✓ 1 · ⏸ 1" text))
+          (should (string-search "⏸ deploy-job" text))
+          (should (string-search "needs approval: prod, stage" text))
+          (should (string-search "A approve  D decline" text))
+          (should (string-search "CI ✓ 1 · ⏸ 1" (ygg-git-compare-pr-info-tests--header))))
+        (ygg-git-compare-pr-info-tests--goto-row "deploy-job")
+        (ygg-git-compare-pr-info-tests--press "A" 'ygg-git-compare-pr-info-tests--asked)
+        (should (string-match-p "Approve workflow Deploy (run 22): deploy to prod"
+                                ygg-git-compare-pr-info-tests--asked))
+        (ygg-git-compare-pr-info-tests--wait-for-call "body")
+        (ygg-git-compare-pr-info-tests--settle buffer)
+        (let ((log (ygg-git-compare-pr-info-tests--log)))
+          (should (member "gh api --hostname github.com repos/o/r/actions/runs/22/pending_deployments --method POST --header Content-Type: application/json --input"
+                          (mapcar (lambda (line) (replace-regexp-in-string " [^ ]*\\.json\\'" "" line))
+                                  log)))
+          (let ((body (json-parse-string
+                       (substring (seq-find (lambda (line) (string-prefix-p "body " line)) log) 5)
+                       :object-type 'plist :array-type 'list)))
+            (should (equal (plist-get body :environment_ids) '(161)))
+            (should (equal (plist-get body :state) "approved"))
+            (should (stringp (plist-get body :comment)))))
+        (should (>= (ygg-git-compare-pr-info-tests--calls "statusCheckRollup") 2))
+        (ygg-git-compare-pr-info-tests--goto-row "deploy-job")
+        (ygg-git-compare-pr-info-tests--press "D" 'ygg-git-compare-pr-info-tests--asked)
+        (should (string-match-p "Reject workflow Deploy" ygg-git-compare-pr-info-tests--asked))
+        (ygg-git-compare-pr-info-tests--settle buffer)
+        (should (= (ygg-git-compare-pr-info-tests--calls "\"state\":\"rejected\"") 1))))))
+
+(ert-deftest ygg-git-compare-pr-info-declined-confirmation-posts-nothing ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put "checks.json"
+                                        (ygg-git-compare-pr-info-tests--waiting-rollup))
+    (ygg-git-compare-pr-info-tests--put
+     "pending.json"
+     "[{\"environment\":{\"id\":161,\"name\":\"prod\"},\"current_user_can_approve\":true}]")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (with-current-buffer buffer
+        (ygg-git-compare-pr-info-tests--goto-row "deploy-job")
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+          (call-interactively (key-binding (kbd "A"))))
+        (ygg-git-compare-pr-info-tests--goto-row "lint")
+        (should-error (call-interactively (key-binding (kbd "A"))) :type 'user-error))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (should (= (ygg-git-compare-pr-info-tests--calls "--method POST") 0)))))
+
+(ert-deftest ygg-git-compare-pr-info-fork-runs-held-for-approval-are-listed-and-approved ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "checks.json" "{\"statusCheckRollup\":[],\"isCrossRepository\":true,\"headRefOid\":\"abc123\"}")
+    (ygg-git-compare-pr-info-tests--put
+     "runs.json"
+     "{\"workflow_runs\":[{\"id\":31,\"name\":\"Fork CI\",\"status\":\"action_required\",\"html_url\":\"https://github.com/o/r/actions/runs/31\"}]}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (should (= (ygg-git-compare-pr-info-tests--calls
+                  "gh api --hostname github.com repos/o/r/actions/runs?head_sha=abc123&status=action_required&per_page=100")
+                 1))
+      (with-current-buffer buffer
+        (let ((text (ygg-git-compare-pr-info-tests--text)))
+          (should (string-search "Checks (1)  ⏸ 1" text))
+          (should (string-search "Fork CI" text))
+          (should (string-search "needs approval" text)))
+        (ygg-git-compare-pr-info-tests--goto-row "Fork CI")
+        (should-error (progn (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+                               (call-interactively (key-binding (kbd "D")))))
+                      :type 'user-error)
+        (ygg-git-compare-pr-info-tests--press "A" 'ygg-git-compare-pr-info-tests--asked)
+        (should (string-match-p "Approve workflow Fork CI (run 31)"
+                                ygg-git-compare-pr-info-tests--asked))
+        (ygg-git-compare-pr-info-tests--wait-for-call "actions/runs/31/approve"))
+      (should (= (ygg-git-compare-pr-info-tests--calls
+                  "gh api --hostname github.com --method POST repos/o/r/actions/runs/31/approve")
+                 1)))))
+
+(ert-deftest ygg-git-compare-pr-info-same-repo-pull-requests-do-not-ask-for-held-runs ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put "checks.json" "{\"statusCheckRollup\":[]}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (should (= (ygg-git-compare-pr-info-tests--calls "actions/runs") 0)))))
+
+(ert-deftest ygg-git-compare-pr-info-gitlab-blocked-deployment-is-marked-and-reviewed ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "mr.json" "{\"iid\":12,\"head_pipeline\":{\"id\":99,\"status\":\"manual\"}}")
+    (ygg-git-compare-pr-info-tests--put
+     "jobs.json"
+     (ygg-git-compare-pr-info-tests--json
+      (list :id 5 :name "ship" :status "manual" :stage "deploy")
+      (list :id 4 :name "unit" :status "success" :stage "test")))
+    (ygg-git-compare-pr-info-tests--put
+     "blocked.json"
+     "[{\"id\":77,\"status\":\"blocked\",\"environment\":{\"id\":9,\"name\":\"prod\"},\"deployable\":{\"id\":5}}]")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'gitlab head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (should (= (ygg-git-compare-pr-info-tests--calls "deployments?status=blocked") 1))
+      (with-current-buffer buffer
+        (let ((text (ygg-git-compare-pr-info-tests--text)))
+          (should (string-search "⏸ 1" text))
+          (should (string-search "needs approval: prod" text)))
+        (ygg-git-compare-pr-info-tests--goto-row "ship")
+        (ygg-git-compare-pr-info-tests--press "D" 'ygg-git-compare-pr-info-tests--asked)
+        (should (equal ygg-git-compare-pr-info-tests--asked
+                       "Reject job ship: deploy to prod?"))
+        (ygg-git-compare-pr-info-tests--wait-for-call "body")
+        (ygg-git-compare-pr-info-tests--settle buffer))
+      (should (= (ygg-git-compare-pr-info-tests--calls
+                  "glab api --hostname gitlab.com projects/o%2Fr/deployments/77/approval --method POST")
+                 1))
+      (should (= (ygg-git-compare-pr-info-tests--calls "\"status\":\"rejected\"") 1)))))
+
+(ert-deftest ygg-git-compare-pr-info-decline-hint-needs-a-declinable-check ()
+  (let ((held (list :name "Fork CI" :state 'waiting :approval '(:kind run)))
+        (deployment (list :name "deploy" :state 'waiting
+                          :approval '(:kind deployment :environments ((:name "prod"))))))
+    (should (string-search "A approve  D decline"
+                           (ygg-git-compare--checks-hint (list deployment) nil)))
+    (should (string-search "A approve  D decline"
+                           (ygg-git-compare--checks-hint (list held deployment) nil)))
+    (let ((hint (ygg-git-compare--checks-hint (list held) nil)))
+      (should (string-search "A approve" hint))
+      (should-not (string-search "decline" hint)))))
+
+(ert-deftest ygg-git-compare-pr-info-gitlab-without-manual-jobs-asks-for-no-deployments ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "mr.json" "{\"iid\":12,\"head_pipeline\":{\"id\":99,\"status\":\"success\"}}")
+    (ygg-git-compare-pr-info-tests--put
+     "jobs.json" (ygg-git-compare-pr-info-tests--json
+                  (list :id 4 :name "unit" :status "success" :stage "test")))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'gitlab head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (should (= (ygg-git-compare-pr-info-tests--calls "deployments") 0)))))
+
+(ert-deftest ygg-git-compare-pr-info-gitlab-fork-merge-request-runs-its-pipeline-in-the-target ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "mr.json" "{\"iid\":12,\"head_pipeline\":null,\"source_project_id\":7,\"target_project_id\":3}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'gitlab head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (with-current-buffer buffer
+        (should (string-search "⏸ no pipeline in the target project"
+                               (ygg-git-compare-pr-info-tests--text)))
+        (ygg-git-compare-pr-info-tests--goto-row "no pipeline")
+        (ygg-git-compare-pr-info-tests--press "P" 'ygg-git-compare-pr-info-tests--asked)
+        (should (equal ygg-git-compare-pr-info-tests--asked "Run the pipeline of !12 in o/r?"))
+        (ygg-git-compare-pr-info-tests--wait-for-call "merge_requests/12/pipelines"))
+      (should (= (ygg-git-compare-pr-info-tests--calls
+                  "glab api --hostname gitlab.com --method POST projects/o%2Fr/merge_requests/12/pipelines")
+                 1)))))
+
+(ert-deftest ygg-git-compare-pr-info-same-project-merge-request-has-no-fork-pipeline ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "mr.json" "{\"iid\":12,\"head_pipeline\":null,\"source_project_id\":3,\"target_project_id\":3}")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'gitlab head)))
+      (ygg-git-compare-pr-info-tests--settle buffer)
+      (with-current-buffer buffer
+        (should-not (string-search "no pipeline in the target" (ygg-git-compare-pr-info-tests--text)))
+        (should-error (ygg-git-compare-checks-run-pipeline) :type 'user-error)))))
+
+(ert-deftest ygg-git-compare-pr-info-approval-keys-are-bound-on-checks ()
+  (should (eq (lookup-key magit-ygg-git-compare-check-section-map "A")
+              #'ygg-git-compare-check-approve))
+  (should (eq (lookup-key magit-ygg-git-compare-check-section-map "D")
+              #'ygg-git-compare-check-decline))
+  (should (eq (lookup-key magit-ygg-git-compare-checks-section-map "P")
+              #'ygg-git-compare-checks-run-pipeline)))
 
 ;;; Errors
 

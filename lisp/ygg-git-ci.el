@@ -92,10 +92,16 @@
     (dolist (item (ygg-git-ci--json text))
       (let* ((name (or (plist-get item :workflowName) "workflow"))
              (created (ygg-git-review-requests--time (plist-get item :createdAt)))
+             (held (or (equal (plist-get item :status) "action_required")
+                       (equal (plist-get item :conclusion) "action_required")))
              (row (list :id (plist-get item :databaseId)
                         :name name
-                        :state (ygg-git-ci--github-state (plist-get item :status)
-                                                         (plist-get item :conclusion))
+                        :status (plist-get item :status)
+                        :state (if held
+                                   'waiting
+                                 (ygg-git-ci--github-state (plist-get item :status)
+                                                           (plist-get item :conclusion)))
+                        :approval (and held (list :kind 'run))
                         :created created
                         :started (ygg-git-review-requests--time (plist-get item :startedAt))
                         :finished (ygg-git-review-requests--time (plist-get item :updatedAt))
@@ -257,8 +263,13 @@
         (list "gh" "run" "list" "--repo" (ygg-git-ci--slug repo) "--branch" branch
               "--limit" "100" "--json" ygg-git-ci--github-fields)
         (lambda (status text stderr)
-          (ygg-git-ci--land key program status text stderr
-                            (lambda (text) (list :rows (ygg-git-ci--parse-github text)))))))
+          (let* ((rows (and (eql status 0) (ignore-errors (ygg-git-ci--parse-github text))))
+                 (waiting (seq-filter (lambda (row) (equal (plist-get row :status) "waiting"))
+                                      rows)))
+            (if waiting
+                (ygg-git-ci--deployments key cell rows waiting)
+              (ygg-git-ci--land key program status text stderr
+                                (lambda (text) (list :rows (ygg-git-ci--parse-github text)))))))))
       ('gitlab
        (ygg-git-ci--step
         key cell
@@ -275,6 +286,42 @@
                                     (list :rows nil)))
               (ygg-git-ci--jobs-page key cell pipeline 1 nil)))))))))
 
+(defun ygg-git-ci--deployments (key cell rows waiting)
+  "Ask which environments each of the WAITING runs among ROWS awaits, then store
+ROWS."
+  (if (null waiting)
+      (ygg-git-ci--store key (list :rows rows))
+    (let ((row (car waiting)))
+      (ygg-git-ci--step
+       key cell (ygg-git-ci--command 'pending-deployments (car key) row)
+       (lambda (status text _stderr)
+         (when-let* (((eql status 0))
+                     (environments (ignore-errors (ygg-git-compare--approval-environments text))))
+           (plist-put row :state 'waiting)
+           (plist-put row :approval (list :kind 'deployment :environments environments)))
+         (ygg-git-ci--deployments key cell rows (cdr waiting)))))))
+
+(defun ygg-git-ci--blocked (key cell rows &optional error)
+  "Mark the manual ROWS that are deployments awaiting approval, then store ROWS,
+with the ERROR that cut the jobs short."
+  (ygg-git-ci--step
+   key cell (ygg-git-ci--command 'blocked-deployments (car key) nil)
+   (lambda (status text _stderr)
+     (dolist (deployment (and (eql status 0) (ignore-errors (ygg-git-ci--json text))))
+       (when-let* ((row (seq-find (lambda (row)
+                                    (and (plist-get row :playable)
+                                         (equal (plist-get row :id)
+                                                (plist-get (plist-get deployment :deployable) :id))))
+                                  rows)))
+         (plist-put row :state 'waiting)
+         (plist-put row :playable nil)
+         (plist-put row :approval
+                    (list :kind 'deployment :deployment (plist-get deployment :id)
+                          :environments
+                          (list (list :name (plist-get (plist-get deployment :environment)
+                                                       :name)))))))
+     (ygg-git-ci--store key (if error (list :rows rows :error error) (list :rows rows))))))
+
 (defun ygg-git-ci--jobs-page (key cell pipeline page earlier)
   "Ask for PAGE of PIPELINE's jobs, after EARLIER ones; on to the next while full."
   (let* ((repo (car key))
@@ -289,12 +336,21 @@
        (let ((jobs (and (eql status 0) (ignore-errors (ygg-git-ci--json text)))))
          (if (and (length= jobs ygg-git-ci--page-size) (< page ygg-git-ci--max-pages))
              (ygg-git-ci--jobs-page key cell pipeline (1+ page) (append earlier jobs))
-           (ygg-git-ci--land
-            key program status text stderr
-            (lambda (text)
-              (list :rows (ygg-git-ci--gitlab-rows
-                           (append earlier (ygg-git-ci--json text)) pipeline)))
-            (and earlier (ygg-git-ci--gitlab-rows earlier pipeline)))))))))
+           (let* ((all (append earlier jobs))
+                  (rows (and all (ygg-git-ci--gitlab-rows all pipeline))))
+             (if (and rows (seq-some (lambda (row) (plist-get row :playable)) rows))
+                 (ygg-git-ci--blocked
+                  key cell rows
+                  (cond ((not (eql status 0))
+                         (ygg-git-review-requests--failure program status stderr))
+                        ((null (ignore-errors (ygg-git-ci--json text) t))
+                         (format "%s answered nothing readable" program))))
+               (ygg-git-ci--land
+                key program status text stderr
+                (lambda (text)
+                  (list :rows (ygg-git-ci--gitlab-rows
+                               (append earlier (ygg-git-ci--json text)) pipeline)))
+                (and earlier (ygg-git-ci--gitlab-rows earlier pipeline)))))))))))
 
 (defun ygg-git-ci--start (key)
   (let ((cell (list (float-time) nil nil))
@@ -370,7 +426,11 @@ and no question is already out; the cache stays until the new answer lands."
          (details (delq nil (list (ygg-git-compare--check-duration row)
                                   (and (not (string-empty-p age)) age)
                                   (plist-get row :event)))))
-    (concat (propertize (string-join details "  ") 'font-lock-face 'magit-dimmed)
+    (concat (if-let* ((approval (plist-get row :approval)))
+                (propertize (concat (ygg-git-compare--approval-label approval) "  ")
+                            'font-lock-face 'warning)
+              "")
+            (propertize (string-join details "  ") 'font-lock-face 'magit-dimmed)
             (if (ygg-git-ci--stale-p row head) (propertize "  stale" 'font-lock-face 'warning) ""))))
 
 (defun ygg-git-ci--row-line (row head)
@@ -385,10 +445,17 @@ and no question is already out; the cache stays until the new answer lands."
     (magit-insert-heading
       "  " (ygg-git-review-requests--fit (ygg-git-ci--row-line row head)))))
 
-(defun ygg-git-ci--keys (repo)
-  (if (eq (car repo) 'github)
-      "r rerun  x cancel  a artifacts  l log  t run"
-    "r retry  x cancel  p play  a artifacts  R/X pipeline  l log  t start"))
+(defun ygg-git-ci--keys (repo &optional rows)
+  (concat (if (eq (car repo) 'github)
+              "r rerun  x cancel  a artifacts  l log  t run"
+            "r retry  x cancel  p play  a artifacts  R/X pipeline  l log  t start")
+          (cond ((seq-some (lambda (row)
+                             (eq (plist-get (plist-get row :approval) :kind) 'deployment))
+                           rows)
+                 "  A approve  D decline")
+                ((seq-some (lambda (row) (plist-get row :approval)) rows)
+                 "  A approve")
+                (t ""))))
 
 (defun ygg-git-ci--stages (rows)
   "ROWS as (STAGE . ROWS) in pipeline order, or nil when they carry no stage."
@@ -442,7 +509,7 @@ and no question is already out; the cache stays until the new answer lands."
                    branch (if rows
                               (ygg-git-compare--checks-summary rows)
                             (propertize "no runs" 'font-lock-face 'magit-dimmed))
-                   (ygg-git-ci--keys (car key)))
+                   (ygg-git-ci--keys (car key) rows))
                   (let ((head (ignore-errors (magit-rev-parse "HEAD"))))
                     (if-let* ((stages (ygg-git-ci--stages rows)))
                         (dolist (group stages)
@@ -464,6 +531,10 @@ and no question is already out; the cache stays until the new answer lands."
   (or (magit-section-value-if 'ci-run)
       (user-error "No CI run at point")))
 
+(defun ygg-git-ci--body-file (body)
+  (let ((coding-system-for-write 'utf-8))
+    (make-temp-file "ygg-git-ci-body-" nil ".json" (json-serialize body))))
+
 (defun ygg-git-ci--command (action repo row &optional extra)
   "The command doing ACTION to ROW on REPO's forge."
   (let ((id (plist-get row :id)))
@@ -476,6 +547,17 @@ and no question is already out; the cache stays until the new answer lands."
           ('log (list "gh" "run" "view" (format "%s" id)
                       (if (memq (plist-get row :state) '(failed cancelled)) "--log-failed" "--log")
                       "--repo" (ygg-git-ci--slug repo)))
+          ('approve-run (list "gh" "api" "--hostname" (nth 1 repo) "--method" "POST"
+                              (format "repos/%s/actions/runs/%s/approve" (nth 2 repo) id)))
+          ('pending-deployments (list "gh" "api" "--hostname" (nth 1 repo)
+                                      (format "repos/%s/actions/runs/%s/pending_deployments"
+                                              (nth 2 repo) id)))
+          ('review-deployments (list "gh" "api" "--hostname" (nth 1 repo)
+                                     (format "repos/%s/actions/runs/%s/pending_deployments"
+                                             (nth 2 repo) id)
+                                     "--method" "POST"
+                                     "--header" "Content-Type: application/json"
+                                     "--input" (ygg-git-ci--body-file extra)))
           ('artifact-count (list "gh" "api" "--hostname" (nth 1 repo)
                                  (format "repos/%s/actions/runs/%s/artifacts" (nth 2 repo) id)
                                  "--jq" "[.artifacts[] | select(.expired | not)] | length"))
@@ -498,6 +580,15 @@ and no question is already out; the cache stays until the new answer lands."
           ('cancel-pipeline (append api (list "--method" "POST"
                                               (format "%s/pipelines/%s/cancel" project
                                                       (plist-get row :pipeline)))))
+          ('blocked-deployments
+           (append api (list (format "%s/deployments?status=blocked&order_by=id&sort=desc&per_page=%d"
+                                     project ygg-git-ci--page-size))))
+          ('review-deployment
+           (append api (list "--method" "POST"
+                             (format "%s/deployments/%s/approval" project
+                                     (plist-get (plist-get row :approval) :deployment))
+                             "--header" "Content-Type: application/json"
+                             "--input" (ygg-git-ci--body-file extra))))
           ('play (append api (list "--method" "POST" (format "%s/jobs/%s/play" project id))
                          (and extra
                               (list "--header" "Content-Type: application/json"
@@ -523,7 +614,6 @@ and no question is already out; the cache stays until the new answer lands."
     (unwind-protect
         (when (or (null prompt) (y-or-n-p prompt))
           (message "ci: %s…" label)
-          (setq running t)
           (let* ((finished nil)
                  (process
                   (ygg-git-review-requests--spawn
@@ -542,6 +632,7 @@ and no question is already out; the cache stays until the new answer lands."
                          (ygg-git-ci--ensure key t)
                          (when (derived-mode-p 'magit-mode)
                            (magit-refresh-buffer))))))))
+            (setq running t)
             (unless finished
               (setq timer
                     (run-at-time ygg-git-ci-timeout nil
@@ -634,6 +725,61 @@ A manual GitLab job is played instead."
     (ygg-git-ci--do key (format "cancel %s" name)
                     (ygg-git-ci--command 'cancel (car key) row)
                     (format "Cancel %s? " name))))
+
+(defun ygg-git-ci--decide (state)
+  "Ask, then put STATE, approved or rejected, on what the run at point waits for."
+  (let* ((key (ygg-git-ci--key))
+         (repo (car key))
+         (row (ygg-git-ci--at-point))
+         (name (plist-get row :name))
+         (approval (or (plist-get row :approval)
+                       (user-error "%s is not waiting for approval" name)))
+         (approving (equal state "approved"))
+         (verb (if approving "Approve" "Reject"))
+         (comment (if approving "Approved from Emacs" "Rejected from Emacs")))
+    (pcase (list (car repo) (plist-get approval :kind))
+      ('(github run)
+       (unless approving
+         (user-error "GitHub cannot decline a held run; cancel it instead"))
+       (ygg-git-ci--do key (format "approve %s" name)
+                       (ygg-git-ci--command 'approve-run repo row)
+                       (format "Approve workflow %s (run %s) held for approval? "
+                               name (plist-get row :id))))
+      ('(github deployment)
+       (let ((environments (seq-filter (lambda (environment) (plist-get environment :can))
+                                       (plist-get approval :environments))))
+         (unless environments
+           (user-error "You cannot review the deployments of %s" name))
+         (let ((names (string-join (mapcar (lambda (environment) (plist-get environment :name))
+                                           environments)
+                                   ", ")))
+           (ygg-git-ci--do key (format "%s %s to %s" (downcase verb) name names)
+                           (ygg-git-ci--command
+                            'review-deployments repo row
+                            (list :environment_ids
+                                  (vconcat (mapcar (lambda (environment) (plist-get environment :id))
+                                                   environments))
+                                  :state state :comment comment))
+                           (format "%s workflow %s (run %s): deploy to %s? "
+                                   verb name (plist-get row :id) names)))))
+      ('(gitlab deployment)
+       (ygg-git-ci--do key (format "%s %s to %s" (downcase verb) name
+                                   (ygg-git-compare--approval-names approval))
+                       (ygg-git-ci--command 'review-deployment repo row
+                                            (list :status state :comment comment))
+                       (format "%s job %s: deploy to %s? " verb name
+                               (ygg-git-compare--approval-names approval))))
+      (_ (user-error "%s is not waiting for approval" name)))))
+
+(defun ygg-git-ci-approve ()
+  "Approve what the run at point waits for: a held run or a deployment."
+  (interactive)
+  (ygg-git-ci--decide "approved"))
+
+(defun ygg-git-ci-decline ()
+  "Reject the deployment the run at point waits for."
+  (interactive)
+  (ygg-git-ci--decide "rejected"))
 
 (defun ygg-git-ci--artifact-stem (row)
   (format "%s-%s" (replace-regexp-in-string "[^[:alnum:]._-]+" "_" (plist-get row :name))
@@ -1057,6 +1203,9 @@ FETCH asks the forge when the answer is missing or stale and adds :head."
         (job (eq (plist-get row :kind) 'job)))
     (delq nil
           (list (and (plist-get row :url) (cons "browse" #'ygg-git-ci-browse))
+                (and (plist-get row :approval) (cons "approve" #'ygg-git-ci-approve))
+                (and (eq (plist-get (plist-get row :approval) :kind) 'deployment)
+                     (cons "decline" #'ygg-git-ci-decline))
                 (and (not (and gitlab (not job))) (cons "log" #'ygg-git-ci-log))
                 (cons (if gitlab "retry" "rerun") #'ygg-git-ci-rerun)
                 (and (memq (plist-get row :state) '(running pending))
@@ -1087,6 +1236,8 @@ FETCH asks the forge when the answer is missing or stale and adds :head."
   "p" #'ygg-git-ci-play
   "a" #'ygg-git-ci-artifacts
   "r" #'ygg-git-ci-rerun
+  "A" #'ygg-git-ci-approve
+  "D" #'ygg-git-ci-decline
   "x" #'ygg-git-ci-cancel
   "R" #'ygg-git-ci-rerun-pipeline
   "X" #'ygg-git-ci-cancel-pipeline)

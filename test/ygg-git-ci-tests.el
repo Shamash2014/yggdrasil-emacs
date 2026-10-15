@@ -215,6 +215,11 @@
                        '("glab" "api" "--hostname" "gl.example"
                          "projects/g%2Fr/pipelines/900/jobs?per_page=100&page=1")))
         (funcall (cdr second) 0 ygg-git-ci-tests--jobs nil))
+      (let ((third (car spawned)))
+        (should (equal (car third)
+                       '("glab" "api" "--hostname" "gl.example"
+                         "projects/g%2Fr/deployments?status=blocked&order_by=id&sort=desc&per_page=100")))
+        (funcall (cdr third) 0 "[]" nil))
       (let ((text (buffer-string)))
         (should (string-match-p "^CI  feat  ✓ 1 · ● 1" text))
         (should (string-match-p "^  ▶ deploy" text))
@@ -634,6 +639,7 @@
         (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--pipelines nil)
         (funcall (cdr (pop spawned)) 0 page nil)
         (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--jobs nil)
+        (funcall (cdr (pop spawned)) 0 "[]" nil)
         (should-not spawned)
         (should (= 103 (length (plist-get (cdr (gethash (ygg-git-ci-tests--key) ygg-git-ci--cache))
                                           :rows))))))))
@@ -702,7 +708,8 @@
 
 (defmacro ygg-git-ci-tests--land-gitlab ()
   `(progn (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--pipelines nil)
-          (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--jobs nil)))
+          (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--jobs nil)
+          (funcall (cdr (pop spawned)) 0 "[]" nil)))
 
 (ert-deftest ygg-git-ci-startable-gitlab-fetches-on-an-empty-cache ()
   (ygg-git-ci-tests--with
@@ -1099,3 +1106,291 @@
       (should (= 1 (length calls)))
       (should (equal (mapcar (lambda (i) (plist-get i :label)) (car (car calls)))
                      '("job: d" "new pipeline: feat"))))))
+
+(defconst ygg-git-ci-tests--held
+  (concat
+   "[{\"databaseId\":21,\"workflowName\":\"Fork CI\",\"status\":\"action_required\",\"conclusion\":\"\",\"createdAt\":\"2026-10-05T10:05:00Z\",\"headSha\":\"aaa\",\"event\":\"pull_request\",\"url\":\"https://github.com/o/r/actions/runs/21\"},"
+   "{\"databaseId\":22,\"workflowName\":\"Deploy\",\"status\":\"waiting\",\"conclusion\":\"\",\"createdAt\":\"2026-10-05T10:04:00Z\",\"headSha\":\"aaa\",\"event\":\"push\",\"url\":\"https://github.com/o/r/actions/runs/22\"},"
+   "{\"databaseId\":23,\"workflowName\":\"Lint\",\"status\":\"in_progress\",\"conclusion\":\"\",\"createdAt\":\"2026-10-05T10:03:00Z\",\"headSha\":\"aaa\",\"event\":\"push\",\"url\":\"https://github.com/o/r/actions/runs/23\"}]"))
+
+(defconst ygg-git-ci-tests--pending
+  "[{\"environment\":{\"id\":161,\"name\":\"prod\"},\"current_user_can_approve\":true,\"reviewers\":[]},{\"environment\":{\"id\":162,\"name\":\"stage\"},\"current_user_can_approve\":false,\"reviewers\":[]}]")
+
+(defun ygg-git-ci-tests--deployment-row ()
+  (ygg-git-ci-tests--run
+   'waiting :name "Deploy" :id 22
+   :approval '(:kind deployment
+               :environments ((:id 161 :name "prod" :can t) (:id 162 :name "stage" :can nil)))))
+
+(ert-deftest ygg-git-ci-held-github-runs-are-marked-and-counted ()
+  (ygg-git-ci-tests--with
+    (let ((rows (ygg-git-ci--parse-github ygg-git-ci-tests--held)))
+      (should (equal (mapcar (lambda (row) (plist-get row :state)) rows)
+                     '(waiting pending running)))
+      (should (equal (plist-get (car rows) :approval) '(:kind run))))
+    (ygg-git-ci-tests--seed (ygg-git-ci--parse-github ygg-git-ci-tests--held))
+    (with-temp-buffer
+      (ygg-git-ci-tests--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p "^CI  feat  ⏸ 1 · ● 2" text))
+        (should (string-match-p "^  ⏸ Fork CI  needs approval" text))
+        (should (string-match-p "A approve" text))
+        (should-not (string-match-p "D decline" text))))))
+
+(ert-deftest ygg-git-ci-decline-hint-needs-a-declinable-row ()
+  (should (string-match-p "A approve  D decline"
+                          (ygg-git-ci--keys '(github "h" "o/r")
+                                            (list (ygg-git-ci-tests--deployment-row)))))
+  (should (string-match-p "A approve  D decline"
+                          (ygg-git-ci--keys '(github "h" "o/r")
+                                            (list (ygg-git-ci-tests--run 'waiting :approval '(:kind run))
+                                                  (ygg-git-ci-tests--deployment-row)))))
+  (let ((keys (ygg-git-ci--keys '(github "h" "o/r")
+                                (list (ygg-git-ci-tests--run 'waiting :approval '(:kind run))))))
+    (should (string-match-p "A approve" keys))
+    (should-not (string-match-p "decline" keys))))
+
+(ert-deftest ygg-git-ci-pending-deployments-are-asked-only-for-waiting-runs ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (ygg-git-ci-tests--render)
+      (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--github nil)
+      (should-not spawned))
+    (clrhash ygg-git-ci--cache)
+    (with-temp-buffer
+      (ygg-git-ci-tests--render)
+      (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--held nil)
+      (should (equal (car (car spawned))
+                     '("gh" "api" "--hostname" "github.com"
+                       "repos/o/r/actions/runs/22/pending_deployments")))
+      (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--pending nil)
+      (should-not spawned)
+      (let ((row (nth 1 (plist-get (cdr (gethash (ygg-git-ci-tests--key) ygg-git-ci--cache))
+                                   :rows))))
+        (should (eq (plist-get row :state) 'waiting))
+        (should (equal (mapcar (lambda (e) (plist-get e :name))
+                               (plist-get (plist-get row :approval) :environments))
+                       '("prod" "stage"))))
+      (should (string-match-p "^  ⏸ Deploy  needs approval: prod, stage" (buffer-string))))))
+
+(ert-deftest ygg-git-ci-waiting-run-without-environments-stays-pending ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (ygg-git-ci-tests--render)
+      (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--held nil)
+      (funcall (cdr (pop spawned)) 0 "[]" nil)
+      (let ((row (nth 1 (plist-get (cdr (gethash (ygg-git-ci-tests--key) ygg-git-ci--cache))
+                                   :rows))))
+        (should (eq (plist-get row :state) 'pending))
+        (should-not (plist-get row :approval))))))
+
+(ert-deftest ygg-git-ci-approve-a-held-fork-run ()
+  (ygg-git-ci-tests--with
+    (let (prompt)
+      (with-temp-buffer
+        (setq ygg-git-ci-tests--row
+              (ygg-git-ci-tests--run 'waiting :name "Fork CI" :id 21 :approval '(:kind run)))
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t)))
+          (ygg-git-ci-approve))
+        (should (string-match-p "Approve workflow Fork CI (run 21)" prompt))
+        (should (equal (car (car spawned))
+                       '("gh" "api" "--hostname" "github.com" "--method" "POST"
+                         "repos/o/r/actions/runs/21/approve")))
+        (should-error (ygg-git-ci-decline) :type 'user-error)))))
+
+(ert-deftest ygg-git-ci-declined-confirmation-spawns-nothing ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (setq ygg-git-ci-tests--row (ygg-git-ci-tests--deployment-row))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) nil)))
+        (ygg-git-ci-approve))
+      (should-not spawned))))
+
+(ert-deftest ygg-git-ci-review-deployments-sends-a-json-body-through-input ()
+  (ygg-git-ci-tests--with
+    (dolist (case '((ygg-git-ci-approve "approved" "Approve workflow Deploy (run 22): deploy to prod")
+                    (ygg-git-ci-decline "rejected" "Reject workflow Deploy (run 22): deploy to prod")))
+      (setq spawned nil)
+      (with-temp-buffer
+        (setq ygg-git-ci-tests--row (ygg-git-ci-tests--deployment-row))
+        (let (prompt)
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t)))
+            (funcall (car case)))
+          (should (string-prefix-p (nth 2 case) prompt))
+          (let* ((command (car (car spawned)))
+                 (file (cadr (member "--input" command)))
+                 (body (json-parse-string (ygg-git-ci-tests--body command)
+                                          :object-type 'plist :array-type 'list)))
+            (should (equal (seq-take command 4) '("gh" "api" "--hostname" "github.com")))
+            (should (equal (nth 4 command) "repos/o/r/actions/runs/22/pending_deployments"))
+            (should (equal (cadr (member "--method" command)) "POST"))
+            (should (equal (plist-get body :environment_ids) '(161)))
+            (should (equal (plist-get body :state) (nth 1 case)))
+            (should (stringp (plist-get body :comment)))
+            (funcall (cdr (car spawned)) 0 "" nil)
+            (should-not (file-exists-p file))))))))
+
+(ert-deftest ygg-git-ci-review-needs-an-environment-the-user-can-approve ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (setq ygg-git-ci-tests--row
+            (ygg-git-ci-tests--run 'waiting :name "Deploy" :id 22
+                                   :approval '(:kind deployment
+                                               :environments ((:id 162 :name "stage" :can nil)))))
+      (should-error (ygg-git-ci-approve) :type 'user-error)
+      (should-not spawned))))
+
+(ert-deftest ygg-git-ci-gitlab-blocked-deployments-mark-their-jobs ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (with-temp-buffer
+      (ygg-git-ci-tests--render)
+      (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--pipelines nil)
+      (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--jobs nil)
+      (funcall (cdr (pop spawned))
+               0 "[{\"id\":77,\"status\":\"blocked\",\"environment\":{\"id\":9,\"name\":\"prod\"},\"deployable\":{\"id\":13,\"status\":\"manual\",\"pipeline\":{\"id\":900}}},{\"id\":70,\"status\":\"blocked\",\"environment\":{\"name\":\"old\"},\"deployable\":{\"id\":5}}]"
+               nil)
+      (let ((row (nth 2 (plist-get (cdr (gethash (ygg-git-ci-tests--key) ygg-git-ci--cache))
+                                   :rows))))
+        (should (eq (plist-get row :state) 'waiting))
+        (should-not (plist-get row :playable))
+        (should (equal (plist-get row :approval)
+                       '(:kind deployment :deployment 77
+                                 :environments ((:name "prod"))))))
+      (should (string-match-p "^CI  feat  ✓ 1 · ⏸ 1 · ● 1" (buffer-string)))
+      (should (string-match-p "^  ⏸ deploy  needs approval" (buffer-string))))))
+
+(ert-deftest ygg-git-ci-gitlab-deployment-approval-posts-status-and-comment ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (dolist (case '((ygg-git-ci-approve "approved" "Approve job deploy: deploy to prod? ")
+                    (ygg-git-ci-decline "rejected" "Reject job deploy: deploy to prod? ")))
+      (setq spawned nil)
+      (with-temp-buffer
+        (setq ygg-git-ci-tests--row
+              (ygg-git-ci-tests--run 'waiting :name "deploy" :kind 'job :id 13
+                                     :approval '(:kind deployment :deployment 77
+                                                 :environments ((:name "prod")))))
+        (let (prompt)
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (p) (setq prompt p) t)))
+            (funcall (car case)))
+          (should (equal prompt (nth 2 case)))
+          (let* ((command (car (car spawned)))
+                 (body (json-parse-string (ygg-git-ci-tests--body command)
+                                          :object-type 'plist)))
+            (should (equal (seq-take command 8)
+                           '("glab" "api" "--hostname" "gl.example" "--method" "POST"
+                             "projects/g%2Fr/deployments/77/approval" "--header")))
+            (should (equal (plist-get body :status) (nth 1 case)))
+            (should (stringp (plist-get body :comment)))))))))
+
+(ert-deftest ygg-git-ci-gitlab-jobs-page-failure-with-playable-rows-keeps-the-error ()
+  (dolist (blocked-status '(0 1))
+    (ygg-git-ci-tests--with
+      (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+      (let ((full (json-serialize
+                   (vconcat (cl-loop for i from 1 to ygg-git-ci--page-size
+                                     collect (list :id i :name (format "j%d" i)
+                                                   :status (if (= i 1) "manual" "success")
+                                                   :stage "s"))))))
+        (with-temp-buffer
+          (ygg-git-ci-tests--render)
+          (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--pipelines nil)
+          (funcall (cdr (pop spawned)) 0 full nil)
+          (funcall (cdr (pop spawned)) 1 "" "boom")
+          (should (string-search "deployments?status=blocked" (mapconcat #'identity (car (car spawned)) " ")))
+          (funcall (cdr (pop spawned)) blocked-status "[]" "")
+          (let ((answer (cdr (gethash (ygg-git-ci-tests--key) ygg-git-ci--cache))))
+            (should (= ygg-git-ci--page-size (length (plist-get answer :rows))))
+            (should (stringp (plist-get answer :error)))
+            (should (string-match-p "boom\\|glab" (plist-get answer :error)))))))))
+
+(ert-deftest ygg-git-ci-gitlab-jobs-page-failure-without-playable-rows-keeps-the-error ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (let ((full (json-serialize
+                 (vconcat (cl-loop for i from 1 to ygg-git-ci--page-size
+                                   collect (list :id i :name (format "j%d" i)
+                                                 :status "success" :stage "s"))))))
+      (with-temp-buffer
+        (ygg-git-ci-tests--render)
+        (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--pipelines nil)
+        (funcall (cdr (pop spawned)) 0 full nil)
+        (funcall (cdr (pop spawned)) 1 "" "boom")
+        (should-not spawned)
+        (let ((answer (cdr (gethash (ygg-git-ci-tests--key) ygg-git-ci--cache))))
+          (should (= ygg-git-ci--page-size (length (plist-get answer :rows))))
+          (should (stringp (plist-get answer :error))))))))
+
+(ert-deftest ygg-git-ci-review-body-is-removed-on-failure ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (setq ygg-git-ci-tests--row (ygg-git-ci-tests--deployment-row))
+      (ygg-git-ci-approve)
+      (let ((file (cadr (member "--input" (car (car spawned))))))
+        (should (file-exists-p file))
+        (funcall (cdr (car spawned)) 1 "" "boom")
+        (should-not (file-exists-p file))))))
+
+(ert-deftest ygg-git-ci-review-body-is-removed-on-timeout ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (setq ygg-git-ci-tests--row (ygg-git-ci-tests--deployment-row))
+      (ygg-git-ci-approve)
+      (let ((file (cadr (member "--input" (car (car spawned))))))
+        (should (file-exists-p file))
+        (let ((timer (car timers)))
+          (apply (nth 1 timer) (nth 2 timer)))
+        (should-not (file-exists-p file))))))
+
+(ert-deftest ygg-git-ci-review-body-is-removed-when-the-prompt-is-quit ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (let ((ygg-git-ci-tests--row (ygg-git-ci-tests--deployment-row))
+            file)
+        (cl-letf (((symbol-function 'ygg-git-ci--body-file)
+                   (let ((orig (symbol-function 'ygg-git-ci--body-file)))
+                     (lambda (body) (setq file (funcall orig body)))))
+                  ((symbol-function 'y-or-n-p) (lambda (&rest _) (signal 'quit nil))))
+          (should (eq 'quit (condition-case err (ygg-git-ci-approve) (quit (car err))))))
+        (should file)
+        (should-not (file-exists-p file))
+        (should-not spawned)))))
+
+(ert-deftest ygg-git-ci-review-body-is-removed-when-spawning-signals ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (let ((ygg-git-ci-tests--row (ygg-git-ci-tests--deployment-row))
+            file)
+        (cl-letf (((symbol-function 'ygg-git-ci--body-file)
+                   (let ((orig (symbol-function 'ygg-git-ci--body-file)))
+                     (lambda (body) (setq file (funcall orig body)))))
+                  ((symbol-function 'ygg-git-review-requests--spawn)
+                   (lambda (&rest _) (error "spawn blew up"))))
+          (should-error (ygg-git-ci-approve)))
+        (should file)
+        (should-not (file-exists-p file))))))
+
+(ert-deftest ygg-git-ci-act-offers-approval-only-where-it-applies ()
+  (let ((offered nil))
+    (cl-letf (((symbol-function 'ygg-git-ci--key) (lambda () (list '(github "github.com" "o/r") "main")))
+              ((symbol-function 'ygg-git-ci-log) (lambda () (interactive)))
+              ((symbol-function 'completing-read)
+               (lambda (_p actions &rest _) (setq offered (mapcar #'car actions)) "log")))
+      (ygg-git-ci-act "/tmp/p/" (ygg-git-ci-tests--run 'passed))
+      (should-not (member "approve" offered))
+      (should-not (member "decline" offered)))
+    (cl-letf (((symbol-function 'ygg-git-ci--key) (lambda () (list '(github "github.com" "o/r") "main")))
+              ((symbol-function 'ygg-git-ci-approve) (lambda () (interactive)))
+              ((symbol-function 'completing-read)
+               (lambda (_p actions &rest _) (setq offered (mapcar #'car actions)) "approve")))
+      (ygg-git-ci-act "/tmp/p/" (ygg-git-ci-tests--run 'waiting :approval '(:kind run)))
+      (should (member "approve" offered))
+      (should-not (member "decline" offered))
+      (ygg-git-ci-act "/tmp/p/" (ygg-git-ci-tests--deployment-row))
+      (should (member "approve" offered))
+      (should (member "decline" offered)))))
+
+(ert-deftest ygg-git-ci-approval-keys-are-bound-on-runs ()
+  (should (eq (lookup-key magit-ci-run-section-map "A") #'ygg-git-ci-approve))
+  (should (eq (lookup-key magit-ci-run-section-map "D") #'ygg-git-ci-decline)))

@@ -50,11 +50,12 @@
 
 (defconst ygg-git-compare--pr-info-order '(ygg-git-compare-description ygg-git-compare-conversation ygg-git-compare-checks))
 
-(defconst ygg-git-compare--check-order '(failed cancelled warning running pending passed skipped))
+(defconst ygg-git-compare--check-order '(failed cancelled warning waiting running pending passed skipped))
 
 (defconst ygg-git-compare--check-marks
   '((passed "✓" success) (failed "✗" error) (cancelled "⊘" warning)
-    (warning "!" warning) (running "●" warning) (pending "○" warning) (skipped "–" shadow)))
+    (warning "!" warning) (waiting "⏸" warning) (running "●" warning) (pending "○" warning)
+    (skipped "–" shadow)))
 
 ;;; Reading
 
@@ -64,6 +65,10 @@
 
 (defun ygg-git-compare--check-blank-p (value)
   (or (null value) (equal value "")))
+
+(defun ygg-git-compare--check-run-id (url)
+  "The id of the workflow run whose page is URL, as a string, or nil."
+  (and (stringp url) (string-match "/actions/runs/\\([0-9]+\\)" url) (match-string 1 url)))
 
 (defun ygg-git-compare--check-github (item)
   "ITEM, a CheckRun or StatusContext of gh's statusCheckRollup, as a check."
@@ -81,16 +86,24 @@
                         ((ygg-git-compare--check-blank-p conclusion) 'skipped)
                         (t (pcase (upcase conclusion)
                              ("SUCCESS" 'passed)
-                             ((or "FAILURE" "TIMED_OUT" "STARTUP_FAILURE" "ACTION_REQUIRED") 'failed)
+                             ((or "FAILURE" "TIMED_OUT" "STARTUP_FAILURE") 'failed)
+                             ("ACTION_REQUIRED" 'waiting)
                              ("CANCELLED" 'cancelled)
-                             (_ 'skipped))))))
-      (list :name (or (plist-get item :name) "check") :state state
-            :started (ygg-git-compare--check-time (plist-get item :startedAt))
-            :finished (and (memq state '(passed failed cancelled skipped))
-                           (ygg-git-compare--check-time (plist-get item :completedAt)))
-            :url (plist-get item :detailsUrl)
-            :where (let ((workflow (plist-get item :workflowName)))
-                     (and (not (ygg-git-compare--check-blank-p workflow)) workflow))))))
+                             (_ 'skipped)))))
+           (run (ygg-git-compare--check-run-id (plist-get item :detailsUrl)))
+           (workflow (let ((workflow (plist-get item :workflowName)))
+                       (and (not (ygg-git-compare--check-blank-p workflow)) workflow))))
+      (append
+       (list :name (or (plist-get item :name) "check") :state state
+             :started (ygg-git-compare--check-time (plist-get item :startedAt))
+             :finished (and (memq state '(passed failed cancelled skipped))
+                            (ygg-git-compare--check-time (plist-get item :completedAt)))
+             :url (plist-get item :detailsUrl)
+             :where workflow)
+       (and run (list :run run))
+       (and run (equal status "WAITING") (list :held t))
+       (and run (eq state 'waiting)
+            (list :approval (list :kind 'run :run run :workflow workflow)))))))
 
 (defun ygg-git-compare--approval-github (pr)
   "PR's reviewDecision and latestReviews as (:state S :by LOGINS :against LOGINS),
@@ -192,12 +205,16 @@ or nil."
   (let* ((pr (ygg-git-compare--json text))
          (rollup (plist-get pr :statusCheckRollup)))
     (unless (proper-list-p rollup) (error "no rollup"))
-    (list :checks (mapcar #'ygg-git-compare--check-github rollup)
-          :status (ygg-git-compare--pr-status-github pr)
-          :about (ygg-git-compare--pr-about-github pr))))
+    (append (list :checks (mapcar #'ygg-git-compare--check-github rollup)
+                  :status (ygg-git-compare--pr-status-github pr)
+                  :about (ygg-git-compare--pr-about-github pr))
+            (and (plist-get pr :isCrossRepository)
+                 (list :cross t :sha (plist-get pr :headRefOid))))))
 
 (defun ygg-git-compare--check-gitlab (job)
-  (list :name (or (plist-get job :name) "job")
+  (append
+   (list :id (plist-get job :id)
+        :name (or (plist-get job :name) "job")
         :state (pcase (plist-get job :status)
                  ("success" 'passed)
                  ("failed" (if (plist-get job :allow_failure) 'warning 'failed))
@@ -208,14 +225,16 @@ or nil."
         :started (ygg-git-compare--check-time (plist-get job :started_at))
         :finished (ygg-git-compare--check-time (plist-get job :finished_at))
         :url (plist-get job :web_url)
-        :where (plist-get job :stage)))
+        :where (plist-get job :stage))
+   (and (equal (plist-get job :status) "manual") (list :manual t))))
 
-(defun ygg-git-compare--checks-parse-gitlab-jobs (text pipeline &optional status about)
+(defun ygg-git-compare--checks-parse-gitlab-jobs (text pipeline &optional status about fork)
   (let ((jobs (ygg-git-compare--remote-json text)))
     (list :checks (mapcar #'ygg-git-compare--check-gitlab jobs)
           :url (plist-get pipeline :web_url)
           :status status
-          :about about)))
+          :about about
+          :fork fork)))
 
 (defun ygg-git-compare--checks-fetch-gitlab (pr done)
   (let* ((host (plist-get pr :host))
@@ -237,19 +256,28 @@ or nil."
                                         (ygg-git-compare--json text)))))
                       (pipeline (plist-get mr :head_pipeline))
                       (pr-status (ygg-git-compare--pr-status-gitlab mr approval))
-                      (about (ygg-git-compare--pr-about-gitlab mr)))
+                      (about (ygg-git-compare--pr-about-gitlab mr))
+                      (fork (and (plist-get mr :source_project_id)
+                                 (not (equal (plist-get mr :source_project_id)
+                                             (plist-get mr :target_project_id)))
+                                 t)))
                  (if (not (and pipeline (plist-get pipeline :id)))
-                     (funcall done (list :checks nil :status pr-status :about about))
+                     (funcall done (list :checks nil :status pr-status :about about :fork fork))
                    (ygg-git-compare--forge-async
                     "glab" (list "api" "--hostname" host "--paginate"
                                  (format "projects/%s/pipelines/%s/jobs?per_page=100"
                                          path (plist-get pipeline :id)))
                     (lambda (status text err)
                       (ygg-git-compare--answer
-                       done "glab" status text err
+                       (lambda (value &optional failure)
+                         (if (and value (seq-some (lambda (check) (plist-get check :manual))
+                                                  (plist-get value :checks)))
+                             (ygg-git-compare--checks-blocked-gitlab pr value done)
+                           (funcall done value failure)))
+                       "glab" status text err
                        (lambda (text)
                          (ygg-git-compare--checks-parse-gitlab-jobs
-                          text pipeline pr-status about)))))))))))
+                          text pipeline pr-status about fork)))))))))))
         "glab" status text err
         #'ygg-git-compare--json)))))
 
@@ -261,10 +289,132 @@ and why not."
     (ygg-git-compare--forge-async
      "gh" (list "pr" "view" (format "%s" (plist-get pr :number))
                 "--repo" (format "%s/%s" (plist-get pr :host) (plist-get pr :path))
-                "--json" "statusCheckRollup,state,isDraft,reviewDecision,latestReviews,title,body,author,createdAt,headRefName,baseRefName,url")
+                "--json" "statusCheckRollup,state,isDraft,reviewDecision,latestReviews,title,body,author,createdAt,headRefName,baseRefName,url,isCrossRepository,headRefOid")
      (lambda (status text err)
-       (ygg-git-compare--answer done "gh" status text err
-                                #'ygg-git-compare--checks-parse-github)))))
+       (ygg-git-compare--answer
+        (lambda (value &optional failure)
+          (if value
+              (ygg-git-compare--approvals-fork pr value done)
+            (funcall done nil failure)))
+        "gh" status text err #'ygg-git-compare--checks-parse-github)))))
+
+;;; Approvals
+
+(defun ygg-git-compare--approval-names (approval)
+  (string-join (mapcar (lambda (environment) (plist-get environment :name))
+                       (plist-get approval :environments))
+               ", "))
+
+(defun ygg-git-compare--approval-label (approval)
+  (let ((names (ygg-git-compare--approval-names approval)))
+    (concat "needs approval" (and (not (string-empty-p names)) (concat ": " names)))))
+
+(defun ygg-git-compare--approvals-api (pr path)
+  (list "api" "--hostname" (plist-get pr :host)
+        (format "repos/%s/%s" (plist-get pr :path) path)))
+
+(defun ygg-git-compare--approval-environments (text)
+  "The environments gh's pending deployments TEXT waits on, as (:id :name :can)."
+  (seq-keep (lambda (item)
+              (when-let* ((environment (plist-get item :environment)))
+                (list :id (plist-get environment :id)
+                      :name (plist-get environment :name)
+                      :can (and (plist-get item :current_user_can_approve) t))))
+            (ygg-git-compare--json text)))
+
+(defun ygg-git-compare--approvals-deployments (pr value checks done)
+  "Ask which environments each held run of CHECKS awaits, then call DONE with
+VALUE carrying the answers."
+  (let ((held (seq-find (lambda (check) (plist-get check :held)) checks)))
+    (if (null held)
+        (funcall done (plist-put (copy-sequence value) :checks checks))
+      (let ((run (plist-get held :run)))
+        (ygg-git-compare--forge-async
+         "gh" (ygg-git-compare--approvals-api
+               pr (format "actions/runs/%s/pending_deployments" run))
+         (lambda (status text _err)
+           (let ((environments (and (eql status 0)
+                                    (ignore-errors (ygg-git-compare--approval-environments text)))))
+             (ygg-git-compare--approvals-deployments
+              pr value
+              (mapcar (lambda (check)
+                        (cond ((not (equal (plist-get check :run) run)) check)
+                              ((not (plist-get check :held)) check)
+                              (t (let ((check (copy-sequence check)))
+                                   (cl-remf check :held)
+                                   (if (null environments)
+                                       check
+                                     (plist-put check :state 'waiting)
+                                     (plist-put check :approval
+                                                (list :kind 'deployment :run run
+                                                      :workflow (plist-get check :where)
+                                                      :environments environments))
+                                     check)))))
+                      checks)
+              done))))))))
+
+(defun ygg-git-compare--approvals-fork (pr value done)
+  "Add to VALUE's checks the runs of a fork's head the forge holds for approval,
+then see what the held ones await."
+  (let ((checks (plist-get value :checks)))
+    (if (not (and (plist-get value :cross) (plist-get value :sha)
+                  (or (not (seq-some (lambda (check) (plist-get check :where)) checks))
+                      (seq-some (lambda (check) (eq (plist-get (plist-get check :approval) :kind)
+                                                    'run))
+                                checks))))
+        (ygg-git-compare--approvals-deployments pr value checks done)
+      (ygg-git-compare--forge-async
+       "gh" (ygg-git-compare--approvals-api
+             pr (format "actions/runs?head_sha=%s&status=action_required&per_page=100"
+                        (plist-get value :sha)))
+       (lambda (status text _err)
+         (let ((runs (and (eql status 0)
+                          (ignore-errors (plist-get (ygg-git-compare--json text) :workflow_runs)))))
+           (ygg-git-compare--approvals-deployments
+            pr value
+            (append checks
+                    (seq-keep
+                     (lambda (run)
+                       (let ((id (format "%s" (plist-get run :id))))
+                         (unless (seq-some (lambda (check) (equal (plist-get check :run) id)) checks)
+                           (list :name (or (plist-get run :name) "workflow") :state 'waiting
+                                 :url (plist-get run :html_url) :run id
+                                 :approval (list :kind 'run :run id
+                                                 :workflow (plist-get run :name))))))
+                     runs))
+            done)))))))
+
+(defun ygg-git-compare--checks-blocked-gitlab (pr value done)
+  "Mark the manual checks of VALUE that are deployments awaiting approval, then
+call DONE with it."
+  (ygg-git-compare--forge-async
+   "glab" (list "api" "--hostname" (plist-get pr :host)
+                (format "projects/%s/deployments?status=blocked&order_by=id&sort=desc&per_page=100"
+                        (url-hexify-string (plist-get pr :path))))
+   (lambda (status text _err)
+     (let ((blocked (and (eql status 0) (ignore-errors (ygg-git-compare--json text)))))
+       (funcall
+        done
+        (plist-put
+         (copy-sequence value) :checks
+         (mapcar (lambda (check)
+                   (let ((deployment (and (plist-get check :manual)
+                                          (seq-find (lambda (item)
+                                                      (equal (plist-get (plist-get item :deployable) :id)
+                                                             (plist-get check :id)))
+                                                    blocked))))
+                     (if (null deployment)
+                         check
+                       (let ((check (copy-sequence check)))
+                         (plist-put check :state 'waiting)
+                         (plist-put check :approval
+                                    (list :kind 'deployment
+                                          :deployment (plist-get deployment :id)
+                                          :environments
+                                          (list (list :name (plist-get
+                                                             (plist-get deployment :environment)
+                                                             :name)))))))))
+                 (plist-get value :checks))))))))
 
 ;;; Keeping
 
@@ -339,12 +489,14 @@ one allowed to fail is warned."
 
 (defun ygg-git-compare--checks-summary (checks)
   "CHECKS' counts as ✓ 12 · ✗ 1 · ! 1 · ● 2, those that are none left out."
-  (pcase-let ((`(,passed ,bad ,active ,warned) (ygg-git-compare--checks-counts checks)))
+  (pcase-let ((`(,passed ,bad ,active ,warned) (ygg-git-compare--checks-counts checks))
+              (held (seq-count (lambda (check) (eq (plist-get check :state) 'waiting)) checks)))
     (string-join
      (delq nil
            (list (and (> passed 0) (propertize (format "✓ %d" passed) 'font-lock-face 'success))
                  (and (> bad 0) (propertize (format "✗ %d" bad) 'font-lock-face 'error))
                  (and (> warned 0) (propertize (format "! %d" warned) 'font-lock-face 'warning))
+                 (and (> held 0) (propertize (format "⏸ %d" held) 'font-lock-face 'warning))
                  (and (> active 0) (propertize (format "● %d" active) 'font-lock-face 'warning))))
      " · ")))
 
@@ -651,9 +803,13 @@ being fetched; with FORCE, whatever their age."
             (propertize (format "%-9s" state) 'font-lock-face face) " "
             (propertize (format "%8s" (or (ygg-git-compare--check-duration check) ""))
                         'font-lock-face 'shadow)
-            (if-let* ((where (plist-get check :where)))
-                (propertize (concat "  " where) 'font-lock-face 'shadow)
-              ""))))
+            (cond ((plist-get check :approval)
+                   (propertize (concat "  " (ygg-git-compare--approval-label
+                                            (plist-get check :approval)))
+                               'font-lock-face 'warning))
+                  ((plist-get check :where)
+                   (propertize (concat "  " (plist-get check :where)) 'font-lock-face 'shadow))
+                  (t "")))))
 
 (defun ygg-git-compare--conversation-count (comments)
   (seq-count (lambda (c) (not (plist-get c :notice))) comments))
@@ -743,6 +899,17 @@ lines at either end left out."
                 "\n"))
       (insert "\n"))))
 
+(defun ygg-git-compare--checks-hint (checks fork)
+  (let ((keys (delq nil (list (and (seq-some (lambda (check) (plist-get check :approval)) checks)
+                                   (if (seq-some (lambda (check)
+                                                   (eq (plist-get (plist-get check :approval) :kind)
+                                                       'deployment))
+                                                 checks)
+                                       "A approve  D decline"
+                                     "A approve"))
+                              (and fork "P run pipeline")))))
+    (if keys (propertize (concat "  " (string-join keys "  ")) 'font-lock-face 'shadow) "")))
+
 (defun ygg-git-compare--insert-checks (view)
   (let* ((value (plist-get view :value))
          (checks (ygg-git-compare--checks-sorted (plist-get value :checks)))
@@ -758,12 +925,15 @@ lines at either end left out."
       (magit-insert-heading
         (concat (propertize (if checks (format "Checks (%d)" (length checks)) "Checks")
                             'font-lock-face 'magit-section-heading)
-                (and checks (concat "  " (ygg-git-compare--checks-summary checks)))))
+                (and checks (concat "  " (ygg-git-compare--checks-summary checks)))
+                (ygg-git-compare--checks-hint checks (plist-get value :fork))))
       (dolist (check checks)
         (magit-insert-section (ygg-git-compare-check check)
           (insert (ygg-git-compare--check-line check width) "\n")))
       (unless (or checks failed)
         (insert (propertize (cond ((plist-get view :fetching) "  fetching…")
+                                  ((plist-get value :fork)
+                                   "  ⏸ no pipeline in the target project  (P runs it)")
                                   (value "  no checks")
                                   (t "  not fetched"))
                             'font-lock-face 'shadow)
@@ -879,6 +1049,101 @@ in the browser when it is no job."
     (kill-new url)
     (message "Copied: %s" url)))
 
+(declare-function ygg-git-compare-submit--api "ygg-git-compare-submit" (program body args done))
+
+(defun ygg-git-compare--approve-request (pr check state)
+  "The (ARGS BODY LABEL) asking the forge to put STATE, approved or rejected,
+on what CHECK of PR waits for."
+  (let* ((approval (plist-get check :approval))
+         (name (plist-get check :name))
+         (approving (equal state "approved"))
+         (comment (if approving "Approved from Emacs" "Rejected from Emacs")))
+    (pcase (list (plist-get pr :forge) (plist-get approval :kind))
+      ('(github run)
+       (unless approving
+         (user-error "GitHub cannot decline a held run; cancel it from the CI section"))
+       (list (list "api" "--hostname" (plist-get pr :host) "--method" "POST"
+                   (format "repos/%s/actions/runs/%s/approve"
+                           (plist-get pr :path) (plist-get approval :run)))
+             nil
+             (format "Approve workflow %s (run %s) held for approval?"
+                     (or (plist-get approval :workflow) name) (plist-get approval :run))))
+      ('(github deployment)
+       (let ((environments (seq-filter (lambda (environment) (plist-get environment :can))
+                                       (plist-get approval :environments))))
+         (unless environments
+           (user-error "You cannot review the deployments of %s" name))
+         (list (ygg-git-compare--approvals-api
+                pr (format "actions/runs/%s/pending_deployments" (plist-get approval :run)))
+               (list :environment_ids (vconcat (mapcar (lambda (environment)
+                                                         (plist-get environment :id))
+                                                       environments))
+                     :state state :comment comment)
+               (format "%s workflow %s (run %s): deploy to %s?"
+                       (if approving "Approve" "Reject")
+                       (or (plist-get approval :workflow) name) (plist-get approval :run)
+                       (string-join (mapcar (lambda (environment) (plist-get environment :name))
+                                            environments)
+                                    ", ")))))
+      ('(gitlab deployment)
+       (list (list "api" "--hostname" (plist-get pr :host)
+                   (format "projects/%s/deployments/%s/approval"
+                           (url-hexify-string (plist-get pr :path))
+                           (plist-get approval :deployment)))
+             (list :status state :comment comment)
+             (format "%s job %s: deploy to %s?" (if approving "Approve" "Reject") name
+                     (ygg-git-compare--approval-names approval))))
+      (_ (user-error "%s is not waiting for approval" name)))))
+
+(defun ygg-git-compare--check-decide (state)
+  (let* ((pr (or (ygg-git-compare--remote-pr) (user-error "No pull request here")))
+         (check (ygg-git-compare--check-at-point))
+         (request (ygg-git-compare--approve-request pr check state))
+         (buffer (current-buffer)))
+    (when (y-or-n-p (nth 2 request))
+      (require 'ygg-git-compare-submit)
+      (message "%s…" (nth 2 request))
+      (ygg-git-compare-submit--api
+       (if (eq (plist-get pr :forge) 'gitlab) "glab" "gh") (nth 1 request) (car request)
+       (lambda (_value err &optional _refused)
+         (message "%s" (if err (format "Failed: %s" err) "Done"))
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (ignore-errors (ygg-git-compare--checks-start t)))))))))
+
+(defun ygg-git-compare-check-approve ()
+  "Approve what the check at point waits for: a held run or a deployment."
+  (interactive)
+  (ygg-git-compare--check-decide "approved"))
+
+(defun ygg-git-compare-check-decline ()
+  "Reject the deployment the check at point waits for."
+  (interactive)
+  (ygg-git-compare--check-decide "rejected"))
+
+(defun ygg-git-compare-checks-run-pipeline ()
+  "Run the pipeline of the merge request in the project it targets, for a fork."
+  (interactive)
+  (let ((pr (or (ygg-git-compare--remote-pr) (user-error "No pull request here")))
+        (buffer (current-buffer)))
+    (unless (and (eq (plist-get pr :forge) 'gitlab)
+                 (plist-get (plist-get (ygg-git-compare--checks-view) :value) :fork))
+      (user-error "Only a merge request from a fork needs its pipeline run"))
+    (when (y-or-n-p (format "Run the pipeline of !%s in %s?"
+                            (plist-get pr :number) (plist-get pr :path)))
+      (require 'ygg-git-compare-submit)
+      (message "Running the pipeline of !%s…" (plist-get pr :number))
+      (ygg-git-compare-submit--api
+       "glab" nil
+       (list "api" "--hostname" (plist-get pr :host) "--method" "POST"
+             (format "projects/%s/merge_requests/%s/pipelines"
+                     (url-hexify-string (plist-get pr :path)) (plist-get pr :number)))
+       (lambda (_value err &optional _refused)
+         (message "%s" (if err (format "Failed: %s" err) "Done"))
+         (when (buffer-live-p buffer)
+           (with-current-buffer buffer
+             (ignore-errors (ygg-git-compare--checks-start t)))))))))
+
 (autoload 'ygg-git-compare-conversation-goto "ygg-git-compare-threads" nil t)
 
 (defvar-keymap magit-ygg-git-compare-conversation-section-map
@@ -889,7 +1154,13 @@ in the browser when it is no job."
   "RET" #'ygg-git-compare-check-open
   "<return>" #'ygg-git-compare-check-open
   "o" #'ygg-git-compare-check-browse
-  "y" #'ygg-git-compare-check-copy)
+  "y" #'ygg-git-compare-check-copy
+  "A" #'ygg-git-compare-check-approve
+  "D" #'ygg-git-compare-check-decline
+  "P" #'ygg-git-compare-checks-run-pipeline)
+
+(defvar-keymap magit-ygg-git-compare-checks-section-map
+  "P" #'ygg-git-compare-checks-run-pipeline)
 
 (provide 'ygg-git-compare-pr-info)
 ;;; ygg-git-compare-pr-info.el ends here
