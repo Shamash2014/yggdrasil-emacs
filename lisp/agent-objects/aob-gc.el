@@ -28,11 +28,18 @@
   "Seconds a sweep's git fetch or gh query may take before it is killed."
   :type 'integer :group 'aob-gc)
 
-(defcustom aob-gc-branches 'aob
-  "Which merged local branches a sweep deletes: only aob/*, or any."
+(defcustom aob-gc-branches 'merged
+  "What a sweep removes once merged.
+Only aob/* branches and worktrees, any branch, or any branch and worktree."
   :type '(choice (const :tag "aob/* only" aob)
-                 (const :tag "every merged branch" all-merged))
+                 (const :tag "every merged branch" all-merged)
+                 (const :tag "every merged branch and worktree" merged))
   :group 'aob-gc)
+
+(defcustom aob-gc-kept-branches
+  "\\`\\(?:main\\|master\\|develop\\|dev\\|stage\\|staging\\|prod\\|production\\|release/.*\\|backup/.*\\)\\'"
+  "Branches no sweep removes, nor the worktrees on them, merged or not."
+  :type 'regexp :group 'aob-gc)
 
 (defcustom aob-gc-interval 900
   "Seconds between background sweeps."
@@ -164,6 +171,14 @@
   "CALLBACK gets the commit local BRANCH of ROOT is at, or nil when it is gone."
   (aob-gc--first-ref root (list (concat "refs/heads/" branch))
                      (lambda (found) (funcall callback (cdr found)))))
+
+(defun aob-gc--item-tip (root item callback)
+  "CALLBACK gets the commit ITEM of ROOT is at.
+That is its branch, or a detached worktree's HEAD."
+  (if-let* ((branch (plist-get item :branch)))
+      (aob-gc--tip root branch callback)
+    (aob-gc--first-ref (plist-get item :dir) '("HEAD")
+                       (lambda (found) (funcall callback (cdr found))))))
 
 (defun aob-gc--pr-merged-p (prs branch sha)
   "Non-nil when PRS lists a merged PR of this repository from BRANCH at SHA."
@@ -373,12 +388,15 @@ DIR may be gone already, which `file-in-directory-p' cannot judge."
         callback)))))
 
 (defun aob-gc--tree-verdict (dir branch callback)
-  "CALLBACK gets nil when DIR is on BRANCH, clean and holds nothing precious."
+  "CALLBACK gets nil when DIR is on BRANCH, clean and holds nothing precious.
+A nil BRANCH means DIR must still be detached."
   (aob-gc--git
    dir '("symbolic-ref" "-q" "HEAD")
    (lambda (head hcode)
-     (if (not (and (zerop hcode)
-                   (equal (string-trim head) (concat "refs/heads/" branch))))
+     (if (not (if branch
+                  (and (zerop hcode)
+                       (equal (string-trim head) (concat "refs/heads/" branch)))
+                (not (zerop hcode))))
          (funcall callback "not on its branch")
        (aob-gc--checkout-verdict
         dir
@@ -425,8 +443,8 @@ EXCEPT's sessions are spared."
                       (funcall next)))
               (check-merged
                (lambda ()
-                 (aob-gc--tip
-                  project branch
+                 (aob-gc--item-tip
+                  project c
                   (lambda (sha)
                     (if (not sha)
                         (funcall keep "no branch")
@@ -462,20 +480,24 @@ EXCEPT's sessions are spared."
 
 (defun aob-gc--candidates (wts branches default mode &optional locked)
   "The worktrees and branches in WTS and BRANCHES a MODE sweep may remove.
-Those in LOCKED carry :locked."
+Those in LOCKED carry :locked; a project sweep takes detached worktrees too."
   (let* ((root (file-name-as-directory (file-truename aob-acp-worktree-root)))
          (local (plist-get default :local))
          (checked (delq nil (mapcar #'cdr wts)))
          (aob (lambda (b) (string-prefix-p "aob/" b)))
-         (wanted (lambda (b) (and (not (equal b local))
+         (kept (lambda (b) (or (equal b local)
+                               (string-match-p aob-gc-kept-branches b))))
+         (wanted (lambda (b) (and (not (funcall kept b))
                                   (or (memq mode '(project all-merged))
                                       (funcall aob b)))))
          found)
     (dolist (w (cdr wts))
-      (when (and (cdr w) (not (equal (cdr w) local))
-                 (or (eq mode 'project)
-                     (and (funcall aob (cdr w))
-                          (file-in-directory-p (file-truename (car w)) root))))
+      (when (if (cdr w)
+                (and (not (funcall kept (cdr w)))
+                     (or (eq mode 'project)
+                         (and (funcall aob (cdr w))
+                              (file-in-directory-p (file-truename (car w)) root))))
+              (eq mode 'project))
         (push (append (list :dir (car w) :branch (cdr w) :main (caar wts))
                       (and (member (car w) locked) '(:locked t)))
               found)))
@@ -545,23 +567,25 @@ and why."
                       (when on-keep (funcall on-keep item why))
                       (funcall next)))
               (drop (lambda (counted)
-                      (aob-gc--git
-                       project '("worktree" "list" "--porcelain")
-                       (lambda (out code)
-                         (if (or (not (zerop code))
-                                 (rassoc branch (aob-acp--parse-worktrees out)))
-                             (progn (when counted (push branch removed))
-                                    (funcall next))
-                           (aob-gc--git
-                            project (list "update-ref" "-d" (concat "refs/heads/" branch) sha)
-                            (lambda (_o c)
-                              (when (or counted (zerop c)) (push branch removed))
-                              (if (zerop c)
-                                  (aob-gc--git
-                                   project (list "config" "--remove-section"
-                                                 (concat "branch." branch))
-                                   (lambda (&rest _) (funcall next)))
-                                (funcall next)))))))))
+                      (if (not branch)
+                          (progn (push dir removed) (funcall next))
+                        (aob-gc--git
+                         project '("worktree" "list" "--porcelain")
+                         (lambda (out code)
+                           (if (or (not (zerop code))
+                                   (rassoc branch (aob-acp--parse-worktrees out)))
+                               (progn (when counted (push branch removed))
+                                      (funcall next))
+                             (aob-gc--git
+                              project (list "update-ref" "-d" (concat "refs/heads/" branch) sha)
+                              (lambda (_o c)
+                                (when (or counted (zerop c)) (push branch removed))
+                                (if (zerop c)
+                                    (aob-gc--git
+                                     project (list "config" "--remove-section"
+                                                   (concat "branch." branch))
+                                     (lambda (&rest _) (funcall next)))
+                                  (funcall next))))))))))
               (unplug (lambda ()
                         (aob-gc--tree-verdict
                          dir branch
@@ -584,8 +608,8 @@ and why."
                                          (funcall drop t))))))))))))))
          (if (not sha)
              (funcall next)
-           (aob-gc--tip
-            project branch
+           (aob-gc--item-tip
+            project item
             (lambda (tip)
               (cond ((not (equal tip sha)) (funcall next))
                     ((not dir) (funcall drop nil))
@@ -666,7 +690,8 @@ item with :error."
                                             (lambda (i)
                                               (or (plist-get i :skip)
                                                   (assq i kept)
-                                                  (member (plist-get i :branch) removed)))
+                                                  (member (or (plist-get i :branch) (plist-get i :dir))
+                                                          removed)))
                                             items))))
                         (lambda (item why) (push (cons item why) kept)))))))
                dry)))
@@ -679,7 +704,7 @@ item with :error."
 (defun aob-gc--label (item)
   "ITEM as one line naming its worktree and branch."
   (if-let* ((dir (plist-get item :dir)))
-      (format "%s (%s)" (abbreviate-file-name dir) (plist-get item :branch))
+      (format "%s (%s)" (abbreviate-file-name dir) (or (plist-get item :branch) "detached"))
     (format "branch %s" (plist-get item :branch))))
 
 (defun aob-gc--moves (item)
@@ -710,12 +735,12 @@ item with :error."
 
 (defun aob-gc--sweep-mode ()
   "The sweep mode `aob-gc-branches' asks for."
-  (if (eq aob-gc-branches 'all-merged) 'all-merged 'aob))
+  (pcase aob-gc-branches ('merged 'project) ('all-merged 'all-merged) (_ 'aob)))
 
 (defun aob-gc--removed (results)
   "Labels of the items in RESULTS that are being or were removed."
   (mapcar #'aob-gc--label
-          (seq-filter (lambda (i) (and (plist-get i :branch)
+          (seq-filter (lambda (i) (and (or (plist-get i :branch) (plist-get i :dir))
                                        (not (plist-get i :skip))
                                        (not (plist-get i :error))))
                       (apply #'append (mapcar #'cdr results)))))

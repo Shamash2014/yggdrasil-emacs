@@ -176,6 +176,37 @@
       (should (member "main" (gc-tests--branches proj)))
       (should (file-directory-p other)))))
 
+(ert-deftest aob-gc-merged-scope-sweeps-any-worktree-but-long-lived-branches ()
+  (gc-tests--with-repo
+    (let ((feature (expand-file-name "proj.feature" gc-tests--base))
+          (release (expand-file-name "proj.release" gc-tests--base))
+          (aob-gc-branches 'merged))
+      (gc-tests--worktree proj feature "feature/done" "one")
+      (gc-tests--merge-ff proj "feature/done")
+      (gc-tests--worktree proj release "release/1.0")
+      (gc-tests--git proj "branch" "master")
+      (gc-tests--sweep)
+      (should-not (file-directory-p feature))
+      (should-not (member "feature/done" (gc-tests--branches proj)))
+      (should (file-directory-p release))
+      (should (member "release/1.0" (gc-tests--branches proj)))
+      (should (member "master" (gc-tests--branches proj))))))
+
+(ert-deftest aob-gc-merged-scope-sweeps-merged-detached-worktrees ()
+  (gc-tests--with-repo
+    (let ((merged (expand-file-name "proj.merged" gc-tests--base))
+          (ahead (expand-file-name "proj.ahead" gc-tests--base))
+          (aob-gc-branches 'merged))
+      (gc-tests--git proj "worktree" "add" "-q" "--detach" merged)
+      (gc-tests--git proj "worktree" "add" "-q" "--detach" ahead)
+      (gc-tests--commit ahead "g.txt" "unmerged")
+      (let ((results (gc-tests--sweep)))
+        (should (equal (list (format "%s (detached)" (abbreviate-file-name
+                                                      (file-name-as-directory merged))))
+                       (aob-gc--removed results))))
+      (should-not (file-directory-p merged))
+      (should (file-directory-p ahead)))))
+
 (ert-deftest aob-gc-preview-removes-nothing ()
   (gc-tests--with-repo
     (let ((dir (expand-file-name "ff" root)))
