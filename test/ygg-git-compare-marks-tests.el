@@ -216,5 +216,106 @@
       (ygg-git-compare-marks--write (ygg-git-compare-marks--read)))
     (should (equal (hash-table-keys (ygg-git-compare-marks--read)) '("new")))))
 
+(defun ygg-git-compare-marks-tests--bold-p (hunk)
+  (seq-some (lambda (o) (eq (overlay-get o 'face) 'ygg-git-compare-unreviewed))
+            (overlays-in (oref hunk content) (oref hunk end))))
+
+(defvar ygg-git-compare-marks-tests--calls nil)
+
+(defmacro ygg-git-compare-marks-tests--with-forge (forge viewed &rest body)
+  "BODY in a compare of a FORGE pull request whose gh answers that VIEWED
+files are viewed, with the calls to gh gathered in `--calls'."
+  (declare (indent 2))
+  `(let ((ygg-git-compare-marks--ids (make-hash-table :test #'equal))
+         (ygg-git-compare-marks--viewed (make-hash-table :test #'equal))
+         (ygg-git-compare-marks-tests--calls nil))
+     (setq ygg-git-compare-marks--synced nil
+           ygg-git-compare--b-spec (list 'pr :number 7 :forge ,forge :host "github.com"
+                                         :path "acme/widgets" :head "feature"))
+     (cl-letf (((symbol-function 'ygg-git-compare--forge-async)
+                (lambda (program args callback &optional _timeout)
+                  (push (cons program args) ygg-git-compare-marks-tests--calls)
+                  (funcall callback 0
+                           (if (string-match-p "mutation" (apply #'concat args))
+                               "{\"data\":{}}"
+                             (format "{\"data\":{\"repository\":{\"pullRequest\":{\"id\":\"PR_1\",\"files\":{\"nodes\":[%s],\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null}}}}}}"
+                                     (mapconcat (lambda (f) (format "{\"path\":\"%s\",\"viewerViewedState\":\"VIEWED\"}" f))
+                                                ,viewed ",")))
+                           ""))))
+       ,@body)))
+
+(defun ygg-git-compare-marks-tests--mutations ()
+  (seq-filter (lambda (call) (string-match-p "mutation" (apply #'concat (cdr call))))
+              (reverse ygg-git-compare-marks-tests--calls)))
+
+(ert-deftest ygg-git-compare-marks-unreviewed-hunks-are-bold ()
+  (ygg-git-compare-marks-tests--with-compare root
+    (let ((hunk (ygg-git-compare-marks-tests--hunk "fifteen")))
+      (should (ygg-git-compare-marks-tests--bold-p hunk))
+      (ygg-git-compare-marks-tests--mark "fifteen")
+      (should-not (ygg-git-compare-marks-tests--bold-p
+                   (ygg-git-compare-marks-tests--hunk "fifteen")))
+      (ygg-git-compare-marks-tests--mark "fifteen")
+      (should (ygg-git-compare-marks-tests--bold-p
+               (ygg-git-compare-marks-tests--hunk "fifteen")))
+      (ygg-git-compare-refresh)
+      (should (ygg-git-compare-marks-tests--bold-p
+               (ygg-git-compare-marks-tests--hunk "fifteen"))))))
+
+(ert-deftest ygg-git-compare-marks-bold-only-the-changed-lines ()
+  (ygg-git-compare-marks-tests--with-compare root
+    (goto-char (point-min))
+    (search-forward "+fifteen")
+    (should (eq (get-char-property (match-beginning 0) 'face) 'ygg-git-compare-unreviewed))
+    (goto-char (oref (ygg-git-compare-marks-tests--hunk "fifteen") content))
+    (should-not (memq 'ygg-git-compare-unreviewed
+                      (ensure-list (get-char-property (point) 'face))))))
+
+(ert-deftest ygg-git-compare-marks-file-mark-is-sent-to-github ()
+  (ygg-git-compare-marks-tests--with-compare root
+    (ygg-git-compare-marks-tests--with-forge 'github nil
+      (goto-char (oref (oref (ygg-git-compare-marks-tests--hunk "fifteen") parent) start))
+      (ygg-git-compare-mark-file-reviewed)
+      (let ((call (car (ygg-git-compare-marks-tests--mutations))))
+        (should (equal (car call) "gh"))
+        (should (member "path=a.txt" (cdr call)))
+        (should (member "id=PR_1" (cdr call)))
+        (should (string-match-p "markFileAsViewed" (apply #'concat (cdr call)))))
+      (ygg-git-compare-mark-file-reviewed)
+      (let ((calls (ygg-git-compare-marks-tests--mutations)))
+        (should (= 2 (length calls)))
+        (should (string-match-p "unmarkFileAsViewed" (apply #'concat (cdr (cadr calls)))))
+        (should (member "path=a.txt" (cdr (cadr calls))))))))
+
+(ert-deftest ygg-git-compare-marks-hunk-mark-sends-nothing ()
+  (ygg-git-compare-marks-tests--with-compare root
+    (ygg-git-compare-marks-tests--with-forge 'github nil
+      (ygg-git-compare-marks-tests--mark "fifteen")
+      (should-not ygg-git-compare-marks-tests--calls))))
+
+(ert-deftest ygg-git-compare-marks-gitlab-sends-nothing ()
+  (ygg-git-compare-marks-tests--with-compare root
+    (ygg-git-compare-marks-tests--with-forge 'gitlab '("a.txt")
+      (ygg-git-compare-marks--sync)
+      (goto-char (oref (oref (ygg-git-compare-marks-tests--hunk "fifteen") parent) start))
+      (ygg-git-compare-mark-file-reviewed)
+      (should-not ygg-git-compare-marks-tests--calls))))
+
+(ert-deftest ygg-git-compare-marks-github-viewed-files-are-imported ()
+  (ygg-git-compare-marks-tests--with-compare root
+    (ygg-git-compare-marks-tests--with-forge 'github '("a.txt")
+      (should-not (ygg-git-compare-marks-tests--marked-p
+                   (ygg-git-compare-marks-tests--hunk "fifteen")))
+      (ygg-git-compare-marks--sync)
+      (should (gethash (ygg-git-compare-marks--key (ygg-git-compare-marks-tests--hunk "fifteen"))
+                       (ygg-git-compare-marks--read)))
+      (should (ygg-git-compare-marks-tests--marked-p
+               (ygg-git-compare-marks-tests--hunk "fifteen")))
+      (should-not (ygg-git-compare-marks-tests--bold-p
+                   (ygg-git-compare-marks-tests--hunk "fifteen")))
+      (should (= 1 (length ygg-git-compare-marks-tests--calls)))
+      (ygg-git-compare-marks--sync)
+      (should (= 1 (length ygg-git-compare-marks-tests--calls))))))
+
 (provide 'ygg-git-compare-marks-tests)
 ;;; ygg-git-compare-marks-tests.el ends here
