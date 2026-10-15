@@ -253,6 +253,22 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
         (should (string-match-p "A: HEAD ↔ B: main \\[main\\] \\+ uncommitted"
                                 (format "%s" header-line-format)))))))
 
+(ert-deftest ygg-git-compare-lists-each-file-once-with-its-counts ()
+  (ygg-git-compare-tests--with-repo (root _tree)
+    (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") '(rev . "feature"))
+      (should-not (seq-some (lambda (s) (eq (oref s type) 'diffstat))
+                            (oref magit-root-section children)))
+      (should (equal (ygg-git-compare-tests--files-shown) '("a.txt" "b.txt")))
+      (should (equal (mapcar (lambda (ov)
+                               (cons (save-excursion
+                                       (goto-char (overlay-start ov))
+                                       (oref (magit-current-section) value))
+                                     (substring-no-properties (overlay-get ov 'after-string))))
+                             (sort (seq-filter (lambda (ov) (overlay-get ov 'ygg-git-compare-counts))
+                                               (overlays-in (point-min) (point-max)))
+                                   (lambda (x y) (< (overlay-start x) (overlay-start y)))))
+                     '(("a.txt" . "  +1 −1") ("b.txt" . "  +2 −0")))))))
+
 (defun ygg-git-compare-tests--files-shown ()
   "The files whose diff sections this magit diff buffer holds, in order."
   (let (files)
@@ -279,7 +295,7 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
         (should (equal magit-buffer-diff-range base))
         (should (equal (ygg-git-compare--range)
                        (concat main "..." (abbreviate-file-name tree))))
-        (should (member "--stat" magit-buffer-diff-args))
+        (should-not (member "--stat" magit-buffer-diff-args))
         (should (equal (ygg-git-compare-tests--files-shown) '("a.txt" "b.txt")))
         (should (string-match-p
                  "A: main ↔ B: wt \\[feature\\] \\+ uncommitted (incl\\. untracked)"

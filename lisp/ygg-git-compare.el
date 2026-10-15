@@ -1127,8 +1127,9 @@ TEXT is not one."
     (string-to-number (substring arg 2))))
 
 (defun ygg-git-compare--args (plan)
-  "Magit's diff arguments for PLAN with its diffstat; only the diffstat when
-PLAN is too large to wash, since --no-patch cancels what comes before it."
+  "Magit's diff arguments for PLAN; only the diffstat when PLAN is too large
+to wash, since --no-patch cancels what comes before it.  Otherwise each
+file's heading carries its counts, and a diffstat would list them twice."
   (let ((args (append (cl-set-difference (car (magit-diff-arguments 'magit-diff-mode))
                                          '("--stat" "--numstat" "--no-patch" "-R")
                                          :test #'equal)
@@ -1139,7 +1140,37 @@ PLAN is too large to wash, since --no-patch cancels what comes before it."
                        (seq-remove (lambda (a) (string-prefix-p "-U" a)) args)))
     (if (ygg-git-compare--large-p plan)
         (append '("--no-patch" "--numstat" "--stat") args)
-      (cons "--stat" args))))
+      args)))
+
+(defun ygg-git-compare--file-counts (file)
+  "The lines FILE's washed hunks add and remove, as (ADDED . REMOVED)."
+  (let ((added 0) (removed 0))
+    (dolist (hunk (oref file children))
+      (when (magit-section-match 'hunk hunk)
+        (save-excursion
+          (goto-char (oref hunk content))
+          (while (< (point) (oref hunk end))
+            (pcase (char-after)
+              (?+ (cl-incf added))
+              (?- (cl-incf removed)))
+            (forward-line 1)))))
+    (cons added removed)))
+
+(defun ygg-git-compare--label-counts ()
+  "Put each diffed file's counts at the end of its heading."
+  (remove-overlays (point-min) (point-max) 'ygg-git-compare-counts t)
+  (when magit-root-section
+    (dolist (file (oref magit-root-section children))
+      (when (and (magit-section-match 'file file) (oref file children))
+        (pcase-let ((`(,added . ,removed) (ygg-git-compare--file-counts file))
+                    (eol (save-excursion (goto-char (oref file start)) (line-end-position))))
+          (let ((ov (make-overlay eol eol)))
+            (overlay-put ov 'ygg-git-compare-counts t)
+            (overlay-put ov 'after-string
+                         (concat "  "
+                                 (propertize (format "+%d" added) 'face 'magit-diffstat-added)
+                                 " "
+                                 (propertize (format "−%d" removed) 'face 'magit-diffstat-removed)))))))))
 
 (defun ygg-git-compare--insert-untracked ()
   "The files the plan's worktree adds untracked, each a file section to follow."
@@ -1233,7 +1264,8 @@ unless they were made folded."
     (magit-section-show-level-1-all)
     (mapc #'magit-section-show info)
     (mapc #'magit-section-show open)
-    (goto-char (if-let* ((file (seq-some (lambda (s) (car (oref s children))) open)))
+    (goto-char (if-let* ((file (or (seq-some (lambda (s) (car (oref s children))) open)
+                                   (seq-find (lambda (s) (magit-section-match 'file s)) top))))
                    (oref file start)
                  (point-min)))))
 
@@ -2539,8 +2571,10 @@ refused: a compare is read-only.
       (ygg-git-compare-mode 1)
       (ygg-git-compare--load-comments)
       (add-hook 'magit-refresh-buffer-hook #'ygg-git-compare--header nil t)
+      (add-hook 'magit-refresh-buffer-hook #'ygg-git-compare--label-counts nil t)
       (add-hook 'post-command-hook #'ygg-git-compare--schedule nil t)
       (ygg-git-compare--header)
+      (ygg-git-compare--label-counts)
       (ygg-git-compare--fold)
       (current-buffer))))
 

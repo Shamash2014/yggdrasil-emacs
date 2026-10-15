@@ -868,12 +868,12 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
         (let ((types (lambda () (mapcar (lambda (s) (oref s type)) (oref magit-root-section children)))))
           (should (equal (seq-take (funcall types) 4)
                          '(ygg-git-compare-description ygg-git-compare-conversation
-                           ygg-git-compare-checks diffstat)))
+                           ygg-git-compare-checks file)))
           (magit-section-hide (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks))
           (ygg-git-compare--pr-info-refresh buffer :conversation :checks)
           (should (equal (seq-take (funcall types) 4)
                          '(ygg-git-compare-description ygg-git-compare-conversation
-                           ygg-git-compare-checks diffstat)))
+                           ygg-git-compare-checks file)))
           (should (oref (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks) hidden))
           (magit-section-show (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks))
           (goto-char (point-min))
@@ -918,19 +918,19 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
       (ygg-git-compare-pr-info-tests--settle
        buffer (lambda () (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks)))
       (with-current-buffer buffer
-        (goto-char (oref (ygg-git-compare-pr-info-tests--section 'diffstat) start))
+        (goto-char (oref (ygg-git-compare-pr-info-tests--section 'file) start))
         (ygg-git-compare-pr-info-tests--put "checks.json" (ygg-git-compare-pr-info-tests--checks-json))
         (ygg-git-compare-pr-info-tests--redraw
          buffer (lambda () (not (string-search "●" (ygg-git-compare-pr-info-tests--header)))))
-        (should (ygg-git-compare-pr-info-tests--on-p 'diffstat))
+        (should (ygg-git-compare-pr-info-tests--on-p 'file))
         (ygg-git-compare-pr-info-tests--put "checks.json" "{\"statusCheckRollup\":[]}")
         (ygg-git-compare-pr-info-tests--redraw
          buffer (lambda () (not (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks))))
-        (should (ygg-git-compare-pr-info-tests--on-p 'diffstat))
+        (should (ygg-git-compare-pr-info-tests--on-p 'file))
         (ygg-git-compare-pr-info-tests--put "checks.json" (ygg-git-compare-pr-info-tests--checks-json))
         (ygg-git-compare-pr-info-tests--redraw
          buffer (lambda () (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks)))
-        (should (ygg-git-compare-pr-info-tests--on-p 'diffstat))))))
+        (should (ygg-git-compare-pr-info-tests--on-p 'file))))))
 
 (ert-deftest ygg-git-compare-pr-info-point-on-checks-stays-when-the-conversation-appears-and-grows ()
   (ygg-git-compare-pr-info-tests--with-repo head
@@ -1017,7 +1017,7 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
                             (overlays-in (point-min) (point-max)))))
           (should ov)
           (should (= (overlay-start ov)
-                     (oref (ygg-git-compare-pr-info-tests--section 'diffstat) start)))
+                     (oref (ygg-git-compare-pr-info-tests--section 'file) start)))
           (should (>= (overlay-start ov)
                       (oref (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks) end))))))))
 
