@@ -17,6 +17,7 @@
 (require 'ygg-git-compare-comments)
 (require 'ygg-git-compare-submit)
 (require 'ygg-git-compare-threads)
+(require 'aob-acp)
 
 (defvar ygg-git-compare-threads-tests--spawned nil)
 (defvar ygg-git-compare-threads-tests--real nil)
@@ -1147,7 +1148,7 @@ string, or (STATUS . WHAT-IT-SAID)."
              prompt offered default)
         (ignore alien mine)
         (cl-letf (((symbol-function 'completing-read)
-                   (lambda (p table _pred _req _init _hist def)
+                   (lambda (p table _pred _req _init _hist def &rest _)
                      (setq prompt p offered (all-completions "" table) default def)
                      def)))
           (should (eq (ygg-git-compare-pick-reviewer
@@ -1179,7 +1180,7 @@ string, or (STATUS . WHAT-IT-SAID)."
              default)
         (ignore maker)
         (cl-letf (((symbol-function 'completing-read)
-                   (lambda (_p _table _pred _req _init _hist def) (setq default def) def)))
+                   (lambda (_p _table _pred _req _init _hist def &rest _) (setq default def) def)))
           (ygg-git-compare-pick-reviewer
            (list (list :id "a" :author "maker" :created (- (float-time) 7200))
                  (list :id "b" :author "someone" :created (- (float-time) 60))
@@ -1558,7 +1559,7 @@ string, or (STATUS . WHAT-IT-SAID)."
              offered default prompted)
         (ignore other)
         (cl-letf (((symbol-function 'completing-read)
-                   (lambda (_p table _pred _req _init _hist def)
+                   (lambda (_p table _pred _req _init _hist def &rest _)
                      (setq offered (all-completions "" table) default def)
                      def))
                   ((symbol-function 'aob-prompt)
