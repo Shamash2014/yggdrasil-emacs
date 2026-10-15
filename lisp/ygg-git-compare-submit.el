@@ -73,6 +73,7 @@ without one.  Every comment is when MAX-PRIORITY is nil."
   "The checked comments going TO `forge' or `agent', all when nil, oldest
 first, those past MAX-PRIORITY left out."
   (seq-filter (lambda (c) (and (not (ygg-git-compare-submit--pending-p c))
+                               (not (plist-get c :sent))
                                (pcase to
                                  ('forge (ygg-git-compare--forge-p c))
                                  ('agent (not (ygg-git-compare--forge-p c)))
@@ -731,12 +732,13 @@ moved inline comment with no diff version of its own is text in the summary."
 
 ;;; Submitting
 
-(defun ygg-git-compare-submit--sequence (steps final progress done)
+(defun ygg-git-compare-submit--sequence (steps final progress done &optional landed)
   "Run STEPS, each (COMMENTS LABEL RUN), one after another, RUN being called
 with a function taking what went wrong, if anything; a failure does not
 stop the rest.  Then the steps FINAL, a function of the first failure,
 gives.  PROGRESS is called with the comments handled and a step's LABEL
-before each; DONE with the comments posted and the first failure."
+before each; DONE with the comments posted and the first failure.  LANDED is
+called with the comments of each step as it succeeds."
   (let ((posted nil) (failure nil) (handled 0))
     (letrec ((advance
               (lambda (queue)
@@ -752,7 +754,8 @@ before each; DONE with the comments posted and the first failure."
                                     (setq over t)
                                     (if err
                                         (unless failure (setq failure err))
-                                      (setq posted (append posted comments)))
+                                      (setq posted (append posted comments))
+                                      (when (and landed comments) (funcall landed comments)))
                                     (cl-incf handled (length comments))
                                     (funcall advance (cdr queue))))))
                       (funcall progress handled label)
@@ -821,6 +824,12 @@ before each; DONE with the comments posted and the first failure."
   (when comments
     (ygg-git-compare-comments-drop (mapcar (lambda (c) (plist-get c :id)) comments))))
 
+(defun ygg-git-compare-submit--mark-sent (buffer store comments)
+  (let ((ids (mapcar (lambda (c) (plist-get c :id)) comments)))
+    (if (buffer-live-p buffer)
+        (with-current-buffer buffer (ygg-git-compare-comments-mark-sent ids))
+      (ygg-git-compare-comments-mark-sent ids store))))
+
 (defun ygg-git-compare-submit--held (event max-priority)
   "The comments for the pull request, a user error when there is nothing to
 send or one was made on another range."
@@ -870,6 +879,7 @@ send or one was made on another range."
          (n (length comments))
          (pending (ygg-git-compare-submit--pending-note))
          (buffer (current-buffer))
+         (store ygg-git-compare--store)
          (prior ygg-git-compare--note))
     (unless (y-or-n-p (format "%s%s %d comment%s on %s%s? "
                               (or why "")
@@ -894,7 +904,9 @@ send or one was made on another range."
                                       name)))))
            (lambda (posted failure)
              (ygg-git-compare-submit--settle buffer name pr event comments posted failure
-                                             prior))))
+                                             prior))
+           (lambda (landed)
+             (ygg-git-compare-submit--mark-sent buffer store landed))))
       (error (when (buffer-live-p buffer)
                (with-current-buffer buffer (setq ygg-git-compare-submit--busy nil)))
              (signal (car failure) (cdr failure))))))

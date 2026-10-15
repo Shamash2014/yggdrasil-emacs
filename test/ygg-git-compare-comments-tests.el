@@ -1732,3 +1732,45 @@ and adds b.txt; main stays checked out."
             (funcall run)
             (should-not ygg-git-compare--timer)
             (should-not (memq timer timer-idle-list))))))))
+
+;;; Sent once
+
+(defun ygg-git-compare-comments-tests--sent-draft ()
+  (ygg-git-compare--put (list :id "d1" :level 'line :file "b.txt" :new-path "b.txt" :side 'new
+                              :line 2 :type 'nit :text "dupword"
+                              :range (ygg-git-compare--range-label)))
+  (ygg-git-compare-comments-mark-sent '("d1")))
+
+(defun ygg-git-compare-comments-tests--occurrences (needle)
+  (let ((text (ygg-git-compare-comments-tests--shown)) (n 0) (at 0))
+    (while (string-match (regexp-quote needle) text at)
+      (setq n (1+ n) at (match-end 0)))
+    n))
+
+(ert-deftest ygg-git-compare-comments-sent-draft-is-shown-once-beside-its-remote-copy ()
+  (require 'ygg-git-compare-threads)
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (let ((remote (list :id "remote:gh:1" :thread 1 :remote t :level 'line :author "me"
+                          :new-path "b.txt" :file "b.txt" :side 'new :line 2
+                          :text "**nit:** dupword")))
+        (ygg-git-compare-comments-tests--sent-draft)
+        (should (plist-get (car (ygg-git-compare-comments-list)) :sent))
+        (cl-letf (((symbol-function 'ygg-git-compare--remote-comments) (lambda (_) nil))
+                  ((symbol-function 'ygg-git-compare--remote-shown) (lambda (&rest _) nil)))
+          (ygg-git-compare--redraw-comments (current-buffer))
+          (should (= (ygg-git-compare-comments-tests--occurrences "dupword") 1)))
+        (cl-letf (((symbol-function 'ygg-git-compare--remote-comments) (lambda (_) (list remote)))
+                  ((symbol-function 'ygg-git-compare--remote-shown) (lambda (&rest _) (list remote))))
+          (ygg-git-compare--redraw-comments (current-buffer))
+          (should (= (ygg-git-compare-comments-tests--occurrences "dupword") 1)))))))
+
+(ert-deftest ygg-git-compare-comments-sent-mark-is-kept-with-the-comments ()
+  (ygg-git-compare-comments-tests--with-repo root
+    (ygg-git-compare-comments-tests--with-compare root
+      (ygg-git-compare-comments-tests--sent-draft)
+      (ygg-git-compare--reload)
+      (should (plist-get (car (ygg-git-compare-comments-list)) :sent))
+      (ygg-git-compare-comments-mark-sent '("d1") ygg-git-compare--store)
+      (ygg-git-compare--reload)
+      (should (= (length (ygg-git-compare-comments-list)) 1)))))

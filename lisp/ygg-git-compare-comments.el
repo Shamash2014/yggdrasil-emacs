@@ -130,6 +130,37 @@ with INCLUDE-PENDING."
   (ygg-git-compare--change
    (lambda (comments) (seq-remove (lambda (c) (member (plist-get c :id) ids)) comments))))
 
+(defun ygg-git-compare-comments-mark-sent (ids &optional store)
+  "Mark the comments with IDS as sent to the forge, so none is sent again.
+With STORE, (FILE . KEY), only that is changed, the compare's buffer being gone."
+  (let ((mark (lambda (comments)
+                (mapcar (lambda (c)
+                          (if (member (plist-get c :id) ids)
+                              (plist-put (copy-sequence c) :sent t)
+                            c))
+                        comments))))
+    (if store
+        (ygg-git-compare--store-update (car store) (cdr store) mark)
+      (ygg-git-compare--change mark))))
+
+(defun ygg-git-compare--sent-text-p (draft remote)
+  (let ((text (string-trim (or (plist-get draft :text) ""))))
+    (and (not (string-empty-p text))
+         (string-search text (or (plist-get remote :text) "")))))
+
+(defun ygg-git-compare--sent-shown-p (draft remotes)
+  "Whether DRAFT, if sent, is already among REMOTES, the comments from the forge."
+  (and (plist-get draft :sent)
+       (seq-some
+        (lambda (remote)
+          (and (not (plist-get remote :notice))
+               (ygg-git-compare--sent-text-p draft remote)
+               (or (eq (plist-get draft :level) 'review)
+                   (and (equal (plist-get draft :new-path) (plist-get remote :new-path))
+                        (or (null (plist-get remote :line))
+                            (eql (plist-get draft :line) (plist-get remote :line)))))))
+        remotes)))
+
 ;;; Comments
 
 (defvar ygg-git-compare--id-count 0
@@ -1191,8 +1222,11 @@ it has no place for at the top of the diff of every file."
     (when (overlay-get ov 'ygg-git-compare-comments) (delete-overlay ov)))
   (when-let* (((derived-mode-p 'magit-diff-mode))
               (list (ignore-errors (ygg-git-compare--list)))
-              (comments (append (ygg-git-compare--remote-comments list)
-                                (reverse (buffer-local-value 'ygg-git-compare--comments list))))
+              (comments (let ((remote (ygg-git-compare--remote-comments list)))
+                          (append remote
+                                  (seq-remove
+                                   (lambda (c) (ygg-git-compare--sent-shown-p c remote))
+                                   (reverse (buffer-local-value 'ygg-git-compare--comments list))))))
               ((bound-and-true-p magit-root-section)))
     (when-let* ((spans (and (eq (current-buffer) list)
                             (ygg-git-compare--conversation-spans))))

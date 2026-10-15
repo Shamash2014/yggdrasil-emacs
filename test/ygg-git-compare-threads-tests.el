@@ -1612,3 +1612,11 @@ string, or (STATUS . WHAT-IT-SAID)."
                          (format "%S" (transient-get-suffix 'ygg-git-compare-submit "@"))))
   (should (string-search "agent review"
                          (funcall #'ygg-git-compare-comments--review-description))))
+
+(ert-deftest ygg-git-compare-threads-a-comment-fetched-twice-is-one-thread-entry ()
+  (let ((comments (ygg-git-compare--remote-threads
+                   (list (list :remote t :id "remote:gh:1" :thread 1 :created 1 :text "once")
+                         (list :remote t :id "remote:gh:2" :thread 1 :created 2 :text "reply")
+                         (list :remote t :id "remote:gh:1" :thread 1 :created 1 :text "once")))))
+    (should (equal (mapcar (lambda (c) (plist-get c :id)) comments)
+                   '("remote:gh:1" "remote:gh:2")))))

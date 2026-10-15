@@ -487,7 +487,8 @@ failed."
 (defun ygg-git-compare--remote-threads (comments)
   "COMMENTS grouped by thread, oldest thread first, a thread's replies after
 its first comment and one level in."
-  (let* ((groups (mapcar (lambda (group)
+  (let* ((comments (seq-uniq comments (lambda (a b) (equal (plist-get a :id) (plist-get b :id)))))
+         (groups (mapcar (lambda (group)
                            (sort (copy-sequence (cdr group))
                                  (lambda (a b) (< (or (plist-get a :created) 0)
                                                   (or (plist-get b :created) 0)))))

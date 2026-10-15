@@ -25,6 +25,7 @@
 (defvar ygg-git-compare-submit-tests--dropped nil)
 (defvar ygg-git-compare-submit-tests--calls nil "Each forge call, newest first, as (PROGRAM ARGS BODY).")
 (defvar ygg-git-compare-submit-tests--messages nil)
+(defvar ygg-git-compare-submit-tests--marked nil "Each mark of sent comments, newest first, as (IDS STORE).")
 (defvar ygg-git-compare-submit-tests--prompts nil)
 
 (defconst ygg-git-compare-submit-tests--github-pr
@@ -58,6 +59,7 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
   `(let ((ygg-git-compare-submit-tests--comments (copy-tree ,comments))
          (ygg-git-compare-submit--memo nil)
          (ygg-git-compare-submit-tests--dropped nil)
+         (ygg-git-compare-submit-tests--marked nil)
          (ygg-git-compare-submit-tests--calls nil)
          (ygg-git-compare-submit-tests--messages nil)
          (ygg-git-compare-submit-tests--prompts nil)
@@ -85,6 +87,15 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                   (setq ygg-git-compare-submit-tests--comments
                         (seq-remove (lambda (c) (member (plist-get c :id) ids))
                                     ygg-git-compare-submit-tests--comments))))
+               ((symbol-function 'ygg-git-compare-comments-mark-sent)
+                (lambda (ids &optional store)
+                  (push (list ids store) ygg-git-compare-submit-tests--marked)
+                  (setq ygg-git-compare-submit-tests--comments
+                        (mapcar (lambda (c)
+                                  (if (member (plist-get c :id) ids)
+                                      (plist-put (copy-sequence c) :sent t)
+                                    c))
+                                ygg-git-compare-submit-tests--comments))))
                ((symbol-function 'ygg-git-compare--list) #'current-buffer)
                ((symbol-function 'ygg-git-compare--range-label) (lambda () "R"))
                ((symbol-function 'y-or-n-p)
@@ -1249,3 +1260,53 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
   (ygg-git-compare-submit-tests--conversation '(rev :diff "x") (lambda (&rest _) "{}")
     (should-error (ygg-git-compare-comment-conversation) :type 'user-error)
     (should-not ygg-git-compare-submit-tests--calls)))
+
+;;; Never twice
+
+(ert-deftest ygg-git-compare-submit-gitlab-marks-each-comment-sent-as-it-lands ()
+  (let (during)
+    (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
+        ygg-git-compare-submit-tests--gitlab-pr
+        (lambda (_program _args body)
+          (when (equal (plist-get body :body) "**nit:** line")
+            (setq during (mapcar (lambda (c) (plist-get c :id))
+                                 (ygg-git-compare-submit--select 'forge))))
+          "{\"id\":1}")
+      (ygg-git-compare-submit-forge 'comment)
+      (should (member "summary" ygg-git-compare-submit-tests--dropped))
+      (should-not (member "summary" during))
+      (should (member "line" during)))))
+
+(ert-deftest ygg-git-compare-submit-marks-sent-in-the-store-when-the-buffer-is-gone ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
+      ygg-git-compare-submit-tests--github-pr
+      (lambda (&rest _) (kill-buffer (current-buffer)) "{}")
+    (setq ygg-git-compare--store '("file" . "key"))
+    (ygg-git-compare-submit-forge 'comment)
+    (let ((mark (car ygg-git-compare-submit-tests--marked)))
+      (should (equal (car mark) '("summary" "line" "range" "whole")))
+      (should (equal (cadr mark) '("file" . "key"))))))
+
+(ert-deftest ygg-git-compare-submit-a-second-send-posts-nothing-already-sent ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (cl-letf (((symbol-function 'ygg-git-compare-comments-drop) #'ignore))
+      (ygg-git-compare-submit-forge 'comment)
+      (should (= (length (ygg-git-compare-submit-tests--posts)) 1))
+      (should-error (ygg-git-compare-submit-forge 'comment) :type 'user-error)
+      (should (= (length (ygg-git-compare-submit-tests--posts)) 1))
+      (should-not (ygg-git-compare-submit--select 'forge)))))
+
+(ert-deftest ygg-git-compare-submit-a-failed-send-keeps-the-draft-and-a-resend-posts-it ()
+  (let ((fail t))
+    (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--mixed
+        ygg-git-compare-submit-tests--github-pr
+        (lambda (&rest _) (if fail (user-error "gh api: 502") "{}"))
+      (ygg-git-compare-submit-forge 'comment)
+      (should-not ygg-git-compare-submit-tests--marked)
+      (should (= (length (ygg-git-compare-submit--select 'forge)) 4))
+      (setq fail nil)
+      (ygg-git-compare-submit-forge 'comment)
+      (should (equal (car (car ygg-git-compare-submit-tests--marked))
+                     '("summary" "line" "range" "whole")))
+      (should (= (length (ygg-git-compare-submit-tests--posts)) 2)))))
