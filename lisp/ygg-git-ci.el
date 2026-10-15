@@ -354,22 +354,31 @@ and no question is already out; the cache stays until the new answer lands."
           ((plist-get context :note) (user-error "ci: %s" (plist-get context :note)))
           (t (user-error "ci: not a forge remote")))))
 
+(defun ygg-git-ci-row-mark (row)
+  "The status glyph of ROW, in its face."
+  (pcase-let ((`(,mark ,face) (if (plist-get row :playable)
+                                  '("▶" link)
+                                (cdr (assq (plist-get row :state) ygg-git-compare--check-marks)))))
+    (propertize mark 'font-lock-face face)))
+
+(defun ygg-git-ci--stale-p (row head)
+  (and head (plist-get row :sha) (not (equal head (plist-get row :sha)))))
+
+(defun ygg-git-ci-row-details (row head)
+  "Duration, age, event and staleness of ROW against HEAD."
+  (let* ((age (ygg-git-review-requests--age (plist-get row :created)))
+         (details (delq nil (list (ygg-git-compare--check-duration row)
+                                  (and (not (string-empty-p age)) age)
+                                  (plist-get row :event)))))
+    (concat (propertize (string-join details "  ") 'font-lock-face 'magit-dimmed)
+            (if (ygg-git-ci--stale-p row head) (propertize "  stale" 'font-lock-face 'warning) ""))))
+
 (defun ygg-git-ci--row-line (row head)
-  (pcase-let* ((state (plist-get row :state))
-               (`(,mark ,face) (if (plist-get row :playable)
-                                   '("▶" link)
-                                 (cdr (assq state ygg-git-compare--check-marks))))
-               (stale (and head (plist-get row :sha) (not (equal head (plist-get row :sha)))))
-               (age (ygg-git-review-requests--age (plist-get row :created)))
-               (details (delq nil (list (ygg-git-compare--check-duration row)
-                                        (and (not (string-empty-p age)) age)
-                                        (plist-get row :event)))))
-    (concat (propertize mark 'font-lock-face face) " "
-            (propertize (plist-get row :name)
-                        'font-lock-face (if stale 'magit-dimmed 'default))
-            "  "
-            (propertize (string-join details "  ") 'font-lock-face 'magit-dimmed)
-            (if stale (propertize "  stale" 'font-lock-face 'warning) ""))))
+  (concat (ygg-git-ci-row-mark row) " "
+          (propertize (plist-get row :name)
+                      'font-lock-face (if (ygg-git-ci--stale-p row head) 'magit-dimmed 'default))
+          "  "
+          (ygg-git-ci-row-details row head)))
 
 (defun ygg-git-ci--insert-row (row head)
   (magit-insert-section (ci-run row)
@@ -1028,6 +1037,43 @@ On a playable job it plays that job."
   (interactive)
   (ygg-git-ci--ensure (ygg-git-ci--key) t)
   (magit-refresh-buffer))
+
+(defun ygg-git-ci-snapshot (root &optional fetch)
+  "ROOT's current-branch CI answer as a plist, or nil when it has no forge branch.
+FETCH asks the forge when the answer is missing or stale and adds :head."
+  (let* ((default-directory root)
+         (key (ignore-errors (ygg-git-ci--key))))
+    (when key
+      (let ((answer (if fetch
+                        (ygg-git-ci--ensure key)
+                      (cdr (gethash key ygg-git-ci--cache)))))
+        (append (list :key key :rows (plist-get answer :rows)
+                      :error (plist-get answer :error)
+                      :stamp (car (gethash key ygg-git-ci--cache)))
+                (and fetch (list :head (ignore-errors (magit-rev-parse "HEAD")))))))))
+
+(defun ygg-git-ci--row-actions (repo row)
+  (let ((gitlab (eq (car repo) 'gitlab))
+        (job (eq (plist-get row :kind) 'job)))
+    (delq nil
+          (list (and (plist-get row :url) (cons "browse" #'ygg-git-ci-browse))
+                (and (not (and gitlab (not job))) (cons "log" #'ygg-git-ci-log))
+                (cons (if gitlab "retry" "rerun") #'ygg-git-ci-rerun)
+                (and (memq (plist-get row :state) '(running pending))
+                     (cons "cancel" #'ygg-git-ci-cancel))
+                (and (plist-get row :playable) (cons "play" #'ygg-git-ci-play))
+                (cons "artifacts" #'ygg-git-ci-artifacts)
+                (and gitlab (cons "retry pipeline" #'ygg-git-ci-rerun-pipeline))
+                (and gitlab (cons "cancel pipeline" #'ygg-git-ci-cancel-pipeline))))))
+
+(defun ygg-git-ci-act (root row)
+  "Offer the actions valid for ROW of ROOT's current branch and run the chosen one."
+  (let* ((default-directory root)
+         (key (ygg-git-ci--key))
+         (actions (ygg-git-ci--row-actions (car key) row))
+         (choice (completing-read (format "%s: " (plist-get row :name)) actions nil t)))
+    (cl-letf (((symbol-function 'ygg-git-ci--at-point) (lambda () row)))
+      (call-interactively (cdr (assoc choice actions))))))
 
 (defvar-keymap magit-ci-section-map
   "g" #'ygg-git-ci-refetch

@@ -959,6 +959,19 @@
           (should (equal (mapcar #'buffer-live-p (reverse buffers)) '(t nil t t))))
       (mapc (lambda (b) (when (buffer-live-p b) (kill-buffer b))) buffers))))
 
+(ert-deftest ygg-git-ci-act-runs-the-chosen-action-on-the-given-row ()
+  (let ((row (list :name "build" :kind 'job :state 'running :url "u" :id 7))
+        offered seen)
+    (cl-letf (((symbol-function 'ygg-git-ci--key) (lambda () (list '(gitlab "h" "g/p") "main")))
+              ((symbol-function 'completing-read)
+               (lambda (_p actions &rest _) (setq offered (mapcar #'car actions)) "cancel"))
+              ((symbol-function 'ygg-git-ci-cancel)
+               (lambda () (interactive) (setq seen (ygg-git-ci--at-point)))))
+      (ygg-git-ci-act "/tmp/p/" row))
+    (should (eq seen row))
+    (should (member "cancel" offered))
+    (should-not (member "play" offered))))
+
 (provide 'ygg-git-ci-tests)
 ;;; ygg-git-ci-tests.el ends here
 
