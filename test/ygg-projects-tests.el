@@ -1113,3 +1113,17 @@ sidebar in the selected window."
 
 (provide 'ygg-projects-tests)
 ;;; ygg-projects-tests.el ends here
+
+(ert-deftest ygg-projects-worktree-row-keeps-its-branch-and-cuts-its-name ()
+  "A worktree row too long for its window loses the end of its name, not its branch."
+  (let* ((ygg-projects-width 56)
+         (branch "feature/VBFE-2228-registration")
+         (out (concat "worktree /r/repo\n\nworktree /r/repo.backport-and-more\nbranch refs/heads/"
+                      branch "\n"))
+         (wt (car (ygg-projects--worktrees-parse out "/r/repo")))
+         (row (substring-no-properties
+               (ygg-projects--entry-text (concat "⌥ " (car wt)) "/tmp/p/" 'folders
+                                         (cons 'worktree (cdr wt))))))
+    (should (string-search (concat "(" branch ")") row))
+    (should (string-search "⌥ .back" row))
+    (should (string-search "…" row))))

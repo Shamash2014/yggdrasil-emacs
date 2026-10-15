@@ -730,14 +730,17 @@ one its short sha."
 
 (defun ygg-projects--worktrees-parse (out root)
   "The worktrees OUT names as (LABEL . DIR), ROOT's own checkout left out.
-LABEL is the worktree's folder and, in brackets, its branch."
+LABEL is the worktree's folder, less the repository's name when it
+starts with it, and, in brackets, its branch."
   (let ((own (file-name-as-directory (expand-file-name root)))
+        (repo (file-name-nondirectory (directory-file-name root)))
         dirs)
     (dolist (block (split-string out "\n\n" t))
       (when (string-match "^worktree \\(.*\\)$" block)
         (let ((dir (match-string 1 block)))
           (unless (equal (file-name-as-directory (expand-file-name dir)) own)
-            (push (cons (format "%s (%s)" (file-name-nondirectory dir)
+            (push (cons (format "%s (%s)"
+                                (string-remove-prefix repo (file-name-nondirectory dir))
                                 (ygg-projects--worktree-branch block))
                         dir)
                   dirs)))))
@@ -1328,11 +1331,38 @@ name does not get."
   "Columns of an entry's name kept before its badge gives up a part."
   :type 'natnum :group 'ygg-projects)
 
+(defcustom ygg-projects-worktree-min-name 4
+  "Columns of a worktree's name kept before its branch gives up a part."
+  :type 'natnum :group 'ygg-projects)
+
+(defun ygg-projects--fit-worktree (label room)
+  "LABEL, a worktree's name and its branch in brackets, cut to ROOM columns.
+The name is cut at its end; only when the branch alone cannot fit beside
+a few columns of name does the branch lose its head, keeping the slug."
+  (if (or (<= (string-width label) room)
+          (not (string-match "\\`\\(.*\\) (\\(.*\\))\\'" label)))
+      (truncate-string-to-width label room nil nil "…")
+    (let* ((name (match-string 1 label))
+           (branch (match-string 2 label))
+           (keep (min ygg-projects-worktree-min-name (string-width name)))
+           (branch-room (max 1 (- room keep 3)))
+           (branch (if (<= (string-width branch) branch-room)
+                       branch
+                     (let ((tail branch))
+                       (while (> (string-width tail) (1- branch-room))
+                         (setq tail (substring tail 1)))
+                       (concat "…" tail)))))
+      (format "%s (%s)"
+              (truncate-string-to-width name (max 1 (- room (string-width branch) 3))
+                                        nil nil "…")
+              branch))))
+
 (defun ygg-projects--entry-text (label root kind payload)
   "LABEL as one row, its badge at the right edge.
 A row never wraps: the badge sheds its least parts until the name has
 the columns ygg-projects-entry-min-name asks for, and the name is cut
-to what is left after that; a path loses its head, not its name."
+to what is left after that; a path loses its head, not its name, and a
+worktree loses the end of its name, not its branch."
   (let* ((indent (+ ygg-projects-entry-indent 2))
          (pin (if (ygg-projects--pinned-p payload)
                   (propertize "⊤ " 'font-lock-face 'ygg-projects-count)
@@ -1350,6 +1380,8 @@ to what is left after that; a path loses its head, not its name."
                        " "))
          (room (max 1 (- line (string-width badge))))
          (name (cond ((<= (string-width label) room) label)
+                     ((eq (car-safe payload) 'worktree)
+                      (ygg-projects--fit-worktree label room))
                      ((string-search "/" label)
                       (let ((tail label))
                         (while (> (string-width tail) (1- room))
