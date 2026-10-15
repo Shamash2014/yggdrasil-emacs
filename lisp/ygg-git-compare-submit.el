@@ -16,6 +16,7 @@
 (require 'transient)
 (require 'ygg-git-compare)
 (require 'ygg-git-compare-comments)
+(require 'ygg-git-compare-threads)
 
 (defvar transient--original-buffer)
 (declare-function ygg-git-compare-comments-list "ygg-git-compare-comments"
@@ -1011,6 +1012,58 @@ out findings less urgent than it."
                               (if (string-empty-p pending) "" (concat "; " pending))))
                    (ygg-git-compare-show-trace session))
                (message "Review not sent: the comments for the agent are gone")))))))))
+
+(declare-function ygg-git-compare--pr-info-refetch "ygg-git-compare-pr-info")
+(declare-function aob-comment-box "aob")
+
+(defun ygg-git-compare-submit--conversation-post (pr text done)
+  "Post TEXT as a note on the conversation of PR, then call DONE with what
+went wrong, if anything."
+  (let ((finish (lambda (_value err &rest _) (funcall done err))))
+    (if (eq (plist-get pr :forge) 'github)
+        (ygg-git-compare-submit--api
+         "gh" (list :body text)
+         (list "api" "--hostname" (plist-get pr :host)
+               (format "repos/%s/issues/%s/comments" (plist-get pr :path) (plist-get pr :number)))
+         finish)
+      (ygg-git-compare-submit--gitlab-note pr nil text nil finish))))
+
+(defun ygg-git-compare-submit--conversation-box (list pr initial)
+  (let ((number (plist-get pr :number)))
+    (with-current-buffer list
+      (require 'aob)
+      (aob-comment-box
+       (format "conversation:%s#%s" (plist-get pr :path) number)
+       (format "Comment on #%s" number)
+       (lambda (text)
+         (if (string-empty-p text)
+             (message "Nothing to post")
+           (ygg-git-compare-submit--conversation-post
+            pr text
+            (lambda (err)
+              (cond (err
+                     (if (buffer-live-p list)
+                         (run-at-time 0 nil #'ygg-git-compare-submit--conversation-box
+                                      list pr text)
+                       (kill-new text))
+                     (message "Comment on #%s not posted: %s" number err))
+                    (t (message "Commented on #%s" number)
+                       (when (buffer-live-p list)
+                         (with-current-buffer list
+                           (ygg-git-compare--pr-info-refetch)))))))))
+       :initial initial
+       :placeholder "Write the comment; it is posted to the conversation when sent"))))
+
+;;;###autoload
+(defun ygg-git-compare-comment-conversation ()
+  "Write a comment on the pull request's conversation and post it at once."
+  (interactive)
+  (let* ((list (ygg-git-compare--list))
+         (pr (with-current-buffer list
+               (or (and (eq (car-safe ygg-git-compare--b-spec) 'pr)
+                        (ygg-git-compare--remote-pr))
+                   (user-error "Not a pull or merge request")))))
+    (ygg-git-compare-submit--conversation-box list pr nil)))
 
 ;;; Menu
 

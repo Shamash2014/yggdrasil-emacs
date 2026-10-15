@@ -1188,3 +1188,64 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
       (ygg-git-compare-submit--moved-heads nil ygg-git-compare-submit-tests--gitlab-pr)
       (ygg-git-compare-submit--forge-hunks ygg-git-compare-submit-tests--gitlab-pr "a.txt" "a.txt")
       (should (= asked 2)))))
+
+(defvar ygg-git-compare-submit-tests--refetched nil)
+
+(defmacro ygg-git-compare-submit-tests--conversation (spec answer &rest body)
+  (declare (indent 2))
+  `(let ((ygg-git-compare--b-spec ,spec)
+         (ygg-git-compare-submit-tests--refetched nil))
+     (ygg-git-compare-submit-tests--with nil nil ,answer
+       (setq ygg-git-compare--b-spec ,spec)
+       (cl-letf (((symbol-function 'ygg-git-compare--pr-info-refetch)
+                  (lambda () (setq ygg-git-compare-submit-tests--refetched t))))
+         (unwind-protect (progn ,@body)
+           (when (get-buffer "compose:conversation:o/r#12") (kill-buffer "compose:conversation:o/r#12"))
+           (when (get-buffer "compose:conversation:grp/proj#7") (kill-buffer "compose:conversation:grp/proj#7")))))))
+
+(defun ygg-git-compare-submit-tests--send (name text)
+  (with-current-buffer name
+    (erase-buffer)
+    (insert text)
+    (aob-compose-send)))
+
+(ert-deftest ygg-git-compare-comment-conversation-github-posts-an-issue-comment ()
+  (ygg-git-compare-submit-tests--conversation
+      '(pr :forge github :host "github.com" :path "o/r" :number 12) (lambda (&rest _) "{}")
+    (ygg-git-compare-comment-conversation)
+    (ygg-git-compare-submit-tests--send "compose:conversation:o/r#12" "hello there")
+    (let ((call (car ygg-git-compare-submit-tests--calls)))
+      (should (equal (car call) "gh"))
+      (should (equal (ygg-git-compare-submit-tests--endpoint call) "repos/o/r/issues/12/comments"))
+      (should (equal (plist-get (nth 2 call) :body) "hello there")))
+    (should ygg-git-compare-submit-tests--refetched)
+    (should (equal (car ygg-git-compare-submit-tests--messages) "Commented on #12"))))
+
+(ert-deftest ygg-git-compare-comment-conversation-gitlab-posts-a-note ()
+  (ygg-git-compare-submit-tests--conversation
+      '(pr :forge gitlab :host "gitlab.com" :path "grp/proj" :number 7) (lambda (&rest _) "{}")
+    (ygg-git-compare-comment-conversation)
+    (ygg-git-compare-submit-tests--send "compose:conversation:grp/proj#7" "hello there")
+    (let ((call (car ygg-git-compare-submit-tests--calls)))
+      (should (equal (car call) "glab"))
+      (should (equal (ygg-git-compare-submit-tests--endpoint call)
+                     "projects/grp%2Fproj/merge_requests/7/notes"))
+      (should (equal (plist-get (nth 2 call) :body) "hello there")))
+    (should ygg-git-compare-submit-tests--refetched)))
+
+(ert-deftest ygg-git-compare-comment-conversation-failure-keeps-the-draft ()
+  (ygg-git-compare-submit-tests--conversation
+      '(pr :forge github :host "github.com" :path "o/r" :number 12)
+      (lambda (&rest _) (error "boom"))
+    (ygg-git-compare-comment-conversation)
+    (ygg-git-compare-submit-tests--send "compose:conversation:o/r#12" "keep me")
+    (sleep-for 0.1)
+    (should-not ygg-git-compare-submit-tests--refetched)
+    (should (string-search "boom" (car ygg-git-compare-submit-tests--messages)))
+    (should (equal (with-current-buffer "compose:conversation:o/r#12" (string-trim (buffer-string)))
+                   "keep me"))))
+
+(ert-deftest ygg-git-compare-comment-conversation-needs-a-pull-request ()
+  (ygg-git-compare-submit-tests--conversation '(rev :diff "x") (lambda (&rest _) "{}")
+    (should-error (ygg-git-compare-comment-conversation) :type 'user-error)
+    (should-not ygg-git-compare-submit-tests--calls)))

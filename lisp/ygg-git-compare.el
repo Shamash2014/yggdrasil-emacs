@@ -2264,6 +2264,7 @@ when that is known, and a compare that is not its range says why instead."
 (autoload 'ygg-git-compare-interdiff "ygg-git-compare-interdiff" nil t)
 (autoload 'ygg-git-compare-export-markdown "ygg-git-compare-submit" nil t)
 (autoload 'ygg-git-compare-submit "ygg-git-compare-submit" nil t)
+(autoload 'ygg-git-compare-comment-conversation "ygg-git-compare-submit" nil t)
 (autoload 'ygg-git-compare-comment "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-comment-file "ygg-git-compare-comments" nil t)
 (autoload 'ygg-git-compare-goto-line "ygg-git-compare-comments" nil t)

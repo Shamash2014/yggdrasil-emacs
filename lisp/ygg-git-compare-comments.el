@@ -1975,6 +1975,7 @@ check in the compare of BRANCH.  Answer (COUNT . KEY)."
   "Comment on the compare, check what agents proposed, and send it."
   [["Comment"
     ("c" "on the review" ygg-git-compare-comment-review)
+    ("g" "on the conversation" ygg-git-compare-comment-conversation)
     ("l" "on the line or lines" ygg-git-compare-comment)
     ("h" "on the hunk" ygg-git-compare-comment-hunk)
     ("f" "on the file" ygg-git-compare-comment-file)
