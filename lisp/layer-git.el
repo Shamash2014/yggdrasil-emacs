@@ -71,6 +71,7 @@
 (autoload 'ygg-git-worktree-insert-section "ygg-git-worktree")
 (autoload 'ygg-git-stack-insert-section "ygg-git-stack")
 (autoload 'ygg-git-review-requests-insert-section "ygg-git-review-requests")
+(autoload 'ygg-git-ci-insert-section "ygg-git-ci")
 (autoload 'ygg-git-pr-merge "ygg-git-pr-merge" nil t)
 (dolist (feature '(ygg-git-review-requests ygg-git-compare))
   (eval-after-load feature '(require 'ygg-git-pr-merge)))
@@ -82,7 +83,9 @@
   (magit-add-section-hook 'magit-status-sections-hook #'ygg-git-stack-insert-section
                           #'ygg-git-worktree-insert-section t)
   (magit-add-section-hook 'magit-status-sections-hook #'ygg-git-review-requests-insert-section
-                          #'ygg-git-stack-insert-section t))
+                          #'ygg-git-stack-insert-section t)
+  (magit-add-section-hook 'magit-status-sections-hook #'ygg-git-ci-insert-section
+                          #'ygg-git-review-requests-insert-section t))
 
 (declare-function magit-blame-next-chunk "magit-blame")
 (declare-function magit-blame-previous-chunk "magit-blame")
