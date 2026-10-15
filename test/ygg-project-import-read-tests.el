@@ -6,15 +6,14 @@
 (require 'cl-lib)
 (require 'ygg-project-scan)
 
-(defmacro ygg-project-import-read-tests--with (fresh pick &rest body)
-  "Run BODY with the scan cache at FRESH and the prompt answering PICK.
+(defmacro ygg-project-import-read-tests--with (walked pick &rest body)
+  "Run BODY with the walk finding WALKED and the prompt answering PICK.
 `rows' is bound to what the prompt was offered, `note' to its annotator."
   (declare (indent 2))
-  `(let ((asyncs 0) rows note browsed)
+  `(let (rows note browsed)
      (cl-letf (((symbol-function 'ygg-project-roots) (lambda (&rest _) '("/a/known/")))
-               ((symbol-function 'ygg-project-scan--load) (lambda (&optional any-age) (or ,fresh (and any-age '("/c/stale/")))))
-               ((symbol-function 'ygg-project-scan-async)
-                (lambda (&rest _) (cl-incf asyncs)))
+               ((symbol-function 'ygg-project-scan--walk) (lambda () ,walked))
+               ((symbol-function 'ygg-project-scan--save) #'identity)
                ((symbol-function 'read-directory-name)
                 (lambda (&rest args) (setq browsed args) "/c/browsed/"))
                ((symbol-function 'completing-read)
@@ -51,16 +50,53 @@
   (ygg-project-import-read-tests--with '("/b/new/") "/no/such/place-xyz"
     (should-error (ygg-project-import--read-root) :type 'user-error)))
 
-(ert-deftest ygg-project-import-read-stale-cache-refreshes-behind-the-prompt ()
-  (ygg-project-import-read-tests--with nil ygg-project-import--browse
-    (ygg-project-import--read-root)
-    (should (= asyncs 1))
-    (should (equal rows (list "/c/stale/" "/a/known/" ygg-project-import--browse)))))
+;; a repository cloned after the saved scan was taken is not in it
+(ert-deftest ygg-project-import-read-offers-a-clone-made-after-the-saved-scan ()
+  (let* ((parent (file-name-as-directory (make-temp-file "ygg-clones" t)))
+         (process-environment (cons "GIT_CONFIG_GLOBAL=/dev/null" process-environment))
+         (ygg-project-search-paths (list parent))
+         (ygg-project-scan-cache-file (expand-file-name "scan.eld" parent))
+         (ygg-project-scan--found nil)
+         (clone (expand-file-name "fresh/" parent))
+         rows)
+    (unwind-protect
+        (progn
+          (ygg-project-scan--save (list (expand-file-name "old/" parent)))
+          (call-process "git" nil nil nil "init" "-q" (expand-file-name "origin" parent))
+          (call-process "git" nil nil nil "clone" "-q"
+                        (expand-file-name "origin" parent) clone)
+          (cl-letf (((symbol-function 'ygg-project-roots) (lambda (&rest _) nil))
+                    ((symbol-function 'completing-read)
+                     (lambda (_p coll &rest _)
+                       (setq rows (all-completions "" coll))
+                       ygg-project-import--browse))
+                    ((symbol-function 'read-directory-name) (lambda (&rest _) "/x/")))
+            (ygg-project-import--read-root))
+          (should (member (abbreviate-file-name clone) rows)))
+      (delete-directory parent t))))
 
-(ert-deftest ygg-project-import-read-fresh-cache-starts-no-walk ()
-  (ygg-project-import-read-tests--with '("/b/new/") ygg-project-import--browse
-    (ygg-project-import--read-root)
-    (should (= asyncs 0))))
+(ert-deftest ygg-project-import-completes-for-a-fresh-clone ()
+  (let* ((parent (file-name-as-directory (make-temp-file "ygg-clones" t)))
+         (process-environment (cons "GIT_CONFIG_GLOBAL=/dev/null" process-environment))
+         (project-list-file (expand-file-name "projects.eld" parent))
+         (project--list nil)
+         (clone (expand-file-name "fresh/" parent))
+         done)
+    (unwind-protect
+        (progn
+          (call-process "git" nil nil nil "init" "-q" (expand-file-name "origin" parent))
+          (call-process "git" nil nil nil "clone" "-q"
+                        (expand-file-name "origin" parent) clone)
+          (cl-letf (((symbol-function 'ygg-project-commands-refresh)
+                     (lambda (root cb) (funcall cb root))))
+            (ygg-project-import clone (lambda (&rest _) (setq done t)))
+            (let ((deadline (+ (float-time) 10)))
+              (while (and (not done) (< (float-time) deadline))
+                (accept-process-output nil 0.05))))
+          (should done)
+          (should (member (file-name-as-directory (file-truename clone))
+                          (mapcar #'file-truename (ygg-project-roots)))))
+      (delete-directory parent t))))
 
 ;; importing a folder that is not on the list yet puts it there, so the sidebar shows it
 (ert-deftest ygg-project-import-remembers-a-new-repository ()

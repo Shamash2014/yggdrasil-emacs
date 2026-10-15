@@ -297,17 +297,18 @@ ICE or refreshes its wiring."
 
 (defun ygg-project-import--read-root ()
   "A project folder: found on disk, already imported, or any folder.
-Reads the saved scan and never waits for a walk; a stale one is
-refreshed behind the prompt for the next time."
-  (let* ((fresh (ygg-project-scan--load))
-         (_ (unless fresh (ygg-project-scan-async)))
+The walk is a handful of `find' calls pruned at each repository, so it
+runs on every prompt: a saved scan cannot know about a clone made after
+it was taken."
+  (let* ((walked (setq ygg-project-scan--found
+                      (ygg-project-scan--save (ygg-project-scan--walk))))
          (known (mapcar #'abbreviate-file-name (ygg-project-roots)))
          (found (seq-difference
                  (sort (delete-dups
                         (mapcar (lambda (d)
                                   (abbreviate-file-name
                                    (file-name-as-directory (expand-file-name d))))
-                                (or fresh ygg-project-scan--found (ygg-project-scan--load t))))
+                                walked))
                        #'string<)
                  known))
          (rows (append found known (list ygg-project-import--browse)))
