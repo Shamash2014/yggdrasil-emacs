@@ -92,6 +92,19 @@ worker that has never authenticated."
                (when url (browse-url url))))))
     timer))
 
+(defun ygg-forge-config--close-on-success (buffer)
+  "Kill BUFFER and its window once its login process exits cleanly; a failure stays to be read."
+  (when-let* ((process (get-buffer-process buffer)))
+    (add-function :after (process-sentinel process)
+                  (lambda (proc _event)
+                    (when (and (memq (process-status proc) '(exit signal))
+                               (eql (process-exit-status proc) 0)
+                               (buffer-live-p buffer))
+                      (dolist (window (get-buffer-window-list buffer nil t))
+                        (unless (frame-root-window-p window)
+                          (delete-window window)))
+                      (kill-buffer buffer))))))
+
 (defun ygg-forge-config--run-terminal (root argv env)
   "Run ARGV in a terminal sitting in ROOT, with ENV in its environment."
   (unless (require 'ghostel nil t)
@@ -109,6 +122,7 @@ worker that has never authenticated."
           (ygg-call-with-buffer-env
            (lambda () (ghostel-exec buffer (car argv) (cdr argv)))
            (append env (ygg-forge-config--browser-env)))
+          (ygg-forge-config--close-on-success buffer)
           (ygg-forge-config--watch-for-url buffer))
       (error (when (and (window-live-p window) (not (frame-root-window-p window)))
                (delete-window window))

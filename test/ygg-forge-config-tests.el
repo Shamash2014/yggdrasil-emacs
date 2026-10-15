@@ -491,6 +491,25 @@
       (should (equal 2 (length (cadr res))))
       (should (equal '("gh login" "glab login") (seq-intersection names '("gh login" "glab login")))))))
 
+(ert-deftest ygg-forge-config-login-buffer-closes-only-on-success ()
+  (let ((ok (generate-new-buffer " *forge-ok*"))
+        (bad (generate-new-buffer " *forge-bad*")))
+    (unwind-protect
+        (progn
+          (start-process "forge-ok" ok "true")
+          (start-process "forge-bad" bad "false")
+          (ygg-forge-config--close-on-success ok)
+          (ygg-forge-config--close-on-success bad)
+          (let ((deadline (+ (float-time) 5)))
+            (while (and (or (get-buffer-process ok) (process-live-p (get-buffer-process bad)))
+                        (buffer-live-p ok)
+                        (< (float-time) deadline))
+              (accept-process-output nil 0.05)))
+          (accept-process-output nil 0.1)
+          (should-not (buffer-live-p ok))
+          (should (buffer-live-p bad)))
+      (dolist (b (list ok bad)) (when (buffer-live-p b) (kill-buffer b))))))
+
 (provide 'ygg-forge-config-tests)
 ;;; ygg-forge-config-tests.el ends here
 
