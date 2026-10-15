@@ -168,6 +168,24 @@
                             (seq-remove (lambda (e) (member e ygg-agent-session-env-vars))
                                         (ygg-agent-terminal-env (ygg-term-tests--dir "p"))))))))
 
+(ert-deftest ygg-term-unlogged-project-home-is-kept-and-named ()
+  (ygg-term-tests--with
+    (cl-letf (((symbol-function 'ygg-agent--logged-in-p)
+               (lambda (_kind dir &rest _) (not (string-prefix-p ygg-agent-conf-root dir))))
+              ((symbol-function 'ygg-agent--bootstrap-share) #'ignore))
+      (let ((project (ygg-term-tests--dir "p")) said env)
+        (make-directory (ygg-agent--own-home "claude" (ygg-agent--repo-home project)) t)
+        (cl-letf (((symbol-function 'display-warning)
+                   (lambda (_type msg &rest _) (push msg said))))
+          (setq env (ygg-agent--config-env "claude" "claude" project)))
+        (should (string-prefix-p (concat "CLAUDE_CONFIG_DIR=" ygg-agent-conf-root) env))
+        (should (seq-some (lambda (m)
+                            (and (string-search "not logged in" m)
+                                 (string-search (file-name-nondirectory
+                                                 (directory-file-name project))
+                                                m)))
+                          said))))))
+
 (ert-deftest ygg-term-local-after-remote-gets-homes-again ()
   (ygg-term-tests--with
     (ygg--ghostel-shell "*ygg-term:r*" "/ssh:box:/srv/")

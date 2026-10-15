@@ -942,8 +942,19 @@ day a login can be seeded too."
                   (when ygg-agent-conf-root
                     (let* ((own (ygg-agent--own-home kind repo isolate))
                            (shared (and isolate (ygg-agent--own-home kind repo)))
-                           (dir (ygg-agent--authenticated-home
-                                 kind spec (delq nil (list own shared)) peek)))
+                           (kept (seq-find #'file-directory-p (delq nil (list own shared))))
+                           ;; a project that has its own home never borrows another account
+                           (dir (or kept
+                                    (ygg-agent--authenticated-home
+                                     kind spec (delq nil (list own shared)) peek))))
+                      (when (and kept (not peek)
+                                 (not (ygg-agent--logged-in-p kind kept)))
+                        (display-warning
+                         'ygg-agent
+                         (format "%s's %s home %s is not logged in; log it in with M-x ygg-agent-login-config-home — no other account is used"
+                                 (abbreviate-file-name (directory-file-name project))
+                                 kind (abbreviate-file-name kept))
+                         :warning))
                       (unless (or peek
                                   (equal (directory-file-name dir)
                                          (directory-file-name

@@ -8853,7 +8853,7 @@ other homes to share from, so nothing reaches the real one."
                       (aob-tests--conn-home project)))))))
 
 (ert-deftest aob-acp-conn-key-follows-what-names-the-home ()
-  "A marker file appearing, or a login check changing its answer, renames the home."
+  "A marker file appearing renames the home; a lapsed login never swaps in another account."
   (aob-tests--with-config-homes
    (lambda (project)
      (funcall aob-acp-prepare-function "claude" project)
@@ -8865,9 +8865,10 @@ other homes to share from, so nothing reaches the real one."
                       (aob-tests--conn-home project)))
        (delete-file (expand-file-name ".claude-config-dir" project)))
      (should (string-match-p "/conf/repo/claude\\'" (aob-tests--conn-home project)))
-     (cl-letf (((symbol-function 'ygg-agent--keychain-read) #'ignore))
-       (ygg-agent--logged-in-p "claude" (ygg-agent--own-home "claude" project)))
-     (should-not (aob-tests--conn-home project)))))
+     (cl-letf (((symbol-function 'ygg-agent--keychain-read) #'ignore)
+               ((symbol-function 'display-warning) #'ignore))
+       (ygg-agent--logged-in-p "claude" (ygg-agent--own-home "claude" project))
+       (should (string-match-p "/conf/repo/claude\\'" (aob-tests--conn-home project)))))))
 
 (ert-deftest aob-acp-start-conn-makes-the-home-ready ()
   "Starting a connection provisions its config home; looking one up does not."
