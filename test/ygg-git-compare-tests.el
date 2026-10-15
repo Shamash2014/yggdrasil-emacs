@@ -258,6 +258,11 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
     (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") '(rev . "feature"))
       (should-not (seq-some (lambda (s) (eq (oref s type) 'diffstat))
                             (oref magit-root-section children)))
+      (let ((changes (seq-find (lambda (s) (eq (oref s type) 'ygg-git-compare-changes))
+                               (oref magit-root-section children))))
+        (should (equal (buffer-substring-no-properties (oref changes start)
+                                                       (1- (oref changes end)))
+                       "Changes (2)  +3 −1")))
       (should (equal (ygg-git-compare-tests--files-shown) '("a.txt" "b.txt")))
       (should (equal (mapcar (lambda (ov)
                                (cons (save-excursion

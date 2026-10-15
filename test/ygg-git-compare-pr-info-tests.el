@@ -868,12 +868,12 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
         (let ((types (lambda () (mapcar (lambda (s) (oref s type)) (oref magit-root-section children)))))
           (should (equal (seq-take (funcall types) 4)
                          '(ygg-git-compare-description ygg-git-compare-conversation
-                           ygg-git-compare-checks file)))
+                           ygg-git-compare-checks ygg-git-compare-changes)))
           (magit-section-hide (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks))
           (ygg-git-compare--pr-info-refresh buffer :conversation :checks)
           (should (equal (seq-take (funcall types) 4)
                          '(ygg-git-compare-description ygg-git-compare-conversation
-                           ygg-git-compare-checks file)))
+                           ygg-git-compare-checks ygg-git-compare-changes)))
           (should (oref (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks) hidden))
           (magit-section-show (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks))
           (goto-char (point-min))
@@ -1017,7 +1017,7 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
                             (overlays-in (point-min) (point-max)))))
           (should ov)
           (should (= (overlay-start ov)
-                     (oref (ygg-git-compare-pr-info-tests--section 'file) start)))
+                     (oref (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-changes) start)))
           (should (>= (overlay-start ov)
                       (oref (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-checks) end))))))))
 

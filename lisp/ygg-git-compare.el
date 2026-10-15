@@ -1196,8 +1196,35 @@ file's heading carries its counts, and a diffstat would list them twice."
 (autoload 'ygg-git-compare--checks-badge "ygg-git-compare-pr-info")
 (autoload 'ygg-git-compare--pr-badge "ygg-git-compare-pr-info")
 
+(defun ygg-git-compare--insert-changes-heading ()
+  "A Changes heading above the file sections, counting them; a diff too
+large to wash heads itself with its diffstat."
+  (unless (member "--no-patch" magit-buffer-diff-args)
+    (let* ((default-directory (plist-get ygg-git-compare--plan :dir))
+           ;; a buffer-local let of the global arguments misses the temp buffer git runs from
+           (stat (or (apply #'magit-git-string
+                            (append ygg-git-compare--quiet-args '("diff" "--shortstat")
+                                    magit-buffer-diff-args
+                                    (list (plist-get ygg-git-compare--plan :range) "--")
+                                    magit-buffer-diff-files))
+                     ""))
+           (count (lambda (word)
+                    (if (string-match (format "\\([0-9]+\\) %s" word) stat)
+                        (string-to-number (match-string 1 stat))
+                      0))))
+      (unless (string-empty-p stat)
+        (magit-insert-section (ygg-git-compare-changes)
+          (magit-insert-heading
+            (propertize (format "Changes (%d)" (funcall count "files? changed"))
+                        'font-lock-face 'magit-section-heading)
+            "  "
+            (propertize (format "+%d" (funcall count "insertion")) 'font-lock-face 'magit-diffstat-added)
+            " "
+            (propertize (format "−%d" (funcall count "deletion")) 'font-lock-face 'magit-diffstat-removed)))))))
+
 (defun ygg-git-compare--sections-hook ()
-  (append (list #'ygg-git-compare--insert-pr-info)
+  (append (list #'ygg-git-compare--insert-pr-info
+                #'ygg-git-compare--insert-changes-heading)
           (default-value 'magit-diff-sections-hook)
           (list #'ygg-git-compare--insert-untracked)))
 

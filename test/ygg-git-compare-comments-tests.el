@@ -475,6 +475,7 @@ and adds b.txt; main stays checked out."
   (ygg-git-compare-comments-tests--with-repo root
     (ygg-git-compare-comments-tests--with-compare root
       (goto-char (point-min))
+      (ygg-git-compare-next-file)
       (should (looking-at-p ".*a\\.txt"))
       (ygg-git-compare-next-hunk)
       (should (looking-at-p "@@"))
