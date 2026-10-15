@@ -18,6 +18,7 @@
 (require 'magit)
 (require 'ygg-git-compare)
 (require 'ygg-git-compare-threads)
+(require 'ygg-git-compare-images)
 
 (defcustom ygg-git-compare-checks-ttl 300
   "Seconds the checks of a pull request that has none running are kept."
@@ -635,14 +636,22 @@ being fetched; with FORCE, whatever their age."
     (and parts (propertize (concat "  " (string-join parts " · ")) 'font-lock-face 'shadow))))
 
 (defun ygg-git-compare--description-lines (about)
-  "ABOUT's body as indented lines with the blank ones at either end left out."
-  (let ((lines (ygg-git-compare--remote-body
-                (list :text (plist-get about :body))
-                (- (ygg-git-compare--remote-width) 2))))
-    (while (and lines (string-empty-p (car lines))) (pop lines))
+  "ABOUT's body as indented lines, with a plist for each picture, and the blank
+lines at either end left out."
+  (let* ((width (- (ygg-git-compare--remote-width) 2))
+         (body (or (plist-get about :body) ""))
+         (lines (mapcan (lambda (part)
+                          (if (stringp part)
+                              (ygg-git-compare--remote-body (list :text part) width)
+                            (list part)))
+                        (if (display-images-p)
+                            (ygg-git-compare--image-parts body)
+                          (list body)))))
+    (while (equal (car lines) "") (pop lines))
     (setq lines (nreverse lines))
-    (while (and lines (string-empty-p (car lines))) (pop lines))
-    (mapcar (lambda (line) (if (string-empty-p line) line (concat "  " line)))
+    (while (equal (car lines) "") (pop lines))
+    (mapcar (lambda (line)
+              (if (and (stringp line) (not (string-empty-p line))) (concat "  " line) line))
             (nreverse lines))))
 
 (defun ygg-git-compare--insert-description (view)
@@ -654,7 +663,9 @@ being fetched; with FORCE, whatever their age."
       (when-let* ((meta (ygg-git-compare--description-meta about)))
         (insert meta "\n"))
       (if lines
-          (dolist (line lines) (insert line "\n"))
+          (let ((pr (ygg-git-compare--remote-pr)))
+            (dolist (line lines)
+              (insert (if (stringp line) line (ygg-git-compare--image-line line pr)) "\n")))
         (unless (and failed (not (plist-get view :loaded)))
           (insert (propertize (cond ((not (plist-get view :loaded))
                                      (if (plist-get view :fetching) "  fetching…" "  not fetched"))

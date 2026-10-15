@@ -17,6 +17,7 @@
 (require 'ygg-git-compare-comments)
 (require 'ygg-git-compare-threads)
 (require 'ygg-git-compare-pr-info)
+(require 'ygg-git-compare-images)
 
 (defvar ygg-git-compare-pr-info-tests--browsed nil)
 
@@ -1299,5 +1300,652 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
           (should (string-search "lands late"
                                  (ygg-git-compare-pr-info-tests--description-text buffer))))))))
 
+(defconst ygg-git-compare-pr-info-tests--png
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+
+(defconst ygg-git-compare-pr-info-tests--gif
+  "R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7")
+
+(defun ygg-git-compare-pr-info-tests--picture (name data)
+  (let ((file (expand-file-name name ygg-git-compare-image-directory))
+        (coding-system-for-write 'no-conversion))
+    (make-directory ygg-git-compare-image-directory t)
+    (write-region (base64-decode-string data) nil file nil 'silent)
+    file))
+
+(defmacro ygg-git-compare-pr-info-tests--with-pictures (&rest body)
+  (declare (indent 0))
+  `(let ((ygg-git-compare-image-directory
+          (file-name-as-directory (expand-file-name "pictures" root)))
+         (ygg-git-compare--images (make-hash-table :test #'equal))
+         (ygg-git-compare--image-waiting (make-hash-table :test #'equal))
+         (ygg-git-compare--image-objects (make-hash-table :test #'equal))
+         (ygg-git-compare--image-queue nil)
+         (ygg-git-compare--image-active 0)
+         (ygg-git-compare-image-external t))
+     (cl-letf (((symbol-function 'display-images-p) (lambda (&rest _) t)))
+       ,@body)))
+
+(defun ygg-git-compare-pr-info-tests--seed-body (body)
+  (ygg-git-compare-pr-info-tests--put
+   "checks.json"
+   (json-serialize (list :statusCheckRollup [] :title "gh title" :body body
+                         :author (list :login "alice") :createdAt "2020-01-01T00:00:00Z"
+                         :headRefName "feature" :baseRefName "main"
+                         :url "https://github.com/o/r/pull/12"))))
+
+(defun ygg-git-compare-pr-info-tests--displays (buffer)
+  "The `display' values on the description section of BUFFER, in order."
+  (with-current-buffer buffer
+    (let* ((section (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-description))
+           (pos (oref section start))
+           out)
+      (while (< pos (oref section end))
+        (when-let* ((display (get-text-property pos 'display)))
+          (unless (eq display (car out)) (push display out)))
+        (setq pos (next-single-property-change pos 'display nil (oref section end))))
+      (nreverse out))))
+
+(ert-deftest ygg-git-compare-pr-info-image-parts-read-markdown-and-html ()
+  (let ((parts (ygg-git-compare--image-parts
+                (concat "intro ![shot](https://x/a.png) after\r\n"
+                        "<a href=\"https://l\"><img width=\"300\" alt=\"wide\" src=\"https://x/b.gif?a=1&amp;b=2\"></a>\n"
+                        "[![badge](https://x/c.svg)](https://link)\n"
+                        "<!-- ![hidden](https://x/h.png) -->\n"
+                        "```\n![code](https://x/code.png)\n```\n"))))
+    (should (equal (seq-filter #'consp parts)
+                   '((:image "https://x/a.png" :alt "shot" :width nil)
+                     (:image "https://x/b.gif?a=1&b=2" :alt "wide" :width 300)
+                     (:image "https://x/c.svg" :alt "badge" :width nil))))
+    (should (equal (car parts) "intro"))
+    (should (string-search "![code](https://x/code.png)" (car (last parts))))
+    (should-not (string-search "hidden" (format "%S" parts)))))
+
+(ert-deftest ygg-git-compare-pr-info-image-sources-and-commands ()
+  (let ((github '(:forge github :host "github.com" :path "o/r" :number 1))
+        (gitlab '(:forge gitlab :host "git.example.com" :path "g/p" :number 1))
+        (url "https://github.com/user-attachments/assets/1234"))
+    (should (equal (ygg-git-compare--image-source "/uploads/abc/shot.png" gitlab)
+                   '(remote . "https://git.example.com/g/p/uploads/abc/shot.png")))
+    (should (equal (ygg-git-compare--image-source "//x.io/a.png" github)
+                   '(remote . "https://x.io/a.png")))
+    (should (equal (ygg-git-compare--image-token-command url github)
+                   '("gh" "auth" "token" "--hostname" "github.com")))
+    (should (equal (ygg-git-compare--image-token-command
+                    "https://git.example.com/g/p/uploads/abc/shot.png" gitlab)
+                   '("glab" "config" "get" "token" "--host" "git.example.com")))
+    (should-not (ygg-git-compare--image-token-command "https://evil.example/a.png" github))
+    (should (equal (car (last (ygg-git-compare--image-signed-command url github))) "repos/o/r/pulls/1"))
+    (should-not (ygg-git-compare--image-signed-command url gitlab))
+    (should (equal (ygg-git-compare--image-signed-url
+                    "<p><img src=\"https://private-user-images.githubusercontent.com/1/2-1234.png?jwt=a&amp;b=c\"></p>"
+                    url)
+                   "https://private-user-images.githubusercontent.com/1/2-1234.png?jwt=a&b=c"))
+    (let ((command (ygg-git-compare--image-curl-command url "/tmp/part" t)))
+      (should (equal (cl-subseq command (- (length command) 4))
+                     (list "--output" "/tmp/part" "--url" url)))
+      (should (member "--config" command)))))
+
+(ert-deftest ygg-git-compare-pr-info-description-draws-fetched-pictures ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((png (ygg-git-compare-pr-info-tests--picture "a.png" ygg-git-compare-pr-info-tests--png))
+             (gif (ygg-git-compare-pr-info-tests--picture "b.gif" ygg-git-compare-pr-info-tests--gif))
+             (ygg-git-compare-image-fetcher
+              (lambda (url _pr done)
+                (let ((file (if (string-suffix-p "a.png" url) png gif)))
+                  (funcall done (ygg-git-compare--image-found file))))))
+        (ygg-git-compare-pr-info-tests--seed-body
+         "does the thing\n\n![still](https://x.example/a.png)\n<img src=\"https://x.example/b.gif\" alt=\"moving\" width=\"40\">\n\nthe end")
+        (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+          (ygg-git-compare-pr-info-tests--settle
+           buffer (lambda () (string-search "the end" (ygg-git-compare-pr-info-tests--text))))
+          (let ((displays (ygg-git-compare-pr-info-tests--displays buffer))
+                (own (ygg-git-compare-pr-info-tests--description-text buffer)))
+            (should (= (length displays) 2))
+            (should (eq (car (car displays)) 'image))
+            (should (eq (plist-get (cdr (nth 0 displays)) :type) 'png))
+            (should (eq (plist-get (cdr (nth 1 displays)) :type) 'gif))
+            (should (<= (plist-get (cdr (nth 1 displays)) :max-width) 40))
+            (should (string-search "still" own))
+            (should (< (string-search "does the thing" own) (string-search "still" own)))
+            (should (< (string-search "moving" own) (string-search "the end" own)))))))))
+
+(ert-deftest ygg-git-compare-pr-info-description-remote-picture-lands-without-moving-point ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((waiting nil)
+             (ygg-git-compare-image-fetcher
+              (lambda (url _pr done) (push (cons url done) waiting))))
+        (ygg-git-compare-pr-info-tests--seed-body
+         "does the thing\n\n![remote shot](https://github.com/user-attachments/assets/9)\n\nthe end")
+        (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+          (ygg-git-compare-pr-info-tests--settle
+           buffer (lambda () (string-search "the end" (ygg-git-compare-pr-info-tests--text))))
+          (should (equal (mapcar #'car waiting) '("https://github.com/user-attachments/assets/9")))
+          (should (equal (ygg-git-compare-pr-info-tests--displays buffer) '("remote shot…")))
+          (with-current-buffer buffer
+            (goto-char (point-min))
+            (search-forward "the end")
+            (let ((point (point))
+                  (text (ygg-git-compare-pr-info-tests--text)))
+              (funcall (cdr (car waiting))
+                       (list :file (ygg-git-compare-pr-info-tests--picture
+                                    "9" ygg-git-compare-pr-info-tests--png)
+                             :type 'png))
+              (should (= (point) point))
+              (should (equal (ygg-git-compare-pr-info-tests--text) text))
+              (should (eq (car (car (ygg-git-compare-pr-info-tests--displays buffer))) 'image)))))))))
+
+(ert-deftest ygg-git-compare-pr-info-description-failed-picture-keeps-its-alt-text ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let ((ygg-git-compare-image-fetcher (lambda (_url _pr done) (funcall done nil))))
+        (ygg-git-compare-pr-info-tests--seed-body "![remote shot](https://x.example/a.png)")
+        (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+          (ygg-git-compare-pr-info-tests--settle
+           buffer (lambda () (string-search "remote shot" (ygg-git-compare-pr-info-tests--text))))
+          (should (equal (ygg-git-compare-pr-info-tests--displays buffer)
+                         '("remote shot (image unavailable)"))))))))
+
+(ert-deftest ygg-git-compare-pr-info-description-without-pictures-is-plain-text ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (ygg-git-compare-pr-info-tests--seed-body "See [docs](https://x) and *this*.\n\n- [x] done")
+      (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+        (ygg-git-compare-pr-info-tests--settle
+         buffer (lambda () (string-search "See docs" (ygg-git-compare-pr-info-tests--text))))
+        (should-not (ygg-git-compare-pr-info-tests--displays buffer))
+        (should (string-search "  See docs and this.\n\n  ☑ done"
+                               (ygg-git-compare-pr-info-tests--description-text buffer)))))))
+
+(ert-deftest ygg-git-compare-pr-info-description-in-a-text-terminal-shows-alt-text ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--seed-body "![shot](https://x.example/a.png)")
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (string-search "shot" (ygg-git-compare-pr-info-tests--text))))
+      (should-not (ygg-git-compare-pr-info-tests--displays buffer))
+      (should (string-search "  shot\n" (ygg-git-compare-pr-info-tests--description-text buffer))))))
+
 (provide 'ygg-git-compare-pr-info-tests)
 ;;; ygg-git-compare-pr-info-tests.el ends here
+
+(ert-deftest ygg-git-compare-pr-info-image-empty-body-fails-and-frees-the-slot ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let ((ygg-git-compare-image-fetcher
+             (lambda (url _pr done) (ygg-git-compare--image-curl url nil done)))
+            (source "https://x.example/empty.png"))
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest args)
+                     (let ((sentinel (plist-get args :sentinel))
+                           (process (start-process "empty" nil "true")))
+                       (set-process-sentinel process nil)
+                       (while (process-live-p process) (accept-process-output process 0.05))
+                       (funcall sentinel process "finished\n")
+                       process))))
+          (with-temp-buffer
+            (ygg-git-compare--image-state source nil)
+            (should (plist-get (gethash source ygg-git-compare--images) :failed))
+            (should (= ygg-git-compare--image-active 0))))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-signed-fallback-is-cached-by-source ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((source "https://github.com/user-attachments/assets/1234")
+             (pr '(:forge github :host "github.com" :path "o/r" :number 1))
+             (signed "https://private-user-images.githubusercontent.com/1/2-1234.png?jwt=a")
+             (captured nil))
+        (cl-letf (((symbol-function 'ygg-git-compare--image-signed-command)
+                   (lambda (&rest _) '("gh")))
+                  ((symbol-function 'ygg-git-compare--forge-async)
+                   (lambda (_program _args callback)
+                     (funcall callback 0 (format "<img src=\"%s\">" signed) "")))
+                  ((symbol-function 'ygg-git-compare--image-curl)
+                   (lambda (url _config done &optional key)
+                     (push (cons url key) captured)
+                     (funcall done nil))))
+          (ygg-git-compare--image-fetch-signed source pr #'ignore)
+          (should (equal captured (list (cons signed source)))))
+        (ygg-git-compare-pr-info-tests--picture
+         (md5 source) ygg-git-compare-pr-info-tests--png)
+        (with-temp-buffer
+          (should (eq (plist-get (ygg-git-compare--image-state source pr) :type) 'png)))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-local-sources-are-never-read ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((png (ygg-git-compare-pr-info-tests--picture "a.png" ygg-git-compare-pr-info-tests--png))
+             (read nil)
+             (pr '(:forge github :host "github.com" :path "o/r" :number 1)))
+        (cl-letf (((symbol-function 'ygg-git-compare--image-found)
+                   (lambda (file) (push file read) nil)))
+          (dolist (url (list (concat "file://" png) (concat "file:" png) "~/a.png"))
+            (should-not (ygg-git-compare--image-source url pr))
+            (should (equal (substring-no-properties
+                            (get-text-property
+                             2 'display
+                             (ygg-git-compare--image-line (list :image url :alt "pic" :width nil) pr)))
+                           "pic (image unavailable)")))
+          (should (equal (ygg-git-compare--image-source png pr)
+                         (cons 'remote (concat "https://github.com" png))))
+          (should-not read))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-third-party-host-needs-opt-in ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((fetched nil)
+             (pr '(:forge github :host "github.com" :path "o/r" :number 1))
+             (ygg-git-compare-image-fetcher (lambda (url _pr _done) (push url fetched))))
+        (dolist (url '("https://tracker.example.com/p.png" "http://github.com/a.png"))
+          (let ((ygg-git-compare-image-external nil))
+            (with-temp-buffer
+              (should (string-match-p
+                       "\\`pic (image from [^ ]+ — not loaded)\\'"
+                       (substring-no-properties
+                        (get-text-property
+                         2 'display
+                         (ygg-git-compare--image-line (list :image url :alt "pic" :width nil) pr))))))))
+        (should-not fetched)
+        (with-temp-buffer
+          (let ((ygg-git-compare-image-external nil))
+            (ygg-git-compare--image-line
+             '(:image "https://private-user-images.githubusercontent.com/1/a.png" :alt "a" :width nil) pr))
+          (let ((ygg-git-compare-image-external t))
+            (ygg-git-compare--image-line
+             '(:image "https://tracker.example.com/p.png" :alt "b" :width nil) pr)
+            (ygg-git-compare--image-line
+             '(:image "http://tracker.example.com/q.png" :alt "c" :width nil) pr)))
+        (should (equal (sort fetched #'string<)
+                       '("https://private-user-images.githubusercontent.com/1/a.png"
+                         "https://tracker.example.com/p.png")))
+        (should (string-match-p "tracker.example.com"
+                                (let ((ygg-git-compare-image-external nil))
+                                  (get-text-property
+                                   2 'display
+                                   (ygg-git-compare--image-line
+                                    '(:image "https://tracker.example.com/z.png" :alt "z" :width nil)
+                                    pr)))))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-parts-leave-code-as-text ()
+  (let ((parts (ygg-git-compare--image-parts
+                (concat "use `![a](https://x/a.png)` here\n"
+                        "    ![b](https://x/b.png)\n"
+                        "\t![c](https://x/c.png)\n"
+                        "real ![d](https://x/d.png) and `code`\n"))))
+    (should (equal (seq-filter #'consp parts)
+                   '((:image "https://x/d.png" :alt "d" :width nil))))
+    (let ((text (string-join (seq-filter #'stringp parts) "\n")))
+      (should (string-search "use `![a](https://x/a.png)` here" text))
+      (should (string-search "    ![b](https://x/b.png)" text))
+      (should (string-search "\t![c](https://x/c.png)" text))
+      (should (string-search "and `code`" text)))))
+
+(ert-deftest ygg-git-compare-pr-info-image-resize-keeps-one-object-per-file ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((file (ygg-git-compare-pr-info-tests--picture "a.png" ygg-git-compare-pr-info-tests--png))
+             (state (list :file file :type 'png))
+             (columns 800))
+        (cl-letf (((symbol-function 'window-body-width) (lambda (&rest _) columns)))
+          (let ((first (ygg-git-compare--image-object state nil)))
+            (should (eq first (ygg-git-compare--image-object state nil)))
+            (dolist (width '(700 600 500))
+              (setq columns width)
+              (ygg-git-compare--image-object state nil))
+            (should (= (hash-table-count ygg-git-compare--image-objects) 1))
+            (should-not (eq first (ygg-git-compare--image-object state nil)))))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-userinfo-urls-are-never-fetched-or-given-a-token ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((fetched nil)
+             (pr '(:forge github :host "github.com" :path "o/r" :number 1))
+             (ygg-git-compare-image-fetcher (lambda (url _pr _done) (push url fetched))))
+        (dolist (url '("https://github.com:pw@evil.com/a.png"
+                       "https://user@github.com/a.png"
+                       "//github.com:pw@evil.com/a.png"))
+          (should-not (ygg-git-compare--image-source url pr))
+          (should-not (ygg-git-compare--image-token-command url pr))
+          (should-not (ygg-git-compare--image-allowed-p url pr))
+          (dolist (external '(t nil))
+            (let ((ygg-git-compare-image-external external))
+              (with-temp-buffer
+                (should (equal (substring-no-properties
+                                (get-text-property
+                                 2 'display
+                                 (ygg-git-compare--image-line (list :image url :alt "pic" :width nil) pr)))
+                               "pic (image unavailable)"))))))
+        (should-not fetched)))))
+
+(ert-deftest ygg-git-compare-pr-info-image-token-host-follows-the-host-parser ()
+  (let ((pr '(:forge github :host "github.com" :path "o/r" :number 1)))
+    (should (ygg-git-compare--image-token-command "https://github.com:443/a.png" pr))
+    (should-not (ygg-git-compare--image-token-command "https://github.com.evil.com/a.png" pr))
+    (should-not (ygg-git-compare--image-token-command "https://github.com\\@evil.com/a.png" pr))
+    (should-not (ygg-git-compare--image-token-command "http://github.com/a.png" pr))))
+
+(ert-deftest ygg-git-compare-pr-info-image-signed-url-ignores-foreign-hosts ()
+  (let* ((url "https://github.com/user-attachments/assets/1234")
+         (good "https://private-user-images.githubusercontent.com/1/2-1234.png?jwt=a&b=c")
+         (html (concat "<a href=\"https://evil.example/2-1234.png\">x</a>"
+                       "<img src=\"https://evil.example/x.githubusercontent.com/2-1234.png\">"
+                       "<img src=\"http://private-user-images.githubusercontent.com/1/2-1234.png\">"
+                       "<img src=\"https://private-user-images.githubusercontent.com/1/9-9999.png\">"
+                       "<img src=\"" (replace-regexp-in-string "&" "&amp;" good) "\">")))
+    (should (equal (ygg-git-compare--image-signed-url html url) good))
+    (should-not (ygg-git-compare--image-signed-url
+                 "<a href=\"https://evil.example/2-1234.png\">x</a>" url))))
+
+(ert-deftest ygg-git-compare-pr-info-image-signed-fetch-skips-untrusted-address ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let ((source "https://github.com/user-attachments/assets/1234")
+            (pr '(:forge github :host "github.com" :path "o/r" :number 1))
+            (curled nil)
+            (result 'unset))
+        (cl-letf (((symbol-function 'ygg-git-compare--image-signed-command)
+                   (lambda (&rest _) '("gh")))
+                  ((symbol-function 'ygg-git-compare--forge-async)
+                   (lambda (_program _args callback)
+                     (funcall callback 0 "<a href=\"https://evil.example/2-1234.png\">x</a>" "")))
+                  ((symbol-function 'ygg-git-compare--image-curl)
+                   (lambda (url &rest _) (push url curled))))
+          (ygg-git-compare--image-fetch-signed source pr (lambda (found) (setq result found)))
+          (should-not curled)
+          (should-not result))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-curl-ignores-curlrc-and-globs ()
+  (let ((command (ygg-git-compare--image-curl-command "https://x/a[1].png" "/tmp/part" nil)))
+    (should (equal (cl-subseq command 0 3) '("curl" "-q" "--globoff")))))
+
+(ert-deftest ygg-git-compare-pr-info-image-animation-limit-is-seconds ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((file (ygg-git-compare-pr-info-tests--picture "b.gif" ygg-git-compare-pr-info-tests--gif))
+             (state (list :file file :type 'gif))
+             (calls nil))
+        (cl-letf (((symbol-function 'image-multi-frame-p) (lambda (&rest _) t))
+                  ((symbol-function 'image-animate)
+                   (lambda (image &optional index limit) (push (list index limit) calls))))
+          (let ((ygg-git-compare-gif-seconds 7))
+            (ygg-git-compare--image-object state nil))
+          (should (equal calls '((nil 7))))
+          (clrhash ygg-git-compare--image-objects)
+          (setq calls nil)
+          (let ((ygg-git-compare-gif-seconds 0))
+            (ygg-git-compare--image-object state nil))
+          (should-not calls)
+          (should (eq (indirect-variable 'ygg-git-compare-gif-loops)
+                      'ygg-git-compare-gif-seconds)))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-curl-stops-at-the-byte-limit ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((url "https://x.example/big.png")
+             (part (ygg-git-compare--image-part-file (ygg-git-compare--image-cache-file url)))
+             (ygg-git-compare-image-bytes 10)
+             (check nil)
+             (results nil)
+             (real-make-process (symbol-function 'make-process))
+             (process nil))
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest _)
+                     (setq process (funcall real-make-process :name "big" :buffer nil :noquery t
+                                            :command '("sleep" "30")))))
+                  ((symbol-function 'run-with-timer)
+                   (lambda (_delay _repeat function) (setq check function) (timer-create))))
+          (unwind-protect
+              (progn
+                (ygg-git-compare--image-curl url nil (lambda (found) (push (list found) results)))
+                (should check)
+                (should (process-live-p process))
+                (funcall check)
+                (should (process-live-p process))
+                (let ((coding-system-for-write 'no-conversion))
+                  (write-region (make-string 11 ?x) nil part nil 'silent))
+                (funcall check)
+                (should-not (process-live-p process))
+                (should (equal results '((nil))))
+                (should-not (file-exists-p part)))
+            (when (process-live-p process) (delete-process process))))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-directory-is-private ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (should (ygg-git-compare--image-prepare-directory))
+      (should (= (logand (file-modes ygg-git-compare-image-directory) #o777) #o700)))))
+
+(ert-deftest ygg-git-compare-pr-info-image-foreign-directory-is-refused ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (make-directory ygg-git-compare-image-directory t)
+      (let ((source "https://x.example/a.png")
+            (started nil))
+        (cl-letf (((symbol-function 'user-uid) (lambda () (1+ (file-attribute-user-id
+                                                              (file-attributes root 'integer)))))
+                  ((symbol-function 'make-process) (lambda (&rest _) (setq started t) nil))
+                  ((symbol-function 'ygg-git-compare--image-source) (lambda (url _pr) (cons 'remote url))))
+          (should-not (ygg-git-compare--image-prepare-directory))
+          (let ((ygg-git-compare-image-fetcher
+                 (lambda (url _pr done) (ygg-git-compare--image-curl url nil done))))
+            (with-temp-buffer
+              (ygg-git-compare--image-state source nil)
+              (should (plist-get (gethash source ygg-git-compare--images) :failed))
+              (should-not started)
+              (should (equal (substring-no-properties
+                              (get-text-property
+                               2 'display
+                               (ygg-git-compare--image-line (list :image source :alt "pic" :width nil) nil)))
+                             "pic (image unavailable)")))))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-curl-send-failure-ends-the-job ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let ((results nil)
+            (real-make-process (symbol-function 'make-process))
+            (process nil))
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest _)
+                     (setq process (funcall real-make-process :name "pipe" :buffer nil :noquery t
+                                            :command '("sleep" "30")))))
+                  ((symbol-function 'process-send-string)
+                   (lambda (&rest _) (signal 'file-error '("Broken pipe")))))
+          (unwind-protect
+              (progn
+                (ygg-git-compare--image-curl "https://x.example/a.png" "header = \"x\"\n"
+                                             (lambda (found) (push (list found) results)))
+                (should (equal results '((nil))))
+                (should-not (process-live-p process)))
+            (when (process-live-p process) (delete-process process))))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-attributes-are-anchored-quoted-and-decoded ()
+  (let ((parts (seq-filter
+                #'consp
+                (ygg-git-compare--image-parts
+                 (concat "<img data-src=\"https://bad/x.png\" src=\"https://ok/x.png\" data-alt=\"no\" alt=\"yes\">\n"
+                         "<img alt=\"a > b\" src=\"https://ok/q.png\">\n"
+                         "<img src='https://ok/r.png?a=1&amp;b=2' alt=\"&quot;hi&quot; &lt;b&gt; &#39;x&#39; &amp;amp;\">\n"
+                         "<img data-src=\"https://bad/only.png\">\n")))))
+    (should (equal (mapcar (lambda (item) (plist-get item :image)) parts)
+                   '("https://ok/x.png" "https://ok/q.png" "https://ok/r.png?a=1&b=2")))
+    (should (equal (mapcar (lambda (item) (plist-get item :alt)) parts)
+                   '("yes" "a > b" "\"hi\" <b> 'x' &amp;")))))
+
+(ert-deftest ygg-git-compare-pr-info-image-host-refuses-ports-but-443 ()
+  (let ((pr '(:forge github :host "github.com" :path "o/r" :number 1))
+        (ygg-git-compare-image-external t))
+    (should-not (ygg-git-compare--image-host "https://github.com:8443/x.png"))
+    (should-not (ygg-git-compare--image-token-command "https://github.com:8443/x.png" pr))
+    (should-not (ygg-git-compare--image-allowed-p "https://github.com:8443/x.png" pr))
+    (should (equal (ygg-git-compare--image-host "https://github.com:443/x.png")
+                   (ygg-git-compare--image-host "https://github.com/x.png")))
+    (should (ygg-git-compare--image-token-command "https://github.com:443/x.png" pr))
+    (should (ygg-git-compare--image-allowed-p "https://github.com:443" pr))))
+
+(ert-deftest ygg-git-compare-pr-info-image-pump-survives-a-failing-paint ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((ygg-git-compare-image-jobs 1)
+             (started nil)
+             (dones nil)
+             (ygg-git-compare-image-fetcher
+              (lambda (url _pr done) (push url started) (push done dones))))
+        (cl-letf (((symbol-function 'ygg-git-compare--image-paint)
+                   (lambda (&rest _) (signal 'error '("paint")))))
+          (with-temp-buffer
+            (ygg-git-compare--image-state "https://x.example/1.png" nil)
+            (ygg-git-compare--image-state "https://x.example/2.png" nil)
+            (should (equal started '("https://x.example/1.png")))
+            (funcall (car dones) nil)
+            (should (equal started '("https://x.example/2.png" "https://x.example/1.png")))
+            (should (= ygg-git-compare--image-active 1))))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-directory-is-created-private ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let ((modes nil))
+        (cl-letf (((symbol-function 'set-file-modes) (lambda (&rest _) nil))
+                  ((symbol-function 'make-directory)
+                   (let ((real (symbol-function 'make-directory)))
+                     (lambda (dir &optional parents)
+                       (setq modes (default-file-modes))
+                       (funcall real dir parents)))))
+          (ygg-git-compare--image-prepare-directory)
+          (should (= modes #o700))
+          (should (= (logand (file-modes ygg-git-compare-image-directory) #o777) #o700)))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-attributes-text-in-values-cannot-spoof ()
+  (let ((parts (seq-filter
+                #'consp
+                (ygg-git-compare--image-parts
+                 (concat "<img alt=\"a src=https://github.com/evil\" src=\"https://github.com/real\">\n"
+                         "<img src=https://x/a.png?a=1&#38;b=2&#x2F;c alt='&#65;&#x42;&#0;'>\n")))))
+    (should (equal (mapcar (lambda (item) (plist-get item :image)) parts)
+                   '("https://github.com/real" "https://x/a.png?a=1&b=2/c")))
+    (should (equal (plist-get (nth 0 parts) :alt) "a src=https://github.com/evil"))
+    (should (equal (plist-get (nth 1 parts) :alt) "AB&#0;"))))
+
+(ert-deftest ygg-git-compare-pr-info-image-pathological-line-parses-fast ()
+  (let* ((line (apply #'concat (make-list 8000 "<img '")))
+         (start (float-time))
+         (parts (ygg-git-compare--image-parts (concat line "\n" (make-string 3000 ?x)))))
+    (should (> (length line) 40000))
+    (should (< (- (float-time) start) 0.2))
+    (should-not (seq-some #'consp parts))
+    (let ((start (float-time)))
+      (ygg-git-compare--image-parts (apply #'concat (make-list 700 "<img '")))
+      (ygg-git-compare--image-parts (apply #'concat (make-list 700 "![a](")))
+      (should (< (- (float-time) start) 0.2)))))
+
+(ert-deftest ygg-git-compare-pr-info-image-state-does-not-read-a-refused-directory ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (make-directory ygg-git-compare-image-directory t)
+      (let ((source "https://x.example/a.png")
+            (read nil)
+            (fetched nil)
+            (ygg-git-compare-image-fetcher (lambda (&rest _) (setq fetched t))))
+        (ygg-git-compare-pr-info-tests--picture (md5 source) ygg-git-compare-pr-info-tests--png)
+        (cl-letf (((symbol-function 'user-uid)
+                   (lambda () (1+ (file-attribute-user-id (file-attributes root 'integer)))))
+                  ((symbol-function 'ygg-git-compare--image-found)
+                   (lambda (file) (push file read) nil)))
+          (with-temp-buffer
+            (should (plist-get (ygg-git-compare--image-state source nil) :failed))
+            (should-not read)
+            (should-not fetched)))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-max-limits-images-per-description ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((ygg-git-compare-image-max 2)
+             (fetched nil)
+             (ygg-git-compare-image-fetcher (lambda (url _pr _done) (push url fetched)))
+             (parts (seq-filter #'consp
+                                (ygg-git-compare--image-parts
+                                 "![a](https://x/1.png) ![b](https://x/2.png)\n![c](https://x/3.png)")))
+             (lines nil))
+        (with-temp-buffer
+          (dolist (item parts)
+            (push (substring-no-properties
+                   (get-text-property 2 'display (ygg-git-compare--image-line item nil)))
+                  lines)))
+        (should (equal (sort fetched #'string<) '("https://x/1.png" "https://x/2.png")))
+        (should (equal (car lines) "c (image not loaded: too many)"))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-cache-is-pruned-oldest-first-once ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((ygg-git-compare--image-pruned nil)
+             (ygg-git-compare-image-cache-bytes 100)
+             (old (ygg-git-compare-pr-info-tests--picture "old" ygg-git-compare-pr-info-tests--png))
+             (mid (ygg-git-compare-pr-info-tests--picture "mid" ygg-git-compare-pr-info-tests--png))
+             (new (ygg-git-compare-pr-info-tests--picture "new" ygg-git-compare-pr-info-tests--png))
+             (real-make-process (symbol-function 'make-process)))
+        (set-file-times old '(1000 0))
+        (set-file-times mid '(2000 0))
+        (set-file-times new '(3000 0))
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest args)
+                     (let ((process (funcall real-make-process :name "p" :buffer nil :noquery t
+                                             :command '("true")
+                                             :sentinel (plist-get args :sentinel))))
+                       (while (process-live-p process) (accept-process-output process 0.05))
+                       process))))
+          (ygg-git-compare--image-curl "https://x.example/a.png" nil #'ignore)
+          (should ygg-git-compare--image-pruned)
+          (should-not (file-exists-p old))
+          (should-not (file-exists-p mid))
+          (should (file-exists-p new))
+          (let ((again (ygg-git-compare-pr-info-tests--picture "again" ygg-git-compare-pr-info-tests--png)))
+            (set-file-times again '(10 0))
+            (ygg-git-compare--image-curl "https://x.example/b.png" nil #'ignore)
+            (should (file-exists-p again))))))))
+
+(ert-deftest ygg-git-compare-pr-info-image-found-accepts-only-raster-formats ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (make-directory ygg-git-compare-image-directory t)
+      (let ((coding-system-for-write 'no-conversion))
+        (dolist (case '(("s.svg" . "<?xml version=\"1.0\"?><svg xmlns=\"http://www.w3.org/2000/svg\"></svg>")
+                        ("x.xpm" . "/* XPM */\nstatic char *a[] = {\"1 1 1 1\", \"a c #000\", \"a\"};")
+                        ("b.xbm" . "#define a_width 1\n#define a_height 1\nstatic char a_bits[] = {0x00};")
+                        ("p.pbm" . "P1\n1 1\n0\n")))
+          (let ((file (expand-file-name (car case) ygg-git-compare-image-directory)))
+            (write-region (cdr case) nil file nil 'silent)
+            (should-not (ygg-git-compare--image-found file)))))
+      (should (eq (plist-get (ygg-git-compare--image-found
+                              (ygg-git-compare-pr-info-tests--picture
+                               "a.png" ygg-git-compare-pr-info-tests--png))
+                             :type)
+                  'png)))))
+
+(ert-deftest ygg-git-compare-pr-info-image-curl-removes-a-non-image-and-names-parts-by-pid ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--with-pictures
+      (let* ((url "https://x.example/not-an-image")
+             (cache (ygg-git-compare--image-cache-file url))
+             (results nil)
+             (output nil)
+             (real-make-process (symbol-function 'make-process)))
+        (cl-letf (((symbol-function 'make-process)
+                   (lambda (&rest args)
+                     (let* ((command (plist-get args :command))
+                            (part (nth (1+ (cl-position "--output" command :test #'equal)) command))
+                            (sentinel (plist-get args :sentinel))
+                            (process (funcall real-make-process :name "t" :buffer nil
+                                              :noquery t :command '("true"))))
+                       (setq output part)
+                       (set-process-sentinel process nil)
+                       (let ((coding-system-for-write 'no-conversion))
+                         (write-region "just text" nil part nil 'silent))
+                       (while (process-live-p process) (accept-process-output process 0.05))
+                       (funcall sentinel process "finished\n")
+                       process))))
+          (ygg-git-compare--image-curl url nil (lambda (found) (push (list found) results)))
+          (should (equal results '((nil))))
+          (should-not (file-exists-p cache))
+          (should (string-search (format ".%d.part" (emacs-pid)) output))
+          (should (string-prefix-p cache output)))))))
