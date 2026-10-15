@@ -1044,3 +1044,48 @@ as (COMMAND . CALLBACK) in `spawned'."
             (should (= refreshed 2)))
         (kill-buffer first)
         (kill-buffer second)))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-github-list-asks-for-the-review-decision
+  (ygg-git-review-requests-tests--with
+    (with-temp-buffer
+      (ygg-git-review-requests-tests--render)
+      (should (string-search "reviewDecision" (car (last (car (car spawned)))))))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-row-line-two-shows-the-approval
+  (ygg-git-review-requests-tests--with
+    (dolist (case '(((:review "approved") "ann  feat→main  2h  ✓ approved" success)
+                    ((:review "changes_requested") "2h  ✗ changes" error)
+                    ((:approvals (1 . 2)) "2h  ● 1/2" warning)
+                    ((:review "review_required") "ann  feat→main  2h\n" nil)
+                    (nil "ann  feat→main  2h\n" nil)))
+      (ygg-git-review-requests-tests--seed
+       (list (append (ygg-git-review-requests-tests--row) (nth 0 case))))
+      (with-temp-buffer
+        (ygg-git-review-requests-tests--render)
+        (should (string-search (nth 1 case) (buffer-string)))
+        (when (nth 2 case)
+          (goto-char (point-min))
+          (search-forward (substring (nth 1 case) (string-match "[✓✗●]" (nth 1 case))))
+          (should (eq (get-text-property (1- (point)) 'font-lock-face) (nth 2 case))))))))
+
+(ygg-git-review-requests-tests--deftest ygg-git-review-requests-gitlab-approvals-follow-the-list-one-at-a-time
+  (let ((ygg-git-review-requests-tests--repo '(gitlab "gl.example" "o/r"))
+        (list-json (concat "["
+                           "{\"iid\":7,\"title\":\"A\",\"author\":{\"username\":\"bob\"},\"updated_at\":\"2026-10-05T10:00:00Z\"},"
+                           "{\"iid\":8,\"title\":\"B\",\"author\":{\"username\":\"bob\"},\"updated_at\":\"2026-10-05T10:00:00Z\"}]")))
+    (ygg-git-review-requests-tests--with
+      (puthash "gl.example" "me" ygg-git-review-requests--users)
+      (with-temp-buffer
+        (ygg-git-review-requests-tests--render)
+        (funcall (cdr (car spawned)) 0 list-json)
+        (should (= 2 (length spawned)))
+        (should (string-suffix-p "merge_requests/7/approvals" (car (last (car (car spawned))))))
+        (funcall (cdr (car spawned)) 0
+                 "{\"approved\":false,\"approvals_required\":2,\"approvals_left\":1,\"approved_by\":[{\"user\":{\"username\":\"al\"}}]}")
+        (should (= 3 (length spawned)))
+        (should (string-suffix-p "merge_requests/8/approvals" (car (last (car (car spawned))))))
+        (should (string-search "● 1/2" (buffer-string)))
+        (funcall (cdr (car spawned)) 0
+                 "{\"approved\":true,\"approvals_required\":1,\"approvals_left\":0,\"approved_by\":[{\"user\":{\"username\":\"al\"}}]}")
+        (should (= 3 (length spawned)))
+        (should (string-search "✓ approved" (buffer-string)))))))

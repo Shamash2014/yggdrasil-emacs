@@ -18,6 +18,7 @@
 (declare-function ygg-git-compare--remote "ygg-git-compare" ())
 (declare-function ygg-git-compare--forge-repo "ygg-git-compare" (&optional remote))
 (declare-function ygg-git-compare-review-branch "ygg-git-compare" (&optional target))
+(defvar ygg-git-compare--check-marks)
 (declare-function ygg-git-pr-merge--checks "ygg-git-pr-merge" (rollup))
 
 (defgroup ygg-git-review-requests nil
@@ -34,6 +35,10 @@
 
 (defcustom ygg-git-review-requests-ttl 300
   "Seconds before a repository's requests are asked for again."
+  :type 'integer)
+
+(defcustom ygg-git-review-requests-approvals-limit 10
+  "Most GitLab requests whose approvals are asked for after the list lands."
   :type 'integer)
 
 (defcustom ygg-git-review-requests-timeout 30
@@ -257,10 +262,53 @@ standard output and standard error; a status of nil means it did not start."
     (puthash repo (cons (float-time) result) ygg-git-review-requests--cache)
     (ygg-git-review-requests--save)
     (remhash repo ygg-git-review-requests--running)
-    (dolist (buffer buffers)
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (with-demoted-errors "review requests: %S" (magit-refresh-buffer)))))))
+    (ygg-git-review-requests--redraw buffers)
+    (when (and (eq (car repo) 'gitlab) (plist-get result :rows) (not (plist-get result :error)))
+      (ygg-git-review-requests--approvals repo buffers (gethash repo ygg-git-review-requests--cache)))))
+
+(defun ygg-git-review-requests--redraw (buffers)
+  (dolist (buffer buffers)
+    (when (buffer-live-p buffer)
+      (with-current-buffer buffer
+        (with-demoted-errors "review requests: %S" (magit-refresh-buffer))))))
+
+(defun ygg-git-review-requests--approvals (repo buffers entry)
+  "Ask for the approvals of ENTRY's first few merge requests, one after
+another, writing each into the row while ENTRY is still REPO's answer."
+  (pcase-let ((`(,_ ,host ,path) repo))
+    (let ((todo (seq-take (seq-filter (lambda (row) (and (not (plist-get row :draft))
+                                                         (integerp (plist-get row :number))))
+                                      (plist-get (cdr entry) :rows))
+                          ygg-git-review-requests-approvals-limit)))
+      (cl-labels
+          ((next ()
+             (when-let* ((row (pop todo))
+                         ((eq entry (gethash repo ygg-git-review-requests--cache))))
+               (ygg-git-review-requests--spawn
+                (list "glab" "api" "--hostname" host
+                      (format "projects/%s/merge_requests/%s/approvals"
+                              (url-hexify-string path) (plist-get row :number)))
+                (lambda (status text &optional _stderr)
+                  (when (and (eql status 0) (eq entry (gethash repo ygg-git-review-requests--cache)))
+                    (when-let* ((approval (ignore-errors
+                                            (ygg-git-review-requests--approval-gitlab text))))
+                      (plist-put row :review (car approval))
+                      (plist-put row :approvals (cdr approval))
+                      (ygg-git-review-requests--save)
+                      (ygg-git-review-requests--redraw buffers)))
+                  (next))))))
+        (next)))))
+
+(defun ygg-git-review-requests--approval-gitlab (text)
+  "TEXT, a merge request's approvals, as (REVIEW . (HAVE . NEED)) or nil."
+  (let* ((data (json-parse-string text :object-type 'plist :array-type 'list
+                                  :null-object nil :false-object nil))
+         (need (plist-get data :approvals_required))
+         (left (plist-get data :approvals_left)))
+    (cond ((and (eq (plist-get data :approved) t) (plist-get data :approved_by))
+           (list "approved"))
+          ((and (natnump need) (> need 0) (natnump left) (< left need))
+           (cons nil (cons (- need left) need))))))
 
 (defun ygg-git-review-requests--failure (program status stderr)
   (let* ((stderr (or stderr ""))
@@ -460,12 +508,27 @@ and no question is already out."
 (defun ygg-git-review-requests--note (text)
   (insert (propertize text 'font-lock-face 'magit-dimmed) "\n\n"))
 
-(defun ygg-git-review-requests--fit (text)
-  "TEXT cut to the window showing it; a hidden buffer is redrawn when shown."
+(defun ygg-git-review-requests--fit (text &optional reserve)
+  "TEXT cut to the window showing it, less RESERVE columns; a hidden buffer
+is redrawn when shown."
   (if-let* ((window (get-buffer-window nil t))
             ((window-live-p window)))
-      (truncate-string-to-width text (1- (window-body-width window)) nil nil "…")
+      (truncate-string-to-width text (- (window-body-width window) 1 (or reserve 0)) nil nil "…")
     text))
+
+(defun ygg-git-review-requests--mark (pr)
+  "PR's approval as a short mark, or nil."
+  (require 'ygg-git-compare-pr-info)
+  (let* ((review (plist-get pr :review))
+         (pair (plist-get pr :approvals))
+         (found (cond ((equal review "approved") '(passed . "approved"))
+                      ((equal review "changes_requested") '(failed . "changes"))
+                      ((and (consp pair) (natnump (car pair)) (natnump (cdr pair)) (> (car pair) 0))
+                       `(running . ,(format "%d/%d" (car pair) (cdr pair))))))
+         (mark (and found (cdr (assq (car found) ygg-git-compare--check-marks)))))
+    (and mark
+         (propertize (concat (car mark) " " (cdr found))
+                     'font-lock-face (cadr mark)))))
 
 (defun ygg-git-review-requests--row (pr)
   (let ((face (if (plist-get pr :draft) 'magit-dimmed 'default)))
@@ -478,13 +541,17 @@ and no question is already out."
                   (plist-get pr :title)))
          'font-lock-face face)
         "\n"
-        (propertize
-         (ygg-git-review-requests--fit
-          (format "    %s  %s→%s  %s"
-                  (or (plist-get pr :author) "")
-                  (or (plist-get pr :head) "?") (or (plist-get pr :base) "?")
-                  (ygg-git-review-requests--age (plist-get pr :updated))))
-         'font-lock-face 'magit-dimmed)))))
+        (let ((mark (ygg-git-review-requests--mark pr)))
+          (concat
+           (propertize
+            (ygg-git-review-requests--fit
+             (format "    %s  %s→%s  %s"
+                     (or (plist-get pr :author) "")
+                     (or (plist-get pr :head) "?") (or (plist-get pr :base) "?")
+                     (ygg-git-review-requests--age (plist-get pr :updated)))
+             (and mark (+ 2 (length mark))))
+            'font-lock-face 'magit-dimmed)
+           (and mark (concat (propertize "  " 'font-lock-face 'magit-dimmed) mark))))))))
 
 (defconst ygg-git-review-requests--groups
   '((requested . "Review requested") (mine . "Mine") (open . "Open")))

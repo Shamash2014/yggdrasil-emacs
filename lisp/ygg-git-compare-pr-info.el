@@ -92,21 +92,72 @@
             :where (let ((workflow (plist-get item :workflowName)))
                      (and (not (ygg-git-compare--check-blank-p workflow)) workflow))))))
 
+(defun ygg-git-compare--approval-github (pr)
+  "PR's reviewDecision and latestReviews as (:state S :by LOGINS :against LOGINS),
+or nil."
+  (let* ((reviews (plist-get pr :latestReviews))
+         (named (lambda (state)
+                  (delq nil (mapcar (lambda (review)
+                                      (and (equal (plist-get review :state) state)
+                                           (plist-get (plist-get review :author) :login)))
+                                    reviews))))
+         (by (funcall named "APPROVED"))
+         (against (funcall named "CHANGES_REQUESTED"))
+         (decision (pcase (upcase (or (plist-get pr :reviewDecision) ""))
+                     ("APPROVED" 'approved)
+                     ("CHANGES_REQUESTED" 'changes-requested)
+                     ("REVIEW_REQUIRED" 'review-required)
+                     (_ (cond (against 'changes-requested) (by 'approved))))))
+    (and decision (list :state decision :by by :against against))))
+
+(defun ygg-git-compare--approval-gitlab (data)
+  "DATA, GitLab's merge request approvals, as (:state S :by NAMES :have N :need M),
+or nil."
+  (let* ((by (delq nil (mapcar (lambda (entry)
+                                 (plist-get (plist-get entry :user) :username))
+                               (plist-get data :approved_by))))
+         (need (plist-get data :approvals_required))
+         (left (plist-get data :approvals_left))
+         (need (and (natnump need) (> need 0) need))
+         (have (and need (max 0 (- need (if (natnump left) left (- need (length by))))))))
+    (cond ((or (and need (eql left 0)) (and by (eq (plist-get data :approved) t)))
+           (list :state 'approved :by by))
+          ((and need (> have 0)) (list :state 'partial :by by :have have :need need))
+          (need (list :state 'review-required))
+          (by (list :state 'approved :by by)))))
+
+(defun ygg-git-compare--approval-text (approval)
+  "APPROVAL, as the two approval functions give, in words with its mark, or nil."
+  (let* ((state (plist-get approval :state))
+         (key (pcase state ('approved 'passed) ('changes-requested 'failed) ('partial 'running)))
+         (mark (cdr (assq key ygg-git-compare--check-marks)))
+         (names (lambda (who) (and who (concat " by " (string-join who ", "))))))
+    (cond (mark
+           (let ((face (cadr mark)))
+             (propertize
+              (concat (car mark) " "
+                      (pcase state
+                        ('approved (concat "approved" (funcall names (plist-get approval :by))))
+                        ('changes-requested
+                         (concat "changes requested" (funcall names (plist-get approval :against))))
+                        (_ (format "%s of %s approvals"
+                                   (plist-get approval :have) (plist-get approval :need)))))
+              'face face 'font-lock-face face)))
+          ((eq state 'review-required)
+           (propertize "review required" 'face 'shadow 'font-lock-face 'shadow)))))
+
 (defun ygg-git-compare--pr-status-github (pr)
-  "PR, gh's state, isDraft and reviewDecision, as (:state S :review R)."
+  "PR, gh's state, isDraft and reviewDecision, as (:state S :approval A)."
   (let ((state (pcase (upcase (or (plist-get pr :state) ""))
                  ("OPEN" (if (eq (plist-get pr :isDraft) t) 'draft 'open))
                  ("MERGED" 'merged)
                  ("CLOSED" 'closed))))
     (and state
          (list :state state
-               :review (pcase (upcase (or (plist-get pr :reviewDecision) ""))
-                         ("APPROVED" 'approved)
-                         ("CHANGES_REQUESTED" 'changes-requested)
-                         ("REVIEW_REQUIRED" 'review-required))))))
+               :approval (ygg-git-compare--approval-github pr)))))
 
-(defun ygg-git-compare--pr-status-gitlab (mr)
-  "MR, a GitLab merge request, as (:state S)."
+(defun ygg-git-compare--pr-status-gitlab (mr &optional approval)
+  "MR, a GitLab merge request, as (:state S :approval APPROVAL)."
   (let ((state (pcase (plist-get mr :state)
                  ("opened" (if (or (eq (plist-get mr :draft) t)
                                    (eq (plist-get mr :work_in_progress) t))
@@ -114,7 +165,7 @@
                              'open))
                  ("merged" 'merged)
                  ((or "closed" "locked") 'closed))))
-    (and state (list :state state))))
+    (and state (list :state state :approval approval))))
 
 (defun ygg-git-compare--pr-about-github (pr)
   "PR, gh's title, body, author and the rest, as (:title T :body B :author A
@@ -167,30 +218,38 @@
           :about about)))
 
 (defun ygg-git-compare--checks-fetch-gitlab (pr done)
-  (let ((host (plist-get pr :host))
-        (path (url-hexify-string (plist-get pr :path))))
+  (let* ((host (plist-get pr :host))
+         (path (url-hexify-string (plist-get pr :path)))
+         (mr-path (format "projects/%s/merge_requests/%s" path (plist-get pr :number))))
     (ygg-git-compare--forge-async
-     "glab" (list "api" "--hostname" host
-                  (format "projects/%s/merge_requests/%s" path (plist-get pr :number)))
+     "glab" (list "api" "--hostname" host mr-path)
      (lambda (status text err)
        (ygg-git-compare--answer
         (lambda (mr &optional failure)
-          (let ((pipeline (plist-get mr :head_pipeline))
-                (pr-status (ygg-git-compare--pr-status-gitlab mr))
-                (about (ygg-git-compare--pr-about-gitlab mr)))
-            (cond (failure (funcall done nil failure))
-                  ((not (and pipeline (plist-get pipeline :id)))
-                   (funcall done (list :checks nil :status pr-status :about about)))
-                  (t (ygg-git-compare--forge-async
-                      "glab" (list "api" "--hostname" host "--paginate"
-                                   (format "projects/%s/pipelines/%s/jobs?per_page=100"
-                                           path (plist-get pipeline :id)))
-                      (lambda (status text err)
-                        (ygg-git-compare--answer
-                         done "glab" status text err
-                         (lambda (text)
-                           (ygg-git-compare--checks-parse-gitlab-jobs
-                            text pipeline pr-status about)))))))))
+          (if failure
+              (funcall done nil failure)
+            (ygg-git-compare--forge-async
+             "glab" (list "api" "--hostname" host (concat mr-path "/approvals"))
+             (lambda (status text _err)
+               (let* ((approval (and (eql status 0)
+                                     (ignore-errors
+                                       (ygg-git-compare--approval-gitlab
+                                        (ygg-git-compare--json text)))))
+                      (pipeline (plist-get mr :head_pipeline))
+                      (pr-status (ygg-git-compare--pr-status-gitlab mr approval))
+                      (about (ygg-git-compare--pr-about-gitlab mr)))
+                 (if (not (and pipeline (plist-get pipeline :id)))
+                     (funcall done (list :checks nil :status pr-status :about about))
+                   (ygg-git-compare--forge-async
+                    "glab" (list "api" "--hostname" host "--paginate"
+                                 (format "projects/%s/pipelines/%s/jobs?per_page=100"
+                                         path (plist-get pipeline :id)))
+                    (lambda (status text err)
+                      (ygg-git-compare--answer
+                       done "glab" status text err
+                       (lambda (text)
+                         (ygg-git-compare--checks-parse-gitlab-jobs
+                          text pipeline pr-status about)))))))))))
         "glab" status text err
         #'ygg-git-compare--json)))))
 
@@ -202,7 +261,7 @@ and why not."
     (ygg-git-compare--forge-async
      "gh" (list "pr" "view" (format "%s" (plist-get pr :number))
                 "--repo" (format "%s/%s" (plist-get pr :host) (plist-get pr :path))
-                "--json" "statusCheckRollup,state,isDraft,reviewDecision,title,body,author,createdAt,headRefName,baseRefName,url")
+                "--json" "statusCheckRollup,state,isDraft,reviewDecision,latestReviews,title,body,author,createdAt,headRefName,baseRefName,url")
      (lambda (status text err)
        (ygg-git-compare--answer done "gh" status text err
                                 #'ygg-git-compare--checks-parse-github)))))
@@ -305,11 +364,12 @@ one allowed to fail is warned."
        (not (plist-get comment :heading))))
 
 (defun ygg-git-compare--description-view ()
-  "What this compare shows of the description: (:about A :loaded L :error E
-:fetching F)."
+  "What this compare shows of the description: (:about A :approval R :loaded L
+:error E :fetching F)."
   (let* ((view (ygg-git-compare--checks-view))
          (about (plist-get (plist-get view :value) :about)))
     (list :about about
+          :approval (plist-get (plist-get (plist-get view :value) :status) :approval)
           :loaded (and about t)
           :error (plist-get view :error)
           :fetching (plist-get view :fetching))))
@@ -625,15 +685,19 @@ being fetched; with FORCE, whatever their age."
                         (and title (not (string-blank-p title)) (concat " " title)))
                 'font-lock-face 'magit-section-heading)))
 
-(defun ygg-git-compare--description-meta (about)
-  "ABOUT's author, branches and age as one shadow line, or nil."
+(defun ygg-git-compare--description-meta (about &optional approval)
+  "ABOUT's author, branches and age, then APPROVAL, as one line, or nil."
   (let ((parts (delq nil
                      (list (plist-get about :author)
                            (and (plist-get about :head) (plist-get about :base)
                                 (format "%s → %s" (plist-get about :head) (plist-get about :base)))
                            (and (plist-get about :created)
                                 (ygg-git-compare--remote-age (plist-get about :created)))))))
-    (and parts (propertize (concat "  " (string-join parts " · ")) 'font-lock-face 'shadow))))
+    (when-let* ((line (and parts (propertize (concat "  " (string-join parts " · "))
+                                              'font-lock-face 'shadow))))
+      (if-let* ((text (ygg-git-compare--approval-text approval)))
+          (concat line (propertize " · " 'font-lock-face 'shadow) text)
+        line))))
 
 (defun ygg-git-compare--description-lines (about)
   "ABOUT's body as indented lines, with a plist for each picture, and the blank
@@ -660,7 +724,7 @@ lines at either end left out."
          (lines (and (plist-get view :loaded) (ygg-git-compare--description-lines about))))
     (magit-insert-section (ygg-git-compare-description nil nil)
       (magit-insert-heading (ygg-git-compare--description-heading about))
-      (when-let* ((meta (ygg-git-compare--description-meta about)))
+      (when-let* ((meta (ygg-git-compare--description-meta about (plist-get view :approval))))
         (insert meta "\n"))
       (if lines
           (let ((pr (ygg-git-compare--remote-pr)))
@@ -745,11 +809,6 @@ shows, ahead of its diff; nothing for any other compare."
 (defconst ygg-git-compare--pr-state-faces
   '((open . default) (draft . shadow) (merged . success) (closed . error)))
 
-(defconst ygg-git-compare--pr-review-labels
-  '((approved "approved" success)
-    (changes-requested "changes requested" error)
-    (review-required "review required" shadow)))
-
 (defun ygg-git-compare--pr-badge ()
   "The state of the pull request, and its review when known, for the header
 line, or nil."
@@ -759,9 +818,8 @@ line, or nil."
               (face (cdr (assq state ygg-git-compare--pr-state-faces))))
     (concat (propertize (format "PR #%s %s" (plist-get pr :number) state) 'face face)
             (when-let* (((memq state '(open draft)))
-                        (review (assq (plist-get status :review)
-                                      ygg-git-compare--pr-review-labels)))
-              (concat " " (propertize (cadr review) 'face (nth 2 review)))))))
+                        (text (ygg-git-compare--approval-text (plist-get status :approval))))
+              (concat " " text)))))
 
 (defun ygg-git-compare--pr-info-section (type)
   (when-let* ((root (bound-and-true-p magit-root-section)))

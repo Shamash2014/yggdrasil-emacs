@@ -44,6 +44,7 @@ reply() { if [ -f \"$FAKE_DIR/$1.err\" ]; then cat \"$FAKE_DIR/$1.err\" >&2; exi
 case \"$*\" in
   *jobs*) reply jobs ;;
   *discussions*) reply discussions ;;
+  *merge_requests/12/approvals) reply approvals ;;
   *merge_requests/12) reply mr ;;
   *) echo '[]' ;;
 esac
@@ -286,13 +287,13 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
                   ("OPEN" t "" draft nil)
                   ("MERGED" nil "" merged nil)
                   ("CLOSED" nil "" closed nil)
-                  ("OPEN" nil "APPROVED" open approved)
-                  ("OPEN" nil "CHANGES_REQUESTED" open changes-requested)
-                  ("OPEN" nil "REVIEW_REQUIRED" open review-required)))
+                  ("OPEN" nil "APPROVED" open (:state approved :by nil :against nil))
+                  ("OPEN" nil "CHANGES_REQUESTED" open (:state changes-requested :by nil :against nil))
+                  ("OPEN" nil "REVIEW_REQUIRED" open (:state review-required :by nil :against nil))))
     (should (equal (plist-get (ygg-git-compare-pr-info-tests--github-status
                                (nth 0 case) (nth 1 case) (nth 2 case))
                               :status)
-                   (list :state (nth 3 case) :review (nth 4 case))))))
+                   (list :state (nth 3 case) :approval (nth 4 case))))))
 
 (ert-deftest ygg-git-compare-pr-info-github-without-a-state-has-no-status ()
   (should-not (plist-get (ygg-git-compare--checks-parse-github "{\"statusCheckRollup\":[]}")
@@ -303,7 +304,7 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
                   ("closed" nil closed) ("locked" nil closed)))
     (should (equal (ygg-git-compare--pr-status-gitlab
                     (list :state (nth 0 case) :draft (nth 1 case)))
-                   (list :state (nth 2 case)))))
+                   (list :state (nth 2 case) :approval nil))))
   (should (eq (plist-get (ygg-git-compare--pr-status-gitlab
                           (list :state "opened" :work_in_progress t))
                          :state)
@@ -320,7 +321,7 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
       (ygg-git-compare-pr-info-tests--settle buffer)
       (with-current-buffer buffer
         (let ((header (ygg-git-compare-pr-info-tests--header)))
-          (should (string-search "PR #12 open approved" header))
+          (should (string-search "PR #12 open ✓ approved" header))
           (should (< (string-search "PR #12" header) (string-search "CI " header))))))))
 
 (ert-deftest ygg-git-compare-pr-info-header-shows-a-merged-pull-request ()
@@ -1468,6 +1469,16 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
       (should-not (ygg-git-compare-pr-info-tests--displays buffer))
       (should (string-search "  shot\n" (ygg-git-compare-pr-info-tests--description-text buffer))))))
 
+(ert-deftest ygg-git-compare-pr-info-gitlab-approval-counts-without-names ()
+  (should (eq (plist-get (ygg-git-compare--approval-gitlab
+                          '(:approved t :approvals_required 2 :approvals_left 0 :approved_by []))
+                         :state)
+              'approved))
+  (should-not (eq (plist-get (ygg-git-compare--approval-gitlab
+                              '(:approved t :approvals_required 0 :approvals_left 0 :approved_by []))
+                             :state)
+                  'approved)))
+
 (provide 'ygg-git-compare-pr-info-tests)
 ;;; ygg-git-compare-pr-info-tests.el ends here
 
@@ -1949,3 +1960,85 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
           (should-not (file-exists-p cache))
           (should (string-search (format ".%d.part" (emacs-pid)) output))
           (should (string-prefix-p cache output)))))))
+
+(defun ygg-git-compare-pr-info-tests--github-badge (decision reviews)
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "checks.json"
+     (json-serialize (list :state "OPEN" :isDraft :false :reviewDecision decision
+                           :latestReviews (vconcat reviews) :statusCheckRollup []
+                           :title "t" :body "b" :author (list :login "dave")
+                           :headRefName "feature" :baseRefName "main")))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (string-search "PR #12" (ygg-git-compare-pr-info-tests--header))))
+      (with-current-buffer buffer
+        (list (ygg-git-compare-pr-info-tests--header)
+              (let ((section (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-description)))
+                (buffer-substring-no-properties (oref section start) (oref section end)))
+              (ygg-git-compare-pr-info-tests--calls "pr view"))))))
+
+(defun ygg-git-compare-pr-info-tests--review (login state)
+  (list :author (list :login login) :state state))
+
+(ert-deftest ygg-git-compare-pr-info-github-approved-names-who ()
+  (pcase-let ((`(,header ,description ,views)
+               (ygg-git-compare-pr-info-tests--github-badge
+                "APPROVED" (list (ygg-git-compare-pr-info-tests--review "alice" "APPROVED")
+                                 (ygg-git-compare-pr-info-tests--review "bob" "APPROVED")))))
+    (should (string-search "✓ approved by alice, bob" header))
+    (should (= views 1))
+    (should (string-search "dave" description))
+    (should (string-search "✓ approved by alice, bob" description))))
+
+(ert-deftest ygg-git-compare-pr-info-github-changes-requested-names-who ()
+  (pcase-let ((`(,header ,description ,_)
+               (ygg-git-compare-pr-info-tests--github-badge
+                "CHANGES_REQUESTED" (list (ygg-git-compare-pr-info-tests--review "carol" "CHANGES_REQUESTED")
+                                          (ygg-git-compare-pr-info-tests--review "alice" "APPROVED")))))
+    (should (string-search "✗ changes requested by carol" header))
+    (should-not (string-search "alice" header))
+    (should (string-search "✗ changes requested by carol" description))))
+
+(ert-deftest ygg-git-compare-pr-info-github-review-required-is-said ()
+  (pcase-let ((`(,header ,description ,_)
+               (ygg-git-compare-pr-info-tests--github-badge "REVIEW_REQUIRED" nil)))
+    (should (string-search "review required" header))
+    (should (string-search "review required" description))))
+
+(defun ygg-git-compare-pr-info-tests--gitlab-badge (approvals)
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (ygg-git-compare-pr-info-tests--put
+     "mr.json" (json-serialize (list :iid 12 :state "opened" :head_pipeline nil :title "mr title"
+                                     :description "d" :author (list :username "bob")
+                                     :source_branch "feature" :target_branch "main")))
+    (ygg-git-compare-pr-info-tests--put "approvals.json" (json-serialize approvals))
+    (let ((buffer (ygg-git-compare-pr-info-tests--open 'gitlab head)))
+      (ygg-git-compare-pr-info-tests--settle
+       buffer (lambda () (string-search "PR #12" (ygg-git-compare-pr-info-tests--header))))
+      (with-current-buffer buffer
+        (list (ygg-git-compare-pr-info-tests--header)
+              (ygg-git-compare-pr-info-tests--calls "glab")
+              (ygg-git-compare-pr-info-tests--calls "approvals"))))))
+
+(ert-deftest ygg-git-compare-pr-info-gitlab-approved-names-who ()
+  (pcase-let ((`(,header ,_ ,asked)
+               (ygg-git-compare-pr-info-tests--gitlab-badge
+                (list :approved t :approvals_required 1 :approvals_left 0
+                      :approved_by (vector (list :user (list :username "alice")))))))
+    (should (string-search "✓ approved by alice" header))
+    (should (= asked 1))))
+
+(ert-deftest ygg-git-compare-pr-info-gitlab-partial-approval-counts ()
+  (pcase-let ((`(,header ,_ ,asked)
+               (ygg-git-compare-pr-info-tests--gitlab-badge
+                (list :approved :false :approvals_required 2 :approvals_left 1
+                      :approved_by (vector (list :user (list :username "alice")))))))
+    (should (string-search "● 1 of 2 approvals" header))
+    (should (= asked 1))))
+
+(ert-deftest ygg-git-compare-pr-info-gitlab-no-approvals-yet-requires-review ()
+  (pcase-let ((`(,header ,_ ,_)
+               (ygg-git-compare-pr-info-tests--gitlab-badge
+                (list :approved :false :approvals_required 2 :approvals_left 2 :approved_by []))))
+    (should (string-search "review required" header))))
