@@ -42,6 +42,7 @@
 (defvar ygg-git-ci--watchers (make-hash-table :test 'equal))
 (defvar ygg-git-ci--buffers (make-hash-table :test 'equal))
 (defvar ygg-git-ci--timers (make-hash-table :test 'equal))
+(defvar ygg-git-ci--waiters (make-hash-table :test 'equal))
 
 (defconst ygg-git-ci--github-fields
   "databaseId,workflowName,status,conclusion,createdAt,startedAt,updatedAt,headSha,event,url")
@@ -199,7 +200,11 @@
       (if ygg-git-ci--rendering
           (run-at-time 0 nil #'ygg-git-ci--refresh buffer)
         (ygg-git-ci--refresh buffer)))
-    (ygg-git-ci--arm key)))
+    (ygg-git-ci--arm key)
+    (let ((waiting (nreverse (gethash key ygg-git-ci--waiters))))
+      (remhash key ygg-git-ci--waiters)
+      (dolist (continuation waiting)
+        (with-demoted-errors "ci: %S" (funcall continuation))))))
 
 (defun ygg-git-ci--land (key program status text stderr parser &optional partial)
   "Store what PARSER makes of TEXT; a failure keeps the PARTIAL rows."
@@ -316,6 +321,19 @@ and no question is already out; the cache stays until the new answer lands."
       (ygg-git-ci--start key))
     (cdr (gethash key ygg-git-ci--cache))))
 
+(defun ygg-git-ci--await (key continuation)
+  "Call CONTINUATION once KEY has a fresh answer: now, or when the fetch lands."
+  (let ((entry (gethash key ygg-git-ci--cache)))
+    (if (and entry (<= (- (float-time) (car entry)) ygg-git-ci-ttl))
+        (funcall continuation)
+      (push continuation (gethash key ygg-git-ci--waiters))
+      (condition-case err
+          (ygg-git-ci--ensure key)
+        (error
+         (setf (gethash key ygg-git-ci--waiters)
+               (delq continuation (gethash key ygg-git-ci--waiters)))
+         (signal (car err) (cdr err)))))))
+
 (defun ygg-git-ci--context ()
   "What the section is about: (KEY) for a branch to ask about, else a note."
   (let ((repo (ygg-git-review-requests--repo))
@@ -353,10 +371,16 @@ and no question is already out; the cache stays until the new answer lands."
     (magit-insert-heading
       "  " (ygg-git-review-requests--fit (ygg-git-ci--row-line row head)))))
 
-(defun ygg-git-ci--heading (branch &optional tail)
+(defun ygg-git-ci--keys (repo)
+  (if (eq (car repo) 'github)
+      "r rerun  x cancel  l log  t run"
+    "r retry  x cancel  p play  R/X pipeline  l log  t start"))
+
+(defun ygg-git-ci--heading (branch &optional tail hint)
   (magit-insert-heading
     (concat "CI  " (propertize branch 'font-lock-face 'magit-branch-local)
-            (if tail (concat "  " tail) ""))))
+            (if tail (concat "  " tail) "")
+            (if hint (propertize (concat "  " hint) 'font-lock-face 'magit-dimmed) ""))))
 
 ;;;###autoload
 (defun ygg-git-ci-insert-section ()
@@ -389,7 +413,8 @@ and no question is already out; the cache stays until the new answer lands."
                   (ygg-git-ci--heading
                    branch (if rows
                               (ygg-git-compare--checks-summary rows)
-                            (propertize "no runs" 'font-lock-face 'magit-dimmed)))
+                            (propertize "no runs" 'font-lock-face 'magit-dimmed))
+                   (ygg-git-ci--keys (car key)))
                   (let ((head (ignore-errors (magit-rev-parse "HEAD"))))
                     (dolist (row rows)
                       (ygg-git-ci--insert-row row head)))
@@ -752,7 +777,9 @@ the dispatchable WORKFLOWS, and on GitLab a new pipeline."
 (defun ygg-git-ci-startable (root callback)
   "Call CALLBACK once with what can be started on the current branch of ROOT.
 That is plists of :kind (job, workflow or pipeline), :name and :label, to give
-`ygg-git-ci-start'; a second argument says why the forge could not be asked."
+`ygg-git-ci-start'; a second argument says why the forge could not be asked.
+GitLab's manual jobs are those of the latest pipeline, fetched when the cache
+is missing or stale."
   (let* ((default-directory root)
          (key (condition-case err
                   (ygg-git-ci--key)
@@ -760,7 +787,12 @@ That is plists of :kind (job, workflow or pipeline), :name and :label, to give
          (finish (lambda (workflows)
                    (apply callback
                           (condition-case err
-                              (let ((rows (plist-get (cdr (gethash key ygg-git-ci--cache)) :rows)))
+                              (let* ((answer (cdr (gethash key ygg-git-ci--cache)))
+                                     (rows (plist-get answer :rows)))
+                                (when (and (eq (car (car key)) 'gitlab)
+                                           (plist-get answer :error)
+                                           (not (plist-member answer :rows)))
+                                  (error "%s" (plist-get answer :error)))
                                 (list (mapcar (lambda (choice)
                                                 (append (list :label (car choice)) (cdr choice)))
                                               (ygg-git-ci--startables
@@ -768,7 +800,9 @@ That is plists of :kind (job, workflow or pipeline), :name and :label, to give
                             (error (list nil (error-message-string err))))))))
     (when key
       (if (eq (car (car key)) 'gitlab)
-          (funcall finish #'ignore)
+          (condition-case err
+              (ygg-git-ci--await key (lambda () (funcall finish #'ignore)))
+            (error (funcall callback nil (error-message-string err))))
         (let ((directory (or (magit-toplevel) default-directory)))
           (message "ci: listing workflows…")
           (ygg-git-review-requests--spawn
