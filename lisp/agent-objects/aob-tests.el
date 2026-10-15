@@ -3510,6 +3510,35 @@ own turn on that idle can ask what is waiting and stand down."
     (should expanded)
     (should-not drawn)))
 
+(defmacro aob-tests--with-mermaid-answer (calls &rest body)
+  "Render a settled answer holding a mermaid fence, CALLS collecting what is drawn."
+  (declare (indent 1))
+  `(aob-tests--with-trace s buf
+     (let ((ygg-diagram--cache-dir (make-temp-file "aob-diagram-" t))
+           ,calls)
+       (setq ygg-diagram--shown nil)
+       (cl-letf (((symbol-function 'ygg-diagram--render)
+                  (lambda (lang src _done) (push (cons lang src) ,calls))))
+         (aob-event s 'message :text "```mermaid\ngraph TD\n A-->B\n```\n")
+         (aob-trace--render-1 s)
+         ,@body))))
+
+(ert-deftest aob-trace-draws-a-mermaid-block-the-markdown-rendered ()
+  (aob-tests--with-mermaid-answer calls
+    (should (equal calls '(("mermaid" . "graph TD\n A-->B\n"))))))
+
+(ert-deftest aob-trace-tab-draws-a-mermaid-block-the-markdown-rendered ()
+  (aob-tests--with-mermaid-answer calls
+    (setq aob-trace--diagrams-seen '(("mermaid" . "graph TD\n A-->B\n")))
+    (setq ygg-diagram--shown nil calls nil)
+    (ygg-diagram-replace)
+    (goto-char (text-property-any (point-min) (point-max)
+                                  'agent-shell-markdown-source-block-body t))
+    (aob-trace-tab)
+    (should (equal calls '(("mermaid" . "graph TD\n A-->B\n"))))
+    (aob-trace-tab)
+    (should-not ygg-diagram--shown)))
+
 (ert-deftest aob-trace-tab-owns-the-tab-key ()
   (should (eq (lookup-key aob-trace-mode-map (kbd "TAB")) #'aob-trace-tab)))
 

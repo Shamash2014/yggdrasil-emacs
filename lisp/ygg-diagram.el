@@ -337,7 +337,7 @@ own shape rather than losing text."
       (substring line n)
     (string-trim-left line "[ \t]+")))
 
-(defun ygg-diagram-fence-at-point ()
+(defun ygg-diagram--raw-fence-at-point ()
   "The fenced block point is on or in, as (LANG SRC BEG END), or nil.
 Point counts on the opening line, the closing line, and every line
 between.  SRC is stripped of the prefix the opening line carried, and a
@@ -380,6 +380,61 @@ patch, so it reads as the after-state."
             (list lang
                   (mapconcat (lambda (l) (concat l "\n")) (nreverse lines) "")
                   beg end)))))))
+
+(defun ygg-diagram--rendered-source (pos)
+  "The fence a rendered source block at POS was drawn from, as (LANG SRC), or nil."
+  (when-let* ((text (get-text-property pos 'agent-shell-markdown-source)))
+    (with-temp-buffer
+      (insert text)
+      (goto-char (point-min))
+      (pcase (ygg-diagram--raw-fence-at-point)
+        (`(,lang ,src . ,_) (list lang src))))))
+
+(defun ygg-diagram--rendered-body-bounds (pos)
+  "The (BEG . END) of the rendered source block body on or beside POS, or nil.
+A block is a label, a body and padding, all tagged as one block; point on
+any of them counts."
+  (when (get-text-property pos 'agent-shell-markdown-source-block-rendered)
+    (let* ((lo (previous-single-property-change
+                (1+ pos) 'agent-shell-markdown-source-block-rendered nil (point-min)))
+           (hi (next-single-property-change
+                pos 'agent-shell-markdown-source-block-rendered nil (point-max)))
+           (beg (text-property-any lo hi 'agent-shell-markdown-source-block-body t)))
+      (when beg
+        (cons beg (next-single-property-change
+                   beg 'agent-shell-markdown-source-block-body nil hi))))))
+
+(defun ygg-diagram--rendered-fence-at-point ()
+  "The diagram block point is on, as (LANG SRC BEG END) over its body, or nil.
+An agent-shell markdown block has no fence left to find; its body keeps
+the source it came from."
+  (when-let* ((bounds (ygg-diagram--rendered-body-bounds (point)))
+              (fence (ygg-diagram--rendered-source (car bounds)))
+              ((member (car fence) ygg-diagram--langs)))
+    (list (car fence) (cadr fence) (car bounds) (cdr bounds))))
+
+(defun ygg-diagram--rendered-fences (beg end)
+  "The diagram blocks drawn as agent-shell markdown between BEG and END.
+Each is (LANG SRC BODY-BEG BODY-END)."
+  (let (out (pos beg))
+    (while (and (< pos end)
+                (setq pos (text-property-any pos end
+                                             'agent-shell-markdown-source-block-body t)))
+      (let ((bounds (ygg-diagram--rendered-body-bounds pos)))
+        (when-let* ((bounds)
+                    (fence (ygg-diagram--rendered-source pos))
+                    ((member (car fence) ygg-diagram--langs)))
+          (push (list (car fence) (cadr fence) (car bounds) (cdr bounds)) out))
+        (setq pos (max (1+ pos) (or (cdr bounds) 0)))))
+    (nreverse out)))
+
+(defun ygg-diagram-fence-at-point ()
+  "The fenced block point is on or in, as (LANG SRC BEG END), or nil.
+A block an agent-shell markdown render drew stands for its fence: BEG and
+END then bound its body.  Otherwise point counts on the opening line, the
+closing line, and every line between; see `ygg-diagram--raw-fence-at-point'."
+  (or (ygg-diagram--rendered-fence-at-point)
+      (ygg-diagram--raw-fence-at-point)))
 
 (defun ygg-diagram--overlay-at (pos)
   "The diagram overlay floating at POS, or nil."
@@ -512,6 +567,9 @@ dropped first; a fence that is no longer in the buffer is passed over."
                (ygg-diagram--place end lang src width))
              (goto-char end))
             (_ (end-of-line)))))
+      (pcase-dolist (`(,lang ,src ,_beg ,end) (ygg-diagram--rendered-fences (point-min) (point-max)))
+        (when (member (cons lang src) ygg-diagram--shown)
+          (ygg-diagram--place end lang src width)))
       (when (seq-some (lambda (c) (eq (car c) 'table)) ygg-diagram--shown)
         (save-excursion
           (goto-char (point-min))

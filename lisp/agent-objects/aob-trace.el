@@ -23,6 +23,7 @@
 (declare-function aob-queue-remove "aob" (s entry))
 (defvar ygg-modeline-name)
 (declare-function ygg-diagram-fence-at-point "ygg-diagram" ())
+(declare-function ygg-diagram--rendered-fences "ygg-diagram" (beg end))
 (declare-function ygg-diagram-toggle-at-point "ygg-diagram" ())
 (declare-function ygg-diagram-replace "ygg-diagram" ())
 (declare-function ygg-diagram-toggle-any-at-point "ygg-diagram" ())
@@ -4271,6 +4272,15 @@ Each is drawn once; TAB takes one away and it stays away."
 (defvar ygg-diagram--shown)
 (defvar ygg-diagram--open-re)
 
+(defun aob-trace--mark-diagram (lang src)
+  "Mark the LANG SRC fence to be drawn, once."
+  (let ((key (cons lang src)))
+    (when (and (equal lang "mermaid")
+               (not (member key aob-trace--diagrams-seen)))
+      (push key aob-trace--diagrams-seen)
+      (unless (member key ygg-diagram--shown)
+        (push key ygg-diagram--shown)))))
+
 (defun aob-trace--mark-diagrams (s)
   "Mark the Mermaid fences of S's settled answers to be drawn, once each."
   (dolist (ev (aob-session-events s))
@@ -4278,18 +4288,16 @@ Each is drawn once; TAB takes one away and it stays away."
                (not (aob-trace--live-p ev))
                (string-search "```mermaid" (or (plist-get ev :text) "")))
       (when-let* ((bounds (aob-trace--event-bounds (plist-get ev :seq))))
+        (pcase-dolist (`(,lang ,src . ,_)
+                       (ygg-diagram--rendered-fences (car bounds) (cdr bounds)))
+          (aob-trace--mark-diagram lang src))
         (save-excursion
           (goto-char (car bounds))
           (while (re-search-forward ygg-diagram--open-re (cdr bounds) t)
             (beginning-of-line)
             (pcase (ygg-diagram-fence-at-point)
               (`(,lang ,src ,_beg ,end)
-               (let ((key (cons lang src)))
-                 (when (and (equal lang "mermaid")
-                            (not (member key aob-trace--diagrams-seen)))
-                   (push key aob-trace--diagrams-seen)
-                   (unless (member key ygg-diagram--shown)
-                     (push key ygg-diagram--shown))))
+               (aob-trace--mark-diagram lang src)
                (goto-char end))
               (_ (end-of-line)))))))))
 
