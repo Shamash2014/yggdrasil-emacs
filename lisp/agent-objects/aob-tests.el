@@ -3782,6 +3782,20 @@ tool_result adds no turn of its own."
               (aob-remove-session s))))
       (delete-file file))))
 
+(ert-deftest aob-trace-table-renders-from-a-dedicated-window ()
+  "A table measured while a dedicated window is selected skips scaling
+instead of failing the whole trace."
+  (skip-unless (fboundp 'agent-shell-markdown--table-char-height-scale))
+  (let ((win (selected-window))
+        (agent-shell-markdown--table-height-scale-cache (make-hash-table :test 'eq)))
+    (set-window-dedicated-p win t)
+    (unwind-protect
+        (progn
+          (should-not (agent-shell-markdown--table-char-height-scale ?A))
+          (should (eq (gethash ?A agent-shell-markdown--table-height-scale-cache 'miss)
+                      'miss)))
+      (set-window-dedicated-p win nil))))
+
 (ert-deftest aob-transcript-reads-back-past-records-that-say-nothing ()
   "Turns buried under more than a cap of tool results and bookkeeping
 records are still read: the cap counts turns, not records."

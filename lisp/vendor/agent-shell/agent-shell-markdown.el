@@ -2712,7 +2712,13 @@ The needed scale is just `default-h / char-h' — the factor that
 brings the glyph back to the default height.  Results are cached."
   (let ((cached (gethash char agent-shell-markdown--table-height-scale-cache
                          'miss)))
-    (if (eq cached 'miss)
+    (cond
+     ;; measuring borrows the selected window, which a dedicated or
+     ;; minibuffer window refuses
+     ((and (eq cached 'miss)
+           (or (window-dedicated-p) (window-minibuffer-p)))
+      nil)
+     ((eq cached 'miss)
         (let ((scale
                (let ((win (selected-window))
                      (orig-buf (window-buffer)))
@@ -2731,8 +2737,8 @@ brings the glyph back to the default height.  Results are cached."
                                 ratio))))
                    (set-window-buffer win orig-buf)))))
           (puthash char scale agent-shell-markdown--table-height-scale-cache)
-          scale)
-      cached)))
+          scale))
+     (t cached))))
 
 (defun agent-shell-markdown--table-apply-height-scaling (str)
   "Add display height scaling to tall characters in STR.
