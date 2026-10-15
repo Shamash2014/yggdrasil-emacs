@@ -793,5 +793,24 @@
                                   timer-idle-list))))
       (when aob-gc--idle (cancel-timer aob-gc--idle)))))
 
+(ert-deftest aob-gc-modeline-shows-while-a-sweep-holds-a-repository ()
+  (let ((aob-gc--busy (make-hash-table :test #'equal)))
+    (should-not (aob-gc-modeline))
+    (puthash "/r/.git" (list "/r/.git") aob-gc--busy)
+    (should (equal (substring-no-properties (aob-gc-modeline)) "  gc…"))
+    (puthash "/s/.git" (list "/s/.git") aob-gc--busy)
+    (should (equal (substring-no-properties (aob-gc-modeline)) "  gc 2…"))
+    (should (memq 'aob-gc--modeline-entry mode-line-misc-info))))
+
+(ert-deftest aob-gc-modeline-clears-when-the-sweep-ends ()
+  (gc-tests--with-repo
+    (let ((seen nil))
+      (aob-gc--locked proj (lambda (release)
+                             (setq seen (aob-gc-modeline))
+                             (funcall release)))
+      (gc-tests--wait (lambda () seen))
+      (should (string-match-p "gc" seen))
+      (should-not (aob-gc-modeline)))))
+
 (provide 'aob-gc-tests)
 ;;; aob-gc-tests.el ends here

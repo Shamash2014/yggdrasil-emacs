@@ -80,6 +80,16 @@ Only aob/* branches and worktrees, any branch, or any branch and worktree."
 (defvar aob-gc--prs (make-hash-table :test #'equal)
   "Project to the merged pull requests gh listed for it in the current sweep.")
 
+(defun aob-gc-modeline ()
+  "A dim \"gc\" while a sweep holds a repository, with how many it holds."
+  (let ((n (hash-table-count aob-gc--busy)))
+    (when (> n 0)
+      (propertize (if (= n 1) "  gc…" (format "  gc %d…" n)) 'face 'shadow))))
+
+(defvar aob-gc--modeline-entry '(:eval (aob-gc-modeline)))
+(put 'aob-gc--modeline-entry 'risky-local-variable t)
+(add-to-list 'mode-line-misc-info 'aob-gc--modeline-entry t)
+
 (defvar aob-gc--guard nil
   "Function handed the error of the sweep whose step is running, or nil.")
 
@@ -417,8 +427,10 @@ An error in a step frees the lock and goes to ON-ERROR, or is signalled."
          (let* ((token (list key))
                 (release (lambda ()
                            (when (eq (gethash key aob-gc--busy) token)
-                             (remhash key aob-gc--busy)))))
+                             (remhash key aob-gc--busy)
+                             (force-mode-line-update t)))))
            (puthash key token aob-gc--busy)
+           (force-mode-line-update t)
            (remhash project aob-gc--prs)
            (let ((aob-gc--guard (lambda (err)
                                   (funcall release)
