@@ -1111,6 +1111,62 @@ sidebar in the selected window."
     (should (equal (ygg-projects--entry-tree (aob-session-get "claude: fix x")) "claude"))
     (should (equal (aob-session-name (aob-session-get "claude: fix x")) "claude: fix x"))))
 
+(defconst ygg-projects-tests--local
+  '((:name "build" :source just) (:name "test" :source npm)))
+
+(defconst ygg-projects-tests--ci
+  '((:name "ci: workflow deploy" :source ci) (:name "ci: job e2e" :source ci)
+    (:name "ci: new pipeline" :source ci)))
+
+(defun ygg-projects-tests--command-lines (commands)
+  (let ((ygg-projects--context-flipped nil))
+    (cl-letf (((symbol-function 'ygg-project-commands) (lambda (_) commands)))
+      (mapcar (lambda (n) (string-trim (replace-regexp-in-string
+                                        "[ \t]+" " " (substring-no-properties n))))
+              (ygg-projects--entry-nodes "/tmp/p/" 'commands)))))
+
+(ert-deftest ygg-projects-commands-split-into-local-and-ci-with-counts ()
+  (let ((lines (ygg-projects-tests--command-lines
+                (append ygg-projects-tests--local ygg-projects-tests--ci))))
+    (should (string-match-p "▾ Local 2\\'" (nth 0 lines)))
+    (should (string-match-p "build just\\'" (nth 1 lines)))
+    (should (string-match-p "test npm\\'" (nth 2 lines)))
+    (should (string-match-p "▾ CI 3\\'" (nth 3 lines)))
+    (should (string-match-p "workflow deploy\\'" (nth 4 lines)))
+    (should-not (cl-some (lambda (l) (string-search "ci:" l)) lines))
+    (should (= (length lines) 7))))
+
+(ert-deftest ygg-projects-commands-omit-an-empty-group ()
+  (let ((lines (ygg-projects-tests--command-lines ygg-projects-tests--ci)))
+    (should-not (cl-some (lambda (l) (string-search "Local" l)) lines))
+    (should (string-search "CI" (car lines))))
+  (let ((lines (ygg-projects-tests--command-lines ygg-projects-tests--local)))
+    (should-not (cl-some (lambda (l) (string-search "CI" l)) lines))))
+
+(ert-deftest ygg-projects-commands-group-folds ()
+  (let ((ygg-projects--context-flipped (list (cons "/tmp/p/" 'commands-ci))))
+    (cl-letf (((symbol-function 'ygg-project-commands)
+               (lambda (_) (append ygg-projects-tests--local ygg-projects-tests--ci))))
+      (should (= (length (ygg-projects--entry-nodes "/tmp/p/" 'commands)) 4)))))
+
+(ert-deftest ygg-projects-commands-rows-run-the-same-entry-under-either-heading ()
+  (let (ran)
+    (cl-letf (((symbol-function 'ygg-project-commands)
+               (lambda (_) (append ygg-projects-tests--local ygg-projects-tests--ci)))
+              ((symbol-function 'ygg-project-commands-run) (lambda (c) (push c ran))))
+      (let ((ygg-projects--context-flipped nil))
+        (with-temp-buffer
+          (dolist (n (ygg-projects--entry-nodes "/tmp/p/" 'commands))
+            (insert n "\n"))
+          (goto-char (point-min))
+          (while (not (eobp))
+            (let ((entry (get-text-property (line-beginning-position) 'ygg-entry)))
+              (unless (ygg-projects--context-group-p entry)
+                (ygg-projects-visit)))
+            (forward-line 1)))))
+    (should (equal (nreverse ran)
+                   (append ygg-projects-tests--local ygg-projects-tests--ci)))))
+
 (provide 'ygg-projects-tests)
 ;;; ygg-projects-tests.el ends here
 

@@ -1478,7 +1478,7 @@ OpenSpec opens by default; the other groups start folded.")
   (and (consp entry) (proper-list-p entry) (plist-get entry :group) t))
 
 (defun ygg-projects--context-group-open-p (root key)
-  (xor (eq key 'openspec)
+  (xor (memq key '(openspec commands-local commands-ci))
        (member (cons root key) ygg-projects--context-flipped)))
 
 (defun ygg-projects--repowise-label (root)
@@ -1503,24 +1503,59 @@ ones left out; from the caches only."
                       (list 'repowise (ygg-projects--repowise-label root)
                             (ygg-repowise-entries root))))))))
 
+(defun ygg-projects--group-nodes (root kind key label cells)
+  "A foldable group of CELLS under ROOT's KIND row: its header, and under
+it, when it is open, the entries set in a step."
+  (let ((open (ygg-projects--context-group-open-p root key)))
+    (cons (ygg-projects--entry-text
+           (concat (if open "▾ " "▸ ") label) root kind
+           (list :ice t :group key :badge (number-to-string (length cells))
+                 :items (mapcar #'cdr cells)))
+          (when open
+            (let ((ygg-projects-entry-indent (+ 2 ygg-projects-entry-indent)))
+              (mapcar (lambda (c)
+                        (ygg-projects--entry-text (car c) root kind (cdr c)))
+                      cells))))))
+
 (defun ygg-projects--context-nodes (root)
   "ROOT's Context row: each group, and under one that is open its entries,
 set in a step."
   (or (mapcan
        (lambda (group)
-         (pcase-let* ((`(,key ,label ,cells) group)
-                      (open (ygg-projects--context-group-open-p root key)))
-           (cons (ygg-projects--entry-text
-                  (concat (if open "▾ " "▸ ") label) root 'context
-                  (list :ice t :group key :badge (number-to-string (length cells))
-                        :items (mapcar #'cdr cells)))
-                 (when open
-                   (let ((ygg-projects-entry-indent (+ 2 ygg-projects-entry-indent)))
-                     (mapcar (lambda (c)
-                               (ygg-projects--entry-text (car c) root 'context (cdr c)))
-                             cells))))))
+         (pcase-let ((`(,key ,label ,cells) group))
+           (ygg-projects--group-nodes root 'context key label cells)))
        (ygg-projects--context-groups root))
       (list (ygg-projects--entry-text "— none —" root 'context nil))))
+
+(defun ygg-projects--command-cell (c)
+  "Command C as a row: the CI ones without the prefix their heading says."
+  (let ((ci (eq (plist-get c :source) 'ci)))
+    (cons (if ci
+              (string-remove-prefix "ci: " (plist-get c :name))
+            (format "%s  %s" (plist-get c :name)
+                    (propertize (format "%s" (plist-get c :source))
+                                'font-lock-face 'ygg-projects-count)))
+          c)))
+
+(defun ygg-projects--command-groups (root)
+  "ROOT's commands as (KEY LABEL CELLS), Local then CI, the empty left out."
+  (let* ((all (and (fboundp 'ygg-project-commands) (ygg-project-commands root)))
+         (ci (seq-filter (lambda (c) (eq (plist-get c :source) 'ci)) all))
+         (local (seq-remove (lambda (c) (eq (plist-get c :source) 'ci)) all)))
+    (delq nil
+          (list (and local (list 'commands-local "Local"
+                                 (mapcar #'ygg-projects--command-cell local)))
+                (and ci (list 'commands-ci "CI"
+                              (mapcar #'ygg-projects--command-cell ci)))))))
+
+(defun ygg-projects--command-nodes (root)
+  "ROOT's Commands row: a Local group and a CI group, each foldable."
+  (or (mapcan
+       (lambda (group)
+         (pcase-let ((`(,key ,label ,cells) group))
+           (ygg-projects--group-nodes root 'commands key label cells)))
+       (ygg-projects--command-groups root))
+      (list (ygg-projects--entry-text "— none —" root 'commands nil))))
 
 (defun ygg-projects--toggle-context-group (entry root)
   "Fold or unfold the Context group ENTRY heads; nil when it heads none,
@@ -1539,6 +1574,8 @@ so TAB keeps its other use."
          (ygg-projects--folder-nodes root))
         ((and (eq kind 'context) (not cells))
          (ygg-projects--context-nodes root))
+        ((and (eq kind 'commands) (not cells))
+         (ygg-projects--command-nodes root))
         (t (ygg-projects--cell-nodes root kind cells))))
 
 (defun ygg-projects--cell-nodes (root kind cells)
@@ -2610,10 +2647,12 @@ umbrella's Folders row moves that repository."
              (ygg-projects--open-ended entry))
             (t (when (fboundp 'ygg-aob-goto-space) (ygg-aob-goto-space entry))
                (aob-trace entry))))
-          ('commands (if (fboundp 'ygg-project-commands-run)
-                         (ygg-project-commands-run entry)
-                       (let ((default-directory root))
-                         (compile (format "just %s" entry)))))
+          ('commands (cond ((ygg-projects--context-group-p entry)
+                            (ygg-projects-toggle))
+                           ((fboundp 'ygg-project-commands-run)
+                            (ygg-project-commands-run entry))
+                           (t (let ((default-directory root))
+                                (compile (format "just %s" entry))))))
           ('folders
            (cond ((eq (car-safe entry) 'worktree)
                   (if (fboundp 'ygg-space-open)
