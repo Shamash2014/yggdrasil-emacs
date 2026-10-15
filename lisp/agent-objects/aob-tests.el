@@ -3782,6 +3782,24 @@ tool_result adds no turn of its own."
               (aob-remove-session s))))
       (delete-file file))))
 
+(ert-deftest aob-transcript-reads-back-past-records-that-say-nothing ()
+  "Turns buried under more than a cap of tool results and bookkeeping
+records are still read: the cap counts turns, not records."
+  (let* ((aob-event-cap 4)
+         (file (apply #'aob-tests--transcript
+                      (append
+                       (list "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"first\"}}"
+                             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"one\"}]}}")
+                       (make-list 40 "{\"type\":\"attachment\"}")
+                       (list "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"second\"}}"
+                             "{\"type\":\"assistant\",\"message\":{\"role\":\"assistant\",\"content\":[{\"type\":\"text\",\"text\":\"two\"}]}}"
+                             "{\"type\":\"user\",\"message\":{\"role\":\"user\",\"content\":\"third\"}}")))))
+    (unwind-protect
+        (should (equal (aob-transcript-turns file)
+                       '(("assistant" . "one") ("user" . "second")
+                         ("assistant" . "two") ("user" . "third"))))
+      (delete-file file))))
+
 (ert-deftest aob-transcript-leaves-out-what-claude-wrote-to-itself ()
   "Meta notes, a compaction's summary, a background task's notice, a
 command's output and an interrupt are not prompts; a slash command

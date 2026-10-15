@@ -667,18 +667,24 @@ start of the file."
 (defun aob-transcript-turns (file &optional tools)
   "FILE as a list of (WHO . TEXT), oldest first.
 WHO is \"user\" or \"assistant\", and with TOOLS also \"tool\", a
-tool\='s TEXT the line naming what it did.  Only its last records: a
+tool\='s TEXT the line naming what it did.  Only its last turns: a
 session keeps `aob-event-cap\=' events and drops the older half past
-that, so reading further back is work thrown away.  A pi file is a tree
-of records, and what it shows is the branch the session ended on."
-  (let (out)
-    (dolist (rec (aob-transcript-pi--active
-                  file (aob-transcript--tail-records file aob-event-cap)))
-      (when-let* ((turn (aob-transcript--turn rec)))
-        (push turn out))
-      (dolist (tool (and tools (aob-transcript--tools rec)))
-        (push (cons "tool" tool) out)))
-    (nreverse out)))
+that, so reading further back is work thrown away.  Most records are
+tool results and bookkeeping, so the records read grow until they hold
+that many turns or the file runs out.  A pi file is a tree of records,
+and what it shows is the branch the session ended on."
+  (let ((lines aob-event-cap) out)
+    (while (let ((recs (aob-transcript--tail-records file lines)))
+             (setq out nil)
+             (dolist (rec (aob-transcript-pi--active file recs))
+               (when-let* ((turn (aob-transcript--turn rec)))
+                 (push turn out))
+               (dolist (tool (and tools (aob-transcript--tools rec)))
+                 (push (cons "tool" tool) out)))
+             (and (< (length out) aob-event-cap)
+                  (>= (length recs) lines)
+                  (setq lines (* lines 4)))))
+    (last (nreverse out) aob-event-cap)))
 
 (defun aob-transcript--harness-text-p (text)
   "Whether TEXT in a user turn was written in by the harness, not typed."
