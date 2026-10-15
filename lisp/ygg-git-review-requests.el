@@ -258,9 +258,9 @@ standard output and standard error; a status of nil means it did not start."
     (ygg-git-review-requests--save)
     (remhash repo ygg-git-review-requests--running)
     (dolist (buffer buffers)
-      (when (and (buffer-live-p buffer) (get-buffer-window buffer t))
+      (when (buffer-live-p buffer)
         (with-current-buffer buffer
-          (magit-refresh-buffer))))))
+          (with-demoted-errors "review requests: %S" (magit-refresh-buffer)))))))
 
 (defun ygg-git-review-requests--failure (program status stderr)
   (let* ((stderr (or stderr ""))
@@ -460,19 +460,31 @@ and no question is already out."
 (defun ygg-git-review-requests--note (text)
   (insert (propertize text 'font-lock-face 'magit-dimmed) "\n\n"))
 
+(defun ygg-git-review-requests--fit (text)
+  "TEXT cut to the window showing it; a hidden buffer is redrawn when shown."
+  (if-let* ((window (get-buffer-window nil t))
+            ((window-live-p window)))
+      (truncate-string-to-width text (1- (window-body-width window)) nil nil "…")
+    text))
+
 (defun ygg-git-review-requests--row (pr)
-  (let ((face (and (plist-get pr :draft) 'magit-dimmed)))
+  (let ((face (if (plist-get pr :draft) 'magit-dimmed 'default)))
     (magit-insert-section (review-request pr)
       (magit-insert-heading
         (propertize
-         (format "#%s  %s%s  %s  %s→%s  %s"
-                 (plist-get pr :number)
-                 (if (plist-get pr :draft) "[draft] " "")
-                 (plist-get pr :title)
-                 (or (plist-get pr :author) "")
-                 (or (plist-get pr :head) "?") (or (plist-get pr :base) "?")
-                 (ygg-git-review-requests--age (plist-get pr :updated)))
-         'font-lock-face (or face 'default))))))
+         (ygg-git-review-requests--fit
+          (format "#%s  %s%s" (plist-get pr :number)
+                  (if (plist-get pr :draft) "[draft] " "")
+                  (plist-get pr :title)))
+         'font-lock-face face)
+        "\n"
+        (propertize
+         (ygg-git-review-requests--fit
+          (format "    %s  %s→%s  %s"
+                  (or (plist-get pr :author) "")
+                  (or (plist-get pr :head) "?") (or (plist-get pr :base) "?")
+                  (ygg-git-review-requests--age (plist-get pr :updated))))
+         'font-lock-face 'magit-dimmed)))))
 
 (defconst ygg-git-review-requests--groups
   '((requested . "Review requested") (mine . "Mine") (open . "Open")))
