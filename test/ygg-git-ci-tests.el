@@ -83,8 +83,10 @@
            ,@body)
        (delete-directory ygg-git-ci-tests--dir t))))
 
+(define-derived-mode ygg-git-ci-tests-mode magit-mode "ci-test")
+
 (defun ygg-git-ci-tests--render ()
-  (magit-section-mode)
+  (ygg-git-ci-tests-mode)
   (let ((inhibit-read-only t))
     (erase-buffer)
     (magit-insert-section (status)
@@ -641,6 +643,7 @@
       (puthash key (list dead) ygg-git-ci--buffers)
       (kill-buffer dead)
       (with-temp-buffer
+        (ygg-git-ci-tests-mode)
         (ygg-git-ci--ensure key)
         (should (equal (gethash key ygg-git-ci--buffers) (list (current-buffer)))))
       (let ((dead (generate-new-buffer " ci-dead")))
@@ -708,6 +711,132 @@
         (ygg-git-ci-start ygg-git-ci-tests--dir
                           (list :kind 'pipeline :name "feat" :label "new pipeline: feat")))
       (should-not spawned))))
+
+(ert-deftest ygg-git-ci-startable-answers-once-when-the-key-is-refused ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo nil)
+    (let (calls)
+      (ygg-git-ci-startable ygg-git-ci-tests--dir (lambda (&rest args) (push args calls)))
+      (should (= 1 (length calls)))
+      (should-not (car (car calls)))
+      (should (stringp (cadr (car calls))))
+      (should-not spawned)
+      (should-not (member "ci: listing workflows…" messages)))))
+
+(ert-deftest ygg-git-ci-startable-answers-once-when-the-workflow-list-is-unreadable ()
+  (ygg-git-ci-tests--with
+    (let (calls)
+      (ygg-git-ci-startable ygg-git-ci-tests--dir (lambda (&rest args) (push args calls)))
+      (funcall (cdr (pop spawned)) 0 "not json" nil)
+      (should (= 1 (length calls)))
+      (should-not (car (car calls)))
+      (should (stringp (cadr (car calls)))))))
+
+(ert-deftest ygg-git-ci-mutation-timeout-kills-the-process-and-removes-its-body ()
+  (ygg-git-ci-tests--with
+    (let* ((command (ygg-git-ci--command 'play '(gitlab "gl.example" "g/r")
+                                         (ygg-git-ci-tests--run 'skipped) "{}"))
+           (file (cadr (member "--input" command)))
+           killed)
+      (cl-letf (((symbol-function 'ygg-git-review-requests--spawn)
+                 (lambda (_command _callback) 'fake-process))
+                ((symbol-function 'ygg-git-review-requests--kill)
+                 (lambda (process) (push process killed))))
+        (ygg-git-ci--do (ygg-git-ci-tests--key) "play" command "Play? ")
+        (should (file-exists-p file))
+        (let ((timer (car timers)))
+          (should (= ygg-git-ci-timeout (car timer)))
+          (apply (cadr timer) (nth 2 timer))))
+      (should (equal killed '(fake-process)))
+      (should-not (file-exists-p file)))))
+
+(ert-deftest ygg-git-ci-quitting-at-the-confirmation-removes-the-body ()
+  (ygg-git-ci-tests--with
+    (let* ((command (ygg-git-ci--command 'play '(gitlab "gl.example" "g/r")
+                                         (ygg-git-ci-tests--run 'skipped) "{}"))
+           (file (cadr (member "--input" command))))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (signal 'quit nil))))
+        (should (eq 'quit (condition-case err
+                              (ygg-git-ci--do (ygg-git-ci-tests--key) "play" command "Play? ")
+                            (quit (car err))))))
+      (should-not (file-exists-p file))
+      (should-not spawned))))
+
+(ert-deftest ygg-git-ci-pipeline-variables-are-validated-before-confirming ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (let (asked)
+      (cl-letf (((symbol-function 'read-string)
+                 (lambda (&rest _) (or (pop ygg-git-ci-tests--answers) "")))
+                ((symbol-function 'y-or-n-p) (lambda (&rest _) (setq asked t))))
+        (dolist (bad '("NOCOLON" ":value"))
+          (setq ygg-git-ci-tests--answers (list bad))
+          (should-error (ygg-git-ci--start-spec (ygg-git-ci-tests--key) (list :kind 'pipeline))
+                        :type 'user-error)))
+      (should-not asked)
+      (should-not spawned))))
+
+(ert-deftest ygg-git-ci-gitlab-later-page-failure-keeps-earlier-rows ()
+  (let ((page (concat "["
+                      (mapconcat (lambda (i) (format "{\"id\":%d,\"name\":\"j%d\",\"status\":\"success\"}" i i))
+                                 (number-sequence 1 100) ",")
+                      "]")))
+    (dolist (failure '((1 "" "boom\n") (0 "not json" nil)))
+      (ygg-git-ci-tests--with
+        (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+        (with-temp-buffer
+          (ygg-git-ci-tests--render)
+          (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--pipelines nil)
+          (funcall (cdr (pop spawned)) 0 page nil)
+          (apply (cdr (pop spawned)) failure)
+          (let ((answer (cdr (gethash (ygg-git-ci-tests--key) ygg-git-ci--cache))))
+            (should (= 100 (length (plist-get answer :rows))))
+            (should (stringp (plist-get answer :error)))))))))
+
+(ert-deftest ygg-git-ci-synchronous-failure-while-rendering-does-not-refresh-reentrantly ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (cl-letf (((symbol-function 'ygg-git-review-requests--spawn)
+                 (lambda (_command callback) (funcall callback nil "" nil) nil)))
+        (ygg-git-ci-tests--render))
+      (should (= 0 refreshed))
+      (should (cl-find #'ygg-git-ci--refresh timers :key #'cadr))
+      (apply #'ygg-git-ci--refresh (nth 2 (cl-find #'ygg-git-ci--refresh timers :key #'cadr)))
+      (should (= 1 refreshed))
+      (should (string-match-p "gh not found" (buffer-string))))))
+
+(ert-deftest ygg-git-ci-startables-with-the-same-name-get-distinct-labels-and-play-the-chosen ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (ygg-git-ci-tests--seed
+     (list (ygg-git-ci-tests--run 'skipped :name "deploy" :playable t :kind 'job :id 123 :stage "prod")
+           (ygg-git-ci-tests--run 'skipped :name "deploy" :playable t :kind 'job :id 124 :stage "stage")))
+    (with-temp-buffer
+      (ygg-git-ci-tests-mode)
+      (let (items offered)
+        (ygg-git-ci-startable ygg-git-ci-tests--dir (lambda (found &rest _) (setq items found)))
+        (should (equal (mapcar (lambda (i) (plist-get i :label)) items)
+                       '("job: deploy (stage prod, #123)" "job: deploy (stage stage, #124)"
+                         "new pipeline: feat")))
+        (cl-letf (((symbol-function 'completing-read)
+                   (lambda (_p collection &rest _) (setq offered collection) (cadr collection)))
+                  ((symbol-function 'read-string) (lambda (&rest _) "")))
+          (ygg-git-ci--choose ygg-git-ci-tests--dir (ygg-git-ci-tests--key) items nil))
+        (should (member "projects/g%2Fr/jobs/124/play" (car (car spawned))))))))
+
+(ert-deftest ygg-git-ci-only-magit-buffers-are-watchers ()
+  (ygg-git-ci-tests--with
+    (let ((key (ygg-git-ci-tests--key)))
+      (with-temp-buffer
+        (ygg-git-ci--ensure key)
+        (should-not (gethash key ygg-git-ci--watchers))
+        (should-not (gethash key ygg-git-ci--buffers)))
+      (clrhash ygg-git-ci--running)
+      (with-temp-buffer
+        (ygg-git-ci-tests-mode)
+        (ygg-git-ci--ensure key)
+        (should (equal (gethash key ygg-git-ci--watchers) (list (current-buffer))))
+        (should (equal (gethash key ygg-git-ci--buffers) (list (current-buffer))))))))
 
 (provide 'ygg-git-ci-tests)
 ;;; ygg-git-ci-tests.el ends here

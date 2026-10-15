@@ -133,6 +133,7 @@
     (mapcar (lambda (job)
               (list :id (plist-get job :id) :kind 'job
                     :name (or (plist-get job :name) "job")
+                    :stage (plist-get job :stage)
                     :state (ygg-git-ci--gitlab-state (plist-get job :status)
                                                      (plist-get job :allow_failure))
                     :created (ygg-git-review-requests--time (plist-get job :created_at))
@@ -173,11 +174,19 @@
   (puthash key (seq-filter #'buffer-live-p (gethash key ygg-git-ci--buffers))
            ygg-git-ci--buffers))
 
+(defvar ygg-git-ci--rendering nil)
+
+(defun ygg-git-ci--refresh (buffer)
+  (when (buffer-live-p buffer)
+    (with-current-buffer buffer
+      (with-demoted-errors "ci: %S" (magit-refresh-buffer)))))
+
 (defun ygg-git-ci--store (key result &optional cell)
   (let* ((cell (or cell (gethash key ygg-git-ci--running)))
          (previous (cdr (gethash key ygg-git-ci--cache)))
          (buffers (gethash key ygg-git-ci--watchers)))
-    (when (and (plist-get result :error) (plist-member previous :rows))
+    (when (and (plist-get result :error) (not (plist-member result :rows))
+               (plist-member previous :rows))
       (setq result (list :rows (plist-get previous :rows)
                          :error (plist-get result :error))))
     (when (timerp (nth 2 cell))
@@ -187,20 +196,23 @@
     (remhash key ygg-git-ci--watchers)
     (ygg-git-ci--prune key)
     (dolist (buffer buffers)
-      (when (buffer-live-p buffer)
-        (with-current-buffer buffer
-          (with-demoted-errors "ci: %S" (magit-refresh-buffer)))))
+      (if ygg-git-ci--rendering
+          (run-at-time 0 nil #'ygg-git-ci--refresh buffer)
+        (ygg-git-ci--refresh buffer)))
     (ygg-git-ci--arm key)))
 
-(defun ygg-git-ci--land (key program status text stderr parser)
-  (ygg-git-ci--store
-   key
-   (cond ((null status) (list :error (format "%s not found" program)))
-         ((/= status 0)
-          (list :error (ygg-git-review-requests--failure program status stderr)))
-         (t (condition-case nil
-                (funcall parser text)
-              (error (list :error (format "%s answered nothing readable" program))))))))
+(defun ygg-git-ci--land (key program status text stderr parser &optional partial)
+  "Store what PARSER makes of TEXT; a failure keeps the PARTIAL rows."
+  (let ((result (cond ((null status) (list :error (format "%s not found" program)))
+                      ((/= status 0)
+                       (list :error (ygg-git-review-requests--failure program status stderr)))
+                      (t (condition-case nil
+                             (funcall parser text)
+                           (error (list :error (format "%s answered nothing readable"
+                                                       program))))))))
+    (when (and partial (plist-get result :error))
+      (setq result (list :rows partial :error (plist-get result :error))))
+    (ygg-git-ci--store key result)))
 
 (defun ygg-git-ci--step (key cell command callback)
   (let ((process (ygg-git-review-requests--spawn
@@ -271,7 +283,8 @@
             key program status text stderr
             (lambda (text)
               (list :rows (ygg-git-ci--gitlab-rows
-                           (append earlier (ygg-git-ci--json text)) pipeline))))))))))
+                           (append earlier (ygg-git-ci--json text)) pipeline)))
+            (and earlier (ygg-git-ci--gitlab-rows earlier pipeline)))))))))
 
 (defun ygg-git-ci--start (key)
   (let ((cell (list (float-time) nil nil))
@@ -291,9 +304,10 @@
   "The cached answer for KEY, asking the forge when it is stale or FORCE
 and no question is already out; the cache stays until the new answer lands."
   (let ((entry (gethash key ygg-git-ci--cache)))
-    (cl-pushnew (current-buffer) (gethash key ygg-git-ci--watchers))
+    (when (derived-mode-p 'magit-mode)
+      (cl-pushnew (current-buffer) (gethash key ygg-git-ci--watchers))
+      (cl-pushnew (current-buffer) (gethash key ygg-git-ci--buffers)))
     (ygg-git-ci--prune key)
-    (cl-pushnew (current-buffer) (gethash key ygg-git-ci--buffers))
     (when force
       (ygg-git-ci--abandon key))
     (when (and (not (gethash key ygg-git-ci--running))
@@ -358,7 +372,8 @@ and no question is already out; the cache stays until the new answer lands."
            ((plist-get context :key)
             (let* ((key (plist-get context :key))
                    (branch (cadr key))
-                   (answer (ygg-git-ci--ensure key))
+                   (answer (let ((ygg-git-ci--rendering t))
+                             (ygg-git-ci--ensure key)))
                    (rows (plist-get answer :rows)))
               (ygg-git-ci--arm key)
               (magit-insert-section (ci)
@@ -431,26 +446,42 @@ and no question is already out; the cache stays until the new answer lands."
 
 (defun ygg-git-ci--do (key label command &optional prompt)
   "Run COMMAND after PROMPT is agreed to, say how LABEL went, then refetch."
-  (let ((input (cadr (member "--input" command)))
-        (buffer (current-buffer))
-        (default-directory (or (magit-toplevel) default-directory)))
-    (if (and prompt (not (y-or-n-p prompt)))
-        (when input (ignore-errors (delete-file input)))
-      (message "ci: %s…" label)
-      (ygg-git-review-requests--spawn
-       command
-       (lambda (status _text &optional stderr)
-         (when input (ignore-errors (delete-file input)))
-         (message "%s" (if (eql status 0)
-                           (format "ci: %s done" label)
-                         (format "ci: %s failed: %s" label
-                                 (ygg-git-review-requests--failure
-                                  (car command) status stderr))))
-         (when (buffer-live-p buffer)
-           (with-current-buffer buffer
-             (ygg-git-ci--ensure key t)
-             (when (derived-mode-p 'magit-mode)
-               (magit-refresh-buffer)))))))))
+  (let* ((input (cadr (member "--input" command)))
+         (buffer (current-buffer))
+         (default-directory (or (magit-toplevel) default-directory))
+         (running nil)
+         (timer nil)
+         (cleanup (lambda () (when input (ignore-errors (delete-file input))))))
+    (unwind-protect
+        (when (or (null prompt) (y-or-n-p prompt))
+          (message "ci: %s…" label)
+          (setq running t)
+          (let* ((finished nil)
+                 (process
+                  (ygg-git-review-requests--spawn
+                   command
+                   (lambda (status _text &optional stderr)
+                     (setq finished t)
+                     (when (timerp timer) (cancel-timer timer))
+                     (funcall cleanup)
+                     (message "%s" (if (eql status 0)
+                                       (format "ci: %s done" label)
+                                     (format "ci: %s failed: %s" label
+                                             (ygg-git-review-requests--failure
+                                              (car command) status stderr))))
+                     (when (buffer-live-p buffer)
+                       (with-current-buffer buffer
+                         (ygg-git-ci--ensure key t)
+                         (when (derived-mode-p 'magit-mode)
+                           (magit-refresh-buffer))))))))
+            (unless finished
+              (setq timer
+                    (run-at-time ygg-git-ci-timeout nil
+                                 (lambda ()
+                                   (when process (ygg-git-review-requests--kill process))
+                                   (funcall cleanup)
+                                   (message "ci: %s timed out" label)))))))
+      (unless running (funcall cleanup)))))
 
 (defun ygg-git-ci-browse ()
   "Open the run at point in the browser."
@@ -628,31 +659,49 @@ hand, each with its :file."
       (push entry variables))
     (nreverse variables)))
 
+(defun ygg-git-ci--variable-pair (variable)
+  (let ((at (string-search ":" variable)))
+    (unless (and at (> at 0))
+      (user-error "Variable %S is not KEY:VALUE" variable))
+    (list :key (substring variable 0 at) :value (substring variable (1+ at)))))
+
 (defun ygg-git-ci--variables-json (variables)
   "The play request body for the KEY:VALUE strings VARIABLES."
   (json-serialize
    (list :job_variables_attributes
-         (vconcat (mapcar (lambda (v)
-                            (let ((at (string-search ":" v)))
-                              (unless (and at (> at 0))
-                                (user-error "Variable %S is not KEY:VALUE" v))
-                              (list :key (substring v 0 at) :value (substring v (1+ at)))))
-                          variables)))))
+         (vconcat (mapcar #'ygg-git-ci--variable-pair variables)))))
 
 (defun ygg-git-ci--startables (key rows workflows)
   "What can be started on KEY's branch as (LABEL . SPEC): manual jobs among ROWS,
 the dispatchable WORKFLOWS, and on GitLab a new pipeline."
-  (append
-   (mapcar (lambda (row) (cons (format "job: %s" (plist-get row :name))
-                               (list :kind 'job :name (plist-get row :name) :row row)))
-           (seq-filter (lambda (row) (plist-get row :playable)) rows))
-   (mapcar (lambda (workflow) (cons (format "workflow: %s" (plist-get workflow :name))
-                                    (list :kind 'workflow :name (plist-get workflow :name)
-                                          :workflow workflow)))
-           workflows)
-   (when (eq (car (car key)) 'gitlab)
-     (list (cons (format "new pipeline: %s" (cadr key))
-                 (list :kind 'pipeline :name (cadr key)))))))
+  (let* ((entries
+          (append
+           (mapcar (lambda (row)
+                     (list (format "job: %s" (plist-get row :name))
+                           (format "%s#%s" (if (plist-get row :stage)
+                                               (format "stage %s, " (plist-get row :stage))
+                                             "")
+                                   (plist-get row :id))
+                           (list :kind 'job :name (plist-get row :name) :row row)))
+                   (seq-filter (lambda (row) (plist-get row :playable)) rows))
+           (mapcar (lambda (workflow)
+                     (list (format "workflow: %s" (plist-get workflow :name))
+                           (format "#%s" (plist-get workflow :id))
+                           (list :kind 'workflow :name (plist-get workflow :name)
+                                 :workflow workflow)))
+                   workflows)
+           (when (eq (car (car key)) 'gitlab)
+             (list (list (format "new pipeline: %s" (cadr key)) nil
+                         (list :kind 'pipeline :name (cadr key))))))))
+    (mapcar (lambda (entry)
+              (cons (if (and (cadr entry)
+                             (> (seq-count (lambda (other) (equal (car other) (car entry)))
+                                           entries)
+                                1))
+                        (format "%s (%s)" (car entry) (cadr entry))
+                      (car entry))
+                    (nth 2 entry)))
+            entries)))
 
 (defun ygg-git-ci--start-spec (key spec)
   (let ((repo (car key)) (branch (cadr key)))
@@ -666,6 +715,7 @@ the dispatchable WORKFLOWS, and on GitLab a new pipeline."
                          (format "Play %s? " (plist-get row :name)))))
       ('pipeline
        (let ((variables (ygg-git-ci--read-variables)))
+         (mapc #'ygg-git-ci--variable-pair variables)
          (ygg-git-ci--do key (format "run a pipeline on %s" branch)
                          (append (list "glab" "ci" "run" "-R" (ygg-git-ci--glab-repo repo)
                                        "--branch" branch)
@@ -681,27 +731,34 @@ the dispatchable WORKFLOWS, and on GitLab a new pipeline."
                          (format "Run %s on %s? " (plist-get workflow :name) branch)))))))
 
 (defun ygg-git-ci-startable (root callback)
-  "Call CALLBACK with what can be started on the current branch of ROOT.
+  "Call CALLBACK once with what can be started on the current branch of ROOT.
 That is plists of :kind (job, workflow or pipeline), :name and :label, to give
 `ygg-git-ci-start'; a second argument says why the forge could not be asked."
   (let* ((default-directory root)
-         (key (ygg-git-ci--key))
+         (key (condition-case err
+                  (ygg-git-ci--key)
+                (error (funcall callback nil (error-message-string err)) nil)))
          (finish (lambda (workflows)
-                   (let ((rows (plist-get (cdr (gethash key ygg-git-ci--cache)) :rows)))
-                     (funcall callback
-                              (mapcar (lambda (choice) (append (list :label (car choice)) (cdr choice)))
-                                      (ygg-git-ci--startables key rows workflows)))))))
-    (if (eq (car (car key)) 'gitlab)
-        (funcall finish nil)
-      (let ((directory (or (magit-toplevel) default-directory)))
-        (message "ci: listing workflows…")
-        (ygg-git-review-requests--spawn
-         (list "gh" "workflow" "list" "--repo" (ygg-git-ci--slug (car key))
-               "--limit" "200" "--json" "name,id,state")
-         (lambda (status text &optional stderr)
-           (if (eql status 0)
-               (funcall finish (ygg-git-ci--dispatchable text directory))
-             (funcall callback nil (ygg-git-review-requests--failure "gh" status stderr)))))))))
+                   (apply callback
+                          (condition-case err
+                              (let ((rows (plist-get (cdr (gethash key ygg-git-ci--cache)) :rows)))
+                                (list (mapcar (lambda (choice)
+                                                (append (list :label (car choice)) (cdr choice)))
+                                              (ygg-git-ci--startables
+                                               key rows (funcall workflows)))))
+                            (error (list nil (error-message-string err))))))))
+    (when key
+      (if (eq (car (car key)) 'gitlab)
+          (funcall finish #'ignore)
+        (let ((directory (or (magit-toplevel) default-directory)))
+          (message "ci: listing workflows…")
+          (ygg-git-review-requests--spawn
+           (list "gh" "workflow" "list" "--repo" (ygg-git-ci--slug (car key))
+                 "--limit" "200" "--json" "name,id,state")
+           (lambda (status text &optional stderr)
+             (if (eql status 0)
+                 (funcall finish (lambda () (ygg-git-ci--dispatchable text directory)))
+               (funcall callback nil (ygg-git-review-requests--failure "gh" status stderr))))))))))
 
 (defun ygg-git-ci-start (root item)
   "Confirm and start ITEM, from `ygg-git-ci-startable', on ROOT's current branch."
