@@ -63,6 +63,35 @@ worker that has never authenticated."
             (list env))
           (ygg-forge-config-env project)))
 
+(defconst ygg-forge-config--device-url-regexp
+  "https://[^[:space:]]+\\(?:/login/device\\|/oauth/authorize[^[:space:]]*\\)"
+  "The page a login CLI asks the user to open.")
+
+(defun ygg-forge-config--browser-env ()
+  (when (eq system-type 'darwin)
+    (list "GH_BROWSER=/usr/bin/open" "BROWSER=/usr/bin/open")))
+
+(defun ygg-forge-config--device-url (buffer)
+  (with-current-buffer buffer
+    (save-excursion
+      (goto-char (point-min))
+      (when (re-search-forward ygg-forge-config--device-url-regexp nil t)
+        (match-string-no-properties 0)))))
+
+(defun ygg-forge-config--watch-for-url (buffer)
+  "Open the first login URL BUFFER shows, once, whether or not the CLI manages to."
+  (let (timer)
+    (setq timer
+          (run-with-timer
+           0.5 0.5
+           (lambda ()
+             (let ((url (and (buffer-live-p buffer)
+                             (ygg-forge-config--device-url buffer))))
+               (when (or url (not (buffer-live-p buffer)) (not (get-buffer-process buffer)))
+                 (cancel-timer timer))
+               (when url (browse-url url))))))
+    timer))
+
 (defun ygg-forge-config--run-terminal (root argv env)
   "Run ARGV in a terminal sitting in ROOT, with ENV in its environment."
   (unless (require 'ghostel nil t)
@@ -79,7 +108,8 @@ worker that has never authenticated."
           (select-window window)
           (ygg-call-with-buffer-env
            (lambda () (ghostel-exec buffer (car argv) (cdr argv)))
-           env))
+           (append env (ygg-forge-config--browser-env)))
+          (ygg-forge-config--watch-for-url buffer))
       (error (when (and (window-live-p window) (not (frame-root-window-p window)))
                (delete-window window))
              (kill-buffer buffer)

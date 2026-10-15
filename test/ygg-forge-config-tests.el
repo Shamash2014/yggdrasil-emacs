@@ -493,3 +493,36 @@
 
 (provide 'ygg-forge-config-tests)
 ;;; ygg-forge-config-tests.el ends here
+
+(ert-deftest ygg-forge-config-run-terminal-sets-browser-env ()
+  (let (env)
+    (cl-letf (((symbol-function 'require) (lambda (&rest _) t))
+              ((symbol-function 'ygg--term-split-window) (lambda () (selected-window)))
+              ((symbol-function 'select-window) #'ignore)
+              ((symbol-function 'set-window-buffer) #'ignore)
+              ((symbol-function 'ygg-call-with-buffer-env)
+               (lambda (_thunk extra) (setq env extra)))
+              ((symbol-function 'ygg-forge-config--watch-for-url) #'ignore)
+              (system-type 'darwin))
+      (ygg-forge-config--run-terminal temporary-file-directory '("gh") '("A=b"))
+      (should (member "A=b" env))
+      (should (member "GH_BROWSER=/usr/bin/open" env))
+      (should (member "BROWSER=/usr/bin/open" env)))))
+
+(ert-deftest ygg-forge-config-watch-opens-device-url-once ()
+  (let ((buffer (generate-new-buffer " *forge-watch*"))
+        (opened nil) timer)
+    (unwind-protect
+        (cl-letf (((symbol-function 'browse-url) (lambda (url &rest _) (push url opened))))
+          (setq timer (ygg-forge-config--watch-for-url buffer))
+          (with-current-buffer buffer (insert "! One-time code (AAAA-BBBB) copied\n"))
+          (cl-letf (((symbol-function 'get-buffer-process) (lambda (_) t)))
+            (timer-event-handler timer)
+            (should-not opened)
+            (with-current-buffer buffer
+              (insert "Press Enter to open https://github.com/login/device in your browser...\n"))
+            (timer-event-handler timer)
+            (timer-event-handler timer))
+          (should (equal '("https://github.com/login/device") opened)))
+      (when timer (cancel-timer timer))
+      (kill-buffer buffer))))
