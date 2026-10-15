@@ -838,5 +838,20 @@
         (should (equal (gethash key ygg-git-ci--watchers) (list (current-buffer))))
         (should (equal (gethash key ygg-git-ci--buffers) (list (current-buffer))))))))
 
+(ert-deftest ygg-git-ci-old-log-buffers-are-killed-past-the-cap ()
+  (let ((ygg-git-ci-log-buffers 2) buffers)
+    (unwind-protect
+        (progn
+          (dotimes (i 4)
+            (let ((b (generate-new-buffer (format "*ci log: t%d*" i))))
+              (with-current-buffer b
+                (setq ygg-git-ci--log-p t
+                      buffer-display-time (time-add (current-time) i)))
+              (push b buffers)))
+          (set-window-buffer (selected-window) (car (last buffers)))
+          (ygg-git-ci--gc-logs)
+          (should (equal (mapcar #'buffer-live-p (reverse buffers)) '(t nil t t))))
+      (mapc (lambda (b) (when (buffer-live-p b) (kill-buffer b))) buffers))))
+
 (provide 'ygg-git-ci-tests)
 ;;; ygg-git-ci-tests.el ends here

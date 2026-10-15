@@ -488,6 +488,23 @@ and no question is already out; the cache stays until the new answer lands."
   (interactive)
   (browse-url (plist-get (ygg-git-ci--at-point) :url)))
 
+(defcustom ygg-git-ci-log-buffers 5
+  "How many CI log buffers are kept; older ones not on screen are killed."
+  :type 'natnum :group 'ygg-git-ci)
+
+(defvar-local ygg-git-ci--log-p nil)
+
+(defun ygg-git-ci--gc-logs ()
+  "Kill the CI log buffers past `ygg-git-ci-log-buffers', least recently shown first."
+  (let ((logs (sort (seq-filter (lambda (b) (buffer-local-value 'ygg-git-ci--log-p b))
+                                (buffer-list))
+                    (lambda (a b)
+                      (time-less-p (or (buffer-local-value 'buffer-display-time b) 0)
+                                   (or (buffer-local-value 'buffer-display-time a) 0))))))
+    (dolist (buffer (nthcdr ygg-git-ci-log-buffers logs))
+      (unless (get-buffer-window buffer t)
+        (kill-buffer buffer)))))
+
 (defun ygg-git-ci-log ()
   "Show the log of the run at point."
   (interactive)
@@ -509,8 +526,10 @@ and no question is already out; the cache stays until the new answer lands."
              (insert text)
              (ansi-color-apply-on-region (point-min) (point-max)))
            (special-mode)
+           (setq ygg-git-ci--log-p t)
            (goto-char (point-min))
-           (pop-to-buffer (current-buffer))))))))
+           (pop-to-buffer (current-buffer))
+           (ygg-git-ci--gc-logs)))))))
 
 (defun ygg-git-ci-rerun ()
   "Rerun the run at point; a failed GitHub run may rerun only its failed jobs."
