@@ -976,6 +976,130 @@ changes a.txt and adds b.txt in two commits; main then changes shared.txt."
                  "git@H.example:g/p.git" "https://h.example/g/p/"))
     (should (equal (ygg-git-compare--url-key url) "h.example/g/p"))))
 
+(ert-deftest ygg-git-compare-c-o-jumps-back ()
+  (should (eq (lookup-key ygg-git-compare-mode-map (kbd "C-o")) #'ygg-jump-back))
+  (with-temp-buffer
+    (ygg-git-compare-mode 1)
+    (should (eq (key-binding (kbd "C-o")) #'ygg-jump-back))))
+
+(ert-deftest ygg-git-compare-tab-stays-with-magit ()
+  (should-not (lookup-key ygg-git-compare-mode-map (kbd "C-i"))))
+
+(ert-deftest ygg-git-compare-file-jumps-push-a-jump ()
+  (ygg-git-compare-tests--with-repo (root tree)
+    (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") (cons 'worktree tree))
+      (goto-char (point-min))
+      (ygg-git-compare-next-file)
+      (should (= 1 (length ygg-git-compare--jumps)))
+      (ygg-git-compare-next-hunk)
+      (should (= 1 (length ygg-git-compare--jumps))))))
+
+(ert-deftest ygg-git-compare-file-buffers-push-to-the-jumper ()
+  (let ((pushes 0))
+    (cl-letf (((symbol-function 'ygg--jump-push) (lambda () (cl-incf pushes))))
+      (with-temp-buffer
+        (setq buffer-file-name "/tmp/x")
+        (ygg-git-compare--push-jump)
+        (set-buffer-modified-p nil)
+        (setq buffer-file-name nil)))
+    (should (= pushes 1))))
+
+(ert-deftest ygg-git-compare-c-o-returns-after-a-file-move ()
+  (ygg-git-compare-tests--with-repo (root tree)
+    (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") (cons 'worktree tree))
+      (goto-char (point-min))
+      (let ((origin (point)))
+        (ygg-git-compare-next-file)
+        (should-not (= (point) origin))
+        (should (ygg-git-compare--list-jump-back))
+        (should (= (point) origin))
+        (should (ygg-git-compare--list-jump-forward))
+        (should-not (= (point) origin))))))
+
+(ert-deftest ygg-git-compare-c-o-crosses-list-and-diff ()
+  (ygg-git-compare-tests--with-repo (root tree)
+    (let* ((list (ygg-git-compare-buffer root '(rev . "main") (cons 'worktree tree)))
+           (other (generate-new-buffer " *compare-other*")))
+      (unwind-protect
+          (with-current-buffer list
+            (with-current-buffer other (setq ygg-git-compare--list-buffer list))
+            (setq ygg-git-compare--jumps
+                  (list (cons other (with-current-buffer other (point-marker)))))
+            (should (ygg-git-compare--list-jump-back))
+            (should (eq (current-buffer) other))
+            (should (ygg-git-compare--list-jump-forward))
+            (should (eq (current-buffer) list)))
+        (kill-buffer other)))))
+
+(ert-deftest ygg-git-compare-failed-move-leaves-the-jumps-alone ()
+  (ygg-git-compare-tests--with-repo (root tree)
+    (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") (cons 'worktree tree))
+      (goto-char (point-min))
+      (while (ignore-errors (ygg-git-compare-next-file) t))
+      (let ((jumps ygg-git-compare--jumps)
+            (forward (list (cons (current-buffer) (point-marker)))))
+        (setq ygg-git-compare--jumps-forward forward)
+        (should-error (ygg-git-compare-next-file) :type 'user-error)
+        (should (equal ygg-git-compare--jumps jumps))
+        (should (eq ygg-git-compare--jumps-forward forward))))))
+
+(ert-deftest ygg-git-compare-travel-skips-a-dead-buffer ()
+  (ygg-git-compare-tests--with-repo (root tree)
+    (let* ((list (ygg-git-compare-buffer root '(rev . "main") (cons 'worktree tree)))
+           (dead (generate-new-buffer " *compare-dead*"))
+           (live (generate-new-buffer " *compare-live*")))
+      (unwind-protect
+          (with-current-buffer list
+            (with-current-buffer live (setq ygg-git-compare--list-buffer list))
+            (setq ygg-git-compare--jumps
+                  (list (cons dead (with-current-buffer dead (point-marker)))
+                        (cons live (with-current-buffer live (point-marker)))))
+            (kill-buffer dead)
+            (should (ygg-git-compare--list-jump-back))
+            (should (eq (current-buffer) live))
+            (should-not ygg-git-compare--jumps))
+        (kill-buffer live)))))
+
+(ert-deftest ygg-git-compare-a-push-clears-the-forward-list ()
+  (ygg-git-compare-tests--with-repo (root tree)
+    (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") (cons 'worktree tree))
+      (setq ygg-git-compare--jumps-forward (list (cons (current-buffer) (point-marker))))
+      (ygg-git-compare--push-jump)
+      (should-not ygg-git-compare--jumps-forward)
+      (should (= 1 (length ygg-git-compare--jumps))))))
+
+(ert-deftest ygg-git-compare-travel-shows-a-hidden-buffer-in-the-file-window ()
+  (ygg-git-compare-tests--with-repo (root tree)
+    (let* ((list (ygg-git-compare-buffer root '(rev . "main") (cons 'worktree tree)))
+           (other (generate-new-buffer " *compare-other*"))
+           (start (selected-window)))
+      (unwind-protect
+          (save-window-excursion
+            (delete-other-windows)
+            (let ((list-window (selected-window))
+                  (file-window (split-window (selected-window))))
+              (set-window-buffer list-window list)
+              (set-window-buffer file-window (get-buffer-create " *compare-file*"))
+              (with-current-buffer other (setq ygg-git-compare--list-buffer list))
+              (with-current-buffer list
+                (setq ygg-git-compare--file-window file-window)
+                (setq ygg-git-compare--jumps
+                      (list (cons other (with-current-buffer other (point-marker))))))
+              (select-window list-window)
+              (set-buffer list)
+              (should (ygg-git-compare--list-jump-back))
+              (should (eq (window-buffer file-window) other))
+              (should (eq (window-buffer list-window) list))
+              (should (eq (selected-window) file-window))))
+        (kill-buffer other)
+        (when (window-live-p start) (select-window start))))))
+
+(ert-deftest ygg-git-compare-c-o-without-places-falls-through ()
+  (ygg-git-compare-tests--with-repo (root tree)
+    (with-current-buffer (ygg-git-compare-buffer root '(rev . "main") (cons 'worktree tree))
+      (should-not (ygg-git-compare--list-jump-back))
+      (should-not (ygg-git-compare--list-jump-forward)))))
+
 (provide 'ygg-git-compare-tests)
 ;;; ygg-git-compare-tests.el ends here
 

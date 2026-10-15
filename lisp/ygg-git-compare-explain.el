@@ -84,13 +84,14 @@ the diff of every file brings the file's diff back."
                (buffer (if (file-exists-p file)
                            (find-file-noselect file)
                          (user-error "%s is not in B's checkout" (file-name-nondirectory file)))))
-    (with-current-buffer list (setq ygg-git-compare--shown nil))
-    (if (window-live-p window)
-        (progn (select-window window) (switch-to-buffer buffer nil t))
-      (pop-to-buffer buffer))
-    (goto-char (point-min))
-    (forward-line (1- line))
-    (move-to-column column)))
+    (ygg-git-compare--jumping
+      (with-current-buffer list (setq ygg-git-compare--shown nil))
+      (if (window-live-p window)
+          (progn (select-window window) (switch-to-buffer buffer nil t))
+        (pop-to-buffer buffer))
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (move-to-column column))))
 
 ;;; Sessions on the range
 

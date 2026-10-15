@@ -387,15 +387,17 @@ moves on and the pane follows."
 (defun ygg-git-compare-next-unreviewed ()
   "Go to the next hunk not yet reviewed."
   (interactive)
-  (unless (ygg-git-compare-marks--next (ygg-git-compare-marks--read))
-    (user-error "No unreviewed hunk after point")))
+  (ygg-git-compare--jumping
+    (unless (ygg-git-compare-marks--next (ygg-git-compare-marks--read))
+      (user-error "No unreviewed hunk after point"))))
 
 ;;;###autoload
 (defun ygg-git-compare-previous-unreviewed ()
   "Go to the hunk before point not yet reviewed."
   (interactive)
-  (unless (ygg-git-compare-marks--next (ygg-git-compare-marks--read) t)
-    (user-error "No unreviewed hunk before point")))
+  (ygg-git-compare--jumping
+    (unless (ygg-git-compare-marks--next (ygg-git-compare-marks--read) t)
+      (user-error "No unreviewed hunk before point"))))
 
 ;;;###autoload
 (defun ygg-git-compare-toggle-unreviewed ()

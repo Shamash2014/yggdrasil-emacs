@@ -1563,8 +1563,9 @@ the error when there is no such overlay."
                      (or (car (last (seq-filter (lambda (p) (< p here)) starts)))
                          (car (last starts)))
                    (or (seq-find (lambda (p) (> p here)) starts) (car starts)))))
-    (goto-char target)
-    (ygg-git-compare--reveal)
+    (ygg-git-compare--jumping
+      (goto-char target)
+      (ygg-git-compare--reveal))
     (ygg-git-compare--jumped (ygg-git-compare--comments-at-point))
     (cons (1+ (seq-position starts target)) (length starts))))
 
@@ -1694,10 +1695,11 @@ with a leading - counts the old side."
     (let ((marker (or (ygg-git-compare-show-line path side line)
                       (user-error "%s of %s is outside the diff"
                                   (if (eq side 'old) (- line) line) path))))
-      (unless (eq (marker-buffer marker) (current-buffer))
-        (pop-to-buffer (marker-buffer marker)))
-      (goto-char marker)
-      (ygg-git-compare--reveal))))
+      (ygg-git-compare--jumping
+        (unless (eq (marker-buffer marker) (current-buffer))
+          (pop-to-buffer (marker-buffer marker)))
+        (goto-char marker)
+        (ygg-git-compare--reveal)))))
 
 ;;; Summary
 

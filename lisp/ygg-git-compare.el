@@ -91,6 +91,8 @@ left out of a review."
 (defvar-local ygg-git-compare--file-window nil)
 (defvar-local ygg-git-compare--shown nil "(RANGE . FILE) the right pane shows.")
 (defvar-local ygg-git-compare--timer nil)
+(declare-function ygg--jump-push "yggdrasil-motions" ())
+(declare-function ygg-jump-back "yggdrasil-motions" (&optional count))
 (defvar ygg-jump-back-functions)
 (defvar ygg-jump-forward-functions)
 (defvar-local ygg-git-compare--comments nil
@@ -2299,6 +2301,58 @@ when that is known, and a compare that is not its range says why instead."
       (when (oref section hidden) (magit-section-show section))
       (setq section (oref section parent)))))
 
+(defvar-local ygg-git-compare--jumps nil
+  "In a compare list, the (BUFFER . MARKER) places a jump left, newest first.")
+(defvar-local ygg-git-compare--jumps-forward nil
+  "In a compare list, the places a jump back left, for jumping forward.")
+
+(defconst ygg-git-compare--jumps-max 100)
+
+(defun ygg-git-compare--drop-places (places)
+  (dolist (place places) (set-marker (cdr place) nil)))
+
+(defun ygg-git-compare--cap-places (places)
+  (ygg-git-compare--drop-places (nthcdr ygg-git-compare--jumps-max places))
+  (seq-take places ygg-git-compare--jumps-max))
+
+(defun ygg-git-compare--push-jump (&optional buffer pos)
+  "Leave a jump origin at POS in BUFFER, by default point here."
+  (with-current-buffer (or buffer (current-buffer))
+    (save-excursion
+      (when pos (goto-char pos))
+      (cond ((buffer-file-name)
+             (when (fboundp 'ygg--jump-push) (ygg--jump-push)))
+            ((ygg-git-compare--owner (current-buffer))
+             (let ((here (cons (current-buffer) (point-marker))))
+               (with-current-buffer (ygg-git-compare--owner (current-buffer))
+                 (let ((head (car ygg-git-compare--jumps)))
+                   (if (and head (eq (car head) (car here))
+                            (eql (marker-position (cdr head)) (marker-position (cdr here))))
+                       (set-marker (cdr here) nil)
+                     (setq ygg-git-compare--jumps
+                           (ygg-git-compare--cap-places (cons here ygg-git-compare--jumps)))))
+                 (ygg-git-compare--drop-places ygg-git-compare--jumps-forward)
+                 (setq ygg-git-compare--jumps-forward nil))))
+            ((fboundp 'ygg--jump-push) (ygg--jump-push))))))
+
+(defun ygg-git-compare--call-jumping (thunk)
+  (let* ((buffer (current-buffer))
+         (pos (point))
+         (window (selected-window))
+         (shown (window-buffer window)))
+    (prog1 (funcall thunk)
+      (when (or (not (eq (current-buffer) buffer))
+                (not (eq (selected-window) window))
+                (not (eq (window-buffer window) shown))
+                (and (buffer-live-p buffer)
+                     (/= pos (with-current-buffer buffer (point)))))
+        (ygg-git-compare--push-jump buffer pos)))))
+
+(defmacro ygg-git-compare--jumping (&rest body)
+  "Run BODY, leaving a jump origin where it started if it moved."
+  (declare (indent 0))
+  `(ygg-git-compare--call-jumping (lambda () ,@body)))
+
 (defun ygg-git-compare--goto-section (pred back)
   "Go to the next section PRED holds for, or the one before with BACK."
   (let ((here (line-beginning-position))
@@ -2361,12 +2415,14 @@ on to the following file's when the one shown has none left."
 (defun ygg-git-compare-next-file ()
   "Go to the next file's diff."
   (interactive)
-  (ygg-git-compare--goto-section #'ygg-git-compare--diffed-file-p nil))
+  (ygg-git-compare--jumping
+    (ygg-git-compare--goto-section #'ygg-git-compare--diffed-file-p nil)))
 
 (defun ygg-git-compare-previous-file ()
   "Go to the diff of the file before."
   (interactive)
-  (ygg-git-compare--goto-section #'ygg-git-compare--diffed-file-p t))
+  (ygg-git-compare--jumping
+    (ygg-git-compare--goto-section #'ygg-git-compare--diffed-file-p t)))
 
 (defun ygg-git-compare-search-next (&optional back)
   "Go to the next match of the last search, or the one before with BACK;
@@ -2381,8 +2437,10 @@ around past the end."
                  (or (and (re-search-forward regexp nil t) (match-beginning 0))
                      (progn (goto-char (point-min))
                             (and (re-search-forward regexp nil t) (match-beginning 0))))))))
-    (goto-char (or at (user-error "No match for %s" regexp)))
-    (ygg-git-compare--reveal)))
+    (unless at (user-error "No match for %s" regexp))
+    (ygg-git-compare--jumping
+      (goto-char at)
+      (ygg-git-compare--reveal))))
 
 (defun ygg-git-compare-search-previous ()
   "Go to the match of the last search before point, around past the start."
@@ -2419,6 +2477,7 @@ around past the end."
   (message "Comments are on C; edit with C, delete with d d"))
 
 (defvar-keymap ygg-git-compare-mode-map
+  "C-o" #'ygg-jump-back
   "~" #'ygg-git-compare-swap
   "+" #'ygg-git-compare-expand-context
   "-" #'ygg-git-compare-shrink-context
@@ -2964,6 +3023,43 @@ fetched in the background and the compare drawn again when they are here."
     (goto-char (nth 2 state))
     t))
 
+(defun ygg-git-compare--travel (from to)
+  "Go to the newest live place on the list FROM, keeping this one on TO."
+  (when-let* (((not (buffer-file-name)))
+              (list (ygg-git-compare--owner (current-buffer)))
+              (entry (with-current-buffer list
+                       (let (found)
+                         (while (and (symbol-value from) (not found))
+                           (let ((e (pop (symbol-value from))))
+                             (if (and (buffer-live-p (car e)) (marker-buffer (cdr e)))
+                                 (setq found e)
+                               (set-marker (cdr e) nil))))
+                         found))))
+    (let ((here (cons (current-buffer) (point-marker))))
+      (with-current-buffer list
+        (set to (ygg-git-compare--cap-places (cons here (symbol-value to))))))
+    (let ((window (get-buffer-window (car entry)))
+          (file-window (buffer-local-value 'ygg-git-compare--file-window list)))
+      (cond ((eq (car entry) (current-buffer)))
+            (window (select-window window))
+            ((eq (car entry) list) (switch-to-buffer list))
+            ((window-live-p file-window)
+             (select-window file-window)
+             (switch-to-buffer (car entry)))
+            (t (switch-to-buffer (car entry)))))
+    (goto-char (cdr entry))
+    (set-marker (cdr entry) nil)
+    (ygg-git-compare--reveal)
+    t))
+
+(defun ygg-git-compare--list-jump-back ()
+  (ygg-git-compare--travel 'ygg-git-compare--jumps 'ygg-git-compare--jumps-forward))
+
+(defun ygg-git-compare--list-jump-forward ()
+  (ygg-git-compare--travel 'ygg-git-compare--jumps-forward 'ygg-git-compare--jumps))
+
+(add-hook 'ygg-jump-back-functions #'ygg-git-compare--list-jump-back)
+(add-hook 'ygg-jump-forward-functions #'ygg-git-compare--list-jump-forward)
 (add-hook 'ygg-jump-back-functions #'ygg-git-compare--jump-back)
 (add-hook 'ygg-jump-forward-functions #'ygg-git-compare--jump-forward)
 
