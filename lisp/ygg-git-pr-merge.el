@@ -40,6 +40,15 @@
           "\\|Bearer[ \t]+[^ \t\n]+"
           "\\|\\(?:PRIVATE-TOKEN\\|JOB-TOKEN\\|CI_JOB_TOKEN\\)[:=][ \t]*[^ \t\n]+\\)"))
 
+(defvar aob-gc-kept-branches)
+
+(defcustom ygg-git-pr-merge-delete-branch 'ask
+  "Whether merging a request also deletes its source branch.
+`ask' leaves it to the menu, which starts from the forge's own setting;
+`always' starts the menu with the deletion on; `never' removes the option."
+  :type '(choice (const ask) (const always) (const never))
+  :group 'magit-status)
+
 (defvar ygg-git-pr-merge-retry-delay 2)
 (defvar ygg-git-pr-merge-merged-hook nil
   "Run with (REPO INFO CHOICE ORIGIN) once a request is merged for certain.")
@@ -91,6 +100,11 @@
                  (setq pending t)))))
       (cond (failing 'failing) (pending 'pending) (t 'passing)))))
 
+(defun ygg-git-pr-merge--kept-p (branch)
+  (if (stringp (bound-and-true-p aob-gc-kept-branches))
+      (string-match-p aob-gc-kept-branches branch)
+    (member branch '("main" "master" "develop"))))
+
 (defun ygg-git-pr-merge--github-info (pr repo-json)
   (let ((mergeable (plist-get pr :mergeable))
         (status (plist-get pr :mergeStateStatus))
@@ -116,7 +130,8 @@
                            (and (plist-get repo-json :mergeCommitAllowed) '(merge))
                            (and (plist-get repo-json :rebaseMergeAllowed) '(rebase)))
           :deletable (and (not (plist-get pr :isCrossRepository))
-                          (not (member head (list base default))))
+                          (not (member head (list base default)))
+                          (not (ygg-git-pr-merge--kept-p head)))
           :delete (and (plist-get repo-json :deleteBranchOnMerge) t))))
 
 (defun ygg-git-pr-merge--gitlab-info (mr project)
@@ -150,8 +165,11 @@
           :labels (pcase method
                     ("ff" '((rebase . "fast-forward")))
                     ("rebase_merge" '((merge . "semi-linear merge"))))
-          :deletable (not (member head (list base default)))
-          :delete (and (plist-get project :remove_source_branch_after_merge) t))))
+          :deletable (and (not (member head (list base default)))
+                          (not (ygg-git-pr-merge--kept-p head)))
+          :delete (and (or (plist-get project :remove_source_branch_after_merge)
+                           (plist-get mr :force_remove_source_branch))
+                       t))))
 
 (defun ygg-git-pr-merge--fetch (repo number callback)
   "Ask the forge for request NUMBER and REPO's settings, then call CALLBACK
@@ -245,6 +263,46 @@ GitHub is still computing mergeability."
         (format "repos/%s/git/refs/heads/%s" (nth 2 repo)
                 (mapconcat #'url-hexify-string (split-string (plist-get info :head) "/") "/"))))
 
+(defun ygg-git-pr-merge--worktree-branches ()
+  (delq nil (mapcar (lambda (line)
+                      (and (string-prefix-p "branch refs/heads/" line)
+                           (substring line (length "branch refs/heads/"))))
+                    (magit-git-lines "worktree" "list" "--porcelain"))))
+
+(defun ygg-git-pr-merge--local-tip (branch)
+  (magit-git-string "rev-parse" "--verify" "--quiet" (concat "refs/heads/" branch)))
+
+(defun ygg-git-pr-merge--ancestor-p (tip sha)
+  (magit-git-success "merge-base" "--is-ancestor" tip sha))
+
+(defun ygg-git-pr-merge--delete-local (branch)
+  (magit-git-success "branch" "-D" branch))
+
+(defun ygg-git-pr-merge--local-fate (info)
+  "Delete INFO's local source branch when safe: `deleted', nil when there is
+none, else the reason it was kept."
+  (let* ((branch (plist-get info :head))
+         (tip (ygg-git-pr-merge--local-tip branch)))
+    (cond ((null tip) nil)
+          ((member branch (ygg-git-pr-merge--worktree-branches))
+           "it is checked out in a worktree")
+          ((not (ygg-git-pr-merge--ancestor-p tip (plist-get info :sha)))
+           "it has commits the request does not")
+          ((ygg-git-pr-merge--delete-local branch) 'deleted)
+          (t "git could not delete it"))))
+
+(defun ygg-git-pr-merge--note (info remote-failure local)
+  (let* ((branch (plist-get info :head))
+         (remote (not remote-failure))
+         (local-gone (eq local 'deleted)))
+    (concat (cond ((and remote local-gone) (format ", deleted %s (remote and local)" branch))
+                  (remote (format ", deleted %s" branch))
+                  (local-gone (format ", deleted local %s" branch)))
+            (and remote-failure
+                 (format "; deleting remote branch %s failed: %s" branch remote-failure))
+            (and (stringp local)
+                 (format "; kept local %s: %s" branch local)))))
+
 (defun ygg-git-pr-merge--run-all (commands callback)
   "Run COMMANDS in turn, stopping at the first failure; CALLBACK gets nil or
 the failure's words, the last command's output and the command that failed."
@@ -330,6 +388,7 @@ the failure's words, the last command's output and the command that failed."
 
 (defun ygg-git-pr-merge--delete-offered-p (repo info auto)
   (and (plist-get info :deletable)
+       (not (eq ygg-git-pr-merge-delete-branch 'never))
        (not (and (eq (car repo) 'github) auto))))
 
 (defun ygg-git-pr-merge--default-args (scope)
@@ -339,7 +398,8 @@ the failure's words, the last command's output and the command that failed."
     (delq nil (list (concat "--target=" (plist-get info :base))
                     (concat "--method=" (ygg-git-pr-merge--default-method info))
                     (and auto "--auto")
-                    (and (plist-get info :delete)
+                    (and (or (eq ygg-git-pr-merge-delete-branch 'always)
+                             (plist-get info :delete))
                          (ygg-git-pr-merge--delete-offered-p repo info auto)
                          "--delete")))))
 
@@ -388,12 +448,15 @@ the failure's words, the last command's output and the command that failed."
                                 t))))))
 
 (defun ygg-git-pr-merge--question (repo info choice)
-  (format "%s #%s into %s%s? "
+  (format "%s #%s into %s%s%s? "
           (pcase (plist-get choice :method)
             ('squash "Squash-merge") ('rebase "Rebase-merge") (_ "Merge"))
           (plist-get info :number) (plist-get choice :target)
           (if (plist-get choice :auto)
               (format " when %s" (ygg-git-pr-merge--passes repo))
+            "")
+          (if (plist-get choice :delete)
+              (format " and delete %s" (plist-get info :head))
             "")))
 
 (defun ygg-git-pr-merge--submit (scope args)
@@ -436,7 +499,8 @@ the failure's words, the last command's output and the command that failed."
               (propertize " (the repository's setting decides with auto-merge)" 'face 'shadow)))))
 
 (defun ygg-git-pr-merge--deletable-p ()
-  (plist-get (plist-get (transient-scope) :info) :deletable))
+  (and (plist-get (plist-get (transient-scope) :info) :deletable)
+       (not (eq ygg-git-pr-merge-delete-branch 'never))))
 
 (transient-define-prefix ygg-git-pr-merge-menu ()
   "Merge the pull or merge request held in the transient's scope."
@@ -492,19 +556,22 @@ the failure's words, the last command's output and the command that failed."
          (ygg-git-pr-merge--outcome
           repo info (plist-get choice :auto) output
           (lambda (outcome)
-            (if (and (eq outcome 'merged) github (plist-get choice :delete))
-                (ygg-git-pr-merge--run-all
-                 (list (ygg-git-pr-merge--delete-command repo info))
-                 (lambda (delete-failure _output _failed)
-                   (ygg-git-pr-merge--clear key)
-                   (ygg-git-pr-merge--report
-                    repo info choice origin outcome
-                    (if delete-failure
-                        (format "; deleting remote branch %s failed: %s"
-                                (plist-get info :head) delete-failure)
-                      (format "; remote branch %s deleted" (plist-get info :head))))))
-              (ygg-git-pr-merge--clear key)
-              (ygg-git-pr-merge--report repo info choice origin outcome nil)))))))))
+            (let ((delete (and (eq outcome 'merged) (plist-get choice :delete))))
+              (if (and delete github)
+                  (ygg-git-pr-merge--run-all
+                   (list (ygg-git-pr-merge--delete-command repo info))
+                   (lambda (delete-failure _output _failed)
+                     (ygg-git-pr-merge--clear key)
+                     (ygg-git-pr-merge--report
+                      repo info choice origin outcome
+                      (ygg-git-pr-merge--note info delete-failure
+                                              (ygg-git-pr-merge--local-fate info)))))
+                (ygg-git-pr-merge--clear key)
+                (ygg-git-pr-merge--report
+                 repo info choice origin outcome
+                 (and delete
+                      (ygg-git-pr-merge--note info nil
+                                              (ygg-git-pr-merge--local-fate info)))))))))))))
 
 (defun ygg-git-pr-merge--decide (repo info origin remotes dir key)
   (let ((number (plist-get info :number)))

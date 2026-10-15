@@ -67,6 +67,10 @@ exit 0
 (defvar ygg-git-pr-merge-tests--defaults nil)
 (defvar ygg-git-pr-merge-tests--header nil)
 (defvar ygg-git-pr-merge-tests--after-start nil)
+(defvar ygg-git-pr-merge-tests--local-tip nil)
+(defvar ygg-git-pr-merge-tests--worktrees nil)
+(defvar ygg-git-pr-merge-tests--ancestor t)
+(defvar ygg-git-pr-merge-tests--local-deleted nil)
 
 (defun ygg-git-pr-merge-tests--set (args prefix value)
   (let ((rest (seq-remove (lambda (a) (string-prefix-p prefix a)) args)))
@@ -138,9 +142,20 @@ once it says its last word."
             (ygg-git-pr-merge-tests--confirm t)
             (ygg-git-pr-merge-retry-delay 0)
             (ygg-git-pr-merge--active nil)
-            (ygg-git-pr-merge-tests--after-start nil))
+            (ygg-git-pr-merge-tests--after-start nil)
+            (ygg-git-pr-merge-tests--local-tip nil)
+            (ygg-git-pr-merge-tests--worktrees nil)
+            (ygg-git-pr-merge-tests--ancestor t)
+            (ygg-git-pr-merge-tests--local-deleted nil))
        (unwind-protect
-           (progn
+           (cl-letf (((symbol-function 'ygg-git-pr-merge--local-tip)
+                      (lambda (_branch) ygg-git-pr-merge-tests--local-tip))
+                     ((symbol-function 'ygg-git-pr-merge--worktree-branches)
+                      (lambda () ygg-git-pr-merge-tests--worktrees))
+                     ((symbol-function 'ygg-git-pr-merge--ancestor-p)
+                      (lambda (_tip _sha) ygg-git-pr-merge-tests--ancestor))
+                     ((symbol-function 'ygg-git-pr-merge--delete-local)
+                      (lambda (branch) (push branch ygg-git-pr-merge-tests--local-deleted) t)))
              (dolist (name '("gh" "glab"))
                (let ((script (expand-file-name name ygg-git-pr-merge-tests--dir)))
                  (with-temp-file script (insert ygg-git-pr-merge-tests--fake))
@@ -170,7 +185,7 @@ once it says its last word."
   (should (equal (ygg-git-pr-merge-tests--merge-calls)
                  '("gh pr merge 5 --repo github.com/o/r --squash --match-head-commit abc1234567890def")))
   (should (member "--target=main" ygg-git-pr-merge-tests--defaults))
-  (should (member "Merged #5 into main (squash); remote branch feat deleted"
+  (should (member "Merged #5 into main (squash), deleted feat"
                   ygg-git-pr-merge-tests--messages))
   (should (equal (ygg-git-pr-merge-tests--deletes)
                  '("gh api --hostname github.com -X DELETE repos/o/r/git/refs/heads/feat"))))
@@ -299,7 +314,7 @@ once it says its last word."
   (dolist (part '("Merge PR #5 \"Add thing\" at abc12345  feat -> main" "checks: passing"
                   "review: approved" "mergeable: mergeable"))
     (should (string-match-p (regexp-quote part) ygg-git-pr-merge-tests--header)))
-  (should (equal (ygg-git-pr-merge-tests--confirm-text) "Squash-merge #5 into main? ")))
+  (should (equal (ygg-git-pr-merge-tests--confirm-text) "Squash-merge #5 into main and delete feat? ")))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-failure-surfaces-the-forge-text
   (ygg-git-pr-merge-tests--put "failmerge" "X Pull request is not mergeable: ghp_abcDEF123 base branch policy prohibits the merge\n")
@@ -618,6 +633,106 @@ once it says its last word."
                    "glcbt-64_abcDEF" "Bearer eyJhbGciOi.abc" "CI_JOB_TOKEN=abcd1234" "JOB-TOKEN: abcd1234"))
     (let ((said (ygg-git-pr-merge--scrub (format "bad credentials %s here" token))))
       (should (string-match-p "bad credentials <token> here" said)))))
+
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-ask-yes-adds-the-flag-for-gitlab
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
+                               '("target" . "main") '("method" . "merge") '("delete" . "yes"))
+  (should (string-match-p " --remove-source-branch$" (car (ygg-git-pr-merge-tests--merge-calls))))
+  (should (string-match-p "and delete fix\\? " (ygg-git-pr-merge-tests--confirm-text)))
+  (should (member "Merged #7 into main (merge), deleted fix" ygg-git-pr-merge-tests--messages)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-ask-yes-deletes-on-github-after-the-merge
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+                               '("target" . "main") '("method" . "squash") '("delete" . "yes"))
+  (should (= 1 (length (ygg-git-pr-merge-tests--deletes))))
+  (should (string-match-p "and delete feat\\? " (ygg-git-pr-merge-tests--confirm-text))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-never-offers-and-flags-nothing
+  (let ((ygg-git-pr-merge-delete-branch 'never))
+    (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
+                                 '("target" . "main") '("method" . "merge") '("delete" . "yes"))
+    (should-not (member "--delete" ygg-git-pr-merge-tests--defaults))
+    (should-not (ygg-git-pr-merge--delete-offered-p
+                 ygg-git-pr-merge-tests--gl (plist-get ygg-git-pr-merge-tests--scope :info) nil))
+    (should-not (string-match-p "remove-source-branch" (car (ygg-git-pr-merge-tests--merge-calls))))
+    (should-not (string-match-p "delete" (ygg-git-pr-merge-tests--confirm-text)))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-always-starts-with-the-deletion-on
+  (let ((ygg-git-pr-merge-delete-branch 'always))
+    (ygg-git-pr-merge-tests--put "repoview.json"
+                                 (replace-regexp-in-string "\"deleteBranchOnMerge\":true" "\"deleteBranchOnMerge\":false"
+                                                           ygg-git-pr-merge-tests--gh-repo))
+    (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '("target" . "main"))
+    (should (member "--delete" ygg-git-pr-merge-tests--defaults))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-mr-setting-defaults-to-delete
+  (ygg-git-pr-merge-tests--put "mr.json"
+                               (replace-regexp-in-string "\"source_branch\"" "\"force_remove_source_branch\":true,\"source_branch\""
+                                                         ygg-git-pr-merge-tests--gl-mr))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7 '("target" . "main"))
+  (should (member "--delete" ygg-git-pr-merge-tests--defaults)))
+
+(defvar aob-gc-kept-branches)
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-kept-and-base-branches-are-never-offered
+  (dolist (head '("main" "stage" "release/1.2" "backup/x"))
+   (let ((aob-gc-kept-branches "\\`\\(?:main\\|stage\\|release/.*\\|backup/.*\\)\\'"))
+    (ygg-git-pr-merge-tests--put "prview.json"
+                                 (replace-regexp-in-string "\"headRefName\":\"feat\""
+                                                           (format "\"headRefName\":\"%s\"" head)
+                                                           ygg-git-pr-merge-tests--gh-pr))
+    (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+                                 '("target" . "main") '("method" . "squash") '("delete" . "yes"))
+    (should-not (plist-get (plist-get ygg-git-pr-merge-tests--scope :info) :deletable))
+    (should-not (member "--delete" ygg-git-pr-merge-tests--defaults))
+    (should-not (ygg-git-pr-merge-tests--deletes))))
+  (ygg-git-pr-merge-tests--put "prview.json"
+                               (replace-regexp-in-string "\"baseRefName\":\"main\",\"headRefName\":\"feat\""
+                                                         "\"baseRefName\":\"feat\",\"headRefName\":\"feat\""
+                                                         ygg-git-pr-merge-tests--gh-pr))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '("target" . "main"))
+  (should-not (plist-get (plist-get ygg-git-pr-merge-tests--scope :info) :deletable)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-gitlab-auto-merge-passes-the-flag
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
+                               '("target" . "main") '("method" . "merge")
+                               '("auto" . "yes") '("delete" . "yes"))
+  (should (string-match-p "--auto-merge=true .*--remove-source-branch$"
+                          (car (ygg-git-pr-merge-tests--merge-calls)))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-local-branch-is-deleted-when-free-and-its-tip-matches
+  (setq ygg-git-pr-merge-tests--local-tip "abc1234567890def")
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+                               '("target" . "main") '("method" . "squash") '("delete" . "yes"))
+  (should (equal ygg-git-pr-merge-tests--local-deleted '("feat")))
+  (should (member "Merged #5 into main (squash), deleted feat (remote and local)"
+                  ygg-git-pr-merge-tests--messages)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-local-branch-with-other-commits-is-kept
+  (setq ygg-git-pr-merge-tests--local-tip "ffff" ygg-git-pr-merge-tests--ancestor nil)
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+                               '("target" . "main") '("method" . "squash") '("delete" . "yes"))
+  (should-not ygg-git-pr-merge-tests--local-deleted)
+  (should (string-match-p "kept local feat: it has commits the request does not"
+                          (car ygg-git-pr-merge-tests--messages))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-checked-out-local-branch-is-kept-with-a-note
+  (setq ygg-git-pr-merge-tests--local-tip "abc1234567890def"
+        ygg-git-pr-merge-tests--worktrees '("fix"))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
+                               '("target" . "main") '("method" . "merge") '("delete" . "yes"))
+  (should-not ygg-git-pr-merge-tests--local-deleted)
+  (should (member "Merged #7 into main (merge), deleted fix; kept local fix: it is checked out in a worktree"
+                  ygg-git-pr-merge-tests--messages)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-local-branch-is-untouched-when-the-merge-is-queued
+  (setq ygg-git-pr-merge-tests--local-tip "abc1234567890def")
+  (ygg-git-pr-merge-tests--put "post-mr.json" "{\"state\":\"opened\",\"merge_when_pipeline_succeeds\":true}")
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
+                               '("target" . "main") '("method" . "merge")
+                               '("auto" . "yes") '("delete" . "yes"))
+  (should-not ygg-git-pr-merge-tests--local-deleted))
 
 (provide 'ygg-git-pr-merge-tests)
 ;;; ygg-git-pr-merge-tests.el ends here
