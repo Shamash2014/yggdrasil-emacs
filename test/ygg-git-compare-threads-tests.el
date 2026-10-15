@@ -1458,6 +1458,42 @@ string, or (STATUS . WHAT-IT-SAID)."
                                     (car sent)))
             (should (string-search "thread 103" (car sent)))))))))
 
+(ert-deftest ygg-git-compare-threads-fresh-fetches-stale-comments-and-hands-them-over ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github
+                                         (* 3 ygg-git-compare-threads-ttl))
+    (let (done got)
+      (ygg-git-compare-threads-tests--held-fetch done
+        (ygg-git-compare-threads-tests--with-compare head 'github
+          (ygg-git-compare--remote-fresh (current-buffer) (ygg-git-compare--remote-pr)
+                                         (lambda (&rest args) (setq got args)))
+          (should-not got)
+          (ygg-git-compare-threads-tests--land done)
+          (should (null (cadr got)))
+          (should (car got)))))))
+
+(ert-deftest ygg-git-compare-threads-fresh-skips-the-fetch-for-recent-comments ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (ygg-git-compare-threads-tests--seed head 'github #'ygg-git-compare-threads-tests--github 1)
+    (let (done got)
+      (ygg-git-compare-threads-tests--held-fetch done
+        (ygg-git-compare-threads-tests--with-compare head 'github
+          (ygg-git-compare--remote-fresh (current-buffer) (ygg-git-compare--remote-pr)
+                                         (lambda (&rest args) (setq got args)))
+          (should-not done)
+          (should (car got))
+          (should (null (cadr got))))))))
+
+(ert-deftest ygg-git-compare-threads-fresh-says-why-when-the-fetch-fails ()
+  (ygg-git-compare-threads-tests--with-repo root head
+    (let (done got)
+      (ygg-git-compare-threads-tests--held-fetch done
+        (ygg-git-compare-threads-tests--with-compare head 'github
+          (ygg-git-compare--remote-fresh (current-buffer) (ygg-git-compare--remote-pr)
+                                         (lambda (&rest args) (setq got args)))
+          (funcall done nil "gh is down")
+          (should (equal got '(nil "gh is down"))))))))
+
 (ert-deftest ygg-git-compare-threads-resolved-lines-go-when-their-header-does-not-fit ()
   (let* ((comments '((:thread "o1" :new-path "a" :author "x" :resolved nil :resolvable t :text "open one")
                      (:thread "r1" :new-path "b" :author "y" :resolved t :resolvable t :text "done 1")

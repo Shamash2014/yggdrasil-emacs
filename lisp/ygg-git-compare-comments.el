@@ -143,23 +143,32 @@ With STORE, (FILE . KEY), only that is changed, the compare's buffer being gone.
         (ygg-git-compare--store-update (car store) (cdr store) mark)
       (ygg-git-compare--change mark))))
 
+(defun ygg-git-compare--squash (text)
+  (replace-regexp-in-string "[ \t\n\r]+" " " (string-trim (or text ""))))
+
 (defun ygg-git-compare--sent-text-p (draft remote)
-  (let ((text (string-trim (or (plist-get draft :text) ""))))
+  (let ((text (ygg-git-compare--squash (plist-get draft :text))))
     (and (not (string-empty-p text))
-         (string-search text (or (plist-get remote :text) "")))))
+         (string-search text (ygg-git-compare--squash (plist-get remote :text))))))
+
+(defun ygg-git-compare--on-forge-p (draft remotes)
+  "Whether DRAFT is already among REMOTES, the comments from the forge."
+  (seq-some
+   (lambda (remote)
+     (and (not (plist-get remote :notice))
+          (ygg-git-compare--sent-text-p draft remote)
+          (if (eq (or (plist-get draft :level) (if (plist-get draft :file) 'line 'review)) 'review)
+              (eq (plist-get remote :level) 'review)
+            (and (seq-intersection
+                  (delq nil (mapcar (lambda (k) (plist-get draft k)) '(:new-path :old-path :file)))
+                  (delq nil (mapcar (lambda (k) (plist-get remote k)) '(:new-path :old-path :file))))
+                 (or (null (plist-get remote :line))
+                     (eql (plist-get draft :line) (plist-get remote :line)))))))
+   remotes))
 
 (defun ygg-git-compare--sent-shown-p (draft remotes)
   "Whether DRAFT, if sent, is already among REMOTES, the comments from the forge."
-  (and (plist-get draft :sent)
-       (seq-some
-        (lambda (remote)
-          (and (not (plist-get remote :notice))
-               (ygg-git-compare--sent-text-p draft remote)
-               (or (eq (plist-get draft :level) 'review)
-                   (and (equal (plist-get draft :new-path) (plist-get remote :new-path))
-                        (or (null (plist-get remote :line))
-                            (eql (plist-get draft :line) (plist-get remote :line)))))))
-        remotes)))
+  (and (plist-get draft :sent) (ygg-git-compare--on-forge-p draft remotes)))
 
 ;;; Comments
 

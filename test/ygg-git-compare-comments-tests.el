@@ -1774,3 +1774,23 @@ and adds b.txt; main stays checked out."
       (ygg-git-compare-comments-mark-sent '("d1") ygg-git-compare--store)
       (ygg-git-compare--reload)
       (should (= (length (ygg-git-compare-comments-list)) 1)))))
+
+
+(ert-deftest ygg-git-compare-comments-on-forge-ignores-whitespace-and-wants-the-same-place ()
+  (let ((remote (list (list :remote t :new-path "a.el" :line 4 :level 'line
+                            :text "**nit:** make  it\nshort, please")
+                      (list :remote t :level 'review :text "overall fine"))))
+    (should (ygg-git-compare--on-forge-p
+             '(:level line :new-path "a.el" :line 4 :text " make it short, ") remote))
+    (should-not (ygg-git-compare--on-forge-p
+                 '(:level line :new-path "a.el" :line 5 :text "make it short") remote))
+    (should-not (ygg-git-compare--on-forge-p
+                 '(:level line :new-path "b.el" :line 4 :text "make it short") remote))
+    (should (ygg-git-compare--on-forge-p '(:text "overall fine") remote))
+    (should-not (ygg-git-compare--on-forge-p '(:text "make it short") remote))
+    (should-not (ygg-git-compare--on-forge-p '(:level line :new-path "a.el" :text "  ") remote))))
+
+(ert-deftest ygg-git-compare-comments-a-draft-on-a-deleted-file-is-found-on-the-forge ()
+  (should (ygg-git-compare--on-forge-p
+           '(:level line :old-path "gone.el" :line 3 :text "why remove this")
+           '((:old-path "gone.el" :line 3 :text "why remove this?")))))

@@ -27,6 +27,8 @@
 (defvar ygg-git-compare-submit-tests--messages nil)
 (defvar ygg-git-compare-submit-tests--marked nil "Each mark of sent comments, newest first, as (IDS STORE).")
 (defvar ygg-git-compare-submit-tests--prompts nil)
+(defvar ygg-git-compare-submit-tests--remote nil
+  "The comments the forge holds, or (:unread . WHY) when they cannot be read.")
 
 (defconst ygg-git-compare-submit-tests--github-pr
   '(:forge github :host "github.com" :path "o/r" :number 12 :head "h" :base "b"
@@ -63,6 +65,7 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
          (ygg-git-compare-submit-tests--calls nil)
          (ygg-git-compare-submit-tests--messages nil)
          (ygg-git-compare-submit-tests--prompts nil)
+         (ygg-git-compare-submit-tests--remote nil)
          (call-process-before (symbol-function 'call-process))
          (make-process-before (symbol-function 'make-process)))
      (cl-letf (((symbol-function 'call-process)
@@ -96,6 +99,12 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
                                       (plist-put (copy-sequence c) :sent t)
                                     c))
                                 ygg-git-compare-submit-tests--comments))))
+               ((symbol-function 'ygg-git-compare--remote-fresh)
+                (lambda (_list _pr then)
+                  (let ((remote ygg-git-compare-submit-tests--remote))
+                    (if (eq (car-safe remote) :unread)
+                        (funcall then nil (cdr remote))
+                      (funcall then remote nil)))))
                ((symbol-function 'ygg-git-compare--list) #'current-buffer)
                ((symbol-function 'ygg-git-compare--range-label) (lambda () "R"))
                ((symbol-function 'y-or-n-p)
@@ -1310,3 +1319,108 @@ says what it prints.  The confirm answers `ygg-git-compare-submit-tests--yes'."
       (should (equal (car (car ygg-git-compare-submit-tests--marked))
                      '("summary" "line" "range" "whole")))
       (should (= (length (ygg-git-compare-submit-tests--posts)) 2)))))
+
+;;; Already on the forge
+
+(defun ygg-git-compare-submit-tests--remote-line (id text path line)
+  (list :remote t :id id :level 'line :text text :new-path path :line line))
+
+(defconst ygg-git-compare-submit-tests--old-drafts
+  (list (ygg-git-compare-submit-tests--c "old-line" :level 'line :file "a.txt"
+                                         :new-path "a.txt" :side 'new :line 2
+                                         :text "  Rename   this\nvariable ")
+        (ygg-git-compare-submit-tests--c "old-summary" :level 'review :text "Looks off overall")
+        (ygg-git-compare-submit-tests--c "fresh" :level 'line :file "a.txt"
+                                         :new-path "a.txt" :side 'new :line 9
+                                         :text "Never sent before")))
+
+(defun ygg-git-compare-submit-tests--forge-has (forge)
+  (setq ygg-git-compare-submit-tests--remote
+        (list (ygg-git-compare-submit-tests--remote-line
+              "r1" "**nit:** Rename this variable please" "a.txt" 2)
+              (if (eq forge 'github)
+                  (list :remote t :id "r2" :level 'review
+                        :text "Review: Looks off overall, see inline")
+                (list :remote t :id "r2" :level 'review :text "Looks off overall")))))
+
+(ert-deftest ygg-git-compare-submit-github-skips-and-marks-drafts-the-forge-has ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--old-drafts
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-tests--forge-has 'github)
+    (ygg-git-compare-submit-forge 'comment)
+    (should (equal (car (last ygg-git-compare-submit-tests--marked))
+                   '(("old-line" "old-summary") nil)))
+    (should (string-search "1 comment on" (car ygg-git-compare-submit-tests--prompts)))
+    (should (string-search "2 already on the forge — skipped"
+                           (car ygg-git-compare-submit-tests--prompts)))
+    (let ((posted (format "%S" (nth 2 (car (ygg-git-compare-submit-tests--posts))))))
+      (should (string-search "Never sent before" posted))
+      (should-not (string-search "Rename" posted))
+      (should-not (string-search "Looks off" posted)))
+    (should (string-search "2 already on the forge — skipped"
+                           (car ygg-git-compare-submit-tests--messages)))))
+
+(ert-deftest ygg-git-compare-submit-gitlab-skips-drafts-the-forge-has ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--old-drafts
+      ygg-git-compare-submit-tests--gitlab-pr (lambda (&rest _) "{\"id\":1}")
+    (ygg-git-compare-submit-tests--forge-has 'gitlab)
+    (ygg-git-compare-submit-forge 'comment)
+    (let ((bodies (mapcar (lambda (call) (plist-get (nth 2 call) :body))
+                          (ygg-git-compare-submit-tests--posts))))
+      (should (seq-some (lambda (b) (and b (string-search "Never sent before" b))) bodies))
+      (should-not (seq-some (lambda (b) (and b (or (string-search "Rename" b)
+                                                   (string-search "Looks off" b))))
+                            bodies)))
+    (should (string-search "2 already on the forge — skipped"
+                           (car ygg-git-compare-submit-tests--messages)))))
+
+(ert-deftest ygg-git-compare-submit-sends-nothing-when-the-forge-has-it-all ()
+  (ygg-git-compare-submit-tests--with (seq-take ygg-git-compare-submit-tests--old-drafts 2)
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-tests--forge-has 'github)
+    (ygg-git-compare-submit-forge 'comment)
+    (should-not ygg-git-compare-submit-tests--calls)
+    (should-not ygg-git-compare-submit-tests--prompts)
+    (should-not ygg-git-compare-submit--busy)
+    (should-not (ygg-git-compare-submit--select 'forge))
+    (should (string-search "already on" (car ygg-git-compare-submit-tests--messages)))
+    (should (string-search "nothing sent" (car ygg-git-compare-submit-tests--messages)))))
+
+(ert-deftest ygg-git-compare-submit-review-draft-needs-a-review-level-remote ()
+  (ygg-git-compare-submit-tests--with
+      (list (ygg-git-compare-submit-tests--c "summary" :level 'review :text "Looks off"))
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (setq ygg-git-compare-submit-tests--remote
+          (list (ygg-git-compare-submit-tests--remote-line "r1" "Looks off" "a.txt" 2)))
+    (ygg-git-compare-submit-forge 'comment)
+    (should (= (length (ygg-git-compare-submit-tests--posts)) 1))))
+
+(ert-deftest ygg-git-compare-submit-unreadable-forge-asks-and-defaults-to-not-sending ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--old-drafts
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (setq ygg-git-compare-submit-tests--remote '(:unread . "gh: 502"))
+    (let ((ygg-git-compare-submit-tests--yes nil))
+      (should-error (ygg-git-compare-submit-forge 'comment) :type 'user-error))
+    (should (equal (car ygg-git-compare-submit-tests--prompts)
+                   "Couldn't read the forge's comments; send anyway? (y or n) "))
+    (should (= (length ygg-git-compare-submit-tests--prompts) 1))
+    (should-not ygg-git-compare-submit-tests--calls)
+    (should-not ygg-git-compare-submit-tests--marked)
+    (should-not ygg-git-compare-submit--busy)))
+
+(ert-deftest ygg-git-compare-submit-unreadable-forge-sends-all-when-told-to ()
+  (ygg-git-compare-submit-tests--with ygg-git-compare-submit-tests--old-drafts
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (setq ygg-git-compare-submit-tests--remote '(:unread . "gh: 502"))
+    (ygg-git-compare-submit-forge 'comment)
+    (should (string-search "3 comments on" (car ygg-git-compare-submit-tests--prompts)))
+    (should (= (length (ygg-git-compare-submit-tests--posts)) 1))))
+
+(ert-deftest ygg-git-compare-submit-an-approval-still-goes-when-the-forge-has-every-comment ()
+  (ygg-git-compare-submit-tests--with (seq-take ygg-git-compare-submit-tests--old-drafts 2)
+      ygg-git-compare-submit-tests--github-pr (lambda (&rest _) "{}")
+    (ygg-git-compare-submit-tests--forge-has 'github)
+    (ygg-git-compare-submit-forge 'approve)
+    (should (string-prefix-p "Approve with 0 comments"
+                             (car ygg-git-compare-submit-tests--prompts)))
+    (should (= (length (ygg-git-compare-submit-tests--posts)) 1))))

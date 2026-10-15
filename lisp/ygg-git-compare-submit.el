@@ -784,12 +784,15 @@ called with the comments of each step as it succeeds."
     (with-current-buffer buffer
       (ignore-errors (ygg-git-compare--review-note buffer text)))))
 
-(defun ygg-git-compare-submit--settle (buffer name pr event comments posted failure prior)
-  "Drop what was POSTED of COMMENTS and say how it went."
+(defun ygg-git-compare-submit--settle (buffer name pr event comments posted failure prior
+                                              &optional skipped)
+  "Drop what was POSTED of COMMENTS and say how it went, SKIPPED being how many
+the forge had already."
   (let* ((n (length comments))
          (posted (seq-filter (lambda (c) (memq c posted)) comments))
          (kept (- n (length posted)))
-         (text (cond ((and failure (> kept 0))
+         (text (concat
+                (cond ((and failure (> kept 0))
                       (format "Posted %d of %d; %d kept: %s" (length posted) n kept failure))
                      ((and failure (null posted))
                       (format "%s failed on %s: %s"
@@ -802,7 +805,8 @@ called with the comments of each step as it succeeds."
                                 (alist-get event ygg-git-compare-submit--event-past)
                                 n (if (= n 1) "" "s") name
                                 (alist-get event ygg-git-compare-submit--event-also "")
-                                (plist-get pr :url))))))
+                                (plist-get pr :url))))
+                (ygg-git-compare-submit--skipped-note skipped))))
     (when (buffer-live-p buffer)
       (with-current-buffer buffer
         (setq ygg-git-compare-submit--busy nil)
@@ -864,29 +868,77 @@ send or one was made on another range."
          (with-current-buffer buffer
            (ygg-git-compare-submit--confirm event max-priority pr own)))))))
 
+(defun ygg-git-compare-submit--skipped-note (skipped)
+  (if (and skipped (> skipped 0))
+      (format "; %d already on the forge — skipped" skipped)
+    ""))
+
 (defun ygg-git-compare-submit--confirm (event max-priority pr own)
-  "Ask, then post the comments to PR; on your OWN pull request only a comment."
+  "Ask, then post the comments to PR; on your OWN pull request only a comment.
+The forge's comments are fetched first unless they are fresh."
   (when ygg-git-compare-submit--busy
     (user-error "A review is already being posted; wait for it to land"))
+  (let ((buffer (current-buffer))
+        (sync t))
+    (setq ygg-git-compare-submit--busy t)
+    (condition-case failure
+        (ygg-git-compare--remote-fresh
+         buffer pr
+         (lambda (remote unread)
+           (when (buffer-live-p buffer)
+             (with-current-buffer buffer
+               (setq ygg-git-compare-submit--busy nil)
+               (condition-case err
+                   (ygg-git-compare-submit--ask event max-priority pr own remote unread)
+                 (user-error
+                  (if sync
+                      (signal (car err) (cdr err))
+                    (message "%s" (cadr err)))))))))
+      (error (when (buffer-live-p buffer)
+               (with-current-buffer buffer (setq ygg-git-compare-submit--busy nil)))
+             (signal (car failure) (cdr failure))))
+    (setq sync nil)))
+
+(defun ygg-git-compare-submit--ask (event max-priority pr own remote unread)
+  "Ask, then post the comments the forge does not hold, REMOTE being its
+comments, or UNREAD why they could not be had."
   (let* ((why (and own (format "GitHub refuses %s on your own pull request; "
                                (if (eq event 'approve) "an approval" "a request for changes"))))
          (event (if own 'comment event))
-         (comments (condition-case failure
-                       (ygg-git-compare-submit--held event max-priority)
-                     (user-error
-                      (user-error "%s" (concat why (cadr failure))))))
+         (held (condition-case failure
+                   (ygg-git-compare-submit--held event max-priority)
+                 (user-error
+                  (user-error "%s" (concat why (cadr failure))))))
          (name (ygg-git-compare--pr-name pr))
-         (n (length comments))
          (pending (ygg-git-compare-submit--pending-note))
          (buffer (current-buffer))
          (store ygg-git-compare--store)
-         (prior ygg-git-compare--note))
-    (unless (y-or-n-p (format "%s%s %d comment%s on %s%s? "
-                              (or why "")
-                              (alist-get event ygg-git-compare-submit--event-names)
-                              n (if (= n 1) "" "s") name
-                              (if (string-empty-p pending) "" (concat " (" pending ")"))))
+         (prior ygg-git-compare--note)
+         (known (and (not unread)
+                     (seq-filter (lambda (c) (ygg-git-compare--on-forge-p c remote)) held)))
+         (comments (seq-difference held known #'eq))
+         (n (length comments))
+         (skipped (length known)))
+    (when (and unread
+               (not (y-or-n-p "Couldn't read the forge's comments; send anyway? (y or n) ")))
       (user-error "Nothing sent"))
+    (when known
+      (ygg-git-compare-submit--mark-sent buffer store known))
+    (if (and known (null comments) (not (eq event 'approve)))
+        (ygg-git-compare-submit--say
+         buffer (format "%d comment%s already on %s — skipped; nothing sent"
+                        skipped (if (= skipped 1) "" "s") name))
+      (unless (y-or-n-p (format "%s%s %d comment%s on %s%s%s? "
+                                (or why "")
+                                (alist-get event ygg-git-compare-submit--event-names)
+                                n (if (= n 1) "" "s") name
+                                (if (string-empty-p pending) "" (concat " (" pending ")"))
+                                (ygg-git-compare-submit--skipped-note skipped)))
+        (user-error "Nothing sent"))
+      (ygg-git-compare-submit--send event pr comments skipped name buffer store prior))))
+
+(defun ygg-git-compare-submit--send (event pr comments skipped name buffer store prior)
+  (let ((n (length comments)))
     (setq ygg-git-compare-submit--busy t)
     (condition-case failure
         (pcase-let* ((gitlab (eq (plist-get pr :forge) 'gitlab))
@@ -904,7 +956,7 @@ send or one was made on another range."
                                       name)))))
            (lambda (posted failure)
              (ygg-git-compare-submit--settle buffer name pr event comments posted failure
-                                             prior))
+                                             prior skipped))
            (lambda (landed)
              (ygg-git-compare-submit--mark-sent buffer store landed))))
       (error (when (buffer-live-p buffer)

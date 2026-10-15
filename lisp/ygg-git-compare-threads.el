@@ -828,6 +828,36 @@ waits for nothing."
          (list (ygg-git-compare--remote-notice
                 (concat "forge comments: " (error-message-string err)))))))))
 
+(defcustom ygg-git-compare-threads-send-ttl 30
+  "Seconds the kept comments of a pull request are trusted before a send."
+  :type 'natnum :group 'ygg-git-compare)
+
+(defun ygg-git-compare--remote-fresh (list pr then)
+  "Call THEN with PR's comments from the forge and why they could not be had,
+fetching them first, in the background, unless they were fetched within
+`ygg-git-compare-threads-send-ttl' seconds."
+  (with-current-buffer list
+    (let* ((key (ygg-git-compare--remote-key pr))
+           (ttl ygg-git-compare-threads-send-ttl)
+           (done nil)
+           (finish (lambda (err)
+                     (unless done
+                       (setq done t)
+                       (funcall then (and (not err)
+                                          (plist-get (ygg-git-compare--remote-value key)
+                                                     :comments))
+                                err)))))
+      (if (not (ygg-git-compare--cache-stale-p (ignore-errors (ygg-git-compare--cache-entry key))
+                                               ttl 0))
+          (funcall finish nil)
+        (condition-case err
+            (let ((ygg-git-compare-threads-ttl ttl))
+              (ygg-git-compare--remote-start
+               list pr key (lambda (_value err) (funcall finish (and err (format "%s" err)))) 0))
+          (error (if done
+                     (signal (car err) (cdr err))
+                   (funcall finish (error-message-string err)))))))))
+
 ;;; Telling an agent
 
 (defvar ygg-git-compare-forge-timeout)
