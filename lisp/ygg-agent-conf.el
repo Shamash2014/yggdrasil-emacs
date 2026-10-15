@@ -908,12 +908,163 @@ A name that is not listed makes that profile."
     name))
 
 (defun ygg-agent-profile-env (profile agent)
-  "The \"VAR=DIR\" putting AGENT in PROFILE\='s home, as a list; nil without PROFILE."
+  "The \"VAR=DIR\" putting AGENT in PROFILE\='s home, as a list; nil without PROFILE.
+The profile \"default\" is the CLI\='s own home: the bare VAR, which unsets it."
   (when-let* ((profile)
               ygg-agent-conf-root
               (kind (ygg-agent--kind agent agent)))
-    (list (format "%s=%s" (plist-get (cdr (assoc kind ygg-agent--config-homes)) :var)
-                  (directory-file-name (ygg-agent--profile-home profile kind))))))
+    (let ((var (plist-get (cdr (assoc kind ygg-agent--config-homes)) :var)))
+      (list (if (equal profile "default")
+                var
+              (format "%s=%s" var
+                      (directory-file-name (ygg-agent--profile-home profile kind))))))))
+
+(defcustom ygg-agent-ask-profile 'per-project
+  "When an interactive agent session asks which profile it runs under.
+`per-project' asks once for a project and remembers the answer; `always'
+asks on every interactive start, offering the remembered answer."
+  :type '(choice (const per-project) (const always)) :group 'yggdrasil)
+
+(defun ygg-agent--project-name (project &optional as-is)
+  "PROJECT\='s repository name; AS-IS takes PROJECT for the root without asking git."
+  (file-name-nondirectory
+   (directory-file-name (if as-is project (ygg-agent--repo-home (expand-file-name project))))))
+
+(defun ygg-agent--profile-binding-file (project &optional as-is)
+  (when ygg-agent-conf-root
+    (expand-file-name (concat (ygg-agent--project-name project as-is) "/profile")
+                      ygg-agent-conf-root)))
+
+(defun ygg-agent-project-profile (project &optional as-is)
+  "What PROJECT\='s agents run under: \"project\", \"default\", a profile name, or nil.
+AS-IS, for a project row that is already a repository root, skips git."
+  (when-let* ((file (ygg-agent--profile-binding-file project as-is))
+              ((file-regular-p file))
+              (choice (with-temp-buffer
+                        (insert-file-contents file)
+                        (string-trim (buffer-string))))
+              ((not (string-empty-p choice))))
+    choice))
+
+(defun ygg-agent--save-project-profile (project choice)
+  (let ((file (ygg-agent--profile-binding-file project)))
+    (make-directory (file-name-directory file) t)
+    (write-region (concat choice "\n") nil file nil 'silent)
+    (clrhash ygg-agent--config-dirs)
+    choice))
+
+(defun ygg-agent--choice-home (choice kind project)
+  "The home CHOICE names for KIND in PROJECT; nothing is made."
+  (pcase choice
+    ("project" (ygg-agent--own-home kind (ygg-agent--repo-home (expand-file-name project))))
+    ("default" (expand-file-name (plist-get (cdr (assoc kind ygg-agent--config-homes)) :home)))
+    (_ (expand-file-name (format "profiles/%s/%s" choice kind) ygg-agent-conf-root))))
+
+(defun ygg-agent--account-label (kind dir choice)
+  "The account name Claude recorded in DIR\='s state file, or nil."
+  (when (equal kind "claude")
+    (ignore-errors
+      (when-let* ((json (ygg-agent--read-json
+                         (if (equal choice "default")
+                             (expand-file-name "~/.claude.json")
+                           (expand-file-name ".claude.json" dir))))
+                  (account (gethash "oauthAccount" json)))
+        (and (hash-table-p account) (gethash "emailAddress" account))))))
+
+(defun ygg-agent--choice-state (choice kind project)
+  "Whether CHOICE is logged in for KIND in PROJECT, and as whom when known."
+  (let ((dir (ygg-agent--choice-home choice kind project)))
+    (cond ((not (file-directory-p dir)) "no home yet, not logged in")
+          ((ygg-agent--logged-in-p kind dir)
+           (if-let* ((who (ygg-agent--account-label kind dir choice)))
+               (concat "logged in as " who)
+             "logged in"))
+          (t "not logged in"))))
+
+(defun ygg-agent--profile-table (project kind)
+  (let ((choices (append '("project" "default") (ygg-agent-profiles))))
+    (lambda (str pred action)
+      (if (eq action 'metadata)
+          `(metadata
+            (display-sort-function . identity)
+            (annotation-function
+             . ,(lambda (choice)
+                  (when (member choice choices)
+                    (format "  %s  %s"
+                            (abbreviate-file-name
+                             (directory-file-name (ygg-agent--choice-home choice kind project)))
+                            (ygg-agent--choice-state choice kind project))))))
+        (complete-with-action action choices str pred)))))
+
+(defun ygg-agent-read-project-profile (project agent)
+  "Ask which profile PROJECT\='s AGENT sessions run under; save and return it.
+The answer is \"project\" (its own home), \"default\" (the CLI\='s home) or a
+profile name.  One that is not logged in offers the login right away."
+  (let* ((kind (ygg-agent--kind agent agent))
+         (current (or (ygg-agent-project-profile project) "project"))
+         (choice (completing-read
+                  (format "Agent profile for %s: " (ygg-agent--project-name project))
+                  (ygg-agent--profile-table project kind)
+                  nil nil nil nil current)))
+    (when (string-empty-p choice) (setq choice current))
+    (unless (member choice '("project" "default"))
+      (ygg-agent--profile-home choice kind))
+    (ygg-agent--save-project-profile project choice)
+    (when (and (equal kind "claude")
+               (not (equal choice "default"))
+               (not (ygg-agent--logged-in-p kind (ygg-agent--choice-home choice kind project)))
+               (y-or-n-p (format "Profile %s is not logged in; log it in now? " choice)))
+      (ygg-agent-login-config-home project (unless (equal choice "project") choice)))
+    choice))
+
+;;;###autoload
+(defun ygg-agent-set-project-profile (&optional project agent)
+  "Choose the profile the current project\='s AGENT sessions run under."
+  (interactive)
+  (let ((project (expand-file-name
+                  (or project
+                      (when-let* ((pr (and (fboundp 'project-current) (project-current nil))))
+                        (project-root pr))
+                      default-directory)))
+        (agent (or agent "claude")))
+    (unless (and ygg-agent-conf-root (ygg-agent--kind agent agent))
+      (user-error "No agent config root"))
+    (let ((choice (ygg-agent-read-project-profile project agent)))
+      (message "Agent profile for %s: %s" (ygg-agent--project-name project) choice)
+      choice)))
+
+(defun ygg-agent--ensure-own-home (kind spec project)
+  (let ((dir (ygg-agent--own-home kind (ygg-agent--repo-home project))))
+    (unless (file-directory-p dir)
+      (ygg-agent--bootstrap-share spec dir))))
+
+(defun ygg-agent-session-profile (agent project &optional interactive)
+  "The profile a new AGENT session in PROJECT runs under: nil, a name or \"default\".
+nil is the project\='s own home.  INTERACTIVE starts ask when the project
+has no answer yet, or always under `ygg-agent-ask-profile\='; any other
+start uses the answer, and without one the project\='s own home, with a
+warning and never the CLI\='s."
+  (when-let* (ygg-agent-conf-root
+              (kind (ygg-agent--kind agent agent))
+              (spec (cdr (assoc kind ygg-agent--config-homes)))
+              (project (expand-file-name project))
+              ((not (or (ygg-agent--read-marker (expand-file-name (plist-get spec :marker) project))
+                        (ygg-agent--read-marker
+                         (expand-file-name (plist-get spec :marker)
+                                           (ygg-agent--repo-home project)))))))
+    (let* ((bound (ygg-agent-project-profile project))
+           (choice (cond ((and interactive (or (not bound) (eq ygg-agent-ask-profile 'always)))
+                          (ygg-agent-read-project-profile project agent))
+                         (bound)
+                         (t (display-warning
+                             'ygg-agent
+                             (format "%s has no agent profile; using its own %s home — choose one with M-x ygg-agent-set-project-profile"
+                                     (ygg-agent--project-name project) kind)
+                             :warning)
+                            "project"))))
+      (if (equal choice "project")
+          (progn (ygg-agent--ensure-own-home kind spec project) nil)
+        choice))))
 
 (defun ygg-agent--config-dir (kind spec project &optional peek isolate)
   "Config home for KIND in PROJECT, made ready unless PEEK.
@@ -949,12 +1100,9 @@ day a login can be seeded too."
                                      kind spec (delq nil (list own shared)) peek))))
                       (when (and kept (not peek)
                                  (not (ygg-agent--logged-in-p kind kept)))
-                        (display-warning
-                         'ygg-agent
-                         (format "%s's %s home %s is not logged in; log it in with M-x ygg-agent-login-config-home — no other account is used"
+                        (message "ygg-agent: %s's %s home %s is not logged in; the session will ask you to log in — no other account is used"
                                  (abbreviate-file-name (directory-file-name project))
-                                 kind (abbreviate-file-name kept))
-                         :warning))
+                                 kind (abbreviate-file-name kept)))
                       (unless (or peek
                                   (equal (directory-file-name dir)
                                          (directory-file-name

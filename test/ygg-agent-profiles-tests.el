@@ -404,5 +404,135 @@
                   "anthropic claude-opus-5\\nbedrock claude-opus-5\\n" "--model" "claude-opus-5")
                  '("--model" "claude-opus-5"))))
 
+(defmacro ygg-agent-profiles-tests--asking (answers &rest body)
+  (declare (indent 1))
+  `(let ((asked nil) (answers ,answers))
+     (cl-letf (((symbol-function 'completing-read)
+                (lambda (prompt &rest _) (push prompt asked) (pop answers)))
+               ((symbol-function 'ygg-agent--logged-in-p) (lambda (&rest _) t))
+               ((symbol-function 'display-warning) #'ignore))
+       ,@body)))
+
+(ert-deftest ygg-agent-profiles-first-interactive-start-asks-and-remembers ()
+  (ygg-agent-profiles-tests--with
+    (ygg-agent-profiles-tests--asking '("work" "never")
+      (should (equal (ygg-agent-session-profile "claude" project t) "work"))
+      (should (equal asked '("Agent profile for proj: ")))
+      (should (equal (ygg-agent-project-profile project) "work"))
+      (should (file-exists-p (expand-file-name "proj/profile" ygg-agent-conf-root)))
+      (should (equal (ygg-agent-session-profile "claude" project t) "work"))
+      (should (= (length asked) 1)))))
+
+(ert-deftest ygg-agent-profiles-always-asks-every-interactive-start ()
+  (ygg-agent-profiles-tests--with
+    (let ((ygg-agent-ask-profile 'always))
+      (ygg-agent-profiles-tests--asking '("work" "project")
+        (should (equal (ygg-agent-session-profile "claude" project t) "work"))
+        (should-not (ygg-agent-session-profile "claude" project t))
+        (should (= (length asked) 2))
+        (should (equal (ygg-agent-project-profile project) "project"))))))
+
+(ert-deftest ygg-agent-profiles-the-prompt-defaults-to-the-remembered-answer ()
+  (ygg-agent-profiles-tests--with
+    (let ((ygg-agent-ask-profile 'always) default)
+      (ygg-agent--save-project-profile project "default")
+      (cl-letf (((symbol-function 'completing-read)
+                 (lambda (_p _t _pred _req _init _hist def) (setq default def) "")))
+        (should (equal (ygg-agent-session-profile "claude" project t) "default"))
+        (should (equal default "default"))))))
+
+(ert-deftest ygg-agent-profiles-a-background-start-never-asks ()
+  (ygg-agent-profiles-tests--with
+    (let (warned)
+      (ygg-agent-profiles-tests--asking nil
+        (cl-letf (((symbol-function 'display-warning)
+                   (lambda (_type msg &rest _) (setq warned msg))))
+          (should-not (ygg-agent-session-profile "claude" project))
+          (should (string-match-p "ygg-agent-set-project-profile" warned))
+          (should (file-directory-p (expand-file-name "proj/claude" ygg-agent-conf-root)))
+          (ygg-agent--save-project-profile project "work")
+          (setq warned nil)
+          (should (equal (ygg-agent-session-profile "claude" project) "work"))
+          (should-not warned)
+          (should-not asked))))))
+
+(ert-deftest ygg-agent-profiles-a-spawn-uses-the-binding-and-keeps-it-on-restart ()
+  (ygg-agent-profiles-tests--with
+    (let ((aob-acp-start-dir project)
+          (aob-acp-profiles '(("claude" :agent "claude")))
+          refs)
+      (ygg-agent--save-project-profile project "work")
+      (ygg-agent-profiles-tests--asking nil
+        (cl-letf (((symbol-function 'aob-acp-spawn)
+                   (lambda (&rest _) (setq refs aob-acp-session-refs) nil)))
+          (ygg-aob--with-profile #'aob-acp-spawn "claude" nil)
+          (should (equal (plist-get refs :profile) "work"))
+          (ygg-agent--save-project-profile project "default")
+          (let ((aob-acp-session-refs '(:profile "work")))
+            (ygg-aob--with-profile #'aob-acp-spawn "claude" nil))
+          (should (equal (plist-get refs :profile) "work"))
+          (should-not asked))))))
+
+(ert-deftest ygg-agent-profiles-restart-passes-the-session-profile ()
+  (ygg-agent-profiles-tests--with
+    (let (refs)
+      (cl-letf (((symbol-function 'aob-acp-spawn)
+                 (lambda (&rest _) (setq refs aob-acp-session-refs) nil)))
+        (aob-acp-new (aob-create-session :id "acp:r" :backend 'acp :name "r"
+                                         :project project :dir project
+                                         :refs (list :agent "claude" :profile "work")))
+        (should (equal (plist-get refs :profile) "work"))))))
+
+(ert-deftest ygg-agent-profiles-the-chosen-profile-reaches-the-env ()
+  (ygg-agent-profiles-tests--with
+    (should (equal (ygg-agent-profile-env "work" "claude")
+                   (list (concat "CLAUDE_CONFIG_DIR="
+                                 (expand-file-name "profiles/work/claude" ygg-agent-conf-root)))))
+    (should (equal (ygg-agent-profile-env "default" "claude") '("CLAUDE_CONFIG_DIR")))))
+
+(ert-deftest ygg-agent-profiles-set-project-profile-changes-the-binding ()
+  (ygg-agent-profiles-tests--with
+    (ygg-agent--save-project-profile project "project")
+    (ygg-agent-profiles-tests--asking '("work" "default")
+      (should (equal (ygg-agent-set-project-profile project) "work"))
+      (should (equal (ygg-agent-project-profile project) "work"))
+      (should (equal (ygg-agent-set-project-profile project) "default"))
+      (should (equal (ygg-agent-project-profile project) "default")))))
+
+(ert-deftest ygg-agent-profiles-a-choice-not-logged-in-offers-the-login ()
+  (ygg-agent-profiles-tests--with
+    (let (login)
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "work"))
+                ((symbol-function 'ygg-agent--logged-in-p) (lambda (&rest _) nil))
+                ((symbol-function 'y-or-n-p) (lambda (&rest _) t))
+                ((symbol-function 'ygg-agent-login-config-home)
+                 (lambda (&rest args) (setq login args))))
+        (ygg-agent-read-project-profile project "claude")
+        (should (equal login (list project "work")))))))
+
+(ert-deftest ygg-agent-profiles-a-marker-names-the-home-and-nothing-is-asked ()
+  (ygg-agent-profiles-tests--with
+    (with-temp-file (expand-file-name ".claude-config-dir" project) (insert "elsewhere\n"))
+    (ygg-agent-profiles-tests--asking nil
+      (should-not (ygg-agent-session-profile "claude" project t))
+      (should-not asked))))
+
 (provide 'ygg-agent-profiles-tests)
 ;;; ygg-agent-profiles-tests.el ends here
+
+(ert-deftest ygg-agent-profiles-a-person-starting-is-asked-once-and-nothing-else-is ()
+  (skip-unless (fboundp 'ygg-aob--ask-profile-run))
+  (let ((asked 0) (noninteractive nil))
+    (cl-letf (((symbol-function 'ygg-aob--ask-profile) (lambda (&rest _) (cl-incf asked)))
+              ((symbol-function 'aob-acp--project) (lambda () "/p/")))
+      (let ((this-command 'aob-acp-run))
+        (ygg-aob--ask-profile-run
+         (lambda (_intent) (ygg-aob--ask-profile-spawn (lambda (&rest _) 'spawned) "claude"))
+         "do it"))
+      (should (= asked 1))
+      (let ((this-command 'some-other-command))
+        (ygg-aob--ask-profile-spawn (lambda (&rest _) 'spawned) "claude"))
+      (should (= asked 1))
+      (let ((this-command 'aob-acp-spawn))
+        (ygg-aob--ask-profile-spawn (lambda (&rest _) 'spawned) "claude"))
+      (should (= asked 2)))))

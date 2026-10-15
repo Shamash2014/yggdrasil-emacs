@@ -28,6 +28,7 @@
 (declare-function ygg-project-candidates "ygg-project-scan" (&optional refresh))
 (declare-function ygg-project-import--read-root "ygg-project-scan" ())
 (declare-function ygg-project-import-mark "ygg-project-scan" (root))
+(declare-function ygg-agent-project-profile "ygg-agent-conf" (project &optional as-is))
 (declare-function ygg-project-top-roots "ygg-project-scan" ())
 (declare-function ygg-project-children "ygg-project-scan" (root))
 (declare-function ygg-project-umbrella-of "ygg-project-scan" (root))
@@ -1684,15 +1685,24 @@ session does, so a parent does not count what its child already shows."
                      (propertize (format "◷ %d" (length scheduled))
                                  'font-lock-face (ygg-projects--schedule-face scheduled))))
          (room (- avail (string-width name) 2 (if count (1+ (string-width count)) 0)))
+         (profile (and (fboundp 'ygg-agent-project-profile)
+                       (ygg-projects--once (list 'profile root)
+                         (ygg-agent-project-profile root t))))
          (path (cond (mark (propertize mark 'font-lock-face 'ygg-projects-waiting))
                      ((<= (string-width full) room) full)
                      ((let ((short (concat "…/" (file-name-nondirectory full))))
                         (and (<= (string-width short) room) short)))
-                     (t ""))))
+                     (t "")))
+         (profile (and profile
+                       (let ((label (format "profile: %s" profile)))
+                         (and (<= (+ (string-width label) 1 (string-width path)) room)
+                              label)))))
     (propertize (concat " " dot "  "
                         (propertize name 'font-lock-face 'ygg-projects-name)
                         (ygg-projects--right
                          (concat count (and count (not (string-empty-p path)) " ")
+                                 (and profile (propertize (concat profile " ")
+                                                          'font-lock-face 'ygg-projects-count))
                                  (propertize path 'font-lock-face 'ygg-projects-path))))
                 'ygg-project root 'ygg-row 'project)))
 

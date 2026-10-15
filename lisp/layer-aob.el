@@ -528,6 +528,7 @@ actions keep their tool title.  The short path stays the clickable target."
                (aob-acp-start-worktree ygg-aob--draft-tree)
                (aob-acp-session-refs (append (ygg-aob--preset-limits text)
                                              (bound-and-true-p aob-acp-session-refs))))
+          (unless noninteractive (ygg-aob--ask-profile agent (aob-acp--project)))
           (aob-acp-spawn agent text atts))))
 
 ;; a preset made at its prompt is a profile: a config home of its own, logged in apart
@@ -632,14 +633,48 @@ login counts as done once that home has saved it."
 (add-hook 'aob-acp-delete-profile-functions #'ygg-aob--trash-profile-home)
 
 (defun ygg-aob--with-profile (fn agent &rest args)
-  "Spawn AGENT under the profile its preset names."
+  "Spawn AGENT under the profile its preset names, else the one its project is bound to."
   (let* ((refs (bound-and-true-p aob-acp-session-refs))
          (profile (and (stringp agent)
                        (not (plist-get refs :profile))
-                       (plist-get (aob-acp-profile agent) :profile)))
+                       (or (plist-get (aob-acp-profile agent) :profile)
+                           (ygg-agent-session-profile (aob-acp-profile-agent agent)
+                                                      (aob-acp--project)))))
          (aob-acp-session-refs (if profile (append (list :profile profile) refs) refs)))
     (apply fn agent args)))
 (advice-add 'aob-acp-spawn :around #'ygg-aob--with-profile)
+
+(defun ygg-aob--ask-profile (agent project)
+  "Ask for the profile of PROJECT\='s AGENT when a person is starting the session."
+  (when (and (stringp agent)
+             (not (plist-get (aob-acp-profile agent) :profile)))
+    (ygg-agent-session-profile (aob-acp-profile-agent agent) project t)))
+
+(defvar ygg-aob--profile-asked nil
+  "Non-nil inside a spawn whose profile was already asked for.")
+
+(defun ygg-aob--asking-p (command)
+  "Whether the spawn under way is COMMAND run by a person, not yet asked."
+  (and (not noninteractive) (not ygg-aob--profile-asked) (eq this-command command)))
+
+(defun ygg-aob--ask-profile-spawn (fn agent &rest args)
+  (when (ygg-aob--asking-p 'aob-acp-spawn)
+    (ygg-aob--ask-profile agent (aob-acp--project)))
+  (let ((ygg-aob--profile-asked t)) (apply fn agent args)))
+
+(defun ygg-aob--ask-profile-spawn-with (fn agent project &rest args)
+  (when (ygg-aob--asking-p 'aob-acp-spawn-with)
+    (ygg-aob--ask-profile agent project))
+  (let ((ygg-aob--profile-asked t)) (apply fn agent project args)))
+
+(defun ygg-aob--ask-profile-run (fn intent)
+  (when (ygg-aob--asking-p 'aob-acp-run)
+    (ygg-aob--ask-profile aob-acp-default-agent (aob-acp--project)))
+  (let ((ygg-aob--profile-asked t)) (funcall fn intent)))
+
+(advice-add 'aob-acp-spawn :around #'ygg-aob--ask-profile-spawn)
+(advice-add 'aob-acp-spawn-with :around #'ygg-aob--ask-profile-spawn-with)
+(advice-add 'aob-acp-run :around #'ygg-aob--ask-profile-run)
 
 ;; an agent belongs to the work it was started on: the task in front of the
 ;; owner, else the checkout the buffer is in, else the space — a space pinned

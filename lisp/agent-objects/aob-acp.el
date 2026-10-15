@@ -2674,12 +2674,17 @@ The adapter reports no usage afterwards, so the old reading goes."
       (aob-acp--fresh-conversation s)
     (aob-prompt s "/clear")))
 
+(defvar aob-acp-session-refs)
+
 ;;;###autoload
 (defun aob-acp-new (s)
   "Open a new session of S's agent in S's place, leaving S as it is."
   (interactive (list (aob-target)))
   (let ((aob-acp-start-dir (aob-session-project s))
-        (aob-acp-mcp-servers (aob-session-ref s :mcp-declared)))
+        (aob-acp-mcp-servers (aob-session-ref s :mcp-declared))
+        (aob-acp-session-refs (append (when-let* ((profile (aob-session-ref s :profile)))
+                                        (list :profile profile))
+                                      (bound-and-true-p aob-acp-session-refs))))
     (aob-acp-spawn (or (aob-session-ref s :preset) (aob-session-ref s :agent))
                    nil nil nil (aob-session-dir s))))
 
