@@ -115,6 +115,9 @@
     (let ((dir (expand-file-name "sq" root)))
       (gc-tests--worktree proj dir "aob/sq" "one")
       (gc-tests--commit dir "g.txt" "two")
+      (gc-tests--git dir "push" "-q" "-u" "origin" "aob/sq")
+      (gc-tests--git proj "push" "-q" "origin" "--delete" "aob/sq")
+      (gc-tests--git proj "fetch" "-q" "--prune")
       (gc-tests--commit proj "other" "unrelated")
       (gc-tests--git proj "merge" "-q" "--squash" "aob/sq")
       (gc-tests--git proj "commit" "-q" "-m" "squashed")
@@ -123,6 +126,31 @@
       (gc-tests--sweep)
       (should-not (file-directory-p dir))
       (should-not (member "aob/sq" (gc-tests--branches proj))))))
+
+(ert-deftest aob-gc-squashed-but-never-pushed-is-kept ()
+  (gc-tests--with-repo
+    (let ((dir (expand-file-name "local" root)))
+      (gc-tests--worktree proj dir "aob/local" "one")
+      (gc-tests--git proj "merge" "-q" "--squash" "aob/local")
+      (gc-tests--git proj "commit" "-q" "-m" "squashed")
+      (gc-tests--git proj "push" "-q" "origin" "main")
+      (let ((results (gc-tests--sweep)))
+        (should (equal "not pushed" (plist-get (car (cdar results)) :skip))))
+      (should (file-directory-p dir))
+      (should (member "aob/local" (gc-tests--branches proj))))))
+
+(ert-deftest aob-gc-another-remotes-head-is-kept ()
+  (gc-tests--with-repo
+    (let ((upstream (expand-file-name "upstream.git" gc-tests--base))
+          (aob-gc-branches 'merged))
+      (gc-tests--git gc-tests--base "init" "-q" "--bare" "-b" "trunk" upstream)
+      (gc-tests--git proj "remote" "add" "upstream" upstream)
+      (gc-tests--git proj "push" "-q" "upstream" "main:trunk")
+      (gc-tests--git proj "fetch" "-q" "upstream")
+      (gc-tests--git proj "remote" "set-head" "upstream" "trunk")
+      (gc-tests--git proj "branch" "trunk")
+      (gc-tests--sweep)
+      (should (member "trunk" (gc-tests--branches proj))))))
 
 (ert-deftest aob-gc-unmerged-is-kept ()
   (gc-tests--with-repo

@@ -427,11 +427,35 @@ An error in a step frees the lock and goes to ON-ERROR, or is signalled."
                                     (signal (car err) (cdr err))))))
              (funcall (aob-gc--guarded fn) release))))))))
 
-(defun aob-gc--classify (project targets candidates here except done)
+(defun aob-gc--pushed-p (root branch sha callback)
+  "CALLBACK gets non-nil when BRANCH at SHA of ROOT ever left this machine.
+That is SHA on a remote-tracking ref, BRANCH tracking an upstream (gone
+once its merged remote branch is pruned), or a merged PR from it at SHA."
+  (aob-gc--git
+   root (list "for-each-ref" "--count=1" "--contains" sha "--format=%(refname)"
+              "refs/remotes")
+   (lambda (out code)
+     (cond
+      ((and (zerop code) (not (string-empty-p (string-trim out)))) (funcall callback t))
+      ((not branch) (funcall callback nil))
+      (t (aob-gc--git
+          root (list "config" "--get" (format "branch.%s.merge" branch))
+          (lambda (_out ccode)
+            (if (zerop ccode)
+                (funcall callback t)
+              (aob-gc--gh-merged-p root branch sha callback)))))))))
+
+(defun aob-gc--remote-heads (text)
+  "Branch names the remotes' HEADs point at, from for-each-ref %(symref) TEXT."
+  (mapcar (lambda (ref) (replace-regexp-in-string "\\`refs/remotes/[^/]+/" "" ref))
+          (split-string text "\n" t "[ \t]+")))
+
+(defun aob-gc--classify (project targets candidates here except done &optional pushed-only)
   "Call DONE with CANDIDATES of PROJECT marked with :skip and why they stay.
 A candidate is (:dir DIR :branch BRANCH); kept ones carry :skip, the rest the
 :sha their branch is at.  TARGETS are what merged means; HERE's worktree and
-EXCEPT's sessions are spared."
+EXCEPT's sessions are spared.  With PUSHED-ONLY, work that never left this
+machine stays too."
   (let (items)
     (aob-gc--each
      candidates
@@ -451,12 +475,18 @@ EXCEPT's sessions are spared."
                       (aob-gc--merged-into
                        project branch sha targets
                        (lambda (merged)
-                         (if merged
-                             (progn (push (append c (list :sha sha
-                                                          :saved (and dir (length (aob-gc--saved dir)))))
-                                          items)
-                                    (funcall next))
-                           (funcall keep "not merged"))))))))))
+                         (let ((go (lambda ()
+                                     (push (append c (list :sha sha
+                                                           :saved (and dir (length (aob-gc--saved dir)))))
+                                           items)
+                                     (funcall next))))
+                           (cond
+                            ((not merged) (funcall keep "not merged"))
+                            ((not pushed-only) (funcall go))
+                            (t (aob-gc--pushed-p
+                                project branch sha
+                                (lambda (pushed)
+                                  (if pushed (funcall go) (funcall keep "not pushed")))))))))))))))
          (cond
           ((plist-get c :locked) (funcall keep "locked"))
           ((and dir (aob-gc--in-use-p dir except)) (funcall keep "in use"))
@@ -486,6 +516,7 @@ Those in LOCKED carry :locked; a project sweep takes detached worktrees too."
          (checked (delq nil (mapcar #'cdr wts)))
          (aob (lambda (b) (string-prefix-p "aob/" b)))
          (kept (lambda (b) (or (equal b local)
+                               (member b (plist-get default :heads))
                                (string-match-p aob-gc-kept-branches b))))
          (wanted (lambda (b) (and (not (funcall kept b))
                                   (or (memq mode '(project all-merged))
@@ -536,17 +567,21 @@ OFFLINE skips the fetch."
                    (aob-gc--git
                     project '("for-each-ref" "--format=%(refname)" "refs/heads")
                     (lambda (bout bcode)
-                      (if (not (and (zerop wcode) (zerop bcode)))
-                          (funcall done nil)
-                        (aob-gc--classify
-                         project
-                         (list (cons (plist-get default :ref) (plist-get default :sha)))
-                         (aob-gc--candidates
-                          (aob-acp--parse-worktrees wout)
-                          (mapcar (lambda (r) (string-remove-prefix "refs/heads/" r))
-                                  (split-string bout "\n" t))
-                          default mode (aob-gc--locked-dirs wout))
-                         here nil done))))))))))))
+                      (aob-gc--git
+                       project '("for-each-ref" "--format=%(symref)" "refs/remotes")
+                       (lambda (hout hcode)
+                         (if (not (and (zerop wcode) (zerop bcode) (zerop hcode)))
+                             (funcall done nil)
+                           (aob-gc--classify
+                            project
+                            (list (cons (plist-get default :ref) (plist-get default :sha)))
+                            (aob-gc--candidates
+                             (aob-acp--parse-worktrees wout)
+                             (mapcar (lambda (r) (string-remove-prefix "refs/heads/" r))
+                                     (split-string bout "\n" t))
+                             (append default (list :heads (aob-gc--remote-heads hout)))
+                             mode (aob-gc--locked-dirs wout))
+                            here nil done t))))))))))))))
     (if (and aob-gc-fetch (not offline))
         (aob-gc--fetch project go)
       (funcall go))))
