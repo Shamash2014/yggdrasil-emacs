@@ -39,7 +39,8 @@
 
 (defvar-local ygg-git-compare--checks-timer nil)
 
-(defvar-local ygg-git-compare--checks-waiting nil)
+(defvar-local ygg-git-compare--checks-waiting nil
+  "The checks key this compare is waiting on to redraw, or nil.")
 
 (defvar-local ygg-git-compare--checks-errors 0
   "How many times in a row the forge has failed to answer for the checks.")
@@ -539,12 +540,12 @@ being fetched; with FORCE, whatever their age."
                        ygg-git-compare-checks-running-ttl)
                       (t ygg-git-compare-checks-ttl)))
            (retry (and force 0))
-           (waiter (and (not ygg-git-compare--checks-waiting)
+           (waiter (and (not (equal ygg-git-compare--checks-waiting key))
                         (ygg-git-compare--cache-stale-p
                          (ignore-errors (ygg-git-compare--cache-entry key)) ttl retry)
                         (lambda (&rest _)
                           (run-at-time 0 nil #'ygg-git-compare--checks-landed buffer)))))
-      (when waiter (setq ygg-git-compare--checks-waiting t))
+      (when waiter (setq ygg-git-compare--checks-waiting key))
       (condition-case failure
           (ygg-git-compare--cached
            key ttl

@@ -1220,9 +1220,6 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
           (should (> (length spans) 1))
           (should (equal gap "\n")))))))
 
-(provide 'ygg-git-compare-pr-info-tests)
-;;; ygg-git-compare-pr-info-tests.el ends here
-
 (defun ygg-git-compare-pr-info-tests--description-text (buffer)
   (with-current-buffer buffer
     (let ((section (ygg-git-compare-pr-info-tests--section 'ygg-git-compare-description)))
@@ -1283,3 +1280,24 @@ first on PATH answering from the files ygg-git-compare-pr-info-tests--put wrote.
           (let ((value (ygg-git-compare--checks-value key)))
             (should (equal (plist-get value :checks) (list check)))
             (should-not (plist-get value :about))))))))
+
+(ert-deftest ygg-git-compare-pr-info-answer-for-a-repinned-head-still-draws ()
+  (ygg-git-compare-pr-info-tests--with-repo head
+    (let ((pending nil)
+          (answer (list :checks nil :about (list :title "Repinned" :body "lands late"))))
+      (cl-letf (((symbol-function 'ygg-git-compare--checks-fetch)
+                 (lambda (_pr done) (setq pending (append pending (list done))))))
+        (let ((buffer (ygg-git-compare-pr-info-tests--open 'github head)))
+          (with-current-buffer buffer
+            (plist-put (cdr ygg-git-compare--b-spec) :sha "0000000000000000000000000000000000000001")
+            (ygg-git-compare--checks-start))
+          (should (= (length pending) 2))
+          (funcall (car pending) answer)
+          (dotimes (_ 8) (accept-process-output nil 0.03))
+          (funcall (cadr pending) answer)
+          (ygg-git-compare-pr-info-tests--settle buffer)
+          (should (string-search "lands late"
+                                 (ygg-git-compare-pr-info-tests--description-text buffer))))))))
+
+(provide 'ygg-git-compare-pr-info-tests)
+;;; ygg-git-compare-pr-info-tests.el ends here
