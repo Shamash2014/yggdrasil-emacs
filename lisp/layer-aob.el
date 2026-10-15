@@ -1229,9 +1229,13 @@ buffer-local that says where the words were going."
 
 (advice-add 'aob-compose-send :around #'ygg-aob--compose-opens-trace)
 
+(defvar ygg-aob-show-new-trace t
+  "Nil while the caller puts a new session's trace on screen itself.")
+
 (defun ygg-aob--show-new-trace (s)
   "Show a new session's trace; a subagent its agent runs opens only when asked."
-  (unless (or (aob-session-ref s :native-tool-id) (aob-session-ref s :workflow-agent)
+  (unless (or (not ygg-aob-show-new-trace)
+              (aob-session-ref s :native-tool-id) (aob-session-ref s :workflow-agent)
               (aob-session-ref s :hidden))
     (ygg-aob--show-trace s)))
 

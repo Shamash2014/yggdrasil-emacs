@@ -16,6 +16,7 @@
 
 (defvar aob-acp-start-dir)
 (defvar aob-acp-show-trace)
+(defvar ygg-aob-show-new-trace)
 (defvar aob-acp-default-agent)
 (declare-function aob-acp-spawn "aob-acp" (agent &optional intent atts name tree))
 (declare-function aob-acp-profile "aob-acp" (name))
@@ -152,6 +153,7 @@ Its trace opens beside the compare unless QUIET; the session outlives the compar
   (let* ((list (ygg-git-compare--list))
          (aob-acp-start-dir (ygg-git-compare-explain--dir list))
          (aob-acp-show-trace nil)
+         (ygg-aob-show-new-trace nil)
          (name (format "%s %s…%s" verb
                        (ygg-git-compare-explain--short
                         (buffer-local-value 'ygg-git-compare--a list))
