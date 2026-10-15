@@ -119,6 +119,7 @@
           :conflicting (equal mergeable "CONFLICTING")
           :unknown (or (null mergeable) (equal mergeable "UNKNOWN"))
           :checks (ygg-git-pr-merge--checks (plist-get pr :statusCheckRollup))
+          :approved (equal (plist-get pr :reviewDecision) "APPROVED")
           :review (let ((d (plist-get pr :reviewDecision)))
                     (if (or (null d) (string-empty-p d)) "none required" (downcase d)))
           :merge-state (downcase (or mergeable "unknown"))
@@ -234,8 +235,15 @@ GitHub is still computing mergeability."
         (list "gh" "pr" "edit" number "--repo" slug "--base" target)
       (list "glab" "mr" "update" number "-R" slug "--target-branch" target))))
 
-(defun ygg-git-pr-merge--commands (repo info target method auto delete)
-  "The commands that retarget when needed, then merge, as (PROGRAM . ARGS)."
+(defun ygg-git-pr-merge--approve-command (repo number)
+  (let ((slug (ygg-git-pr-merge--slug repo)))
+    (if (eq (car repo) 'github)
+        (list "gh" "pr" "review" number "--repo" slug "--approve")
+      (list "glab" "mr" "approve" number "-R" slug))))
+
+(defun ygg-git-pr-merge--commands (repo info target method auto delete &optional approve)
+  "The commands that retarget when needed, approve when asked, then merge,
+as (PROGRAM . ARGS)."
   (let* ((number (number-to-string (plist-get info :number)))
          (slug (ygg-git-pr-merge--slug repo))
          (sha (plist-get info :sha))
@@ -244,6 +252,7 @@ GitHub is still computing mergeability."
         (append
          (and retarget
               (list (ygg-git-pr-merge--retarget-command repo number target)))
+         (and approve (list (ygg-git-pr-merge--approve-command repo number)))
          (list (append (list "gh" "pr" "merge" number "--repo" slug
                              (format "--%s" method)
                              "--match-head-commit" sha)
@@ -251,6 +260,7 @@ GitHub is still computing mergeability."
       (append
        (and retarget
             (list (ygg-git-pr-merge--retarget-command repo number target)))
+       (and approve (list (ygg-git-pr-merge--approve-command repo number)))
        (list (append (list "glab" "mr" "merge" number "-R" slug)
                      (pcase method ('squash '("--squash")) ('rebase '("--rebase")))
                      (list "--sha" sha
@@ -431,7 +441,7 @@ the failure's words, the last command's output and the command that failed."
      (and warning (concat "\n" (propertize warning 'face 'warning))))))
 
 (defun ygg-git-pr-merge--choice (scope args)
-  "ARGS as a plist of :target, :method, :auto and :delete, or nil and why not."
+  "ARGS as a plist of :target :method :auto :approve :delete, or nil and why."
   (let* ((repo (plist-get scope :repo))
          (info (plist-get scope :info))
          (target (transient-arg-value "--target=" args))
@@ -443,14 +453,18 @@ the failure's words, the last command's output and the command that failed."
            (message "Merge cancelled: pick one of the offered branches") nil)
           ((null method) (message "Merge cancelled: no merge method chosen") nil)
           (t (list :target target :method method :auto auto
+                   :approve (and (member "--approve" args) t)
                    :delete (and (member "--delete" args)
                                 (ygg-git-pr-merge--delete-offered-p repo info auto)
                                 t))))))
 
 (defun ygg-git-pr-merge--question (repo info choice)
-  (format "%s #%s into %s%s%s? "
+  (format "%s%s #%s into %s%s%s? "
+          (if (plist-get choice :approve) "Approve, then " "")
           (pcase (plist-get choice :method)
-            ('squash "Squash-merge") ('rebase "Rebase-merge") (_ "Merge"))
+            ('squash (if (plist-get choice :approve) "squash-merge" "Squash-merge"))
+            ('rebase (if (plist-get choice :approve) "rebase-merge" "Rebase-merge"))
+            (_ (if (plist-get choice :approve) "merge" "Merge")))
           (plist-get info :number) (plist-get choice :target)
           (if (plist-get choice :auto)
               (format " when %s" (ygg-git-pr-merge--passes repo))
@@ -490,6 +504,11 @@ the failure's words, the last command's output and the command that failed."
 (defun ygg-git-pr-merge--auto-description ()
   (format "Auto-merge when %s" (ygg-git-pr-merge--passes (plist-get (transient-scope) :repo))))
 
+(defun ygg-git-pr-merge--approve-description ()
+  (concat "Approve before merging"
+          (when (plist-get (plist-get (transient-scope) :info) :approved)
+            (propertize " (already approved)" 'face 'shadow))))
+
 (defun ygg-git-pr-merge--delete-description ()
   (let ((scope (transient-scope)))
     (concat (format "Delete remote branch %s" (plist-get (plist-get scope :info) :head))
@@ -510,6 +529,7 @@ the failure's words, the last command's output and the command that failed."
    ("-s" "Merge method" "--method=" :class transient-option :always-read t
     :choices ygg-git-pr-merge--offered-methods)
    ("-a" ygg-git-pr-merge--auto-description "--auto")
+   ("a" ygg-git-pr-merge--approve-description "--approve")
    ("-d" ygg-git-pr-merge--delete-description "--delete" :if ygg-git-pr-merge--deletable-p)]
   ["Actions"
    ("m" "Merge" ygg-git-pr-merge-menu-merge)])
@@ -524,15 +544,18 @@ the failure's words, the last command's output and the command that failed."
                      :scope scope :value (ygg-git-pr-merge--default-args scope))))
 
 (defun ygg-git-pr-merge--report (repo info choice origin outcome note)
-  (let ((number (plist-get info :number)))
+  (let ((number (plist-get info :number))
+        (approved (plist-get choice :approve)))
     (message "%s"
              (pcase outcome
-               ('merged (format "Merged #%s into %s (%s)%s" number (plist-get choice :target)
+               ('merged (format "%s #%s into %s (%s)%s" (if approved "Approved, merged" "Merged")
+                                number (plist-get choice :target)
                                 (ygg-git-pr-merge--method-label info (plist-get choice :method))
                                 (or note "")))
-               ('auto (format "Auto-merge enabled for #%s (merges when %s)" number
-                              (ygg-git-pr-merge--passes repo)))
-               (_ (format "Queued #%s" number))))
+               ('auto (format "%s #%s (merges when %s)"
+                              (if approved "Approved, auto-merge enabled for" "Auto-merge enabled for")
+                              number (ygg-git-pr-merge--passes repo)))
+               (_ (format "%s #%s" (if approved "Approved, queued" "Queued") number))))
     (ygg-git-pr-merge--refetch repo origin)
     (when (eq outcome 'merged)
       (run-hook-with-args 'ygg-git-pr-merge-merged-hook repo info choice origin))))
@@ -544,15 +567,24 @@ the failure's words, the last command's output and the command that failed."
          (github (eq (car repo) 'github)))
     (ygg-git-pr-merge--run-all
      (ygg-git-pr-merge--commands repo info target (plist-get choice :method)
-                                 (plist-get choice :auto) (plist-get choice :delete))
+                                 (plist-get choice :auto) (plist-get choice :delete)
+                                 (plist-get choice :approve))
      (lambda (failure output failed)
        (if failure
            (progn
              (ygg-git-pr-merge--clear key)
-             (if (and retargeting (equal (nth 2 failed) "merge"))
-                 (message "Merge of #%s failed after retargeting it to %s (its base is now %s): %s"
-                          number target target failure)
-               (message "Merge of #%s failed: %s" number failure)))
+             (cond
+              ((member (nth 2 failed) '("review" "approve"))
+               (message "Approval of #%s failed, nothing merged: %s" number failure))
+              ((and retargeting (plist-get choice :approve) (equal (nth 2 failed) "merge"))
+               (message "Approved #%s, but merge failed after retargeting it to %s (its base is now %s): %s"
+                        number target target failure))
+              ((and retargeting (equal (nth 2 failed) "merge"))
+               (message "Merge of #%s failed after retargeting it to %s (its base is now %s): %s"
+                        number target target failure))
+              ((and (plist-get choice :approve) (equal (nth 2 failed) "merge"))
+               (message "Approved #%s, but merge failed: %s" number failure))
+              (t (message "Merge of #%s failed: %s" number failure))))
          (ygg-git-pr-merge--outcome
           repo info (plist-get choice :auto) output
           (lambda (outcome)

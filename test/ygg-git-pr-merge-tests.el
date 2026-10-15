@@ -83,6 +83,7 @@ exit 0
         ("target" (setq args (ygg-git-pr-merge-tests--set args "--target=" (cdr answer))))
         ("method" (setq args (ygg-git-pr-merge-tests--set args "--method=" (cdr answer))))
         ("auto" (setq args (ygg-git-pr-merge-tests--set args "--auto" (and (equal (cdr answer) "yes") ""))))
+        ("approve" (setq args (ygg-git-pr-merge-tests--set args "--approve" (and (equal (cdr answer) "yes") ""))))
         ("delete" (setq args (ygg-git-pr-merge-tests--set args "--delete" (and (equal (cdr answer) "yes") ""))))))
     args))
 
@@ -125,7 +126,7 @@ once it says its last word."
           (let ((deadline (+ (float-time) 10)))
             (while (and (< (float-time) deadline)
                         (not (and (assq 'quit answers) ygg-git-pr-merge-tests--scope))
-                        (not (seq-find (lambda (m) (string-match-p "\\`\\(Merged\\|Auto-merge\\|Queued\\|Merge of\\|Merge cancelled\\|Cannot\\|#[0-9]+ \\|The repo\\|The forge\\|Another\\)" m))
+                        (not (seq-find (lambda (m) (string-match-p "\\`\\(Merged\\|Approved\\|Approval\\|Auto-merge\\|Queued\\|Merge of\\|Merge cancelled\\|Cannot\\|#[0-9]+ \\|The repo\\|The forge\\|Another\\)" m))
                                        ygg-git-pr-merge-tests--messages)))
               (accept-process-output nil 0.05)))
         (quit nil)))))
@@ -257,7 +258,7 @@ once it says its last word."
     (should (equal scope ygg-git-pr-merge-tests--scope))
     (should (equal (sort value #'string<) '("--delete" "--method=squash" "--target=main")))
     (should (string-match-p "\\`Merge PR #5 \"Add thing\" at abc12345  feat -> main\n" header))
-    (should (equal (sort arguments #'string<) '("--auto" "--delete" "--method=" "--target="))))
+    (should (equal (sort arguments #'string<) '("--approve" "--auto" "--delete" "--method=" "--target="))))
   (ygg-git-pr-merge-tests--put "prview.json"
                                (replace-regexp-in-string "\"conclusion\":\"SUCCESS\",\"status\":\"COMPLETED\""
                                                          "\"status\":\"IN_PROGRESS\"" ygg-git-pr-merge-tests--gh-pr))
@@ -268,15 +269,15 @@ once it says its last word."
   (transient--emergency-exit)
   (pcase-let ((`(,_ ,value ,_ ,arguments) (ygg-git-pr-merge-tests--open-menu)))
     (should (equal (sort value #'string<) '("--auto" "--method=squash" "--target=main")))
-    (should (equal (sort arguments #'string<) '("--auto" "--delete" "--method=" "--target=")))))
+    (should (equal (sort arguments #'string<) '("--approve" "--auto" "--delete" "--method=" "--target=")))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-choice-is-read-from-the-menu-arguments
   (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '(quit))
   (let ((scope ygg-git-pr-merge-tests--scope))
     (should (equal (ygg-git-pr-merge--choice scope '("--target=release" "--method=merge" "--auto" "--delete"))
-                   '(:target "release" :method merge :auto t :delete nil)))
+                   '(:target "release" :method merge :auto t :approve nil :delete nil)))
     (should (equal (ygg-git-pr-merge--choice scope '("--target=main" "--method=squash" "--delete"))
-                   '(:target "main" :method squash :auto nil :delete t)))
+                   '(:target "main" :method squash :auto nil :approve nil :delete t)))
     (should-not (ygg-git-pr-merge--choice scope '("--target=main" "--method=rebase")))))
 
 (ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-refuses-a-draft
@@ -733,6 +734,119 @@ once it says its last word."
                                '("target" . "main") '("method" . "merge")
                                '("auto" . "yes") '("delete" . "yes"))
   (should-not ygg-git-pr-merge-tests--local-deleted))
+
+(defun ygg-git-pr-merge-tests--approve-calls ()
+  (seq-filter (lambda (l) (string-match-p " \\(pr review\\|mr approve\\) " l))
+              (ygg-git-pr-merge-tests--log)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-approve-command-comes-after-the-retarget-on-both-forges
+  (let ((gh-info (list :number 5 :sha "abc" :base "main"))
+        (gl-info (list :number 7 :sha "def" :base "main")))
+    (should (equal (ygg-git-pr-merge--commands ygg-git-pr-merge-tests--gh gh-info "release" 'squash t nil t)
+                   '(("gh" "pr" "edit" "5" "--repo" "github.com/o/r" "--base" "release")
+                     ("gh" "pr" "review" "5" "--repo" "github.com/o/r" "--approve")
+                     ("gh" "pr" "merge" "5" "--repo" "github.com/o/r" "--squash"
+                      "--match-head-commit" "abc" "--auto"))))
+    (should (equal (ygg-git-pr-merge--commands ygg-git-pr-merge-tests--gl gl-info "main" 'merge t nil t)
+                   '(("glab" "mr" "approve" "7" "-R" "gl.example/o/r")
+                     ("glab" "mr" "merge" "7" "-R" "gl.example/o/r" "--sha" "def"
+                      "--auto-merge=true" "--yes"))))
+    (should (equal (ygg-git-pr-merge--commands ygg-git-pr-merge-tests--gl gl-info "develop" 'merge t nil t)
+                   '(("glab" "mr" "update" "7" "-R" "gl.example/o/r" "--target-branch" "develop")
+                     ("glab" "mr" "approve" "7" "-R" "gl.example/o/r")
+                     ("glab" "mr" "merge" "7" "-R" "gl.example/o/r" "--sha" "def"
+                      "--auto-merge=true" "--yes"))))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-no-approve-command-without-the-switch
+  (let ((info (list :number 5 :sha "abc" :base "main")))
+    (dolist (repo (list ygg-git-pr-merge-tests--gh ygg-git-pr-merge-tests--gl))
+      (should-not (seq-find (lambda (c) (member (nth 2 c) '("review" "approve")))
+                            (ygg-git-pr-merge--commands repo info "release" 'merge nil nil)))))
+  (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 (ygg-git-pr-merge-tests--answers))
+  (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7 (ygg-git-pr-merge-tests--answers))
+  (should-not (ygg-git-pr-merge-tests--approve-calls)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-approve-then-merge-on-github
+  (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+         (ygg-git-pr-merge-tests--answers '("approve" . "yes")))
+  (should (equal (seq-take (ygg-git-pr-merge-tests--log) 4)
+                 (list (nth 0 (ygg-git-pr-merge-tests--log))
+                       (nth 1 (ygg-git-pr-merge-tests--log))
+                       "gh pr review 5 --repo github.com/o/r --approve"
+                       "gh pr merge 5 --repo github.com/o/r --squash --match-head-commit abc1234567890def")))
+  (should (string-match-p "\\`Approve, then squash-merge #5" (ygg-git-pr-merge-tests--confirm-text)))
+  (should (string-match-p "\\`Approved, merged #5 into main (squash)" (car ygg-git-pr-merge-tests--messages))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-approve-then-merge-on-gitlab
+  (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
+         (ygg-git-pr-merge-tests--answers '("approve" . "yes")))
+  (should (equal (ygg-git-pr-merge-tests--approve-calls) '("glab mr approve 7 -R gl.example/o/r")))
+  (should (string-match-p "\\`Approved, merged #7" (car ygg-git-pr-merge-tests--messages))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-approve-works-with-auto-merge
+  (ygg-git-pr-merge-tests--put "post.json" "{\"state\":\"OPEN\",\"autoMergeRequest\":{\"enabledAt\":\"now\"}}")
+  (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+         (ygg-git-pr-merge-tests--answers '("approve" . "yes") '("auto" . "yes")))
+  (should (equal (ygg-git-pr-merge-tests--approve-calls)
+                 '("gh pr review 5 --repo github.com/o/r --approve")))
+  (should (string-match-p " --auto$" (car (ygg-git-pr-merge-tests--merge-calls))))
+  (should (member "Approved, auto-merge enabled for #5 (merges when the checks pass)"
+                  ygg-git-pr-merge-tests--messages)))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-failed-approval-runs-no-merge
+  (ygg-git-pr-merge-tests--put "fail" "failed to create review: Can not approve your own pull request ghp_abcDEF123\n")
+  (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+         (ygg-git-pr-merge-tests--answers '("approve" . "yes")))
+  (should (ygg-git-pr-merge-tests--approve-calls))
+  (should-not (ygg-git-pr-merge-tests--merge-calls))
+  (let ((said (car ygg-git-pr-merge-tests--messages)))
+    (should (string-match-p "\\`Approval of #5 failed, nothing merged: .*Can not approve your own" said))
+    (should-not (string-match-p "ghp_" said)))
+  (should-not ygg-git-pr-merge-tests--refetched)
+  (should-not ygg-git-pr-merge--active)
+  (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7
+         (ygg-git-pr-merge-tests--answers '("approve" . "yes")))
+  (should-not (seq-find (lambda (l) (string-prefix-p "glab mr merge" l)) (ygg-git-pr-merge-tests--log)))
+  (should (string-match-p "\\`Approval of #7 failed" (car ygg-git-pr-merge-tests--messages))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-merge-failing-after-approval-says-it-was-approved
+  (ygg-git-pr-merge-tests--put "failmerge" "not mergeable\n")
+  (apply #'ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+         (ygg-git-pr-merge-tests--answers '("approve" . "yes")))
+  (should (ygg-git-pr-merge-tests--approve-calls))
+  (should (string-match-p "\\`Approved #5, but merge failed: .*not mergeable"
+                          (car ygg-git-pr-merge-tests--messages)))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+                               '("target" . "release") '("method" . "squash") '("delete" . "no")
+                               '("approve" . "yes"))
+  (should (string-match-p "\\`Approved #5, but merge failed after retargeting it to release.*not mergeable"
+                          (car ygg-git-pr-merge-tests--messages))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-failed-retarget-leaves-no-approval-behind
+  (ygg-git-pr-merge-tests--put "fail" "no such branch\n")
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5
+                               '("target" . "release") '("method" . "squash") '("delete" . "no")
+                               '("approve" . "yes"))
+  (should-not (ygg-git-pr-merge-tests--approve-calls))
+  (should (equal (length (ygg-git-pr-merge-tests--merge-calls)) 1))
+  (should (string-match-p "no such branch" (car ygg-git-pr-merge-tests--messages))))
+
+(ygg-git-pr-merge-tests--deftest ygg-git-pr-merge-menu-offers-the-approve-switch
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '(quit))
+  (pcase-let ((`(,_ ,value ,_ ,arguments) (ygg-git-pr-merge-tests--open-menu)))
+    (should (member "--approve" arguments))
+    (should-not (member "--approve" value)))
+  (ygg-git-pr-merge--present ygg-git-pr-merge-tests--scope)
+  (should (string-match-p "already approved" (ygg-git-pr-merge--approve-description)))
+  (transient--emergency-exit)
+  (ygg-git-pr-merge-tests--put "prview.json"
+                               (replace-regexp-in-string "APPROVED" "REVIEW_REQUIRED" ygg-git-pr-merge-tests--gh-pr))
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gh 5 '(quit))
+  (ygg-git-pr-merge--present ygg-git-pr-merge-tests--scope)
+  (should-not (string-match-p "already approved" (ygg-git-pr-merge--approve-description)))
+  (transient--emergency-exit)
+  (ygg-git-pr-merge-tests--run ygg-git-pr-merge-tests--gl 7 '(quit))
+  (should (member "--approve" (cadddr (ygg-git-pr-merge-tests--open-menu)))))
 
 (provide 'ygg-git-pr-merge-tests)
 ;;; ygg-git-pr-merge-tests.el ends here
