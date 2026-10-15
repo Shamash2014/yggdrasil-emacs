@@ -47,6 +47,16 @@
 (defvar ygg-project-commands--pending (make-hash-table :test #'equal)
   "Root -> callbacks waiting on a scan that is already under way.")
 
+(defvar ygg-project-commands--ci (make-hash-table :test #'equal)
+  "Root -> (:entries :fetched :asked), CI as last heard.")
+
+(defconst ygg-project-commands--ci-ttl 120
+  "Seconds before the forge is asked again what can be started.")
+
+(declare-function ygg-git-ci-startable "ygg-git-ci" (root callback))
+(declare-function ygg-git-ci-start "ygg-git-ci" (root item))
+(declare-function ygg-git-ci--local-dispatch "ygg-git-ci" (directory))
+
 
 ;;; Reading files, never fatally
 
@@ -478,6 +488,7 @@ sentinel to land is the one that settles KEY."
 
 (defun ygg-project-commands--scan (key)
   "Look at KEY's manifests and settle its cache.  Runs off an idle timer."
+  (ignore-errors (ygg-project-commands-refresh-ci key))
   (condition-case nil
       (let* ((members (ygg-project-commands--members key))
              (dirs (cons key members))
@@ -491,15 +502,73 @@ sentinel to land is the one that settles KEY."
     (error (ygg-project-commands--finish key (gethash key ygg-project-commands--cache)))))
 
 
+;;; CI, heard from the forge and never waited for
+
+(defun ygg-project-commands--ci-entry (root item)
+  "ITEM, one startable thing from ygg-git-ci, as a picker entry for ROOT."
+  (let ((label (or (plist-get item :label) (plist-get item :name) "")))
+    (list :name (if (eq (plist-get item :kind) 'pipeline)
+                    "ci: new pipeline"
+                  (concat "ci: " (replace-regexp-in-string ": " " " label t t)))
+          :dir root :command nil :source 'ci :ci item)))
+
+(defun ygg-project-commands--ci-local (root)
+  "Entries for the workflows under ROOT that can be dispatched by hand."
+  (when (file-directory-p (expand-file-name ".github/workflows" root))
+    (mapcar (lambda (hit)
+              (ygg-project-commands--ci-entry
+               root (list :label (format "workflow: %s" (car hit)) :kind 'workflow
+                          :name (car hit)
+                          :workflow (list :name (car hit)
+                                          :id (file-name-nondirectory (cdr hit))
+                                          :file (cdr hit)))))
+            (ignore-errors (ygg-git-ci--local-dispatch root)))))
+
+(defun ygg-project-commands--ci-land (key items err)
+  (let ((cell (copy-sequence (gethash key ygg-project-commands--ci))))
+    (unless err
+      (setq cell (plist-put cell :fetched t))
+      (setq cell (plist-put cell :entries
+                            (mapcar (lambda (item) (ygg-project-commands--ci-entry key item))
+                                    items))))
+    (puthash key cell ygg-project-commands--ci)))
+
+(defun ygg-project-commands-refresh-ci (root)
+  "Ask the forge what ROOT can start, unless it was asked lately.
+Returns at once; the answer lands in the cache for the next look.  A
+project with no forge, or without ygg-git-ci, ends up with nothing."
+  (let* ((key (ygg-project-commands--key root))
+         (cell (gethash key ygg-project-commands--ci)))
+    (unless (and (plist-get cell :asked)
+                 (< (- (float-time) (plist-get cell :asked))
+                    ygg-project-commands--ci-ttl))
+      (puthash key (list :entries (plist-get cell :entries)
+                         :fetched (plist-get cell :fetched)
+                         :asked (float-time))
+               ygg-project-commands--ci)
+      (condition-case nil
+          (when (require 'ygg-git-ci nil t)
+            (ygg-git-ci-startable
+             key (lambda (items &optional err)
+                   (ygg-project-commands--ci-land key items err)))
+            (let ((now (gethash key ygg-project-commands--ci)))
+              (unless (plist-get now :fetched)
+                (puthash key (plist-put (copy-sequence now) :entries
+                                        (ygg-project-commands--ci-local key))
+                         ygg-project-commands--ci))))
+        (error nil)))
+    key))
+
+
 ;;; What the sidebar calls
 
 (defun ygg-project-commands (root)
   "What ROOT was last seen able to run, and nothing fresher.
 The cache and only the cache, so this is safe on a drawing path;
 ygg-project-commands-refresh is the half that goes and looks."
-  (plist-get (gethash (ygg-project-commands--key root)
-                      ygg-project-commands--cache)
-             :commands))
+  (let ((key (ygg-project-commands--key root)))
+    (append (plist-get (gethash key ygg-project-commands--cache) :commands)
+            (plist-get (gethash key ygg-project-commands--ci) :entries))))
 
 (defun ygg-project-workspaces (root)
   "ROOT's monorepo members, as the last scan found them.  Cache only."
@@ -523,6 +592,12 @@ rather than starting a second one."
 
 (defun ygg-project-commands-run (command)
   "Run COMMAND, one plist out of ygg-project-commands, where it belongs."
+  (if (eq (plist-get command :source) 'ci)
+      (progn (require 'ygg-git-ci)
+             (ygg-git-ci-start (plist-get command :dir) (plist-get command :ci)))
+    (ygg-project-commands--run-shell command)))
+
+(defun ygg-project-commands--run-shell (command)
   (let ((line (plist-get command :command))
         (dir (plist-get command :dir)))
     (unless (and (stringp line) (not (string-empty-p line)))

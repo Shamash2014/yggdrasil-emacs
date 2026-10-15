@@ -295,6 +295,8 @@ Lands in a live `*task:…*' buffer, tracked by `ygg-jobs'/`ygg-job-kill'."
     ;; what this project can be told to run — the justfile, the package
     ;; scripts, the mix tasks — which the sidebar knows and the panel did
     ;; not, so the two lists disagreed about what exists
+    (when (and (fboundp 'ygg-project-commands-refresh-ci) (project-current nil))
+      (ignore-errors (ygg-project-commands-refresh-ci (project-root (project-current nil)))))
     (dolist (c (and (fboundp 'ygg-project-commands)
                     (when-let* ((pr (project-current nil)))
                       (ignore-errors (ygg-project-commands (project-root pr))))))
