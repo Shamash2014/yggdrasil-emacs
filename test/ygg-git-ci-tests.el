@@ -433,7 +433,8 @@
                   ((symbol-function 'read-string)
                    (lambda (&rest _) (or (pop ygg-git-ci-tests--answers) ""))))
           (setq ygg-git-ci-tests--answers '("A:1" "B:2"))
-          (ygg-git-ci-trigger))
+          (ygg-git-ci-trigger)
+          (ygg-git-ci-tests--land-older))
         (should (equal offered '("job: deploy" "new pipeline: feat")))
         (should (equal (car (car spawned))
                        '("glab" "ci" "run" "-R" "https://gl.example/g/r" "--branch" "feat"
@@ -692,8 +693,12 @@
     (ygg-git-ci-tests--seed (list (ygg-git-ci-tests--run 'skipped :name "deploy" :playable t :kind 'job)))
     (let (items)
       (ygg-git-ci-startable ygg-git-ci-tests--dir (lambda (found &rest _) (setq items found)))
+      (ygg-git-ci-tests--land-older)
       (should (equal (mapcar (lambda (i) (plist-get i :kind)) items) '(job pipeline)))
       (should (equal (plist-get (cadr items) :name) "feat")))))
+
+(defmacro ygg-git-ci-tests--land-older (&optional pipelines)
+  `(funcall (cdr (pop spawned)) 0 ,(or pipelines "[]") nil))
 
 (defmacro ygg-git-ci-tests--land-gitlab ()
   `(progn (funcall (cdr (pop spawned)) 0 ygg-git-ci-tests--pipelines nil)
@@ -706,6 +711,8 @@
       (ygg-git-ci-startable ygg-git-ci-tests--dir (lambda (&rest args) (push args calls)))
       (should-not calls)
       (ygg-git-ci-tests--land-gitlab)
+      (should-not calls)
+      (ygg-git-ci-tests--land-older)
       (should (= 1 (length calls)))
       (should (equal (mapcar (lambda (i) (plist-get i :label)) (car (car calls)))
                      '("job: deploy" "new pipeline: feat")))
@@ -717,6 +724,7 @@
     (ygg-git-ci-tests--seed (list (ygg-git-ci-tests--run 'skipped :name "d" :playable t :kind 'job)))
     (let (calls)
       (ygg-git-ci-startable ygg-git-ci-tests--dir (lambda (&rest args) (push args calls)))
+      (ygg-git-ci-tests--land-older)
       (should (= 1 (length calls)))
       (should-not spawned)
       (puthash (ygg-git-ci-tests--key)
@@ -725,6 +733,7 @@
       (should (= 1 (length calls)))
       (should spawned)
       (ygg-git-ci-tests--land-gitlab)
+      (ygg-git-ci-tests--land-older)
       (should (= 2 (length calls))))))
 
 (ert-deftest ygg-git-ci-startable-gitlab-waits-for-a-fetch-in-flight ()
@@ -739,6 +748,8 @@
       (should (= 1 (length spawned)))
       (should-not calls)
       (ygg-git-ci-tests--land-gitlab)
+      (ygg-git-ci-tests--land-older)
+      (ygg-git-ci-tests--land-older)
       (should (= 2 (length calls)))
       (should (equal (mapcar (lambda (i) (plist-get i :kind)) (car (car calls)))
                      '(job pipeline))))))
@@ -786,7 +797,7 @@
     (ygg-git-ci-tests--seed (list (ygg-git-ci-tests--run 'passed)))
     (with-temp-buffer
       (ygg-git-ci-tests--render)
-      (should (string-match-p "p play  R/X pipeline" (buffer-string))))))
+      (should (string-match-p "p play  a artifacts  R/X pipeline" (buffer-string))))))
 
 (ert-deftest ygg-git-ci-start-runs-an-item-as-t-does ()
   (ygg-git-ci-tests--with
@@ -909,6 +920,7 @@
       (ygg-git-ci-tests-mode)
       (let (items offered)
         (ygg-git-ci-startable ygg-git-ci-tests--dir (lambda (found &rest _) (setq items found)))
+        (ygg-git-ci-tests--land-older)
         (should (equal (mapcar (lambda (i) (plist-get i :label)) items)
                        '("job: deploy (stage prod, #123)" "job: deploy (stage stage, #124)"
                          "new pipeline: feat")))
@@ -949,3 +961,128 @@
 
 (provide 'ygg-git-ci-tests)
 ;;; ygg-git-ci-tests.el ends here
+
+(defconst ygg-git-ci-tests--staged
+  (concat
+   "[{\"id\":31,\"name\":\"lint\",\"stage\":\"test\",\"status\":\"success\"},"
+   "{\"id\":21,\"name\":\"compile\",\"stage\":\"build\",\"status\":\"failed\",\"allow_failure\":true,"
+   "\"artifacts\":[{\"file_type\":\"trace\"},{\"file_type\":\"archive\"}]},"
+   "{\"id\":22,\"name\":\"pack\",\"stage\":\"build\",\"status\":\"success\",\"artifacts\":[{\"file_type\":\"trace\"}]},"
+   "{\"id\":41,\"name\":\"ship\",\"stage\":\"deploy\",\"status\":\"scheduled\"}]"))
+
+(ert-deftest ygg-git-ci-gitlab-groups-jobs-by-stage-in-pipeline-order ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (ygg-git-ci-tests--seed (ygg-git-ci--parse-gitlab-jobs
+                             ygg-git-ci-tests--staged '(:id 900 :sha "aaa")))
+    (with-temp-buffer
+      (ygg-git-ci-tests--render)
+      (let ((text (buffer-string)))
+        (should (string-match-p
+                 "^  build\n.*compile.*\n.*pack.*\n  test\n.*lint.*\n  deploy\n.*ship" text))
+        (should (string-match-p "^  ! compile" text))))))
+
+(ert-deftest ygg-git-ci-gitlab-rows-know-their-artifacts-and-status ()
+  (let ((rows (ygg-git-ci--parse-gitlab-jobs ygg-git-ci-tests--staged '(:id 900))))
+    (should (equal (mapcar (lambda (r) (plist-get r :artifacts)) rows) '(nil t nil nil)))
+    (should (equal (plist-get (nth 3 rows) :status) "scheduled"))))
+
+(ert-deftest ygg-git-ci-retry-of-a-manual-job-plays-it ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (with-temp-buffer
+      (setq ygg-git-ci-tests--row
+            (ygg-git-ci-tests--run 'skipped :kind 'job :status "manual" :playable t))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "")))
+        (ygg-git-ci-rerun))
+      (should (equal (last (car (car spawned)) 1) '("projects/g%2Fr/jobs/7/play"))))))
+
+(ert-deftest ygg-git-ci-retry-of-a-created-or-skipped-job-explains ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (dolist (status '("created" "skipped"))
+      (setq ygg-git-ci-tests--row (ygg-git-ci-tests--run 'skipped :kind 'job :status status))
+      (should-error (ygg-git-ci-rerun) :type 'user-error))
+    (should-not spawned)))
+
+(ert-deftest ygg-git-ci-gitlab-artifacts-ask-where-confirm-and-refuse-none ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (with-temp-buffer
+      (setq ygg-git-ci-tests--row
+            (ygg-git-ci-tests--run 'passed :kind 'job :name "pack job" :artifacts nil))
+      (should-error (ygg-git-ci-artifacts) :type 'user-error)
+      (setq ygg-git-ci-tests--row
+            (ygg-git-ci-tests--run 'passed :kind 'job :name "pack job" :artifacts t))
+      (let ((target (expand-file-name "out.zip" ygg-git-ci-tests--dir)) prompts)
+        (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) target))
+                  ((symbol-function 'y-or-n-p) (lambda (p) (push p prompts) nil)))
+          (ygg-git-ci-artifacts))
+        (should (string-match-p "out.zip" (car prompts)))
+        (should-not spawned)
+        (cl-letf (((symbol-function 'read-file-name) (lambda (&rest _) target)))
+          (ygg-git-ci-artifacts))
+        (let ((command (car (car spawned))))
+          (should (equal (seq-take command 2) '("sh" "-c")))
+          (should (equal (seq-drop command 3)
+                         (list target "glab" "api" "--hostname" "gl.example"
+                               "projects/g%2Fr/jobs/7/artifacts"))))))))
+
+(ert-deftest ygg-git-ci-github-artifacts-check-then-download ()
+  (ygg-git-ci-tests--with
+    (with-temp-buffer
+      (setq ygg-git-ci-tests--row (ygg-git-ci-tests--run 'passed :name "Build"))
+      (ygg-git-ci-artifacts)
+      (should (equal (car (car spawned))
+                     '("gh" "api" "--hostname" "github.com" "repos/o/r/actions/runs/7/artifacts"
+                       "--jq" "[.artifacts[] | select(.expired | not)] | length")))
+      (funcall (cdr (pop spawned)) 0 "0\n" nil)
+      (should-not spawned)
+      (should (member "ci: Build has no artifacts" messages))
+      (ygg-git-ci-artifacts)
+      (let ((dir (expand-file-name "dl" ygg-git-ci-tests--dir)))
+        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) dir)))
+          (funcall (cdr (pop spawned)) 0 "2\n" nil))
+        (should (equal (car (car spawned))
+                       (list "gh" "run" "download" "7" "--dir" dir "--repo" "github.com/o/r")))))))
+
+(ert-deftest ygg-git-ci-older-manual-jobs-come-only-from-startable-and-are-deduped ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (with-temp-buffer
+      (ygg-git-ci-tests--render)
+      (ygg-git-ci-tests--land-gitlab)
+      (should-not spawned))
+    (let (calls)
+      (ygg-git-ci-startable ygg-git-ci-tests--dir (lambda (&rest args) (push args calls)))
+      (should (equal (car (car spawned))
+                     '("glab" "api" "--hostname" "gl.example"
+                       "projects/g%2Fr/pipelines?ref=feat&per_page=3")))
+      (ygg-git-ci-tests--land-older
+       "[{\"id\":900,\"sha\":\"aaa\"},{\"id\":800,\"sha\":\"bbb\"},{\"id\":700,\"sha\":\"ccc\"}]")
+      (should (equal (car (car spawned))
+                     '("glab" "api" "--hostname" "gl.example"
+                       "projects/g%2Fr/pipelines/800/jobs?scope[]=manual&per_page=100")))
+      (ygg-git-ci-tests--land-older
+       (concat "[{\"id\":81,\"name\":\"deploy\",\"status\":\"manual\"},"
+               "{\"id\":82,\"name\":\"manual:ios\",\"status\":\"manual\"}]"))
+      (should-not calls)
+      (should (string-match-p "pipelines/700/jobs" (mapconcat #'identity (car (car spawned)) " ")))
+      (ygg-git-ci-tests--land-older
+       (concat "[{\"id\":71,\"name\":\"manual:ios\",\"status\":\"manual\"},"
+               "{\"id\":72,\"name\":\"manual:web\",\"status\":\"manual\"}]"))
+      (should (= 1 (length calls)))
+      (should (equal (mapcar (lambda (i) (plist-get i :label)) (car (car calls)))
+                     '("job: deploy" "job: manual:ios (pipeline #800)"
+                       "job: manual:web (pipeline #700)" "new pipeline: feat"))))))
+
+(ert-deftest ygg-git-ci-older-manual-failure-still-answers-once ()
+  (ygg-git-ci-tests--with
+    (setq ygg-git-ci-tests--repo '(gitlab "gl.example" "g/r"))
+    (ygg-git-ci-tests--seed (list (ygg-git-ci-tests--run 'skipped :name "d" :playable t :kind 'job)))
+    (let (calls)
+      (ygg-git-ci-startable ygg-git-ci-tests--dir (lambda (&rest args) (push args calls)))
+      (funcall (cdr (pop spawned)) 1 "" "boom")
+      (should (= 1 (length calls)))
+      (should (equal (mapcar (lambda (i) (plist-get i :label)) (car (car calls)))
+                     '("job: d" "new pipeline: feat"))))))

@@ -140,7 +140,12 @@
                     :created (ygg-git-review-requests--time (plist-get job :created_at))
                     :started (ygg-git-review-requests--time (plist-get job :started_at))
                     :finished (ygg-git-review-requests--time (plist-get job :finished_at))
+                    :status (plist-get job :status)
                     :playable (and (member (plist-get job :status) '("manual" "scheduled")) t)
+                    :artifacts (and (seq-some (lambda (artifact)
+                                                (equal (plist-get artifact :file_type) "archive"))
+                                              (plist-get job :artifacts))
+                                    t)
                     :sha (plist-get pipeline :sha)
                     :url (plist-get job :web_url)
                     :pipeline (plist-get pipeline :id)))
@@ -373,8 +378,22 @@ and no question is already out; the cache stays until the new answer lands."
 
 (defun ygg-git-ci--keys (repo)
   (if (eq (car repo) 'github)
-      "r rerun  x cancel  l log  t run"
-    "r retry  x cancel  p play  R/X pipeline  l log  t start"))
+      "r rerun  x cancel  a artifacts  l log  t run"
+    "r retry  x cancel  p play  a artifacts  R/X pipeline  l log  t start"))
+
+(defun ygg-git-ci--stages (rows)
+  "ROWS as (STAGE . ROWS) in pipeline order, or nil when they carry no stage."
+  (when (seq-some (lambda (row) (plist-get row :stage)) rows)
+    (let (groups)
+      (dolist (row rows)
+        (let ((group (assoc (plist-get row :stage) groups)))
+          (if group
+              (setcdr group (append (cdr group) (list row)))
+            (push (list (plist-get row :stage) row) groups))))
+      (sort groups
+            (lambda (a b)
+              (< (apply #'min (mapcar (lambda (row) (or (plist-get row :id) 0)) (cdr a)))
+                 (apply #'min (mapcar (lambda (row) (or (plist-get row :id) 0)) (cdr b)))))))))
 
 (defun ygg-git-ci--heading (branch &optional tail hint)
   (magit-insert-heading
@@ -416,8 +435,14 @@ and no question is already out; the cache stays until the new answer lands."
                             (propertize "no runs" 'font-lock-face 'magit-dimmed))
                    (ygg-git-ci--keys (car key)))
                   (let ((head (ignore-errors (magit-rev-parse "HEAD"))))
-                    (dolist (row rows)
-                      (ygg-git-ci--insert-row row head)))
+                    (if-let* ((stages (ygg-git-ci--stages rows)))
+                        (dolist (group stages)
+                          (insert (propertize (format "  %s\n" (car group))
+                                              'font-lock-face 'magit-dimmed))
+                          (dolist (row (cdr group))
+                            (ygg-git-ci--insert-row row head)))
+                      (dolist (row rows)
+                        (ygg-git-ci--insert-row row head))))
                   (if (plist-get answer :error)
                       (ygg-git-review-requests--note
                        (format "ci: %s (showing last runs)" (plist-get answer :error)))
@@ -441,7 +466,12 @@ and no question is already out; the cache stays until the new answer lands."
           ('cancel (list "gh" "run" "cancel" (format "%s" id) "--repo" (ygg-git-ci--slug repo)))
           ('log (list "gh" "run" "view" (format "%s" id)
                       (if (memq (plist-get row :state) '(failed cancelled)) "--log-failed" "--log")
-                      "--repo" (ygg-git-ci--slug repo))))
+                      "--repo" (ygg-git-ci--slug repo)))
+          ('artifact-count (list "gh" "api" "--hostname" (nth 1 repo)
+                                 (format "repos/%s/actions/runs/%s/artifacts" (nth 2 repo) id)
+                                 "--jq" "[.artifacts[] | select(.expired | not)] | length"))
+          ('artifacts (list "gh" "run" "download" (format "%s" id) "--dir" extra
+                            "--repo" (ygg-git-ci--slug repo))))
       (let ((project (ygg-git-ci--project repo))
             (api (list "glab" "api" "--hostname" (nth 1 repo))))
         (pcase action
@@ -465,6 +495,10 @@ and no question is already out; the cache stays until the new answer lands."
                                     "--input" (let ((coding-system-for-write 'utf-8))
                                                 (make-temp-file "ygg-git-ci-body-" nil ".json"
                                                                 extra))))))
+          ('artifacts (list "sh" "-c"
+                            "\"$@\" > \"$0.part\" && mv \"$0.part\" \"$0\" || { rm -f \"$0.part\"; exit 1; }"
+                            extra "glab" "api" "--hostname" (nth 1 repo)
+                            (format "%s/jobs/%s/artifacts" project id)))
           ('log (if (eq (plist-get row :kind) 'pipeline)
                     (user-error "No job log for a pipeline row")
                   (append api (list (format "%s/jobs/%s/trace" project id))))))))))
@@ -520,7 +554,7 @@ and no question is already out; the cache stays until the new answer lands."
 (defvar-local ygg-git-ci--log-p nil)
 
 (defun ygg-git-ci--gc-logs ()
-  "Kill the CI log buffers past `ygg-git-ci-log-buffers', least recently shown first."
+  "Kill CI log buffers past `ygg-git-ci-log-buffers', oldest shown first."
   (let ((logs (sort (seq-filter (lambda (b) (buffer-local-value 'ygg-git-ci--log-p b))
                                 (buffer-list))
                     (lambda (a b)
@@ -556,12 +590,21 @@ and no question is already out; the cache stays until the new answer lands."
            (pop-to-buffer (current-buffer))
            (ygg-git-ci--gc-logs)))))))
 
-(defun ygg-git-ci-rerun ()
-  "Rerun the run at point; a failed GitHub run may rerun only its failed jobs."
+(cl-defun ygg-git-ci-rerun ()
+  "Rerun the run at point; a failed GitHub run may rerun only its failed jobs.
+A manual GitLab job is played instead."
   (interactive)
   (let* ((key (ygg-git-ci--key))
          (row (ygg-git-ci--at-point))
          (name (plist-get row :name)))
+    (when (and (eq (car (car key)) 'gitlab) (eq (plist-get row :kind) 'job))
+      (cond ((plist-get row :playable)
+             (ygg-git-ci-play)
+             (cl-return-from ygg-git-ci-rerun))
+            ((equal (plist-get row :status) "created")
+             (user-error "%s is waiting for earlier stages, so there is nothing to retry" name))
+            ((equal (plist-get row :status) "skipped")
+             (user-error "%s was skipped and never ran; R retries the whole pipeline" name))))
     (if (and (eq (car (car key)) 'github)
              (memq (plist-get row :state) '(failed cancelled))
              (y-or-n-p (format "Rerun only the failed jobs of %s? " name)))
@@ -582,6 +625,64 @@ and no question is already out; the cache stays until the new answer lands."
     (ygg-git-ci--do key (format "cancel %s" name)
                     (ygg-git-ci--command 'cancel (car key) row)
                     (format "Cancel %s? " name))))
+
+(defun ygg-git-ci--artifact-stem (row)
+  (format "%s-%s" (replace-regexp-in-string "[^[:alnum:]._-]+" "_" (plist-get row :name))
+          (plist-get row :id)))
+
+(defun ygg-git-ci--download (key row)
+  "Ask where, confirm, and download the artifacts of ROW."
+  (let* ((repo (car key))
+         (name (plist-get row :name))
+         (stem (ygg-git-ci--artifact-stem row))
+         (root (or (magit-toplevel) default-directory)))
+    (if (eq (car repo) 'github)
+        (let ((dir (expand-file-name
+                    (read-directory-name (format "Download artifacts of %s to: " name)
+                                         (file-name-as-directory
+                                          (expand-file-name stem "~/Downloads"))))))
+          (ygg-git-ci--do key (format "download artifacts of %s" name)
+                          (ygg-git-ci--command 'artifacts repo row (directory-file-name dir))
+                          (format "Download artifacts of %s into %s? " name dir)))
+      (let* ((file (read-file-name "Save artifacts to: " "~/Downloads/" nil nil
+                                   (concat stem "-artifacts.zip")))
+             (file (expand-file-name (if (directory-name-p file)
+                                         (concat stem "-artifacts.zip")
+                                       file)
+                                     (and (directory-name-p file) file)))
+             (process-environment
+              (append (ygg-forge-config-program-env "glab" root) process-environment)))
+        (ygg-git-ci--do key (format "download artifacts of %s" name)
+                        (ygg-git-ci--command 'artifacts repo row file)
+                        (format "Save artifacts of %s to %s%s? " name file
+                                (if (file-exists-p file) " (replacing it)" "")))))))
+
+(defun ygg-git-ci-artifacts ()
+  "Download the artifacts of the job (GitLab) or run (GitHub) at point."
+  (interactive)
+  (let* ((key (ygg-git-ci--key))
+         (repo (car key))
+         (row (ygg-git-ci--at-point))
+         (name (plist-get row :name))
+         (buffer (current-buffer))
+         (default-directory (or (magit-toplevel) default-directory)))
+    (if (eq (car repo) 'gitlab)
+        (progn
+          (unless (and (eq (plist-get row :kind) 'job) (plist-get row :artifacts))
+            (user-error "%s has no artifacts" name))
+          (ygg-git-ci--download key row))
+      (message "ci: looking for artifacts of %s…" name)
+      (ygg-git-review-requests--spawn
+       (ygg-git-ci--command 'artifact-count repo row)
+       (lambda (status text &optional stderr)
+         (cond ((not (eql status 0))
+                (message "ci: artifacts failed: %s"
+                         (ygg-git-review-requests--failure "gh" status stderr)))
+               ((not (> (string-to-number text) 0))
+                (message "ci: %s has no artifacts" name))
+               ((buffer-live-p buffer)
+                (with-current-buffer buffer
+                  (ygg-git-ci--download key row)))))))))
 
 (defun ygg-git-ci-rerun-pipeline ()
   "Retry the whole GitLab pipeline of the job at point."
@@ -715,13 +816,70 @@ hand, each with its :file."
    (list :job_variables_attributes
          (vconcat (mapcar #'ygg-git-ci--variable-pair variables)))))
 
+(defun ygg-git-ci--older-manual (key rows callback)
+  "Call CALLBACK once with the manual jobs of the two pipelines before ROWS' own,
+as rows, newest first, leaving out names a newer pipeline has."
+  (let* ((repo (car key))
+         (project (ygg-git-ci--project repo))
+         (api (list "glab" "api" "--hostname" (nth 1 repo)))
+         (latest (plist-get (car rows) :pipeline))
+         (names (mapcar (lambda (row) (plist-get row :name)) rows))
+         (found nil) (done nil) (timer nil) (process nil))
+    (cl-labels
+        ((finish ()
+           (unless done
+             (setq done t)
+             (when (timerp timer) (cancel-timer timer))
+             (when (processp process) (ygg-git-review-requests--kill process))
+             (funcall callback (nreverse found))))
+         (jobs (pipelines)
+           (if (null pipelines)
+               (finish)
+             (let ((pipeline (car pipelines)))
+               (setq process
+                     (ygg-git-review-requests--spawn
+                      (append api (list (format "%s/pipelines/%s/jobs?scope[]=manual&per_page=%d"
+                                                project (plist-get pipeline :id)
+                                                ygg-git-ci--page-size)))
+                      (lambda (status text &optional _stderr)
+                        (unless done
+                          (when-let* (((eql status 0))
+                                      (listed (ignore-errors (ygg-git-ci--json text))))
+                            (dolist (row (ygg-git-ci--gitlab-rows listed pipeline))
+                              (when (and (plist-get row :playable)
+                                         (not (member (plist-get row :name) names)))
+                                (push (plist-get row :name) names)
+                                (push (plist-put row :older t) found))))
+                          (jobs (cdr pipelines))))))))))
+      (if (null rows)
+          (finish)
+        (setq timer (run-at-time ygg-git-ci-timeout nil #'finish))
+        (setq process
+              (ygg-git-review-requests--spawn
+               (append api (list (format "%s/pipelines?ref=%s&per_page=3" project
+                                         (url-hexify-string (cadr key)))))
+               (lambda (status text &optional _stderr)
+                 (unless done
+                   (let ((listed (and (eql status 0) (ignore-errors (ygg-git-ci--json text)))))
+                     (jobs (seq-take
+                            (seq-keep
+                             (lambda (pipeline)
+                               (when (or (null latest) (< (plist-get pipeline :id) latest))
+                                 (list :id (plist-get pipeline :id)
+                                       :sha (plist-get pipeline :sha)
+                                       :url (plist-get pipeline :web_url)))) listed)
+                            2)))))))))))
+
 (defun ygg-git-ci--startables (key rows workflows)
   "What can be started on KEY's branch as (LABEL . SPEC): manual jobs among ROWS,
 the dispatchable WORKFLOWS, and on GitLab a new pipeline."
   (let* ((entries
           (append
            (mapcar (lambda (row)
-                     (list (format "job: %s" (plist-get row :name))
+                     (list (if (plist-get row :older)
+                               (format "job: %s (pipeline #%s)" (plist-get row :name)
+                                       (plist-get row :pipeline))
+                             (format "job: %s" (plist-get row :name)))
                            (format "%s#%s" (if (plist-get row :stage)
                                                (format "stage %s, " (plist-get row :stage))
                                              "")
@@ -779,12 +937,12 @@ the dispatchable WORKFLOWS, and on GitLab a new pipeline."
 That is plists of :kind (job, workflow or pipeline), :name and :label, to give
 `ygg-git-ci-start'; a second argument says why the forge could not be asked.
 GitLab's manual jobs are those of the latest pipeline, fetched when the cache
-is missing or stale."
+is missing or stale, and of the two pipelines before it."
   (let* ((default-directory root)
          (key (condition-case err
                   (ygg-git-ci--key)
                 (error (funcall callback nil (error-message-string err)) nil)))
-         (finish (lambda (workflows)
+         (finish (lambda (workflows &optional older)
                    (apply callback
                           (condition-case err
                               (let* ((answer (cdr (gethash key ygg-git-ci--cache)))
@@ -796,12 +954,20 @@ is missing or stale."
                                 (list (mapcar (lambda (choice)
                                                 (append (list :label (car choice)) (cdr choice)))
                                               (ygg-git-ci--startables
-                                               key rows (funcall workflows)))))
+                                               key (append rows older) (funcall workflows)))))
                             (error (list nil (error-message-string err))))))))
     (when key
       (if (eq (car (car key)) 'gitlab)
           (condition-case err
-              (ygg-git-ci--await key (lambda () (funcall finish #'ignore)))
+              (ygg-git-ci--await
+               key
+               (lambda ()
+                 (let ((answer (cdr (gethash key ygg-git-ci--cache))))
+                   (if (plist-get answer :rows)
+                       (ygg-git-ci--older-manual
+                        key (plist-get answer :rows)
+                        (lambda (older) (funcall finish #'ignore older)))
+                     (funcall finish #'ignore)))))
             (error (funcall callback nil (error-message-string err))))
         (let ((directory (or (magit-toplevel) default-directory)))
           (message "ci: listing workflows…")
@@ -873,6 +1039,7 @@ On a playable job it plays that job."
   "o" #'ygg-git-ci-browse
   "l" #'ygg-git-ci-log
   "p" #'ygg-git-ci-play
+  "a" #'ygg-git-ci-artifacts
   "r" #'ygg-git-ci-rerun
   "x" #'ygg-git-ci-cancel
   "R" #'ygg-git-ci-rerun-pipeline
