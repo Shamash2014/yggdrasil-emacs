@@ -12,6 +12,7 @@
 (require 'yggdrasil-localleader)
 (require 'ygg-diagram)
 (require 'ygg-markdown-fences)
+(require 'ygg-markdown-reveal)
 
 (dolist (mode '(markdown-mode gfm-mode))
   (yggdrasil-localleader-def mode "m" #'ygg-diagram-toggle "diagrams & math")
@@ -20,6 +21,9 @@
   (yggdrasil-localleader-def mode "-" #'ygg-diagram-shrink "shrink diagrams")
   (yggdrasil-localleader-def mode "0" #'ygg-diagram-scale-reset "reset diagram size")
   (yggdrasil-define-mode-keys mode 'normal "<tab>" #'ygg-diagram-markdown-tab))
+
+(dolist (hook '(markdown-mode-hook gfm-mode-hook))
+  (add-hook hook #'ygg-markdown-reveal-setup))
 
 (autoload 'ygg-md-paste-image "ygg-md-image" nil t)
 (dolist (mode '(markdown-mode gfm-mode org-mode))
