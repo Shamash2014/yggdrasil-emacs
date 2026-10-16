@@ -95,5 +95,38 @@
       (should (equal (buffer-substring-no-properties (point-min) (point-max))
                      (substring-no-properties text))))))
 
+(ert-deftest ygg-markdown-reveal-skips-work-when-nothing-changed ()
+  (ygg-markdown-reveal-tests--with "a **bold** b\n"
+    (ygg--switch-state 'insert)
+    (let ((calls 0)
+          (finder (symbol-function 'ygg-markdown-reveal--bounds)))
+      (cl-letf (((symbol-function 'ygg-markdown-reveal--bounds)
+                 (lambda () (cl-incf calls) (funcall finder))))
+        (ygg-markdown-reveal-tests--goto 6)
+        (should (= calls 1))
+        (ygg-markdown-reveal-tests--goto 6)
+        (should (= calls 1))
+        (ygg-markdown-reveal-tests--goto 7)
+        (should (= calls 2))
+        (insert "x")
+        (run-hooks 'post-command-hook)
+        (should (= calls 3))))))
+
+(ert-deftest ygg-markdown-reveal-ignores-code-block-lines ()
+  (ygg-markdown-reveal-tests--with "```\n# not heading\n```\n"
+    (ygg--switch-state 'insert)
+    (ygg-markdown-reveal-tests--goto 8)
+    (should-not ygg-markdown-reveal--region)))
+
+(ert-deftest ygg-markdown-reveal-strip-keeps-foreign-display ()
+  (ygg-markdown-reveal-tests--with "a **bold** b\n"
+    (let ((inhibit-read-only t))
+      (with-silent-modifications
+        (put-text-property 3 5 'invisible 'markdown-markup)
+        (put-text-property 3 5 'display "X")))
+    (ygg-markdown-reveal--strip 1 10)
+    (should-not (get-text-property 3 'invisible))
+    (should (equal (get-text-property 3 'display) "X"))))
+
 (provide 'ygg-markdown-reveal-tests)
 ;;; ygg-markdown-reveal-tests.el ends here
