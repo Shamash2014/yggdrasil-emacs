@@ -307,7 +307,7 @@ Past the window width they clip at its edge unless lines are truncated."
   (when (ygg-diagram--overlays) (ygg-diagram--clear)))
 
 (defun ygg-diagram--centered-image (file width)
-  "The display string for the image FILE on a line to itself, centered in the window."
+  "The display string for image FILE alone on its line, centered in the window."
   (let ((image (ygg-diagram--image file width)))
     (concat (propertize " " 'display
                         (ygg-diagram--center-spec (get-text-property 0 'display image)))
