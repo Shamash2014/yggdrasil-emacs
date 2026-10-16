@@ -14,6 +14,7 @@
 
 (require 'cl-lib)
 (require 'seq)
+(require 'ansi-color)
 (require 'ygg-ui)
 
 (declare-function ygg-mise-prefix "layer-agent")
@@ -104,6 +105,21 @@ renderer per redraw is a process storm on a streaming trace.")
         (car (last plain))
         (car (last lines)))))
 
+(defcustom ygg-diagram-render-timeout 60
+  "Seconds a renderer may run before it is killed and its diagram marked failed."
+  :type 'number
+  :group 'ygg-diagram)
+
+(defconst ygg-diagram--log-cap 4096
+  "Most characters of a renderer log kept in the error tooltip.")
+
+(defun ygg-diagram--plain-log (log)
+  "LOG without ANSI escapes, trimmed to its last `ygg-diagram--log-cap' chars."
+  (let ((plain (string-trim (ansi-color-filter-apply log))))
+    (if (> (length plain) ygg-diagram--log-cap)
+        (concat "…" (substring plain (- ygg-diagram--log-cap)))
+      plain)))
+
 (defvar ygg-diagram--queue nil
   "Renders waiting for the renderer, each as (SVG LANG SRC SPEC), oldest first.")
 
@@ -131,42 +147,68 @@ One at a time: mmdc is a headless Chromium, and a launch per diagram is a storm.
       (setq ygg-diagram--busy t)
       (apply #'ygg-diagram--start job))))
 
+(defun ygg-diagram--finish (proc svg output in failure)
+  "Settle SVG after PROC ended, drop its buffer and input file IN, start the next.
+FAILURE, when non-nil, is the reason that replaces the log summary."
+  (let ((log ""))
+    (unwind-protect
+        (progn
+          (ignore-errors
+            (with-current-buffer (process-buffer proc)
+              (when (and (eq output 'stdout)
+                         (null failure)
+                         (eq (process-status proc) 'exit)
+                         (zerop (process-exit-status proc)))
+                (write-region (point-min) (point-max) svg nil 'silent))
+              (setq log (buffer-string))))
+          (ignore-errors (kill-buffer (process-buffer proc)))
+          (when in (ignore-errors (delete-file in)))
+          (ygg-diagram--settle
+           svg (and (null failure)
+                    (eq (process-status proc) 'exit)
+                    (zerop (process-exit-status proc))
+                    (file-exists-p svg))
+           log failure))
+      (remhash svg ygg-diagram--rendering)
+      (ygg-diagram--next))))
+
 (defun ygg-diagram--start (svg lang src spec)
   "Run the renderer for SPEC over SRC into SVG, then settle it and start the next."
-  (condition-case err
-      (let* ((_ (make-directory ygg-diagram--cache-dir t))
-             (input (nth 0 spec)) (output (nth 1 spec)) (tpl (nthcdr 2 spec))
-             (in (and (eq input 'file)
-                      (make-temp-file "ygg-dia" nil (ygg-diagram--ext lang) src)))
-             (argv (mapcar (lambda (x) (cond ((eq x 'in) in) ((eq x 'out) svg) (t x))) tpl))
-             (argv (if (eq input 'arg) (append argv (list src)) argv))
-             (obuf (generate-new-buffer " *ygg-diagram*"))
-             (proc (make-process
-                    :name "ygg-diagram" :noquery t :buffer obuf
-                    :command (ygg-diagram--login-argv argv)
-                    :sentinel
-                    (lambda (p _e)
-                      (when (memq (process-status p) '(exit signal))
-                        (let ((log ""))
-                          (ignore-errors
-                            (with-current-buffer (process-buffer p)
-                              (when (and (eq output 'stdout)
-                                         (eq (process-status p) 'exit)
-                                         (zerop (process-exit-status p)))
-                                (write-region (point-min) (point-max) svg nil 'silent))
-                              (setq log (buffer-string))))
-                          (ignore-errors (kill-buffer (process-buffer p)))
-                          (when in (ignore-errors (delete-file in)))
-                          (ygg-diagram--settle
-                           svg (and (eq (process-status p) 'exit)
-                                    (zerop (process-exit-status p))
-                                    (file-exists-p svg))
-                           log)
-                          (ygg-diagram--next)))))))
-        (when (eq input 'stdin)
-          (ignore-errors (process-send-string proc src) (process-send-eof proc))))
-    (error (ygg-diagram--settle svg nil "" (error-message-string err))
-           (ygg-diagram--next))))
+  (let (in obuf timer)
+    (condition-case err
+        (let* ((_ (make-directory ygg-diagram--cache-dir t))
+               (input (nth 0 spec)) (output (nth 1 spec)) (tpl (nthcdr 2 spec))
+               (timed-out nil)
+               (_in (setq in (and (eq input 'file)
+                                  (make-temp-file "ygg-dia" nil (ygg-diagram--ext lang) src))))
+               (argv (mapcar (lambda (x) (cond ((eq x 'in) in) ((eq x 'out) svg) (t x))) tpl))
+               (argv (if (eq input 'arg) (append argv (list src)) argv))
+               (_obuf (setq obuf (generate-new-buffer " *ygg-diagram*")))
+               (proc (make-process
+                      :name "ygg-diagram" :noquery t :buffer obuf
+                      :command (ygg-diagram--login-argv argv)
+                      :sentinel
+                      (lambda (p _e)
+                        (when (memq (process-status p) '(exit signal))
+                          (when timer (cancel-timer timer))
+                          (ygg-diagram--finish
+                           p svg output in
+                           (and timed-out
+                                (format "timed out after %ss" ygg-diagram-render-timeout))))))))
+          (setq timer (run-at-time ygg-diagram-render-timeout nil
+                                   (lambda ()
+                                     (when (process-live-p proc)
+                                       (setq timed-out t)
+                                       (signal-process proc 'KILL)))))
+          (when (eq input 'stdin)
+            (ignore-errors (process-send-string proc src) (process-send-eof proc))))
+      (error
+       (when timer (cancel-timer timer))
+       (when (buffer-live-p obuf) (kill-buffer obuf))
+       (when in (ignore-errors (delete-file in)))
+       (unwind-protect (ygg-diagram--settle svg nil "" (error-message-string err))
+         (remhash svg ygg-diagram--rendering)
+         (ygg-diagram--next))))))
 
 (defun ygg-diagram--render (lang src on-done)
   "Render LANG SRC to an SVG, then call (ON-DONE svg-path).
@@ -335,10 +377,10 @@ CENTER puts the image in the middle of its line."
                                              (ygg-diagram--image svg width))
                                       "\n")
                             (concat "\n"
-                                    (propertize (format "  ⚠ %s" (or err "render failed"))
+                                    (propertize (format "  ⚠ %s" (ansi-color-filter-apply (or err "render failed")))
                                                 'face 'error
                                                 'help-echo (or (and log (not (string-blank-p log))
-                                                                    (string-trim log))
+                                                                    (ygg-diagram--plain-log log))
                                                                err))
                                     "\n"))))))))))
 
