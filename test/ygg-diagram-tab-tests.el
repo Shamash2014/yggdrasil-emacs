@@ -504,3 +504,125 @@
                                    :scale)))))))
 
 ;;; ygg-diagram-tab-tests.el ends here
+
+(defun ygg-diagram-tab-tests--center-spec (ov)
+  (let ((str (overlay-get ov 'after-string)) found)
+    (dotimes (i (length str))
+      (let ((disp (get-text-property i 'display str)))
+        (when (ygg-diagram--center-p disp) (setq found disp))))
+    found))
+
+(ert-deftest ygg-diagram-math-display-block-is-centered ()
+  (ygg-diagram-tab-tests--with-svg f
+    (cl-letf (((symbol-function 'ygg-diagram--render)
+               (lambda (_l _s done) (funcall done f nil))))
+      (ygg-diagram-tab-tests--in "$$x^2$$\n\ntext $$y$$ more\n"
+        (let ((inhibit-message t)) (ygg-diagram--show))
+        (let* ((ovs (sort (ygg-diagram--overlays)
+                          (lambda (a b) (< (overlay-start a) (overlay-start b)))))
+               (spec (ygg-diagram-tab-tests--center-spec (car ovs))))
+          (should (= 2 (length ovs)))
+          (should (equal (butlast (plist-get (cdr spec) :align-to) 1)
+                         '(- center)))
+          (should (eq (car (cdr (nth 2 (plist-get (cdr spec) :align-to)))) 'image))
+          (should-not (ygg-diagram-tab-tests--center-spec (cadr ovs))))))))
+
+(ert-deftest ygg-diagram-math-centering-follows-rescale ()
+  (ygg-diagram-tab-tests--with-svg f
+    (cl-letf (((symbol-function 'ygg-diagram--render)
+               (lambda (_l _s done) (funcall done f nil))))
+      (ygg-diagram-tab-tests--in "$$x^2$$\n"
+        (let ((ygg-diagram--scale nil) (inhibit-message t))
+          (ygg-diagram--show)
+          (ygg-diagram-enlarge)
+          (let* ((spec (ygg-diagram-tab-tests--center-spec (car (ygg-diagram--overlays))))
+                 (image (cdr (nth 2 (plist-get (cdr spec) :align-to)))))
+            (should (= 1.25 (plist-get (cdr image) :scale)))))))))
+
+(ert-deftest ygg-diagram-error-overlay-help-echo-carries-the-full-log ()
+  (let ((log "Error: bad\n    at async renderMermaid (f:1:2)\n"))
+    (cl-letf (((symbol-function 'ygg-diagram--render)
+               (lambda (_l _s done)
+                 (funcall done nil (ygg-diagram--log-summary log) log))))
+      (ygg-diagram-tab-tests--in "```mermaid\ngraph TD\n```\n"
+        (forward-line 1)
+        (ygg-diagram-toggle-at-point)
+        (let* ((text (overlay-get (car (ygg-diagram--overlays)) 'after-string))
+               (pos (string-search "⚠" text)))
+          (should (equal (get-text-property pos 'help-echo text) (string-trim log))))))))
+
+(defun ygg-diagram-tab-tests--fake-renderer (script)
+  `(arg stdout "sh" "-c" ,script "x"))
+
+(defun ygg-diagram-tab-tests--live-renderers ()
+  (seq-count (lambda (p) (and (process-live-p p)
+                              (string-prefix-p "ygg-diagram" (process-name p))))
+             (process-list)))
+
+(defun ygg-diagram-tab-tests--render-all (srcs)
+  "Render SRCS through a fake renderer; return (PEAK-LIVE . RESULTS) by source."
+  (let* ((ygg-diagram--cache-dir (file-name-as-directory
+                                  (make-temp-file "ygg-q" t)))
+         (ygg-diagram--rendering (make-hash-table :test #'equal))
+         (ygg-diagram--queue nil)
+         (ygg-diagram--busy nil)
+         (script "sleep 0.15; case \"$1\" in fail*) echo boom >&2; exit 3;; esac; echo '<svg/>'")
+         (results nil) (peak 0) (deadline (+ (float-time) 15)))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ygg-diagram--spec)
+                   (lambda (_l) (ygg-diagram-tab-tests--fake-renderer script)))
+                  ((symbol-function 'ygg-diagram--login-argv) #'identity))
+          (dolist (src srcs)
+            (let ((src src))
+              (ygg-diagram--render "mermaid" src
+                                   (lambda (svg err &optional log)
+                                     (push (list src svg err log) results)))))
+          (setq peak (max peak (ygg-diagram-tab-tests--live-renderers)))
+          (while (and (< (length results) (length srcs)) (< (float-time) deadline))
+            (accept-process-output nil 0.02)
+            (setq peak (max peak (ygg-diagram-tab-tests--live-renderers))))
+          (cons peak results))
+      (delete-directory ygg-diagram--cache-dir t))))
+
+(ert-deftest ygg-diagram-queue-runs-one-renderer-at-a-time ()
+  (let ((out (ygg-diagram-tab-tests--render-all '("a" "b" "c"))))
+    (should (= 1 (car out)))
+    (should (= 3 (length (cdr out))))
+    (should (seq-every-p #'cadr (cdr out)))))
+
+(ert-deftest ygg-diagram-queue-failure-starts-the-next-job ()
+  (let* ((out (ygg-diagram-tab-tests--render-all '("fail" "b" "c")))
+         (failed (assoc "fail" (cdr out))))
+    (should (= 1 (car out)))
+    (should (= 3 (length (cdr out))))
+    (should-not (cadr failed))
+    (should (equal (nth 2 failed) "boom"))
+    (should (string-match-p "boom" (nth 3 failed)))
+    (should (cadr (assoc "b" (cdr out))))
+    (should (cadr (assoc "c" (cdr out))))))
+
+(ert-deftest ygg-diagram-queue-coalesces-identical-renders ()
+  (let ((out (ygg-diagram-tab-tests--render-all '("a" "a" "b"))))
+    (should (= 1 (car out)))
+    (should (= 3 (length (cdr out))))))
+
+(ert-deftest ygg-diagram-queue-survives-cleared-overlays ()
+  (let ((ygg-diagram--cache-dir (file-name-as-directory (make-temp-file "ygg-q" t)))
+        (ygg-diagram--rendering (make-hash-table :test #'equal))
+        (ygg-diagram--queue nil)
+        (ygg-diagram--busy nil)
+        (script "sleep 0.1; echo '<svg/>'"))
+    (unwind-protect
+        (cl-letf (((symbol-function 'ygg-diagram--spec)
+                   (lambda (_l) (ygg-diagram-tab-tests--fake-renderer script)))
+                  ((symbol-function 'ygg-diagram--login-argv) #'identity))
+          (ygg-diagram-tab-tests--in "```mermaid\na\n```\n\n```mermaid\nb\n```\n"
+            (let ((inhibit-message t)) (ygg-diagram--show))
+            (ygg-diagram--clear)
+            (let ((deadline (+ (float-time) 15)))
+              (while (and (or ygg-diagram--busy ygg-diagram--queue) (< (float-time) deadline))
+                (accept-process-output nil 0.02)))
+            (should-not ygg-diagram--busy)
+            (should-not ygg-diagram--queue)
+            (should-not (ygg-diagram--overlays))))
+      (delete-directory ygg-diagram--cache-dir t))))

@@ -104,9 +104,75 @@ renderer per redraw is a process storm on a streaming trace.")
         (car (last plain))
         (car (last lines)))))
 
+(defvar ygg-diagram--queue nil
+  "Renders waiting for the renderer, each as (SVG LANG SRC SPEC), oldest first.")
+
+(defvar ygg-diagram--busy nil
+  "Non-nil while a renderer process is running.
+One at a time: mmdc is a headless Chromium, and a launch per diagram is a storm.")
+
+(defun ygg-diagram--settle (svg ok log &optional err)
+  "Tell everyone waiting on SVG how its render went; LOG is the renderer output."
+  (let ((waiting (gethash svg ygg-diagram--rendering))
+        (err (or err (ygg-diagram--log-summary log))))
+    (remhash svg ygg-diagram--rendering)
+    (dolist (done waiting)
+      (ignore-errors
+        (if ok (funcall done svg nil) (funcall done nil err log))))))
+
+(defun ygg-diagram--next ()
+  "Free the renderer slot and start the oldest queued render."
+  (setq ygg-diagram--busy nil)
+  (ygg-diagram--pump))
+
+(defun ygg-diagram--pump ()
+  (unless ygg-diagram--busy
+    (when-let* ((job (pop ygg-diagram--queue)))
+      (setq ygg-diagram--busy t)
+      (apply #'ygg-diagram--start job))))
+
+(defun ygg-diagram--start (svg lang src spec)
+  "Run the renderer for SPEC over SRC into SVG, then settle it and start the next."
+  (condition-case err
+      (let* ((_ (make-directory ygg-diagram--cache-dir t))
+             (input (nth 0 spec)) (output (nth 1 spec)) (tpl (nthcdr 2 spec))
+             (in (and (eq input 'file)
+                      (make-temp-file "ygg-dia" nil (ygg-diagram--ext lang) src)))
+             (argv (mapcar (lambda (x) (cond ((eq x 'in) in) ((eq x 'out) svg) (t x))) tpl))
+             (argv (if (eq input 'arg) (append argv (list src)) argv))
+             (obuf (generate-new-buffer " *ygg-diagram*"))
+             (proc (make-process
+                    :name "ygg-diagram" :noquery t :buffer obuf
+                    :command (ygg-diagram--login-argv argv)
+                    :sentinel
+                    (lambda (p _e)
+                      (when (memq (process-status p) '(exit signal))
+                        (let ((log ""))
+                          (ignore-errors
+                            (with-current-buffer (process-buffer p)
+                              (when (and (eq output 'stdout)
+                                         (eq (process-status p) 'exit)
+                                         (zerop (process-exit-status p)))
+                                (write-region (point-min) (point-max) svg nil 'silent))
+                              (setq log (buffer-string))))
+                          (ignore-errors (kill-buffer (process-buffer p)))
+                          (when in (ignore-errors (delete-file in)))
+                          (ygg-diagram--settle
+                           svg (and (eq (process-status p) 'exit)
+                                    (zerop (process-exit-status p))
+                                    (file-exists-p svg))
+                           log)
+                          (ygg-diagram--next)))))))
+        (when (eq input 'stdin)
+          (ignore-errors (process-send-string proc src) (process-send-eof proc))))
+    (error (ygg-diagram--settle svg nil "" (error-message-string err))
+           (ygg-diagram--next))))
+
 (defun ygg-diagram--render (lang src on-done)
   "Render LANG SRC to an SVG, then call (ON-DONE svg-path).
-A cache hit resolves synchronously; a miss renders async so Emacs never blocks."
+A cache hit resolves synchronously; a miss renders async so Emacs never blocks,
+one renderer at a time.  On failure ON-DONE gets nil, a one-line reason and
+the renderer's full log."
   (let ((svg (expand-file-name
               (concat (secure-hash 'sha1 (format "%s\0%s\0%s\0svg-text"
                                                 lang ygg-diagram-theme src))
@@ -120,44 +186,9 @@ A cache hit resolves synchronously; a miss renders async so Emacs never blocks."
       (push on-done (gethash svg ygg-diagram--rendering)))
      (t
       (puthash svg (list on-done) ygg-diagram--rendering)
-      (condition-case err
-          (let* ((_ (make-directory ygg-diagram--cache-dir t))
-                 (input (nth 0 spec)) (output (nth 1 spec)) (tpl (nthcdr 2 spec))
-                 (in (and (eq input 'file)
-                          (make-temp-file "ygg-dia" nil (ygg-diagram--ext lang) src)))
-                 (argv (mapcar (lambda (x) (cond ((eq x 'in) in) ((eq x 'out) svg) (t x))) tpl))
-                 (argv (if (eq input 'arg) (append argv (list src)) argv))
-                 (obuf (generate-new-buffer " *ygg-diagram*"))
-                 (proc (make-process
-                        :name "ygg-diagram" :noquery t :buffer obuf
-                        :command (ygg-diagram--login-argv argv)
-                        :sentinel
-                        (lambda (p _e)
-                          (when (memq (process-status p) '(exit signal))
-                            (let ((waiting (gethash svg ygg-diagram--rendering))
-                                  (log ""))
-                              (remhash svg ygg-diagram--rendering)
-                              (ignore-errors
-                                (with-current-buffer (process-buffer p)
-                                  (when (and (eq output 'stdout)
-                                             (eq (process-status p) 'exit)
-                                             (zerop (process-exit-status p)))
-                                    (write-region (point-min) (point-max) svg nil 'silent))
-                                  (setq log (buffer-string))))
-                              (ignore-errors (kill-buffer (process-buffer p)))
-                              (when in (ignore-errors (delete-file in)))
-                              (let ((ok (and (eq (process-status p) 'exit)
-                                             (zerop (process-exit-status p))
-                                             (file-exists-p svg))))
-                                (dolist (done waiting)
-                                  (ignore-errors
-                                    (if ok (funcall done svg nil)
-                                      (funcall done nil
-                                               (ygg-diagram--log-summary log))))))))))))
-            (when (eq input 'stdin)
-              (process-send-string proc src) (process-send-eof proc)))
-        (error (remhash svg ygg-diagram--rendering)
-               (funcall on-done nil (error-message-string err))))))))
+      (setq ygg-diagram--queue
+            (append ygg-diagram--queue (list (list svg lang src spec))))
+      (ygg-diagram--pump)))))
 
 (defcustom ygg-diagram-scale 1.0
   "Size of inline diagrams, math and images relative to the window width.
@@ -194,18 +225,34 @@ and a screenshot on disk both draw through this."
   (propertize " " 'display
               (ygg-diagram--make-image file width (ygg-diagram--effective-scale))))
 
+(defun ygg-diagram--rescaled-spec (disp scale)
+  "DISP, an image display spec, redrawn at SCALE, or nil when it is not one."
+  (when (and (eq (car-safe disp) 'image) (plist-get (cdr disp) :ygg-base-width))
+    (let ((spec (copy-sequence disp)))
+      (setcdr spec (plist-put (copy-sequence (cdr spec)) :scale scale))
+      (setcdr spec (plist-put (cdr spec) :max-width
+                              (round (* scale (plist-get (cdr spec) :ygg-base-width)))))
+      spec)))
+
+(defun ygg-diagram--center-spec (image)
+  "A display spec that pads the line so IMAGE stands in its middle."
+  `(space :align-to (- center (0.5 . ,image))))
+
+(defun ygg-diagram--center-p (disp)
+  (and (eq (car-safe disp) 'space) (equal (car-safe (plist-get (cdr disp) :align-to)) '-)))
+
 (defun ygg-diagram--rescale-string (str scale)
   "A copy of STR whose image display specs are redrawn at SCALE."
   (let ((out (copy-sequence str)) (pos 0))
     (while (< pos (length out))
-      (let ((next (or (next-single-property-change pos 'display out) (length out)))
-            (disp (get-text-property pos 'display out)))
-        (when (and (eq (car-safe disp) 'image) (plist-get (cdr disp) :ygg-base-width))
-          (let ((spec (copy-sequence disp)))
-            (setcdr spec (plist-put (copy-sequence (cdr spec)) :scale scale))
-            (setcdr spec (plist-put (cdr spec) :max-width
-                                    (round (* scale (plist-get (cdr spec) :ygg-base-width)))))
-            (put-text-property pos next 'display spec out)))
+      (let* ((next (or (next-single-property-change pos 'display out) (length out)))
+             (disp (get-text-property pos 'display out))
+             (spec (or (ygg-diagram--rescaled-spec disp scale)
+                       (and (ygg-diagram--center-p disp) (< next (length out))
+                            (when-let* ((image (ygg-diagram--rescaled-spec
+                                                (get-text-property next 'display out) scale)))
+                              (ygg-diagram--center-spec image))))))
+        (when spec (put-text-property pos next 'display spec out))
         (setq pos next)))
     out))
 
@@ -259,8 +306,16 @@ Past the window width they clip at its edge unless lines are truncated."
   ;; a transient preview: any edit dismisses the images, re-toggle to refresh
   (when (ygg-diagram--overlays) (ygg-diagram--clear)))
 
-(defun ygg-diagram--place (end lang src width)
-  "Float LANG SRC's rendered image below buffer position END."
+(defun ygg-diagram--centered-image (file width)
+  "The display string for the image FILE on a line to itself, centered in the window."
+  (let ((image (ygg-diagram--image file width)))
+    (concat (propertize " " 'display
+                        (ygg-diagram--center-spec (get-text-property 0 'display image)))
+            image)))
+
+(defun ygg-diagram--place (end lang src width &optional center)
+  "Float LANG SRC's rendered image below buffer position END.
+CENTER puts the image in the middle of its line."
   (let ((ov (make-overlay end end)) (hint (ygg-diagram--missing lang)))
     (overlay-put ov 'ygg-diagram t)
     (if hint
@@ -270,13 +325,30 @@ Past the window width they clip at its edge unless lines are truncated."
                    (concat "\n" (propertize "  ⧗ rendering…" 'face 'shadow) "\n"))
       (ygg-diagram--render
        lang src
-       (lambda (svg err)
+       (lambda (svg err &optional log)
          (when (overlay-buffer ov)
            (with-current-buffer (overlay-buffer ov)
              (overlay-put ov 'after-string
-                          (if svg (concat "\n" (ygg-diagram--image svg width) "\n")
-                            (concat "\n" (propertize (format "  ⚠ %s" (or err "render failed"))
-                                                     'face 'error) "\n"))))))))))
+                          (if svg
+                              (concat "\n" (if center
+                                               (ygg-diagram--centered-image svg width)
+                                             (ygg-diagram--image svg width))
+                                      "\n")
+                            (concat "\n"
+                                    (propertize (format "  ⚠ %s" (or err "render failed"))
+                                                'face 'error
+                                                'help-echo (or (and log (not (string-blank-p log))
+                                                                    (string-trim log))
+                                                               err))
+                                    "\n"))))))))))
+
+(defun ygg-diagram--standalone-p (beg end)
+  "Whether only whitespace shares its lines with the text from BEG to END."
+  (save-excursion
+    (goto-char beg)
+    (skip-chars-backward " \t")
+    (and (bolp)
+         (progn (goto-char end) (skip-chars-forward " \t") (eolp)))))
 
 (defun ygg-diagram--show ()
   "Render every diagram fence and $$math$$ block; float images below each."
@@ -292,7 +364,8 @@ Past the window width they clip at its edge unless lines are truncated."
       (goto-char (point-min))
       (while (re-search-forward ygg-diagram--math-re nil t)
         (setq n (1+ n))
-        (ygg-diagram--place (match-end 0) "latex" (string-trim (match-string 1)) width)))
+        (ygg-diagram--place (match-end 0) "latex" (string-trim (match-string 1)) width
+                            (ygg-diagram--standalone-p (match-beginning 0) (match-end 0)))))
     (if (zerop n)
         (user-error "No diagram fence or $$math$$ in buffer")
       (add-hook 'after-change-functions #'ygg-diagram--on-change nil t)
